@@ -2199,12 +2199,7 @@ fn note_lane(st: &mut IbdWorkState, peer: usize) {
 }
 
 fn punish_header_peer(st: &mut IbdWorkState, peer: usize) {
-    super::dial::disconnect_peer(
-        &mut st.slots,
-        &mut st.addr_cooldown,
-        &mut st.addr_strikes,
-        peer,
-    );
+    super::dial::disconnect_peer(st, peer);
 }
 
 /// Ask for the next header when it is not already stored. The locator is the
@@ -5010,6 +5005,40 @@ mod tests {
             st.header_walk.tip_hash(),
             tip,
             "a look-ahead from a peer that was not asked is ignored"
+        );
+    }
+
+    #[test]
+    fn a_peer_dropped_for_off_path_headers_hands_back_its_block_requests() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-drop-release");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        floor_unreachable(&mut hub);
+        let owed = BlockHash::from_byte_array([0x5a; 32]);
+        let (path_peer, _rx0) = slot(0);
+        let (mut side_peer, _rx1) = slot(1);
+        side_peer.track_insert(owed);
+        let mut st = IbdWorkState::new(vec![path_peer, side_peer], Some(gen), Some(0));
+        super::super::assign::inflight_add_peer(&mut st.inflight, owed, 1);
+        let h1 = mine(gen, 1);
+        let h2 = mine(h1.block_hash(), 2);
+        apply(&mut st, &hub, 0, vec![h1, h2]);
+
+        let mut prev = gen;
+        let mut side = Vec::with_capacity(4_001);
+        for n in 0..4_001 {
+            let hdr = mine(prev, 10_000 + n);
+            prev = hdr.block_hash();
+            side.push(hdr);
+        }
+        apply(&mut st, &hub, 1, side);
+        assert!(
+            st.slots.iter().all(|s| s.id != 1 || !s.alive),
+            "a peer over the off-path budget is disconnected"
+        );
+        assert!(
+            !st.inflight.contains_key(&owed),
+            "the disconnected peer's block getdata is free to ask another peer"
         );
     }
 

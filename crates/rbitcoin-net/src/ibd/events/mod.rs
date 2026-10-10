@@ -322,12 +322,7 @@ fn on_headers_batch(
         if let Some(h) = batch_header_height(st, hub, prev, batch_prev) {
             note_header_path(st, hub, hash, h, prev);
             if !st.is_on_path(&hash, h) && super::header_walk::note_off_path(st, hub, peer, hash) {
-                disconnect_peer(
-                    &mut st.slots,
-                    &mut st.addr_cooldown,
-                    &mut st.addr_strikes,
-                    peer,
-                );
+                disconnect_peer(st, peer);
             }
             if st.is_on_path(&hash, h) {
                 let base = if hub.tip_hash() == Some(prev) {
@@ -818,12 +813,7 @@ fn apply_block_framed(
                 warn!("ibd: peer[{peer}] block {hash} h={height}: {e}; dropping peer");
                 st.body.mark_missing(hash);
                 st.reopen_for_densify(&[hash]);
-                disconnect_peer(
-                    &mut st.slots,
-                    &mut st.addr_cooldown,
-                    &mut st.addr_strikes,
-                    peer,
-                );
+                disconnect_peer(st, peer);
                 return;
             }
             rbitcoin_log::warn!("ibd: body queue offer failed ({e}) h={height}");
@@ -1175,12 +1165,7 @@ fn punish_mutated_sender(st: &mut IbdWorkState, peer: usize, hash: BlockHash) {
         return;
     }
     warn!("ibd: peer[{peer}] sent mutated block {hash}; dropping peer");
-    disconnect_peer(
-        &mut st.slots,
-        &mut st.addr_cooldown,
-        &mut st.addr_strikes,
-        peer,
-    );
+    disconnect_peer(st, peer);
 }
 
 fn apply_cascade_reject(

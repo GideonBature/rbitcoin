@@ -581,22 +581,25 @@ pub(crate) fn kick_cooldown_for(strikes: u8) -> Duration {
     }
 }
 
-/// Drop one live peer and cool down its address.
-pub(crate) fn disconnect_peer(
-    slots: &mut [PeerSlot],
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
-    addr_strikes: &mut HashMap<SocketAddr, u8>,
-    peer: usize,
-) {
-    let Some(idx) = slots.iter().position(|s| s.id == peer && s.alive) else {
+/// Drop one live peer, cool down its address, and hand its block getdata
+/// back to densify. The main loop drops dead slots before `PeerDead`
+/// arrives, so the release cannot wait for that event.
+pub(crate) fn disconnect_peer(st: &mut super::state::IbdWorkState, peer: usize) {
+    let Some(idx) = st.slots.iter().position(|s| s.id == peer && s.alive) else {
         return;
     };
-    let net = slots[idx].net;
-    slots[idx].alive = false;
-    let _ = slots[idx].cmd_tx.send(PeerCmd::Shutdown);
+    let net = st.slots[idx].net;
+    let _ = st.slots[idx].cmd_tx.send(PeerCmd::Shutdown);
     if let Some(sock) = net.socket_addr().filter(|s| !s.ip().is_unspecified()) {
-        record_stall_kick(addr_cooldown, addr_strikes, sock, Instant::now());
+        record_stall_kick(
+            &mut st.addr_cooldown,
+            &mut st.addr_strikes,
+            sock,
+            Instant::now(),
+        );
     }
+    let freed = release_peer_block_work(&mut st.slots, &mut st.inflight, &mut st.body, peer);
+    st.reopen_for_densify(&freed);
 }
 
 /// Bump the process-local strike count and set `addr_cooldown`.
