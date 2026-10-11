@@ -4656,6 +4656,12 @@ fn tip_announce_decision(
     if peer_has_header(hub, best_header_sent, best_known, prev) {
         return TipAnnounce::Headers(out);
     }
+    // A one-block extend whose parent was only inv'd must stay an inv.
+    // Bridging back to an older header mark resumes headers after a large
+    // reorg (`p2p_sendheaders` part 3). A multi-block event still walks.
+    if ev.reorg_branch_len <= 1 {
+        return TipAnnounce::Inv(ev.hash);
+    }
     for _ in 1..MAX_BLOCKS_TO_ANNOUNCE {
         let Some(hdr) = hub.header_of(&prev) else {
             return TipAnnounce::Inv(ev.hash);
