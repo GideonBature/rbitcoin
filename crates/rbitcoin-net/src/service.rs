@@ -631,6 +631,7 @@ async fn prepare_outbound_session(
     typ: PeerConnType,
     dialer: crate::socks::Dialer,
 ) -> Result<PreparedOutbound, NetError> {
+    hub.clock.note_connection_attempt();
     rbitcoin_log::debug!("{}", crate::peers::trying_connection_log(typ, &peer));
     // Until this returns, the redial pass and `addnode` treat `peer` as
     // already dialling. A queued dial was counted when it was queued.

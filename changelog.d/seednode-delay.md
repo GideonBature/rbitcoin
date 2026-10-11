@@ -1,5 +1,6 @@
 Fixed
 
-- **A seednode is added after 10s of failed addrman dials even when
-  `setmocktime` runs during catch-up.** The wait starts when outbound
-  dials start. A mock-time jump during catch-up still crosses that mark.
+- **A seednode is added 10s after the first outbound dial, including when
+  `setmocktime` jumps the clock in that window.** The wait does not start
+  at process start, so a slow startup cannot emit the line before the dial
+  is observed.

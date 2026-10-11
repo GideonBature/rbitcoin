@@ -598,12 +598,61 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
-    // Before catch-up. `setmocktime` freezes `hub.clock` (a non-zero mock
-    // ignores wall time). `p2p_seednode.py` jumps that clock while catch-up
-    // is still dialing, then expects the 10s seednode line. Sampling at the
-    // spawn below would start the wait after the jump, and it would never
-    // elapse.
-    let seed_delay_from = node.hub.clock.now_secs();
+    // Arm before catch-up so the task is already polling when the first dial
+    // is logged. The 10s starts at that dial (`note_connection_attempt`), not
+    // at process start: `p2p_seednode.py` watches for the dial, then
+    // `setmocktime(now+11)`. A timer started at process start can elapse
+    // during that first watch and miss the second one.
+    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
+        let seeds = config.listen.seednodes.clone();
+        let network = config.network;
+        let peers = Arc::clone(&node.peers);
+        let clock = Arc::clone(&node.hub.clock);
+        let stop = Arc::clone(&shutdown.flag);
+        tokio::spawn(async move {
+            let started = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let t = clock.connection_attempt_at();
+                if t != 0 {
+                    break t;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if seednode_delay_elapsed(started, clock.now_secs()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if peers.outbound_full_relay_ids().len() >= 2 {
+                return;
+            }
+            for raw in &seeds {
+                let addr = match resolve_seednode(raw, network) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("seednode {raw}: {e}");
+                        continue;
+                    }
+                };
+                let host = raw.split(':').next().unwrap_or(raw);
+                info!(
+                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
+                );
+                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
+                    warn!("seednode dial {addr}: {e}");
+                }
+            }
+        });
+    }
     status.enter(Phase::CatchUp);
     let catch_up = run_ibd_or_skip(
         &node,
@@ -713,48 +762,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
         }
     }
-    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
-        let seeds = config.listen.seednodes.clone();
-        let network = config.network;
-        let peers = Arc::clone(&node.peers);
-        let clock = Arc::clone(&node.hub.clock);
-        let stop = Arc::clone(&shutdown.flag);
-        let start_secs = seed_delay_from;
-        tokio::spawn(async move {
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if seednode_delay_elapsed(start_secs, clock.now_secs()) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            if peers.outbound_full_relay_ids().len() >= 2 {
-                return;
-            }
-            for raw in &seeds {
-                let addr = match resolve_seednode(raw, network) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("seednode {raw}: {e}");
-                        continue;
-                    }
-                };
-                let host = raw.split(':').next().unwrap_or(raw);
-                info!(
-                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
-                );
-                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
-                    warn!("seednode dial {addr}: {e}");
-                }
-            }
-        });
-    }
-
     if tip_follow_ready && !shutdown.requested() {
         let follow_n = targets.len().min(max_out.min(3));
         if catch_up.dial_failed_all() {
@@ -2325,12 +2332,12 @@ pub(crate) fn follow_dial_type(connect: &[rbitcoin_net::NetAddr]) -> PeerConnTyp
 
 const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
 
-/// True once `now` is at least 10s after outbound attempts started.
+/// True once `now` is at least 10s after the first outbound dial.
 ///
-/// `started_at` is the clock sample from before catch-up. A later
-/// `setmocktime` jump moves `now` without moving `started_at`.
+/// `started_at == 0` means that dial has not happened. A later `setmocktime`
+/// moves `now` and leaves `started_at` on the dial sample.
 pub(crate) fn seednode_delay_elapsed(started_at: u64, now: u64) -> bool {
-    now.saturating_sub(started_at) >= ADD_NEXT_SEEDNODE_SECS
+    started_at != 0 && now.saturating_sub(started_at) >= ADD_NEXT_SEEDNODE_SECS
 }
 
 /// Whether `--seednode` may be dialled as addr-fetch: at startup with an
@@ -2491,11 +2498,15 @@ mod tests {
     }
 
     #[test]
-    fn seednode_delay_sees_a_mock_jump_from_before_catch_up() {
+    fn seednode_delay_starts_at_the_first_dial() {
+        assert!(
+            !seednode_delay_elapsed(0, 1_700_000_011),
+            "no dial yet, so a clock jump must not add the seednode"
+        );
         let started = 1_700_000_000u64;
         assert!(
             !seednode_delay_elapsed(started, started),
-            "arming the wait must not dial the seednode immediately"
+            "the dial itself must not add the seednode"
         );
         assert!(
             !seednode_delay_elapsed(started, started + 9),
@@ -2503,7 +2514,7 @@ mod tests {
         );
         assert!(
             seednode_delay_elapsed(started, started + 11),
-            "setmocktime(now+11) from a pre-catch-up sample must open the window"
+            "setmocktime(now+11) after the dial must open the window"
         );
     }
 
