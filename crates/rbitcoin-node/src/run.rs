@@ -2507,6 +2507,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn seednodes_are_off_under_connect() {
         let mut listen = NodeConfig::default().listen;
         assert!(!seednodes_allowed(&listen), "no seednodes");
