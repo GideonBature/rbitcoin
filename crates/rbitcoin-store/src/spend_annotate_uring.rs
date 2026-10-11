@@ -119,7 +119,7 @@ pub fn put_spend_batch_by_abs_meta_uring(
                         slot as u32,
                     );
                     // SAFETY: `s.buf` lives until this meta-read wave drains.
-                    unsafe { session.push_pread_flags(body_fd, abs, &mut s.buf, ud, 0) }?;
+                    unsafe { session.push_pread(body_fd, abs, &mut s.buf, ud) }?;
                 }
                 *in_flight += 1;
             }
@@ -207,7 +207,7 @@ pub fn put_spend_batch_by_abs_meta_uring(
                                 slot as u32,
                             );
                             // SAFETY: `s.buf` lives until this meta-write wave drains.
-                            unsafe { session.push_pwrite_flags(body_fd, abs, &s.buf, ud, 0) }?;
+                            unsafe { session.push_pwrite(body_fd, abs, &s.buf, ud) }?;
                         }
                         in_flight += 1;
                     }
@@ -579,9 +579,7 @@ fn put_spend_batch_pure_write_uring(
                         slot as u32,
                     );
                     // SAFETY: `s.buf` lives until this page-read wave drains.
-                    unsafe {
-                        session.push_pread_flags(body_fd, groups[gi].off, &mut s.buf, ud, 0)
-                    }?;
+                    unsafe { session.push_pread(body_fd, groups[gi].off, &mut s.buf, ud) }?;
                 }
                 *in_flight += 1;
             }
@@ -766,39 +764,6 @@ mod tests {
             assert_eq!(fl2 & output_flags::MULTI_SPENDER, 0);
             let _ = std::fs::remove_dir_all(&dir);
         }
-    }
-
-    /// Shipped uring spend path must not set RWF_DONTCACHE (`spent.body` is its
-    /// own file; evicting those pages does not protect `txout`).
-    #[test]
-    fn uring_rmw_body_sqe_sets_no_dontcache() {
-        if !crate::bulk_io::io_uring_enabled() {
-            return;
-        }
-        let (dir, t, spenders) = temp_table();
-        let (cfk, off, len) = put_one(&t);
-        let _ = len;
-        let abs = crate::tx_table::spent_abs(off, 0);
-        let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
-        let (field, flags, _vin) = bulk[0].unwrap();
-        let _ = uring_session::tls_take_sqe_rw_nonzero();
-        let cold = put_spend_batch_by_abs_meta_known(
-            &t,
-            &spenders,
-            &[(abs, cfk, 0, Fk(55), 0)],
-            &[(field, flags, 0)],
-            crate::io_backend::WriteIoBackend::Uring,
-        )
-        .unwrap();
-        assert!(cold.is_empty());
-        assert_eq!(
-            uring_session::tls_take_sqe_rw_nonzero(),
-            0,
-            "annotate SQEs must not set RWF_DONTCACHE"
-        );
-        let after = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
-        assert_eq!(after[0].unwrap().0, Fk(55));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Shipped RMW machine annotates the sole spender on the process session.

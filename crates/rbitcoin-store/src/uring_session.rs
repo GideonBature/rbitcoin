@@ -240,9 +240,6 @@ pub struct UringSession {
     /// Set on undrained leftover, unexpected CQE, CQ overflow, or wait timeout.
     /// Push and [`Self::begin_batch`] fail closed; [`with_thread_local`] drops the TLS ring.
     poisoned: bool,
-    /// SQEs whose `rw_flags` were nonzero. Test builds only.
-    #[cfg(test)]
-    sqe_rw_nonzero: u64,
 }
 
 impl UringSession {
@@ -317,16 +314,7 @@ impl UringSession {
             epoch: 0,
             kind,
             poisoned: false,
-            #[cfg(test)]
-            sqe_rw_nonzero: 0,
         })
-    }
-
-    #[cfg(test)]
-    fn note_rw_flags(&mut self, rw_flags: i32) {
-        if rw_flags != 0 {
-            self.sqe_rw_nonzero = self.sqe_rw_nonzero.saturating_add(1);
-        }
     }
 
     pub fn kind(&self) -> SessionKind {
@@ -403,26 +391,6 @@ impl UringSession {
         buf: &mut [u8],
         user_data: u64,
     ) -> Result<(), StoreError> {
-        unsafe { self.push_pread_flags(fd, offset, buf, user_data, 0) }
-    }
-
-    /// Like [`push_pread`] with optional `rw_flags` (honored on Linux uring only).
-    ///
-    /// # Safety
-    ///
-    /// Same buffer contract as [`Self::push_pread`].
-    pub unsafe fn push_pread_flags(
-        &mut self,
-        fd: impl Into<IoHandle>,
-        offset: u64,
-        buf: &mut [u8],
-        user_data: u64,
-        rw_flags: i32,
-    ) -> Result<(), StoreError> {
-        #[cfg(test)]
-        self.note_rw_flags(rw_flags);
-        #[cfg(not(target_os = "linux"))]
-        let _ = rw_flags;
         if buf.is_empty() {
             return Ok(());
         }
@@ -436,16 +404,14 @@ impl UringSession {
             #[cfg(target_os = "linux")]
             SessionBackend::Uring(ring) => {
                 use io_uring::{opcode, types};
-                let mut b = opcode::Read::new(
+                let sqe = opcode::Read::new(
                     types::Fd(handle.as_raw_fd()),
                     buf.as_mut_ptr(),
                     buf.len() as u32,
                 )
-                .offset(offset);
-                if rw_flags != 0 {
-                    b = b.rw_flags(rw_flags);
-                }
-                let sqe = b.build().user_data(user_data);
+                .offset(offset)
+                .build()
+                .user_data(user_data);
                 // SAFETY: caller keeps `buf` alive until matching CQE is harvested.
                 unsafe {
                     if ring.submission().push(&sqe).is_err() {
@@ -480,26 +446,6 @@ impl UringSession {
         buf: &[u8],
         user_data: u64,
     ) -> Result<(), StoreError> {
-        unsafe { self.push_pwrite_flags(fd, offset, buf, user_data, 0) }
-    }
-
-    /// Like [`push_pwrite`] with optional `rw_flags` (honored on Linux uring only).
-    ///
-    /// # Safety
-    ///
-    /// Same buffer contract as [`Self::push_pwrite`].
-    pub unsafe fn push_pwrite_flags(
-        &mut self,
-        fd: impl Into<IoHandle>,
-        offset: u64,
-        buf: &[u8],
-        user_data: u64,
-        rw_flags: i32,
-    ) -> Result<(), StoreError> {
-        #[cfg(test)]
-        self.note_rw_flags(rw_flags);
-        #[cfg(not(target_os = "linux"))]
-        let _ = rw_flags;
         if buf.is_empty() {
             return Ok(());
         }
@@ -513,16 +459,14 @@ impl UringSession {
             #[cfg(target_os = "linux")]
             SessionBackend::Uring(ring) => {
                 use io_uring::{opcode, types};
-                let mut b = opcode::Write::new(
+                let sqe = opcode::Write::new(
                     types::Fd(handle.as_raw_fd()),
                     buf.as_ptr(),
                     buf.len() as u32,
                 )
-                .offset(offset);
-                if rw_flags != 0 {
-                    b = b.rw_flags(rw_flags);
-                }
-                let sqe = b.build().user_data(user_data);
+                .offset(offset)
+                .build()
+                .user_data(user_data);
                 // SAFETY: caller keeps `buf` alive until matching CQE is harvested.
                 unsafe {
                     if ring.submission().push(&sqe).is_err() {
@@ -1135,17 +1079,6 @@ pub fn with_thread_local<R>(
             out
         })
     }
-}
-
-/// Nonzero-`rw_flags` SQEs on this thread's session since the last take.
-#[cfg(test)]
-pub fn tls_take_sqe_rw_nonzero() -> u64 {
-    SESSION.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .map(|s| std::mem::take(&mut s.sqe_rw_nonzero))
-            .unwrap_or(0)
-    })
 }
 
 /// Kind byte for [`pack_ud`]. Distinct per machine so a leftover CQE cannot

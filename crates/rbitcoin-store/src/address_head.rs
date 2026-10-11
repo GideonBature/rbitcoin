@@ -888,7 +888,6 @@ impl AddressHead {
 
         let fd = self.file.read_fd();
         let path = self.file.path();
-        let rw_flags = 0i32;
 
         // Fixed pool — never one buffer per unique page in the stamp.
         let pool_n = PROBE_PAGES_IN_FLIGHT.min(n_pages).max(1);
@@ -926,7 +925,7 @@ impl AddressHead {
                         slot as u32,
                     );
                     // SAFETY: `bufs[slot]` lives until this probe wave drains.
-                    unsafe { session.push_pread_flags(fd, off, buf, ud, rw_flags) }?;
+                    unsafe { session.push_pread(fd, off, buf, ud) }?;
                     slot_page[slot] = Some(pi);
                     in_flight += 1;
                 }

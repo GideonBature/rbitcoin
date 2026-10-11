@@ -726,7 +726,7 @@ fn stream_g_pages(
                     slot as u32,
                 );
                 // SAFETY: `bufs[slot]` lives until this g-page wave drains.
-                unsafe { session.push_pread_flags(fd, off, buf, ud, 0) }?;
+                unsafe { session.push_pread(fd, off, buf, ud) }?;
                 slot_page[slot] = Some(pi);
                 in_flight += 1;
             }
