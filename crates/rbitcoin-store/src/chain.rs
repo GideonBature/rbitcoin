@@ -130,8 +130,8 @@ pub struct StrongTxTable {
     bits: crate::file::TableFile,
     /// Number of bits allocated (covers tx fks 1..=n_bits).
     n_bits: std::sync::atomic::AtomicU64,
-    /// L2 byte image (`None` = pure L0).
-    data: std::sync::RwLock<Option<Vec<u8>>>,
+    /// L2 byte image. `strong_tx` stays in this `Vec`; open and create never go FdOnly.
+    data: std::sync::RwLock<Vec<u8>>,
     /// `0` = clean. Nonzero generation: a bit `set` raced persist if CAS fails.
     dirty_epoch: std::sync::atomic::AtomicU64,
     /// Min bit index mutated since last flush (`u64::MAX` = none).
@@ -145,7 +145,7 @@ impl StrongTxTable {
         Ok(Self {
             bits: crate::file::TableFile::create(dir.join("strong_tx.body"), TableKind::StrongTx)?,
             n_bits: std::sync::atomic::AtomicU64::new(0),
-            data: std::sync::RwLock::new(Some(Vec::new())),
+            data: std::sync::RwLock::new(Vec::new()),
             dirty_epoch: std::sync::atomic::AtomicU64::new(0),
             dirty_lo_bit: std::sync::atomic::AtomicU64::new(u64::MAX),
             disk_bytes: std::sync::atomic::AtomicU64::new(0),
@@ -162,11 +162,10 @@ impl StrongTxTable {
         if body > 0 {
             bits.read_at(crate::file::FILE_HEADER_LEN as u64, &mut v)?;
         }
-        let data = Some(v);
         Ok(Self {
             bits,
             n_bits: std::sync::atomic::AtomicU64::new(n_bits),
-            data: std::sync::RwLock::new(data),
+            data: std::sync::RwLock::new(v),
             dirty_epoch: std::sync::atomic::AtomicU64::new(0),
             dirty_lo_bit: std::sync::atomic::AtomicU64::new(u64::MAX),
             disk_bytes: std::sync::atomic::AtomicU64::new(body),
@@ -190,10 +189,6 @@ impl StrongTxTable {
         }
     }
 
-    fn byte_off(bit: u64) -> u64 {
-        crate::file::FILE_HEADER_LEN as u64 + bit / 8
-    }
-
     fn ensure_bits(&self, need_bits: u64) -> Result<(), StoreError> {
         use std::sync::atomic::Ordering;
         let n = self.n_bits.load(Ordering::Acquire);
@@ -201,23 +196,12 @@ impl StrongTxTable {
             return Ok(());
         }
         let need_bytes = need_bits.div_ceil(8);
-        let cur_bytes = n.div_ceil(8);
         let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref mut v) = *guard {
-            if need_bytes as usize > v.len() {
-                v.resize(need_bytes as usize, 0);
-            }
-            self.n_bits.store(need_bits, Ordering::Release);
-            // Growth alone is not a bit mutate; callers set_bit mark dirty.
-            return Ok(());
-        }
-        drop(guard);
-        if need_bytes > cur_bytes {
-            let zeros = vec![0u8; (need_bytes - cur_bytes) as usize];
-            self.bits
-                .write_at(crate::file::FILE_HEADER_LEN as u64 + cur_bytes, &zeros)?;
+        if need_bytes as usize > guard.len() {
+            guard.resize(need_bytes as usize, 0);
         }
         self.n_bits.store(need_bits, Ordering::Release);
+        // Growth alone is not a bit mutate; callers set_bit mark dirty.
         Ok(())
     }
 
@@ -228,38 +212,21 @@ impl StrongTxTable {
             return Ok(false);
         }
         let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref v) = *guard {
-            let bi = (bit / 8) as usize;
-            return Ok((v[bi] >> (bit % 8)) & 1 != 0);
-        }
-        drop(guard);
-        let mut b = [0u8; 1];
-        self.bits.read_at(Self::byte_off(bit), &mut b)?;
-        Ok((b[0] >> (bit % 8)) & 1 != 0)
+        let bi = (bit / 8) as usize;
+        Ok((guard[bi] >> (bit % 8)) & 1 != 0)
     }
 
     fn set_bit(&self, bit: u64, on: bool) -> Result<(), StoreError> {
         self.ensure_bits(bit + 1)?;
         let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref mut v) = *guard {
-            let bi = (bit / 8) as usize;
-            if on {
-                v[bi] |= 1 << (bit % 8);
-            } else {
-                v[bi] &= !(1 << (bit % 8));
-            }
-            self.mark_dirty_bit(bit);
-            return Ok(());
-        }
-        drop(guard);
-        let mut b = [0u8; 1];
-        self.bits.read_at(Self::byte_off(bit), &mut b)?;
+        let bi = (bit / 8) as usize;
         if on {
-            b[0] |= 1 << (bit % 8);
+            guard[bi] |= 1 << (bit % 8);
         } else {
-            b[0] &= !(1 << (bit % 8));
+            guard[bi] &= !(1 << (bit % 8));
         }
-        self.bits.write_at(Self::byte_off(bit), &b)
+        self.mark_dirty_bit(bit);
+        Ok(())
     }
 
     /// Compatibility: Some(dummy nonzero) if strong, else None.
@@ -271,10 +238,10 @@ impl StrongTxTable {
         }
     }
 
-    /// In-RAM L2 bit-image bytes (0 when FdOnly).
+    /// In-RAM L2 bit-image bytes.
     pub fn l2_resident_bytes(&self) -> u64 {
         let g = self.data.read().unwrap_or_else(|e| e.into_inner());
-        g.as_ref().map(|v| v.len() as u64).unwrap_or(0)
+        g.len() as u64
     }
 
     pub fn set_strong(&self, tx_fk: Fk, header_fk: Fk) -> Result<(), StoreError> {
@@ -312,61 +279,17 @@ impl StrongTxTable {
         }
         self.ensure_bits(end)?;
         let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref mut v) = *guard {
-            let mut bit = start;
-            while bit < end {
-                let bi = (bit / 8) as usize;
-                if on {
-                    v[bi] |= 1 << (bit % 8);
-                } else {
-                    v[bi] &= !(1 << (bit % 8));
-                }
-                bit += 1;
-            }
-            self.mark_dirty_bit(start);
-            return Ok(());
-        }
-        drop(guard);
-
         let mut bit = start;
-        if !bit.is_multiple_of(8) {
-            let byte_end = (bit + 8) & !7;
-            let stop = end.min(byte_end);
-            while bit < stop {
-                let mut b = [0u8; 1];
-                self.bits.read_at(Self::byte_off(bit), &mut b)?;
-                if on {
-                    b[0] |= 1 << (bit % 8);
-                } else {
-                    b[0] &= !(1 << (bit % 8));
-                }
-                self.bits.write_at(Self::byte_off(bit), &b)?;
-                bit += 1;
-            }
-        }
-        if bit + 8 <= end {
-            let full_start = bit / 8;
-            let full_end = end / 8;
-            if full_end > full_start {
-                let n = (full_end - full_start) as usize;
-                let fill = if on { 0xffu8 } else { 0u8 };
-                let blob = vec![fill; n];
-                self.bits
-                    .write_at(crate::file::FILE_HEADER_LEN as u64 + full_start, &blob)?;
-                bit = full_end * 8;
-            }
-        }
         while bit < end {
-            let mut b = [0u8; 1];
-            self.bits.read_at(Self::byte_off(bit), &mut b)?;
+            let bi = (bit / 8) as usize;
             if on {
-                b[0] |= 1 << (bit % 8);
+                guard[bi] |= 1 << (bit % 8);
             } else {
-                b[0] &= !(1 << (bit % 8));
+                guard[bi] &= !(1 << (bit % 8));
             }
-            self.bits.write_at(Self::byte_off(bit), &b)?;
             bit += 1;
         }
+        self.mark_dirty_bit(start);
         Ok(())
     }
 
@@ -425,48 +348,19 @@ impl StrongTxTable {
         }
         let mut ones = 0u64;
         let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref v) = *guard {
-            let mut bit = start_bit;
-            while bit < end_bit {
-                let bi = (bit / 8) as usize;
-                let b = v[bi];
-                if b == 0 {
-                    bit = (bit + 8) & !7;
-                    continue;
-                }
-                let off = (bit % 8) as u32;
-                if (b >> off) & 1 != 0 {
-                    ones += 1;
-                }
-                bit += 1;
-            }
-            return Ok(ones);
-        }
-        drop(guard);
-        const CHUNK: usize = 8192;
-        let mut buf = vec![0u8; CHUNK];
         let mut bit = start_bit;
         while bit < end_bit {
-            let byte_off = bit / 8;
-            let nbytes = end_bit.div_ceil(8).saturating_sub(byte_off);
-            let take = (nbytes as usize).min(CHUNK);
-            self.bits.read_at(
-                crate::file::FILE_HEADER_LEN as u64 + byte_off,
-                &mut buf[..take],
-            )?;
-            let base_bit = byte_off * 8;
-            for (i, &b) in buf[..take].iter().enumerate() {
-                if b == 0 {
-                    continue;
-                }
-                for k in 0..8u32 {
-                    let idx = base_bit + (i as u64) * 8 + u64::from(k);
-                    if idx >= start_bit && idx < end_bit && (b >> k) & 1 != 0 {
-                        ones += 1;
-                    }
-                }
+            let bi = (bit / 8) as usize;
+            let b = guard[bi];
+            if b == 0 {
+                bit = (bit + 8) & !7;
+                continue;
             }
-            bit = base_bit + (take as u64) * 8;
+            let off = (bit % 8) as u32;
+            if (b >> off) & 1 != 0 {
+                ones += 1;
+            }
+            bit += 1;
         }
         Ok(ones)
     }
@@ -477,21 +371,16 @@ impl StrongTxTable {
             return Ok(());
         }
         let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref v) = *guard {
-            let start = byte_off as usize;
-            let end = start.saturating_add(dst.len()).min(v.len());
-            if start >= v.len() {
-                dst.fill(0);
-                return Ok(());
-            }
-            let n = end - start;
-            dst[..n].copy_from_slice(&v[start..end]);
-            dst[n..].fill(0);
+        let start = byte_off as usize;
+        let end = start.saturating_add(dst.len()).min(guard.len());
+        if start >= guard.len() {
+            dst.fill(0);
             return Ok(());
         }
-        drop(guard);
-        self.bits
-            .read_at(crate::file::FILE_HEADER_LEN as u64 + byte_off, dst)
+        let n = end - start;
+        dst[..n].copy_from_slice(&guard[start..end]);
+        dst[n..].fill(0);
+        Ok(())
     }
 
     /// True when every fk in `[first, first+count)` is strong.
@@ -508,9 +397,7 @@ impl StrongTxTable {
     pub fn flush_dirty(&self) -> Result<(), StoreError> {
         use std::sync::atomic::Ordering;
         let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
-        let Some(ref v) = *guard else {
-            return Ok(());
-        };
+        let v = &*guard;
         let e0 = self.dirty_epoch.load(Ordering::Acquire);
         if e0 == 0 {
             return Ok(());
@@ -622,6 +509,27 @@ mod strong_tests {
         drop(t);
         let t = StrongTxTable::open(&dir).unwrap();
         assert_eq!(t.count_strong_in_fk_range(1, 17).unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Count uses the L2 image. A scribbled `strong_tx.body` does not change it.
+    #[test]
+    fn strong_tx_count_reads_l2_not_the_file() {
+        let dir = tmp();
+        let t = StrongTxTable::create(&dir).unwrap();
+        t.set_strong_range(Fk(1), 20, Fk(1)).unwrap();
+        t.flush().unwrap();
+        assert!(t.l2_resident_bytes() > 0);
+        assert_eq!(t.count_strong_in_fk_range(1, 21).unwrap(), 20);
+        let path = dir.join("strong_tx.body");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let header = crate::file::FILE_HEADER_LEN;
+        assert!(bytes.len() > header);
+        for b in &mut bytes[header..] {
+            *b = 0;
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(t.count_strong_in_fk_range(1, 21).unwrap(), 20);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
