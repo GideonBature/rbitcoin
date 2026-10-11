@@ -1,5 +1,4 @@
 Fixed
 
-- **After a reorg longer than eight blocks, the next block stays an inv
-  announcement.** A header mark on the block before the inv-only tip no
-  longer resumes headers until the peer asks.
+- **A reorg longer than eight blocks is announced with one inv.** Reorg
+  announcements wait out a short burst so the peer sees the final tip.

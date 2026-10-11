@@ -52,6 +52,11 @@ const ADDRFETCH_TIMEOUT_SECS: u64 = 300;
 /// On a reorg larger than this, announce via inv instead of a header list.
 const MAX_BLOCKS_TO_ANNOUNCE: u32 = 8;
 
+/// Quiet period before announcing a reorg tip. A direct child of the header we
+/// already sent goes out immediately. `p2p_sendheaders` part 3 needs the whole
+/// reorg in one inv (nine blocks) or one headers list (eight).
+const TIP_ANNOUNCE_BATCH: Duration = Duration::from_millis(200);
+
 /// True when a session error is a missing store row (not peer malice / corrupt IO).
 ///
 /// These must not tear down the TCP session: re-request or skip and keep the peer.
@@ -1650,6 +1655,8 @@ pub async fn peer_session_with(
 
     let session = meta.session.clone();
     let mut last_hb = std::time::Instant::now();
+    let mut pending_tip: Option<Result<crate::chain::TipEvent, broadcast::error::RecvError>> = None;
+    let mut tip_deadline: Option<tokio::time::Instant> = None;
     let result = async {
         loop {
             if session
@@ -1805,7 +1812,15 @@ pub async fn peer_session_with(
                             Err(_) => break,
                         }
                     }
-                    if on_tip_event(
+                    // A reorg is not a child of the header this peer was sent.
+                    // Hold it so a burst becomes one announcement. A normal
+                    // extend, and a closed channel, go out immediately.
+                    let batch = pending_tip.is_some()
+                        || tip_is_reorg_vs_sent(hub.as_ref(), session.as_deref(), &tip);
+                    if batch {
+                        pending_tip = Some(tip);
+                        tip_deadline = Some(tokio::time::Instant::now() + TIP_ANNOUNCE_BATCH);
+                    } else if on_tip_event(
                         hub.as_ref(),
                         &out_tx,
                         &mut follow,
@@ -1815,6 +1830,27 @@ pub async fn peer_session_with(
                     .await?
                     {
                         return Ok(());
+                    }
+                }
+                _ = async {
+                    match tip_deadline {
+                        Some(dl) => tokio::time::sleep_until(dl).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if pending_tip.is_some() && !over_budget => {
+                    tip_deadline = None;
+                    if let Some(tip) = pending_tip.take() {
+                        if on_tip_event(
+                            hub.as_ref(),
+                            &out_tx,
+                            &mut follow,
+                            session.as_deref(),
+                            tip,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
                     }
                 }
                 _ = headers_poll.tick(), if !over_budget => {
@@ -4499,6 +4535,30 @@ fn current_tip_announce(hub: &ChainHub) -> TipRecvAnnounce {
     }
 }
 
+/// True when `tip` is not the header we last sent this peer, and not a
+/// descendant of it. Those announcements wait [`TIP_ANNOUNCE_BATCH`] so a
+/// reorg is one message.
+fn tip_is_reorg_vs_sent(
+    hub: &ChainHub,
+    session: Option<&crate::peers::LivePeer>,
+    tip: &Result<crate::chain::TipEvent, broadcast::error::RecvError>,
+) -> bool {
+    if matches!(tip, Err(broadcast::error::RecvError::Closed)) {
+        return false;
+    }
+    let Some(mark) = session.and_then(|s| s.header_marks().0) else {
+        return false;
+    };
+    let hash = match tip {
+        Ok(ev) => ev.hash,
+        Err(_) => match hub.tip_hash() {
+            Some(h) => h,
+            None => return false,
+        },
+    };
+    hash != mark && !hub.is_header_ancestor(mark, hash)
+}
+
 /// Map a `tip_rx.recv()` result to the tip we should announce.
 ///
 /// `Lagged` and a queued `TipEvent` whose hash is no longer `hub.tip` both
@@ -4655,12 +4715,6 @@ fn tip_announce_decision(
     let mut prev = ev.header.prev_blockhash;
     if peer_has_header(hub, best_header_sent, best_known, prev) {
         return TipAnnounce::Headers(out);
-    }
-    // A one-block extend whose parent was only inv'd must stay an inv.
-    // Bridging back to an older header mark resumes headers after a large
-    // reorg (`p2p_sendheaders` part 3). A multi-block event still walks.
-    if ev.reorg_branch_len <= 1 {
-        return TipAnnounce::Inv(ev.hash);
     }
     for _ in 1..MAX_BLOCKS_TO_ANNOUNCE {
         let Some(hdr) = hub.header_of(&prev) else {

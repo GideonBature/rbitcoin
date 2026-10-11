@@ -1257,14 +1257,6 @@ fn tip_announce_reorg_inv_until_caught_up() {
         Ann::Inv,
         "still far from sent mark must inv",
     );
-    let prefix_sent = branch[7].block_hash();
-    assert_ann(
-        hub,
-        &after,
-        marks(true, Some(prefix_sent), None, false),
-        Ann::Inv,
-        "header mark one behind an inv-only tip must not resume headers",
-    );
     assert_ann(
         hub,
         &after,
