@@ -18,7 +18,9 @@ pub const RPC_MAX_HTTP_BODY: usize = 2 * 1024 * 1024;
 pub const DEFAULT_RPC_WORK_QUEUE: usize = 16;
 /// Accept cap, copied from the Electrum public listener. Not a knob.
 const RPC_MAX_CONNECTIONS: usize = 256;
-use rbitcoin_log::{info, warn};
+use rbitcoin_log::info;
+#[cfg(unix)]
+use rbitcoin_log::warn;
 use rbitcoin_net::{BlockingRegion, MempoolHub};
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
