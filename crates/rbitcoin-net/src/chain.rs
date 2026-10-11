@@ -22,6 +22,11 @@ use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+
+/// Header-store reads inside [`ChainHub::try_tip_hash`]. The orchestration
+/// loop calls `tip_hash` every pass; a published tip must not add to this.
+#[cfg(test)]
+pub(crate) static TIP_HASH_HEADER_READS: AtomicU64 = AtomicU64::new(0);
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::{broadcast, Notify};
@@ -799,11 +804,19 @@ impl ChainHub {
         let c_h = self.cache.tip_height();
         Ok(match (q_h, c_h) {
             (Some(qh), Some(ch)) if ch > qh => self.cache.tip_hash(),
-            (Some(qh), _) => self
-                .query
-                .header_at_height(rbitcoin_primitives::Height(qh))
-                .map_err(NetError::store)?
-                .map(|(_, rec)| BlockHash::from_byte_array(rec.hash)),
+            (Some(qh), _) => {
+                if let Some(p) = self.query.published_tip() {
+                    if p.height == qh {
+                        return Ok(Some(BlockHash::from_byte_array(p.hash)));
+                    }
+                }
+                #[cfg(test)]
+                TIP_HASH_HEADER_READS.fetch_add(1, Ordering::Relaxed);
+                self.query
+                    .header_at_height(rbitcoin_primitives::Height(qh))
+                    .map_err(NetError::store)?
+                    .map(|(_, rec)| BlockHash::from_byte_array(rec.hash))
+            }
             (None, Some(_)) => self.cache.tip_hash(),
             (None, None) => None,
         })
@@ -3815,6 +3828,19 @@ mod tests {
 
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
         super::tiny_regtest_hub_labeled("chain")
+    }
+
+    #[test]
+    fn tip_hash_after_genesis_does_not_reread_the_header() {
+        let (_dir, hub) = super::tiny_regtest_hub_labeled("pub-tip");
+        hub.ensure_genesis().unwrap();
+        let before = super::TIP_HASH_HEADER_READS.load(Ordering::Relaxed);
+        assert!(hub.tip_hash().is_some());
+        assert_eq!(
+            super::TIP_HASH_HEADER_READS.load(Ordering::Relaxed),
+            before,
+            "tip hash must come from the snapshot confirm published"
+        );
     }
 
     #[test]

@@ -345,6 +345,7 @@ fn prepared_at(q: &Query, height: Height, header_fk: Fk) -> ConfirmPrepared {
             .header_tx_fks(header_fk, None)
             .unwrap()
             .expect("archived body"),
+        hash: q.get_header(header_fk).unwrap().hash,
     }
 }
 

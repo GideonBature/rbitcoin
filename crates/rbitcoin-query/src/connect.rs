@@ -40,9 +40,40 @@ pub struct ConfirmPrepared {
     pub height: Height,
     pub header_fk: Fk,
     pub tx_fks: Vec<Fk>,
+    /// Block hash. Published as the tip when this run extends `confirmed[]`.
+    pub hash: [u8; 32],
 }
 
 impl Query {
+    /// Tip hash from the last confirm or disconnect, if it still matches `height`.
+    pub fn published_tip(&self) -> Option<PublishedTip> {
+        self.published_tip.load_full().as_deref().copied()
+    }
+
+    /// Publish `hash` as the confirmed tip at `height`. Called in the same
+    /// confirm that advanced `confirmed[]`, before the Class C flush.
+    pub fn publish_confirmed_tip(&self, height: u32, hash: [u8; 32]) {
+        self.published_tip
+            .store(Some(std::sync::Arc::new(PublishedTip { height, hash })));
+    }
+
+    pub fn clear_published_tip(&self) {
+        self.published_tip.store(None);
+    }
+
+    /// One header read at open, so the first orchestration pass does not
+    /// re-read the tip. Later tips come from [`Self::publish_confirmed_tip`].
+    pub(crate) fn seed_published_tip(&self) -> Result<(), QueryError> {
+        let Some(tip) = self.tip_height() else {
+            self.clear_published_tip();
+            return Ok(());
+        };
+        if let Some((_, rec)) = self.header_at_height(tip)? {
+            self.publish_confirmed_tip(tip.0, rec.hash);
+        }
+        Ok(())
+    }
+
     pub fn confirm_block(&self, height: Height, header_hash: &[u8; 32]) -> Result<Fk, QueryError> {
         if let Some(h) = self.height_of_hash(header_hash)? {
             if h == height {
@@ -65,6 +96,7 @@ impl Query {
             height,
             header_fk,
             tx_fks,
+            hash: *header_hash,
         };
         let out = self.confirm_blocks_run(std::slice::from_ref(&prepared))?;
         self.annotate_spends_for_confirmed(std::slice::from_ref(&prepared))?;
@@ -236,6 +268,11 @@ impl Query {
                 .height_fence_extend(item.height, item.header_fk)?;
         }
         self.store.confirmed.set_many(&confirmed_pairs)?;
+        // Publish before the Class C flush. `tip_height` is already the new
+        // tip; a header read here would land on the orchestration loop.
+        if let Some(last) = items.last() {
+            self.publish_confirmed_tip(last.height.0, last.hash);
+        }
         // Do not forget pending here: drain may still be inserting tx.head
         // (67438). Write forgets after drain.join() *and* this extend.
         // L2 write-behind barrier: complete-or-fail Class C image to disk **before**
@@ -616,10 +653,12 @@ impl Query {
                     ));
                 }
             };
+            let hash = self.store.get_header(header_fk)?.hash;
             items.push(ConfirmPrepared {
                 height: Height(h),
                 header_fk,
                 tx_fks,
+                hash,
             });
         }
         if !items.is_empty() {
@@ -780,9 +819,10 @@ impl Query {
         } else {
             self.clamp_index_released_before(height);
         }
-        let hash = self
-            .header_at_height(height)?
-            .map(|(_, rec)| rec.hash)
+        let disconnected = self.header_at_height(height)?.map(|(_, rec)| rec);
+        let hash = disconnected
+            .as_ref()
+            .map(|rec| rec.hash)
             .unwrap_or([0u8; 32]);
         let tx_fks = self.block_tx_fks(height)?;
 
@@ -822,8 +862,17 @@ impl Query {
         self.store.clamp_spend_durable()?;
         log_disconnect_tip(height.0, &hash, tx_fks.len());
         if let Some(new_tip) = self.tip_height() {
+            let parent_hash = match disconnected.as_ref() {
+                Some(rec) if !rec.prev_fk.is_null() => self.get_header(rec.prev_fk)?.hash,
+                _ => self
+                    .header_at_height(new_tip)?
+                    .map(|(_, rec)| rec.hash)
+                    .unwrap_or([0u8; 32]),
+            };
+            self.publish_confirmed_tip(new_tip.0, parent_hash);
             let _ = self.ensure_height_by_hash_index(new_tip);
         } else {
+            self.clear_published_tip();
             self.invalidate_height_by_hash_index();
         }
 

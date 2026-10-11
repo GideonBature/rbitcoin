@@ -136,6 +136,9 @@ pub(crate) struct IbdWorkState {
     pub hash_height: HashMap<BlockHash, u32>,
     /// Inverse of [`Self::hash_height`] for O(1) tip+1‥ confirm offers.
     pub height_to_hash: HashMap<u32, BlockHash>,
+    /// Parent hash recorded when the header was admitted. The orchestration
+    /// loop uses this instead of reading the header store.
+    pub path_prev: HashMap<BlockHash, BlockHash>,
     pub known_headers: HashSet<BlockHash>,
     pub body: BodyPresence,
     /// header hash → Class A header fk (from getheaders; Block path skips store).
@@ -215,6 +218,7 @@ impl IbdWorkState {
             ordered: VecDeque::new(),
             ordered_set: HashSet::new(),
             hash_height,
+            path_prev: HashMap::new(),
             height_to_hash: {
                 let mut m = HashMap::new();
                 if let (Some(h), Some(th)) = (tip_hash, tip_height) {
@@ -285,6 +289,11 @@ impl IbdWorkState {
     ///
     /// Always records `hash_height`. Returns whether the path slot was set
     /// to `hash`.
+    #[cfg(test)]
+    pub(crate) fn note_path_prev(&mut self, hash: BlockHash, prev: BlockHash) {
+        self.path_prev.insert(hash, prev);
+    }
+
     pub(crate) fn try_set_path_slot(
         &mut self,
         hash: BlockHash,
@@ -292,6 +301,7 @@ impl IbdWorkState {
         prev: BlockHash,
         tip: Option<(u32, BlockHash)>,
     ) -> bool {
+        self.path_prev.insert(hash, prev);
         if let Some(old) = self.hash_height.insert(hash, ht) {
             if old != ht && self.height_to_hash.get(&old) == Some(&hash) {
                 self.height_to_hash.remove(&old);
@@ -373,6 +383,9 @@ impl IbdWorkState {
         self.hash_height.retain(|h, _| {
             live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
         });
+        self.path_prev.retain(|h, _| {
+            live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
+        });
         // Retain chained occupants. Do not clear+rebuild (HashMap order is
         // last-write and would remix two hashes at one height).
         self.height_to_hash.retain(|ht, hash| {
@@ -386,6 +399,9 @@ impl IbdWorkState {
                 live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
             });
             self.hash_height.retain(|h, _| {
+                live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
+            });
+            self.path_prev.retain(|h, _| {
                 live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
             });
         }

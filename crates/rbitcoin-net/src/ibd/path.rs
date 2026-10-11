@@ -163,7 +163,7 @@ fn plant_find_valid_child(
         if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
             continue;
         }
-        let Ok(Some(prev)) = super::reorg::parent_hash_of(hub, h) else {
+        let Some(prev) = st.path_prev.get(&h).copied() else {
             continue;
         };
         if prev != tip_hash {
@@ -228,14 +228,12 @@ fn plant_hash_at_height(st: &IbdWorkState, ht: u32) -> Option<BlockHash> {
 
 fn plant_next_connected(
     st: &IbdWorkState,
-    hub: &ChainHub,
+    _hub: &ChainHub,
     parent: BlockHash,
     ht: u32,
 ) -> Option<BlockHash> {
     let n = plant_hash_at_height(st, ht)?;
-    let Ok(Some(p)) = super::reorg::parent_hash_of(hub, n) else {
-        return None;
-    };
+    let p = st.path_prev.get(&n).copied()?;
     (p == parent).then_some(n)
 }
 
@@ -431,7 +429,9 @@ mod tests {
 
         let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
         st.hash_height.insert(child.block_hash(), 1);
+        st.note_path_prev(child.block_hash(), hub.tip_hash().unwrap());
         st.hash_height.insert(ext.block_hash(), 2);
+        st.note_path_prev(ext.block_hash(), child.block_hash());
         super::plant_valid_tip_child(&mut st, &hub);
         assert!(st.ordered_set.contains(&child.block_hash()));
         assert!(st.ordered_set.contains(&ext.block_hash()));

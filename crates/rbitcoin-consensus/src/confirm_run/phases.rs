@@ -342,6 +342,7 @@ pub(super) fn class_c_commit(
             height: p.height,
             header_fk: p.header_fk,
             tx_fks: std::mem::take(&mut p.tx_fks),
+            hash: p.hash,
         })
         .collect();
     let pins = if write_create_pins.is_empty() {

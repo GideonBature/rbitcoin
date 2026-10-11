@@ -66,6 +66,15 @@ pub use confirm_stats::{
 
 pub type QueryError = StoreError;
 
+/// Best-chain tip published with the `confirmed[]` update that made it the tip.
+///
+/// One `Arc` swap, so a reader sees a height and hash from the same commit.
+#[derive(Clone, Copy, Debug)]
+pub struct PublishedTip {
+    pub height: u32,
+    pub hash: [u8; 32],
+}
+
 /// Electrum JSON-RPC error / Esplora 503 body when `--sh-index` is off.
 pub const SCRIPTHASH_INDEX_DISABLED: &str = "scripthash index disabled";
 
@@ -341,6 +350,9 @@ pub struct Query {
     disconnect_height: AtomicU32,
     /// Bumped on each [`Self::disconnect_tip`]. Load drops in-flight layers.
     disconnect_gen: AtomicU64,
+    /// Confirmed tip hash published by the write that advanced `confirmed[]`.
+    /// The IBD orchestration loop loads this instead of reading the header store.
+    published_tip: arc_swap::ArcSwapOption<PublishedTip>,
     /// Confirm / archive / load window meters (`ibd: perf`). One instance per Query.
     confirm_stats: Arc<ConfirmStats>,
     /// Tip height of last in-process io_uring recover (`u32::MAX` = none).
@@ -483,6 +495,7 @@ impl Query {
             head_drain_fk: AtomicU64::new(head_drained),
             disconnect_height: AtomicU32::new(0),
             disconnect_gen: AtomicU64::new(0),
+            published_tip: arc_swap::ArcSwapOption::empty(),
             confirm_stats: Arc::new(ConfirmStats::default()),
             uring_recover_tip: AtomicU32::new(u32::MAX),
             pruneheight: AtomicU32::new(ph),
@@ -499,6 +512,7 @@ impl Query {
         if let Some(tip) = q.tip_height() {
             let _ = q.ensure_height_by_hash_index(tip);
         }
+        q.seed_published_tip()?;
         q.recover_sh_writebehind()?;
         if let Some(t) = q
             .sp_tweaks

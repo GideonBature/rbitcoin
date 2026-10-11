@@ -876,6 +876,7 @@ fn offer_confirm_ready_walks_height_map() {
 
     let feed = ConfirmFeed::new();
     let mut body = BodyPresence::new();
+    let prev_of = HashMap::new();
     let mut h2h = HashMap::new();
     // Tip is 0; expect tip+1 = 1. Zombie pending without BQ is not claim-ready.
     let h1 = bh(0x11);
@@ -883,18 +884,42 @@ fn offer_confirm_ready_walks_height_map() {
     body.mark_pending(h1);
     let mut max_arch = 0u32;
     let shared = AtomicU32::new(0);
-    let n = offer_confirm_ready(&feed, &h2h, &mut body, &hub, &mut max_arch, &shared);
+    let n = offer_confirm_ready(
+        &feed,
+        &h2h,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
     assert_eq!(n, 0, "pending without body queue must not note");
     assert_eq!(feed.size_snap().0, 0);
 
     // Rejected tip+1 stops and notes zero new.
     body.mark_rejected(h1);
-    let n2 = offer_confirm_ready(&feed, &h2h, &mut body, &hub, &mut max_arch, &shared);
+    let n2 = offer_confirm_ready(
+        &feed,
+        &h2h,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
     assert_eq!(n2, 0);
 
     // Gap in height map stops.
     let h2h2 = HashMap::new();
-    let n3 = offer_confirm_ready(&feed, &h2h2, &mut body, &hub, &mut max_arch, &shared);
+    let n3 = offer_confirm_ready(
+        &feed,
+        &h2h2,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
     assert_eq!(n3, 0);
 
     // Already-confirmed tip heights are skipped (continue walking).
@@ -910,7 +935,15 @@ fn offer_confirm_ready_walks_height_map() {
         g.ready.remove(&1);
     }
     // With tip+1 inflight, offer still notes if ready map empty for that height.
-    let n4 = offer_confirm_ready(&feed, &h2h, &mut body, &hub, &mut max_arch, &shared);
+    let n4 = offer_confirm_ready(
+        &feed,
+        &h2h,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
     // rejected path already cleared h1 from ready; height 1 still rejected → 0.
     assert_eq!(n4, 0);
 
@@ -922,7 +955,15 @@ fn offer_confirm_ready_walks_height_map() {
     body.mark_archived(h1);
     feed.finish([1]);
     max_arch = 0;
-    let n5 = offer_confirm_ready(&feed, &h2h3, &mut body, &hub, &mut max_arch, &shared);
+    let n5 = offer_confirm_ready(
+        &feed,
+        &h2h3,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
     assert_eq!(
         n5, 0,
         "Class A without body queue must not note confirm feed"
@@ -930,7 +971,15 @@ fn offer_confirm_ready_walks_height_map() {
 
     // Zombie pending without BQ is still not claim-ready.
     body.mark_pending(h1);
-    let n6 = offer_confirm_ready(&feed, &h2h3, &mut body, &hub, &mut max_arch, &shared);
+    let n6 = offer_confirm_ready(
+        &feed,
+        &h2h3,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
     assert_eq!(n6, 0, "pending alone must not note without body queue");
 
     let _ = std::fs::remove_dir_all(dir);
