@@ -147,9 +147,8 @@ fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
     });
 }
 
-/// Bind RPC. Callers that publish Tor onions wait until those services exist
-/// so `getnetworkinfo` cannot observe a partial list. Everyone else binds
-/// before catch-up so `setmocktime` can land inside the seednode wait.
+/// Bind RPC after tip entry and onion publish, so wallet RPCs and
+/// `getnetworkinfo` see a node that can already mine and list those services.
 async fn start_rpc_listener(
     config: &NodeConfig,
     node: &P2PNode,
@@ -674,68 +673,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
-    // RPC before catch-up, unless Tor control is on. Onion services are
-    // published after tip entry; answering RPC before that lets
-    // `getnetworkinfo` miss them. `p2p_seednode.py` has no Tor control, and
-    // it cannot `setmocktime` until the port accepts.
-    let defer_rpc = config.tor.control.is_some();
     let mut rpc_handle: Option<RpcHandle> = None;
-    if !defer_rpc && !shutdown.requested() {
-        rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
-    }
-    // Arm before catch-up so the task is already polling when the first dial
-    // is logged. The 10s starts at that dial (`note_connection_attempt`).
-    // `setmocktime` can run as soon as RPC is up, which is before the dial.
-    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
-        let seeds = config.listen.seednodes.clone();
-        let network = config.network;
-        let peers = Arc::clone(&node.peers);
-        let clock = Arc::clone(&node.hub.clock);
-        let stop = Arc::clone(&shutdown.flag);
-        tokio::spawn(async move {
-            let started = loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                let t = clock.connection_attempt_at();
-                if t != 0 {
-                    break t;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            };
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if seednode_delay_elapsed(started, clock.now_secs()) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            if peers.outbound_full_relay_ids().len() >= 2 {
-                return;
-            }
-            for raw in &seeds {
-                let addr = match resolve_seednode(raw, network) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("seednode {raw}: {e}");
-                        continue;
-                    }
-                };
-                let host = raw.split(':').next().unwrap_or(raw);
-                info!(
-                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
-                );
-                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
-                    warn!("seednode dial {addr}: {e}");
-                }
-            }
-        });
-    }
     status.enter(Phase::CatchUp);
     let catch_up = run_ibd_or_skip(
         &node,
@@ -950,8 +888,60 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if let Some(h) = esplora_handles.first() {
         publish_listener_addr(config.datadir.path(), "esplora", h.local_addr);
     }
-    if defer_rpc && !shutdown.requested() {
+    if !shutdown.requested() {
         rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
+    }
+    // The first dial is often during catch-up, before this port accepts.
+    // Measure the 10s from now (RPC is up) once a dial has been noted, so
+    // `setmocktime` in the post-restart window still lands inside it.
+    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
+        let seeds = config.listen.seednodes.clone();
+        let network = config.network;
+        let peers = Arc::clone(&node.peers);
+        let clock = Arc::clone(&node.hub.clock);
+        let stop = Arc::clone(&shutdown.flag);
+        tokio::spawn(async move {
+            let started = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if clock.connection_attempt_at() != 0 {
+                    break clock.now_secs();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if seednode_delay_elapsed(started, clock.now_secs()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if peers.outbound_full_relay_ids().len() >= 2 {
+                return;
+            }
+            for raw in &seeds {
+                let addr = match resolve_seednode(raw, network) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("seednode {raw}: {e}");
+                        continue;
+                    }
+                };
+                let host = raw.split(':').next().unwrap_or(raw);
+                info!(
+                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
+                );
+                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
+                    warn!("seednode dial {addr}: {e}");
+                }
+            }
+        });
     }
     let sv2_tp = start_sv2_tp(&config, &node.hub).await;
     let sv2_stats = sv2_tp.as_ref().map(Sv2TpHandle::stats);
