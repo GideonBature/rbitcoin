@@ -119,13 +119,20 @@ impl BlockQueue {
         if legacy.exists() {
             let _ = std::fs::remove_dir_all(&legacy);
         }
-        Ok(Self {
+        Ok(Self::empty())
+    }
+
+    /// Empty queue with no legacy-directory cleanup.
+    ///
+    /// Extra height stripes use this so only the first open touches `store_dir`.
+    pub fn empty() -> Self {
+        Self {
             next_id: AtomicU64::new(1),
             index: BTreeMap::new(),
             height_to_id: HashMap::new(),
             bytes: 0,
             raw_clones: AtomicU64::new(0),
-        })
+        }
     }
 
     pub fn bytes(&self) -> u64 {
