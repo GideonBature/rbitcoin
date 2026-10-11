@@ -1,6 +1,6 @@
 //! Node clock for consensus / generate. Mock time is **not** a process `time()` hook.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,13 +8,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug)]
 pub struct NodeClock {
     mock: AtomicI64,
+    /// First outbound dial, on this clock. `0` means no dial yet.
+    /// A later [`Self::set_mock`] does not move it.
+    attempt_at: AtomicU64,
 }
 
 impl NodeClock {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             mock: AtomicI64::new(0),
+            attempt_at: AtomicU64::new(0),
         })
+    }
+
+    /// Remember the first outbound dial. Later calls keep that sample, so a
+    /// `setmocktime` afterwards still measures from the dial.
+    pub fn note_connection_attempt(&self) {
+        let now = self.now_secs().max(1);
+        let _ = self
+            .attempt_at
+            .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// `0` until [`Self::note_connection_attempt`].
+    pub fn connection_attempt_at(&self) -> u64 {
+        self.attempt_at.load(Ordering::SeqCst)
     }
 
     pub fn now_secs(&self) -> u64 {
@@ -96,5 +114,19 @@ mod tests {
             c.with_frozen(|| assert_eq!(current_now(), 2_000_000_000));
             assert_eq!(current_now(), 42);
         });
+    }
+
+    #[test]
+    fn connection_attempt_stays_put_when_mock_time_jumps() {
+        let c = NodeClock::new();
+        assert_eq!(c.connection_attempt_at(), 0);
+        c.note_connection_attempt();
+        let started = c.connection_attempt_at();
+        assert!(started > 0);
+        c.set_mock((started + 11) as i64);
+        assert_eq!(c.connection_attempt_at(), started);
+        assert!(c.now_secs() >= started + 11);
+        c.note_connection_attempt();
+        assert_eq!(c.connection_attempt_at(), started);
     }
 }

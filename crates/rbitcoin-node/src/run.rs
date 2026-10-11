@@ -147,6 +147,81 @@ fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
     });
 }
 
+/// Bind RPC after tip entry and onion publish, so wallet RPCs and
+/// `getnetworkinfo` see a node that can already mine and list those services.
+async fn start_rpc_listener(
+    config: &NodeConfig,
+    node: &P2PNode,
+    mempool: &Arc<MempoolHub>,
+    shared_peers: &Arc<std::sync::Mutex<AddrMan>>,
+) -> Option<RpcHandle> {
+    if !(config.rpc.socket || config.rpc.listen.is_some()) {
+        return None;
+    }
+    let rcfg = RpcConfig {
+        listen: config.rpc.listen,
+        socket_path: if config.rpc.socket {
+            Some(config.rpc_socket_path())
+        } else {
+            None
+        },
+        socket_shared: config.rpc.socket_path.is_some(),
+        datadir: config.datadir.path.clone(),
+        network: config.network,
+        token_path: Some(config.rpc_token_path()),
+        cookie_path: config.rpc_cookie_path(),
+        work_queue: config.rpc.work_queue,
+        rest: config.rpc.rest,
+        subversion: Some(
+            rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
+                .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
+        ),
+        alert_notify: config.alert_notify.clone(),
+    };
+    let op_true_signet = config.network == Network::Signet
+        && config
+            .signet_challenge
+            .as_ref()
+            .is_some_and(|s| s.as_bytes() == [0x51]);
+    let miner: Option<Arc<dyn RpcRegtest>> = if config.network == Network::Regtest || op_true_signet
+    {
+        Some(Arc::new(HubRegtest(Arc::clone(&node.hub))))
+    } else {
+        None
+    };
+    match run_rpc(
+        rcfg,
+        Arc::clone(&node.hub.query),
+        Some(Arc::clone(mempool)),
+        miner,
+        Some(Arc::clone(&node.peers)),
+        Some(Arc::clone(&node.hub)),
+        Some(Arc::clone(shared_peers)),
+    )
+    .await
+    {
+        Ok(h) => {
+            h.initial_block_download
+                .store(node.hub.in_ibd(), Ordering::SeqCst);
+            h.connections.store(0, Ordering::Relaxed);
+            info!(
+                "rpc: listening tcp={:?} sock={:?} token={}",
+                h.local_addr,
+                h.socket_path,
+                h.token_path.display()
+            );
+            if let Some(addr) = h.local_addr {
+                publish_listener_addr(config.datadir.path(), "rpc", addr);
+            }
+            Some(h)
+        }
+        Err(e) => {
+            warn!("rpc start warning: {e}");
+            None
+        }
+    }
+}
+
 /// Restore fee history from the mempool dir and read the rest of up to 1 GiB
 /// of txstat rows once relay is on, off the tip path.
 fn spawn_fee_history_backfill(mempool: &Arc<MempoolHub>) {
@@ -598,6 +673,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
+    let mut rpc_handle: Option<RpcHandle> = None;
     status.enter(Phase::CatchUp);
     let catch_up = run_ibd_or_skip(
         &node,
@@ -707,49 +783,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
         }
     }
-    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
-        const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
-        let seeds = config.listen.seednodes.clone();
-        let network = config.network;
-        let peers = Arc::clone(&node.peers);
-        let clock = Arc::clone(&node.hub.clock);
-        let stop = Arc::clone(&shutdown.flag);
-        let start_secs = clock.now_secs();
-        tokio::spawn(async move {
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if clock.now_secs().saturating_sub(start_secs) >= ADD_NEXT_SEEDNODE_SECS {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            if peers.outbound_full_relay_ids().len() >= 2 {
-                return;
-            }
-            for raw in &seeds {
-                let addr = match resolve_seednode(raw, network) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("seednode {raw}: {e}");
-                        continue;
-                    }
-                };
-                let host = raw.split(':').next().unwrap_or(raw);
-                info!(
-                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
-                );
-                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
-                    warn!("seednode dial {addr}: {e}");
-                }
-            }
-        });
-    }
-
     if tip_follow_ready && !shutdown.requested() {
         let follow_n = targets.len().min(max_out.min(3));
         if catch_up.dial_failed_all() {
@@ -855,6 +888,61 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if let Some(h) = esplora_handles.first() {
         publish_listener_addr(config.datadir.path(), "esplora", h.local_addr);
     }
+    if !shutdown.requested() {
+        rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
+    }
+    // The first dial is often during catch-up, before this port accepts.
+    // Measure the 10s from now (RPC is up) once a dial has been noted, so
+    // `setmocktime` in the post-restart window still lands inside it.
+    if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
+        let seeds = config.listen.seednodes.clone();
+        let network = config.network;
+        let peers = Arc::clone(&node.peers);
+        let clock = Arc::clone(&node.hub.clock);
+        let stop = Arc::clone(&shutdown.flag);
+        tokio::spawn(async move {
+            let started = loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if clock.connection_attempt_at() != 0 {
+                    break clock.now_secs();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if seednode_delay_elapsed(started, clock.now_secs()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if peers.outbound_full_relay_ids().len() >= 2 {
+                return;
+            }
+            for raw in &seeds {
+                let addr = match resolve_seednode(raw, network) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("seednode {raw}: {e}");
+                        continue;
+                    }
+                };
+                let host = raw.split(':').next().unwrap_or(raw);
+                info!(
+                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
+                );
+                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
+                    warn!("seednode dial {addr}: {e}");
+                }
+            }
+        });
+    }
     let sv2_tp = start_sv2_tp(&config, &node.hub).await;
     let sv2_stats = sv2_tp.as_ref().map(Sv2TpHandle::stats);
     if let Some(s) = &sv2_stats {
@@ -885,75 +973,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     .await?,
                 );
             }
-        }
-    }
-
-    let mut rpc_handle: Option<RpcHandle> = None;
-    if (config.rpc.socket || config.rpc.listen.is_some()) && !shutdown.requested() {
-        let rcfg = RpcConfig {
-            listen: config.rpc.listen,
-            socket_path: if config.rpc.socket {
-                Some(config.rpc_socket_path())
-            } else {
-                None
-            },
-            socket_shared: config.rpc.socket_path.is_some(),
-            datadir: config.datadir.path.clone(),
-            network: config.network,
-            token_path: Some(config.rpc_token_path()),
-            cookie_path: config.rpc_cookie_path(),
-            work_queue: config.rpc.work_queue,
-            rest: config.rpc.rest,
-            subversion: Some(
-                rbitcoin_primitives::rbitcoin_subversion(
-                    env!("CARGO_PKG_VERSION"),
-                    &config.uacomments,
-                )
-                .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
-            ),
-            alert_notify: config.alert_notify.clone(),
-        };
-        // OP_TRUE signet is mine-on-demand, same as regtest. Any other
-        // challenge needs a signer we do not have.
-        let op_true_signet = config.network == Network::Signet
-            && config
-                .signet_challenge
-                .as_ref()
-                .is_some_and(|s| s.as_bytes() == [0x51]);
-        let miner: Option<Arc<dyn RpcRegtest>> =
-            if config.network == Network::Regtest || op_true_signet {
-                Some(Arc::new(HubRegtest(Arc::clone(&node.hub))))
-            } else {
-                None
-            };
-        match run_rpc(
-            rcfg,
-            Arc::clone(&node.hub.query),
-            Some(mempool.clone()),
-            miner,
-            Some(Arc::clone(&node.peers)),
-            Some(Arc::clone(&node.hub)),
-            Some(Arc::clone(&shared_peers)),
-        )
-        .await
-        {
-            Ok(h) => {
-                h.initial_block_download
-                    .store(!tip_follow_ready || node.hub.in_ibd(), Ordering::SeqCst);
-                h.connections
-                    .store(node.follow_live_count() as u64, Ordering::Relaxed);
-                info!(
-                    "rpc: listening tcp={:?} sock={:?} token={}",
-                    h.local_addr,
-                    h.socket_path,
-                    h.token_path.display()
-                );
-                if let Some(addr) = h.local_addr {
-                    publish_listener_addr(config.datadir.path(), "rpc", addr);
-                }
-                rpc_handle = Some(h);
-            }
-            Err(e) => warn!("rpc start warning: {e}"),
         }
     }
 
@@ -2318,6 +2337,16 @@ pub(crate) fn follow_dial_type(connect: &[rbitcoin_net::NetAddr]) -> PeerConnTyp
     }
 }
 
+const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
+
+/// True once `now` is at least 10s after the first outbound dial.
+///
+/// `started_at == 0` means that dial has not happened. A later `setmocktime`
+/// moves `now` and leaves `started_at` on the dial sample.
+pub(crate) fn seednode_delay_elapsed(started_at: u64, now: u64) -> bool {
+    started_at != 0 && now.saturating_sub(started_at) >= ADD_NEXT_SEEDNODE_SECS
+}
+
 /// Whether `--seednode` may be dialled as addr-fetch: at startup with an
 /// empty addrman, or by the 10 s fallback when fewer than 2 outbound
 /// full-relay peers are live. Core never dials seednodes under `-connect`.
@@ -2473,6 +2502,27 @@ mod tests {
         // Core reports `-connect` peers as `manual`; addrman picks are full relay.
         assert_eq!(follow_dial_type(&connect), PeerConnType::Manual);
         assert_eq!(follow_dial_type(&[]), PeerConnType::OutboundFullRelay);
+    }
+
+    #[test]
+    fn seednode_delay_starts_at_the_first_dial() {
+        assert!(
+            !seednode_delay_elapsed(0, 1_700_000_011),
+            "no dial yet, so a clock jump must not add the seednode"
+        );
+        let started = 1_700_000_000u64;
+        assert!(
+            !seednode_delay_elapsed(started, started),
+            "the dial itself must not add the seednode"
+        );
+        assert!(
+            !seednode_delay_elapsed(started, started + 9),
+            "nine seconds is still inside the addrman window"
+        );
+        assert!(
+            seednode_delay_elapsed(started, started + 11),
+            "setmocktime(now+11) after the dial must open the window"
+        );
     }
 
     #[test]

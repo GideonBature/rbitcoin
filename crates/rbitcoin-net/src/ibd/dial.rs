@@ -255,6 +255,7 @@ pub(crate) async fn dial_batch(
     connect_timeout: Duration,
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     dialer: crate::socks::Dialer,
+    clock: &rbitcoin_consensus::NodeClock,
 ) -> DialBatchResult {
     let mut out = DialBatchResult {
         slots: Vec::new(),
@@ -286,6 +287,7 @@ pub(crate) async fn dial_batch(
         }
         let id = next_peer_id();
         let sinks = sinks.clone();
+        clock.note_connection_attempt();
         debug!(
             "{}",
             trying_connection_log(PeerConnType::OutboundFullRelay, addr)
@@ -1334,6 +1336,7 @@ mod tests {
             Duration::from_millis(50),
             None,
             crate::socks::Dialer::Direct,
+            &rbitcoin_consensus::NodeClock::new(),
         ));
         assert!(r.slots.is_empty() && r.failed.is_empty());
         let r2 = rt.block_on(dial_batch(
@@ -1348,6 +1351,7 @@ mod tests {
             Duration::from_millis(50),
             None,
             crate::socks::Dialer::Direct,
+            &rbitcoin_consensus::NodeClock::new(),
         ));
         assert!(r2.slots.is_empty() && r2.failed.is_empty());
     }

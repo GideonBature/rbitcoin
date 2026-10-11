@@ -19,6 +19,8 @@ pub const DEFAULT_RPC_WORK_QUEUE: usize = 16;
 /// Accept cap, copied from the Electrum public listener. Not a knob.
 const RPC_MAX_CONNECTIONS: usize = 256;
 use rbitcoin_log::info;
+#[cfg(unix)]
+use rbitcoin_log::warn;
 use rbitcoin_net::{BlockingRegion, MempoolHub};
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
@@ -297,8 +299,31 @@ pub async fn run_rpc(
         }
         let _ = std::fs::remove_file(sock);
         let mode = if config.socket_shared { 0o660 } else { 0o600 };
-        let listener = bind_unix_mode(sock, mode)
-            .map_err(|e| format!("rpc unix bind {}: {e}", sock.display()))?;
+        // A too-long path (`SUN_LEN`) must not drop the TCP listener. Its
+        // stop flag lives on the handle; returning Err here leaked the
+        // accept task and left the node with no flag to poll.
+        let listener = match bind_unix_mode(sock, mode) {
+            Ok(listener) => listener,
+            Err(e) if local_addr.is_some() => {
+                warn!(
+                    "rpc unix bind {}: {e} — TCP listener stays up",
+                    sock.display()
+                );
+                return Ok(RpcHandle {
+                    local_addr,
+                    socket_path: None,
+                    token_path,
+                    auth,
+                    stop,
+                    connections,
+                    initial_block_download: ibd,
+                    active,
+                    shutdown,
+                    tasks,
+                });
+            }
+            Err(e) => return Err(format!("rpc unix bind {}: {e}", sock.display())),
+        };
         let state = AppState {
             ctx: Arc::clone(&ctx),
             auth: auth.clone(),
@@ -906,6 +931,42 @@ mod tests {
         let body_start = text.find("\r\n\r\n").ok_or("no HTTP body")? + 4;
         let json_body = &text[body_start..];
         serde_json::from_str(json_body).map_err(|e| format!("json: {e} body={json_body}"))
+    }
+
+    #[tokio::test]
+    async fn long_socket_path_keeps_the_tcp_stop_flag() {
+        let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-long-sock").expect("temp dir");
+        let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
+        let sock = dir.path().join(format!("{}.sock", "s".repeat(200)));
+        let cfg = RpcConfig {
+            listen: Some("127.0.0.1:0".parse().unwrap()),
+            socket_path: Some(sock),
+            socket_shared: false,
+            datadir: dir.path().to_path_buf(),
+            network: Network::Regtest,
+            token_path: None,
+            cookie_path: None,
+            subversion: None,
+            work_queue: None,
+            rest: false,
+            alert_notify: None,
+        };
+        let handle = run_rpc(cfg, q, None, None, None, None, None)
+            .await
+            .expect("tcp listener stays up when the unix path exceeds SUN_LEN");
+        assert!(handle.socket_path.is_none());
+        assert!(handle.local_addr.is_some());
+        let stopped = post_rpc(
+            tcp_addr(&handle),
+            &handle.auth,
+            "stop",
+            serde_json::json!([]),
+        )
+        .await
+        .unwrap();
+        assert!(stopped["error"].is_null(), "{stopped}");
+        assert!(handle.stop.load(Ordering::SeqCst));
+        handle.shutdown().await;
     }
 
     #[tokio::test]
