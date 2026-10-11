@@ -1312,7 +1312,7 @@ fn money_range_out_sum(out_sum: u64) -> i64 {
     out_sum as i64
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one non-coinbase assemble; call site stays unbundled
 fn assemble_non_cb_tx(
     params: &ChainParams,
     block: &Block,
@@ -1436,7 +1436,7 @@ fn assemble_tx_value_out(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one non-coinbase input walk; call site stays unbundled
 fn assemble_non_cb_inputs(
     params: &ChainParams,
     block: &Block,
@@ -2078,7 +2078,7 @@ fn structural_load_durable_spent(
     Ok((multi_list_ns, spent_strong_ns))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one spent-slot apply; call site stays unbundled
 fn structural_apply_one_meta(
     query: &Query,
     meta: Option<(rbitcoin_primitives::Fk, u8, u32)>,

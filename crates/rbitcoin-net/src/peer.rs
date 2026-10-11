@@ -4007,7 +4007,7 @@ async fn on_cmpctblock_reconstruct(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one compact-block fill; call site stays unbundled
 async fn on_cmpct_got_block(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -4067,7 +4067,7 @@ fn on_cmpct_need_getdata(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one getblocktxn ask; call site stays unbundled
 fn on_cmpct_need_txn(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,
@@ -4152,7 +4152,7 @@ async fn on_blocktxn(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one blocktxn fill; call site stays unbundled
 async fn on_blocktxn_got_block(
     hub: &ChainHub,
     out_tx: &mpsc::UnboundedSender<PeerOut>,

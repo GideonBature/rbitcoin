@@ -552,7 +552,7 @@ fn carried_header_at(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one header-link stamp; call site stays unbundled
 fn stamp_check_header_link(
     query: &Query,
     params: &ChainParams,

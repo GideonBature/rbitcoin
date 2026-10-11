@@ -8,8 +8,6 @@
 //! - https://arxiv.org/abs/1907.04749
 //! - https://github.com/ayazhafiz/xorf (MIT)
 
-#![allow(clippy::needless_range_loop)]
-
 use crate::readonly_map::ReadonlyMap;
 
 /// Fingerprint storage: heap while building, mapped after `open_file`.
@@ -274,6 +272,8 @@ impl BinaryFuse8 {
         const MAX_ITER: usize = 1_000;
 
         for _ in 0..MAX_ITER {
+            // `i` is the segment index in the start-pos formula, not a slice walk.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..start_pos_len {
                 start_pos[i] = ((i as u64).wrapping_mul(size as u64) >> block_bits) as usize;
             }
@@ -290,8 +290,7 @@ impl BinaryFuse8 {
 
             let mut error = false;
             let mut duplicates = 0usize;
-            for i in 0..size {
-                let hash = reverse_order[i];
+            for &hash in reverse_order.iter().take(size) {
                 let (index1, index2, index3) = hash_of_hash(
                     hash,
                     segment_length,
@@ -326,9 +325,7 @@ impl BinaryFuse8 {
                 error = t2count[index1] < 4 || t2count[index2] < 4 || t2count[index3] < 4;
             }
             if error {
-                for i in 0..size {
-                    reverse_order[i] = 0;
-                }
+                reverse_order[..size].fill(0);
                 for i in 0..capacity {
                     t2count[i] = 0;
                     t2hash[i] = 0;
@@ -354,9 +351,7 @@ impl BinaryFuse8 {
                 break;
             }
 
-            for i in 0..size {
-                reverse_order[i] = 0;
-            }
+            reverse_order[..size].fill(0);
             for i in 0..capacity {
                 t2count[i] = 0;
                 t2hash[i] = 0;
