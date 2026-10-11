@@ -242,8 +242,10 @@ fn follow_core_verdict(
         return Ok((DiffVerdict::Accept, String::new()));
     }
     // `submitblock` returns "duplicate" on `!new_block && accepted` before the
-    // state catcher. That is also a body already stored by the compact
-    // announcement whose connect failed. Accept only an active or valid fork.
+    // state catcher. After `reconsiderblock` clears `BLOCK_FAILED_VALID`, a
+    // heavier tip leaves the body stored and `getchaintips` says
+    // `valid-headers`. Accept that reply only for an active chain or a valid
+    // fork.
     if reason == "duplicate" {
         return match oracle.block_standing(hash) {
             Ok(BlockStanding::Active | BlockStanding::ValidFork) => {
@@ -668,9 +670,75 @@ mod tests {
         }
     }
 
-    /// Run 38145491136 input `[1, 221, 181]`. Core's `!new_block && accepted`
-    /// arm returns `duplicate` for a block already stored by the compact
-    /// announcement, including one whose connect failed.
+    /// v31.1, block already stored and `BLOCK_FAILED_VALID`, tip heavier than
+    /// this header. After the compact announcement, `follow_reconstructed_cmpct`
+    /// sees `duplicate-invalid`, `reconsiderblock`, then `duplicate`.
+    /// `getchaintips` status is `valid-headers` (`NotConnected`).
+    ///
+    /// `ca87380a3` scored that `duplicate` as an accept with an empty reason:
+    /// hub reject, Core accept. Standing makes it a reject.
+    struct HeavierTipDuplicate {
+        log: std::cell::RefCell<Vec<&'static str>>,
+        scored: std::cell::RefCell<Option<OracleReply>>,
+    }
+
+    /// `ca87380a3` `follow_core_verdict`: JSON null or exact `duplicate` is an
+    /// accept with an empty reason. `duplicate-invalid` is a reject.
+    fn master_follow_accept(reply: &OracleReply) -> bool {
+        let reason = match reply {
+            OracleReply::Reason(s) => s.as_str(),
+            _ => "",
+        };
+        matches!(reply, OracleReply::NullAccept) || reason == "duplicate"
+    }
+
+    impl BlockOracle for HeavierTipDuplicate {
+        fn submitblock_hex(&self, hex: &str) -> OracleReply {
+            assert!(hex.len() > 160, "honest body");
+            let reply = if self.log.borrow().contains(&"reconsider") {
+                self.log.borrow_mut().push("submit-duplicate");
+                OracleReply::Reason("duplicate".into())
+            } else {
+                self.log.borrow_mut().push("submit-duplicate-invalid");
+                OracleReply::Reason("duplicate-invalid".into())
+            };
+            *self.scored.borrow_mut() = Some(reply.clone());
+            reply
+        }
+        fn liveness_ok(&self) -> bool {
+            true
+        }
+        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str> {
+            assert_eq!(
+                hash,
+                "65cf78f7756e9040065276fbbfc42c8c7fd07636edfde1eb703aa735bd274ca5"
+            );
+            self.log.borrow_mut().push("reconsider");
+            Ok(())
+        }
+        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn block_standing(
+            &self,
+            hash: &str,
+        ) -> Result<crate::block_diff::BlockStanding, &'static str> {
+            assert_eq!(
+                hash,
+                "65cf78f7756e9040065276fbbfc42c8c7fd07636edfde1eb703aa735bd274ca5"
+            );
+            self.log.borrow_mut().push("standing-valid-headers");
+            Ok(crate::block_diff::BlockStanding::NotConnected)
+        }
+    }
+
+    /// Run 38145491136 input `[1, 221, 181]` through the shipped follow.
     #[test]
     fn seen_invalid_duplicate_is_not_a_core_accept() {
         use rbitcoin_consensus::Milestone;
@@ -698,20 +766,30 @@ mod tests {
         let params = crate::block_diff::diff_regtest_params();
         let hub = ChainHub::new(q, params, Milestone::NONE);
         hub.ensure_genesis().unwrap();
-        let oracle = DuplicateStanding {
-            standing: crate::block_diff::BlockStanding::Invalid,
-            submits: std::cell::Cell::new(0),
+        let oracle = HeavierTipDuplicate {
+            log: std::cell::RefCell::new(Vec::new()),
+            scored: std::cell::RefCell::new(None),
         };
         let fate = follow_reconstructed_cmpct(&hub, &oracle, &case).expect("follow");
+        assert_eq!(
+            oracle.log.borrow().as_slice(),
+            [
+                "submit-duplicate-invalid",
+                "reconsider",
+                "submit-duplicate",
+                "standing-valid-headers",
+            ]
+        );
+        let scored = oracle.scored.borrow().clone().expect("scored reply");
         assert!(
-            matches!(
-                fate,
-                CompareOne::Agreed { accept: false } | CompareOne::Skipped
-            ),
-            "{fate:?}"
+            master_follow_accept(&scored),
+            "master would not have accepted {scored:?}"
         );
         assert_ne!(hub.tip_hash(), Some(block.block_hash()));
-        assert!(oracle.submits.get() >= 1);
+        assert!(
+            matches!(fate, CompareOne::Agreed { accept: false }),
+            "{fate:?}"
+        );
     }
 
     #[test]

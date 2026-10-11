@@ -546,7 +546,9 @@ is a comparison: a same-hash mutant, then the honest body, scored against
 fork. `duplicate-invalid` and
 `duplicate-inconclusive` are `reconsiderblock` then one more `submitblock`,
 because a compared accept `invalidateblock`s that header and Core keeps the
-flag. A reason that remains is a disagreement. Seeds: 2-tx hole,
+flag. When a heavier tip is already active, that second `submitblock` is
+`duplicate` and `getchaintips` reports `valid-headers` (not connected). That
+is a reject. A reason that remains is a disagreement. Seeds: 2-tx hole,
 coinbase-only, fill, duplicate short-id, raw fixture. Disagreement panics.
 It does not drive a two-node reorg.
 
