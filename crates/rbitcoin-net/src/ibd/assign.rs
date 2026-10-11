@@ -761,13 +761,10 @@ pub(crate) fn issue_batch(
     if batch.is_empty() {
         return false;
     }
-    let empty = st.slots[idx].in_flight.is_empty();
     for &h in &batch {
         st.slots[idx].track_insert(h);
     }
-    if empty {
-        st.slots[idx].rate.note_work_started(ibd_mono_ms());
-    }
+    st.slots[idx].getdata_wire.queue(batch.len());
     let _ = st.slots[idx].cmd_tx.send(PeerCmd::GetData {
         hashes: batch.clone(),
     });
@@ -1466,6 +1463,7 @@ pub(in crate::ibd) mod tests {
             requested: solicit_track().0,
             solicited_bytes: solicit_track().1,
             solicited_ms: solicit_track().2,
+            getdata_wire: super::super::peer_io::GetdataWire::new(),
             peer_height: 100,
             connected_ms: 1,
             first_data_ms: 0,
@@ -1669,12 +1667,72 @@ pub(in crate::ibd) mod tests {
         st.slots[0].rate.work_started_ms = 7;
         let mut room = 10usize;
         let mut issued = 0u64;
-        let t0 = super::super::peer_io::ibd_mono_ms();
         assert!(issue_one(&mut st, 0, h(30), &mut room, &mut issued));
-        let t1 = super::super::peer_io::ibd_mono_ms();
         assert_eq!(st.slots[0].rate.progress_ms, 42);
-        assert!(st.slots[0].rate.work_started_ms >= t0);
-        assert!(st.slots[0].rate.work_started_ms <= t1);
+        assert_eq!(
+            st.slots[0].rate.work_started_ms, 7,
+            "queueing getdata is not the stall clock"
+        );
+        assert_eq!(st.slots[0].getdata_wire.unwritten(), 1);
+        st.slots[0].getdata_wire.wrote(1, 9_000);
+        assert!(!super::super::peer_io::getdata_on_wire_stalled(
+            &st.slots[0],
+            9_000 + 29_999,
+            30_000
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Silence before a new hash is written does not satisfy the stall, and
+    /// the write itself opens a fresh 30s. A hash already in flight does not.
+    #[test]
+    fn new_hash_on_a_busy_peer_starts_a_fresh_stall_window() {
+        use super::super::peer_io::getdata_on_wire_stalled;
+        let (dir, _hub) = tmp_hub();
+        let mut st = IbdWorkState::new(vec![dummy_slot(0)], None, Some(0));
+        st.slots[0].in_flight.insert(h(1));
+        st.slots[0].rate.progress_ms = 0;
+        st.slots[0].rate.work_started_ms = 0;
+        assert!(
+            getdata_on_wire_stalled(&st.slots[0], 30_001, 30_000),
+            "an old request already on the wire can stall"
+        );
+        let mut room = 10usize;
+        let mut issued = 0u64;
+        assert!(issue_one(&mut st, 0, h(2), &mut room, &mut issued));
+        assert_eq!(st.slots[0].getdata_wire.unwritten(), 1);
+        assert!(
+            getdata_on_wire_stalled(&st.slots[0], 30_001, 30_000),
+            "the old request is still unanswered"
+        );
+        let now = 100_000;
+        st.slots[0].getdata_wire.wrote(1, now);
+        assert!(!getdata_on_wire_stalled(&st.slots[0], now + 29_999, 30_000));
+        assert!(getdata_on_wire_stalled(&st.slots[0], now + 30_001, 30_000));
+        let again = st.slots[0].getdata_wire.written_ms();
+        assert!(!issue_one(&mut st, 0, h(2), &mut room, &mut issued));
+        assert_eq!(st.slots[0].getdata_wire.unwritten(), 0);
+        assert_eq!(st.slots[0].getdata_wire.written_ms(), again);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Idle with nothing outstanding, then a queued ask, does not stall until
+    /// that ask is on the socket.
+    #[test]
+    fn queued_getdata_does_not_count_idle_time_before_the_write() {
+        use super::super::peer_io::getdata_on_wire_stalled;
+        let (dir, _hub) = tmp_hub();
+        let mut st = IbdWorkState::new(vec![dummy_slot(0)], None, Some(0));
+        st.slots[0].rate.progress_ms = 0;
+        st.slots[0].rate.work_started_ms = 0;
+        let mut room = 10usize;
+        let mut issued = 0u64;
+        assert!(issue_one(&mut st, 0, h(2), &mut room, &mut issued));
+        assert!(!getdata_on_wire_stalled(&st.slots[0], 1_000_000, 30_000));
+        let now = 50_000;
+        st.slots[0].getdata_wire.wrote(1, now);
+        assert!(!getdata_on_wire_stalled(&st.slots[0], now + 29_999, 30_000));
+        assert!(getdata_on_wire_stalled(&st.slots[0], now + 30_001, 30_000));
         let _ = std::fs::remove_dir_all(dir);
     }
 

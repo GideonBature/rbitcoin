@@ -15,10 +15,12 @@ pub(crate) const PROGRESS_STEP: u64 = 64 * 1024;
 ///
 /// Accrues only while the peer has block getdata in flight. Idle time rebaselines
 /// the byte cursor so it does not dilute the rate. `progress_ms` is last qualifying
-/// rx (stream ≥ [`PROGRESS_STEP`] or event-path `note_rx`); `work_started_ms` is the
-/// last empty→nonempty getdata. Stall is `now - max(progress, work_started) > stall`
-/// while inflight. A quiet in-flight gap does not rewrite the EWMA. Ranking,
-/// densify caps, and AddrMan FAST/SLOW read [`Self::bps`]. Eviction reads
+/// rx (a requested block, or event-path `note_rx`); `work_started_ms` is the
+/// last getdata write of a new hash ([`super::peer_io::GetdataWire::wrote`]).
+/// Stall is `now - max(progress, work_started) > stall` while some of those
+/// hashes are already on the socket. A quiet in-flight gap does not rewrite
+/// the EWMA. Ranking, densify caps, and AddrMan FAST/SLOW read [`Self::bps`].
+/// Eviction reads
 /// [`Self::eviction_bps`], which folds silence in as zero throughput.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PeerRate {
@@ -75,6 +77,7 @@ impl PeerRate {
         self.last_ms = Some(now_ms);
     }
 
+    #[cfg(test)]
     pub(crate) fn note_work_started(&mut self, now_ms: u64) {
         self.work_started_ms = now_ms;
     }

@@ -632,11 +632,13 @@ pub(crate) fn note_misbehavior_dead(
     }
 }
 
-/// One stall rule: if a peer has outstanding block getdata and no **block**
-/// progress for `stall`, disconnect it and free its work for reassignment.
+/// One stall rule: if a peer has block getdata already on the socket and no
+/// **block** progress for `stall`, disconnect it and free its work.
 ///
-/// Progress = payload bytes (atomic), complete `block`, or `notfound`.
-/// Headers/pings do not count. Clock resets when we issue new getdata.
+/// The window opens when that getdata is written, including when the peer
+/// already had other hashes outstanding. Hashes still queued in the writer
+/// do not start it. Progress is a requested block, a decode failure, or
+/// `notfound`. Headers, pings, and an empty window do not count.
 ///
 /// Stalled addresses enter a cooldown so redial does not immediately re-open
 /// the same host under a new peer id (log spam + wasted slots).
@@ -678,7 +680,7 @@ pub(crate) fn disconnect_stalled_block_peers_at(
     let stalled_peers: Vec<(usize, usize, SocketAddr, u64)> = slots
         .iter()
         .filter(|s| s.alive && !s.in_flight.is_empty())
-        .filter(|s| s.rate.stalled(now_ms, stall_ms, true))
+        .filter(|s| super::peer_io::getdata_on_wire_stalled(s, now_ms, stall_ms))
         .map(|s| {
             (
                 s.id,
@@ -844,6 +846,7 @@ mod tests {
             requested: solicit_track().0,
             solicited_bytes: solicit_track().1,
             solicited_ms: solicit_track().2,
+            getdata_wire: super::super::peer_io::GetdataWire::new(),
             peer_height: 0,
             connected_ms: 0,
             first_data_ms: 0,

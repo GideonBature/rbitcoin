@@ -2909,6 +2909,7 @@ mod tests {
                 requested: solicit_track().0,
                 solicited_bytes: solicit_track().1,
                 solicited_ms: solicit_track().2,
+                getdata_wire: crate::ibd::peer_io::GetdataWire::new(),
                 peer_height: 50_000,
                 connected_ms: 1,
                 first_data_ms: 0,

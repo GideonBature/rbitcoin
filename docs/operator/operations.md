@@ -353,8 +353,11 @@ from the race who still owe it. When
 Densify default is 32 in-flight hashes per peer (half of the 64-block
 per-peer ceiling; none while a quarter-full tip hole is open, so getdata
 queues can drain for tip+1); 64 only for an EWMA outlier at ≥ 2× pack median. WARN
-`ibd: peer[…] stalled` is 30s without qualifying rx (≥64 KiB stream or a
-block / decode-fail / NotFound event) after work start. WARN
+`ibd: peer[…] stalled` is 30s without a requested block, decode-fail, or
+NotFound after the last getdata write. Time with an empty window, and time
+a new getdata spends queued before that write, does not count. A later
+getdata write starts a new 30s even when older hashes are still outstanding.
+WARN
 `ibd: peer[…] relative-slow` is a quarter-median outlier (cluster gate keeps a
 uniformly slow pack). Slow or constrained uplinks: [Slow / constrained uplink
 (IBD)](#slow--constrained-uplink-ibd).
