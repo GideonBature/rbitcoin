@@ -498,6 +498,17 @@ mod tests {
     }
 
     #[test]
+    fn second_enqueue_at_height_keeps_the_first_body() {
+        let mut q = BlockQueue::empty();
+        let first = q.enqueue(1, [1u8; 32], 1, b"aaaa").unwrap();
+        let again = q.enqueue(1, [2u8; 32], 9, b"bbbbbbbb").unwrap();
+        assert_eq!(again, first);
+        assert_eq!(q.count(), 1);
+        assert_eq!(q.bytes(), 4);
+        assert_eq!(q.hash_at_height(1), Some([1u8; 32]));
+    }
+
+    #[test]
     fn get_by_height_peek_without_dequeue() {
         let dir = temp();
         let mut q = BlockQueue::open_or_create(&dir).unwrap();

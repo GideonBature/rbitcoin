@@ -122,6 +122,20 @@ fn has_hash_tracks_each_height_until_dequeue() {
 }
 
 #[test]
+fn queue_ids_stay_unique_and_list_meta_is_oldest_first() {
+    let q = open();
+    let older = q.block_queue_enqueue(5, [5u8; 32], 1, b"aa").unwrap();
+    let newer = q.block_queue_enqueue(3, [3u8; 32], 1, b"b").unwrap();
+    assert_ne!(older, newer);
+    let meta = q.block_queue_list_meta();
+    assert_eq!(meta.len(), 2);
+    assert_eq!(meta[0].id, older);
+    assert_eq!(meta[0].height, 5);
+    assert_eq!(meta[1].id, newer);
+    assert_eq!(meta[1].height, 3);
+}
+
+#[test]
 fn stats_follow_enqueue_and_dequeue() {
     let q = open();
     q.block_queue_enqueue(5, [5u8; 32], 1, b"aaaaa").unwrap();
