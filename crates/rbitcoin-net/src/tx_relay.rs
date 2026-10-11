@@ -607,6 +607,9 @@ pub struct MempoolHub {
     meter_tip_mtp: AtomicU64,
     meter_get_coin: AtomicU64,
     meter_get_coin_create_mtp: AtomicU64,
+    /// Compact short-id walks that take the mempool read lock. Test builds only.
+    #[cfg(test)]
+    meter_cmpct_avail: AtomicU64,
     /// Live mempool txs by Electrum scripthash (updated on accept/remove).
     sh_index: Mutex<MempoolShIndex>,
     /// `{datadir}/mempool` — sidecar `unbroadcast` lives here.
@@ -705,6 +708,12 @@ struct CommitOutcome {
 }
 
 impl MempoolHub {
+    /// Short-id walks that entered the mempool, including a `try_read` miss.
+    #[cfg(test)]
+    pub fn cmpct_avail_scans(&self) -> u64 {
+        self.meter_cmpct_avail.load(Ordering::Relaxed)
+    }
+
     fn lock_read(&self) -> std::sync::RwLockReadGuard<'_, ActiveMempool> {
         crate::reactor::assert_not_reactor("mempool inner read");
         self.inner.read().unwrap()
@@ -808,6 +817,8 @@ impl MempoolHub {
             meter_tip_mtp: AtomicU64::new(0),
             meter_get_coin: AtomicU64::new(0),
             meter_get_coin_create_mtp: AtomicU64::new(0),
+            #[cfg(test)]
+            meter_cmpct_avail: AtomicU64::new(0),
             sh_index: Mutex::new(MempoolShIndex::new()),
             unbroadcast: Mutex::new(unbroadcast),
             local_origin: Mutex::new(HashSet::new()),
@@ -3362,6 +3373,8 @@ impl MempoolHub {
         if needed.is_empty() && prefill_wtxids.is_empty() {
             return Some((HashMap::new(), crate::compact::CmpctFillSets::default()));
         }
+        #[cfg(test)]
+        self.meter_cmpct_avail.fetch_add(1, Ordering::Relaxed);
         let g = self.inner.try_read().ok()?;
         let keys = ShortId::calculate_siphash_keys(header, nonce);
         let sid_of = |tx: &Transaction| -> ShortId {

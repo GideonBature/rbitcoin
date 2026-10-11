@@ -2192,6 +2192,21 @@ mod tests {
     }
 
     #[test]
+    fn keys_spill_channel_is_one_slot() {
+        let (tx, rx) = keys_spill_channel();
+        let mut first = Key16PackMap::default();
+        insert_key_pack(&mut first, prefix_key(1), Fk(1));
+        tx.send((0, first)).unwrap();
+        let mut second = Key16PackMap::default();
+        insert_key_pack(&mut second, prefix_key(2), Fk(2));
+        match tx.try_send((0, second)) {
+            Err(mpsc::TrySendError::Full(_)) => {}
+            other => panic!("second spill must block on the one-slot queue, got {other:?}"),
+        }
+        assert_eq!(rx.recv().unwrap().0, 0);
+    }
+
+    #[test]
     fn keys_spill_writer_folds_two_senders() {
         let dir = crate::testutil::TempDir::labeled("sh-spill-writer").expect("temp");
         let seqs = [AtomicU32::new(0)];

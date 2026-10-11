@@ -802,8 +802,15 @@ mod tests {
         let (cfk, off, _len) = put_one(&t);
         let abs = crate::tx_table::spent_abs(off, 0);
         let sfk = Fk(88);
-        let cold = put_spend_batch_by_abs_meta_uring(&t, &spenders, &[(abs, cfk, 0, sfk, 0)])
-            .expect("rmw");
+        let cold = match put_spend_batch_by_abs_meta_uring(&t, &spenders, &[(abs, cfk, 0, sfk, 0)])
+        {
+            Ok(cold) => cold,
+            Err(StoreError::Unavailable) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            Err(e) => panic!("rmw: {e}"),
+        };
         assert!(cold.is_empty());
         let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         let (field, flags, _vin) = bulk[0].unwrap();
