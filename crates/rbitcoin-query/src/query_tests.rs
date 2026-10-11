@@ -1379,7 +1379,7 @@ fn sh_collect_write_pin_skips_store() {
 }
 
 #[test]
-fn sh_collect_and_disconnect_skip_get_tx_full() {
+fn sh_collect_cold_then_disconnect_clears_tip() {
     let (dir, q) = temp_query("sh-collect-outs-only");
     let (h0, t0) = coinbase_block(0, Fk::NULL, None);
     q.connect_block(Height(0), &h0, &[t0]).unwrap();

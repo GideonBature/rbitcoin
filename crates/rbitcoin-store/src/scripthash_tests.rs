@@ -467,7 +467,7 @@ fn put_create_batch_many_uses_pages() {
 }
 
 #[test]
-fn create_count_inline_slab_no_page_io_extent_stamps() {
+fn create_count_inline_slab_and_extent_stamp() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh1 = script_hash(&[0x01]);
@@ -487,7 +487,6 @@ fn create_count_inline_slab_no_page_io_extent_stamps() {
         ShHeadValue::Extent { .. } => {}
         other => panic!("expected extent, got {other:?}"),
     }
-    assert_eq!(t.create_count(&sh3).unwrap(), 300);
     assert_eq!(t.create_count(&sh3).unwrap(), 300);
     let ShHeadValue::Extent { last_page } = t.head_value(&sh3).unwrap().unwrap() else {
         panic!("extent");

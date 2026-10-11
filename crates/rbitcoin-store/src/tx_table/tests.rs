@@ -394,9 +394,9 @@ fn input_n_in_scans_both_prevouts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Class A append submits txout+seqsigwit+spent bodies as one pwrite wave (not 3 serial).
+/// One Class A append roundtrips the output it stored.
 #[test]
-fn put_full_batch_one_body_write_wave() {
+fn put_full_batch_roundtrips_one_output() {
     let dir = tempfile_dir("one-wave");
     let t = create_tiny(&dir);
     let tx = TxRecord {

@@ -2742,7 +2742,7 @@ mod tests {
 
     /// Packed plan commits the coinbase prevout the apply carried.
     #[test]
-    fn plan_packed_and_batch_pin_share_create_pin_arc() {
+    fn plan_packed_commits_coinbase_prevout() {
         let (dir, q) = temp_query("shared-create-pin");
         let need = vec![(Fk(1), vec![coinbase_apply(1)])];
         let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();

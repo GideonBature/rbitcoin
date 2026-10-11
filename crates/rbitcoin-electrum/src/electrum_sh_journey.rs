@@ -116,7 +116,7 @@ fn stamp_follows_pending(q: &Query, height: u32, prev: Fk, parent: [u8; 32]) {
     assert_eq!(durable_h, Height(height));
 }
 
-fn casa_reuses_then_cap(q: &Query) {
+fn casa_cap_then_balance_history_unspent(q: &Query) {
     let params = ChainParams::regtest();
     let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
     let sh = electrum_scripthash_hex(&[0x51]);
@@ -316,7 +316,7 @@ async fn electrum_sh_join() {
         prev = q.tip_header_fk().unwrap().unwrap();
     }
     stamp_follows_pending(&q, base + 3, prev, parent);
-    casa_reuses_then_cap(&q);
+    casa_cap_then_balance_history_unspent(&q);
 
     let q = Arc::new(q);
     let hub = MempoolHub::open(dir.join("mempool"), Arc::clone(&q)).unwrap();

@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn leftover_miss_classifies_head_body_idx_fence() {
+    fn leftover_miss_classifies_head_body_fence() {
         assert_eq!(classify_leftover_miss(0, false), LeftoverMissOn::Head);
         assert_eq!(classify_leftover_miss(3, false), LeftoverMissOn::Body);
         assert_eq!(classify_leftover_miss(3, true), LeftoverMissOn::Fence);
