@@ -83,6 +83,10 @@ assert_ok "llvm-cov test does not pass --report-time (stable rustc)" \
   bash -c '! grep -E "report-time" "$1"' _ "$COV"
 assert_ok "ci coverage job has a wall timeout" \
   bash -c 'awk "/^  coverage:/{p=1} p&&/timeout-minutes:/{print; exit}" "$1" | grep -q timeout-minutes' _ "$ROOT/.github/workflows/ci.yml"
+assert_ok "required test job excludes rbitcoin-bench" \
+  grep -q 'cargo test --workspace --exclude rbitcoin-bench' "$ROOT/.github/workflows/ci.yml"
+assert_ok "gitignore ignores apilog jsonl" \
+  bash -c 'grep -q "apilog\\*\\.jsonl" "$1/.gitignore" && git -C "$1" check-ignore -q -- apilog.jsonl && git -C "$1" check-ignore -q -- apilog-old.jsonl' _ "$ROOT"
 
 tmp="$(mktemp)"
 python3 "$ROOT/scripts/coverage-badge.py" \

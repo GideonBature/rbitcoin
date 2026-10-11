@@ -50,6 +50,10 @@ assert_ok ".cargo-crap.toml allowlists production offenders" \
   grep -q "run_p2p" "$ROOT/.cargo-crap.toml"
 assert_ok ".cargo-crap.toml excludes rbitcoin-bench" \
   grep -q "rbitcoin-bench" "$ROOT/.cargo-crap.toml"
+assert_ok "crap_baseline.json is not in the tree" \
+  bash -c '! test -e "$1/crap_baseline.json"' _ "$ROOT"
+assert_ok "gate does not name crap_baseline" \
+  bash -c '! grep -q crap_baseline "$1/scripts/coverage-crap.sh" "$1/.cargo-crap.toml"' _ "$ROOT"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "coverage-crap.test.sh: $PASS passed, $FAIL failed"
