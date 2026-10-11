@@ -147,6 +147,82 @@ fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
     });
 }
 
+/// Bind RPC. Callers that publish Tor onions wait until those services exist
+/// so `getnetworkinfo` cannot observe a partial list. Everyone else binds
+/// before catch-up so `setmocktime` can land inside the seednode wait.
+async fn start_rpc_listener(
+    config: &NodeConfig,
+    node: &P2PNode,
+    mempool: &Arc<MempoolHub>,
+    shared_peers: &Arc<std::sync::Mutex<AddrMan>>,
+) -> Option<RpcHandle> {
+    if !(config.rpc.socket || config.rpc.listen.is_some()) {
+        return None;
+    }
+    let rcfg = RpcConfig {
+        listen: config.rpc.listen,
+        socket_path: if config.rpc.socket {
+            Some(config.rpc_socket_path())
+        } else {
+            None
+        },
+        socket_shared: config.rpc.socket_path.is_some(),
+        datadir: config.datadir.path.clone(),
+        network: config.network,
+        token_path: Some(config.rpc_token_path()),
+        cookie_path: config.rpc_cookie_path(),
+        work_queue: config.rpc.work_queue,
+        rest: config.rpc.rest,
+        subversion: Some(
+            rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &config.uacomments)
+                .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
+        ),
+        alert_notify: config.alert_notify.clone(),
+    };
+    let op_true_signet = config.network == Network::Signet
+        && config
+            .signet_challenge
+            .as_ref()
+            .is_some_and(|s| s.as_bytes() == [0x51]);
+    let miner: Option<Arc<dyn RpcRegtest>> = if config.network == Network::Regtest || op_true_signet
+    {
+        Some(Arc::new(HubRegtest(Arc::clone(&node.hub))))
+    } else {
+        None
+    };
+    match run_rpc(
+        rcfg,
+        Arc::clone(&node.hub.query),
+        Some(Arc::clone(mempool)),
+        miner,
+        Some(Arc::clone(&node.peers)),
+        Some(Arc::clone(&node.hub)),
+        Some(Arc::clone(shared_peers)),
+    )
+    .await
+    {
+        Ok(h) => {
+            h.initial_block_download
+                .store(node.hub.in_ibd(), Ordering::SeqCst);
+            h.connections.store(0, Ordering::Relaxed);
+            info!(
+                "rpc: listening tcp={:?} sock={:?} token={}",
+                h.local_addr,
+                h.socket_path,
+                h.token_path.display()
+            );
+            if let Some(addr) = h.local_addr {
+                publish_listener_addr(config.datadir.path(), "rpc", addr);
+            }
+            Some(h)
+        }
+        Err(e) => {
+            warn!("rpc start warning: {e}");
+            None
+        }
+    }
+}
+
 /// Restore fee history from the mempool dir and read the rest of up to 1 GiB
 /// of txstat rows once relay is on, off the tip path.
 fn spawn_fee_history_backfill(mempool: &Arc<MempoolHub>) {
@@ -598,73 +674,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
-    // RPC before catch-up. `p2p_seednode.py` cannot `setmocktime` until the
-    // RPC port accepts, and the 10s seednode wait is wall time from the first
-    // dial. Binding here lets that jump land inside the wait.
+    // RPC before catch-up, unless Tor control is on. Onion services are
+    // published after tip entry; answering RPC before that lets
+    // `getnetworkinfo` miss them. `p2p_seednode.py` has no Tor control, and
+    // it cannot `setmocktime` until the port accepts.
+    let defer_rpc = config.tor.control.is_some();
     let mut rpc_handle: Option<RpcHandle> = None;
-    if (config.rpc.socket || config.rpc.listen.is_some()) && !shutdown.requested() {
-        let rcfg = RpcConfig {
-            listen: config.rpc.listen,
-            socket_path: if config.rpc.socket {
-                Some(config.rpc_socket_path())
-            } else {
-                None
-            },
-            socket_shared: config.rpc.socket_path.is_some(),
-            datadir: config.datadir.path.clone(),
-            network: config.network,
-            token_path: Some(config.rpc_token_path()),
-            cookie_path: config.rpc_cookie_path(),
-            work_queue: config.rpc.work_queue,
-            rest: config.rpc.rest,
-            subversion: Some(
-                rbitcoin_primitives::rbitcoin_subversion(
-                    env!("CARGO_PKG_VERSION"),
-                    &config.uacomments,
-                )
-                .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
-            ),
-            alert_notify: config.alert_notify.clone(),
-        };
-        let op_true_signet = config.network == Network::Signet
-            && config
-                .signet_challenge
-                .as_ref()
-                .is_some_and(|s| s.as_bytes() == [0x51]);
-        let miner: Option<Arc<dyn RpcRegtest>> =
-            if config.network == Network::Regtest || op_true_signet {
-                Some(Arc::new(HubRegtest(Arc::clone(&node.hub))))
-            } else {
-                None
-            };
-        match run_rpc(
-            rcfg,
-            Arc::clone(&node.hub.query),
-            Some(mempool.clone()),
-            miner,
-            Some(Arc::clone(&node.peers)),
-            Some(Arc::clone(&node.hub)),
-            Some(Arc::clone(&shared_peers)),
-        )
-        .await
-        {
-            Ok(h) => {
-                h.initial_block_download
-                    .store(node.hub.in_ibd(), Ordering::SeqCst);
-                h.connections.store(0, Ordering::Relaxed);
-                info!(
-                    "rpc: listening tcp={:?} sock={:?} token={}",
-                    h.local_addr,
-                    h.socket_path,
-                    h.token_path.display()
-                );
-                if let Some(addr) = h.local_addr {
-                    publish_listener_addr(config.datadir.path(), "rpc", addr);
-                }
-                rpc_handle = Some(h);
-            }
-            Err(e) => warn!("rpc start warning: {e}"),
-        }
+    if !defer_rpc && !shutdown.requested() {
+        rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
     }
     // Arm before catch-up so the task is already polling when the first dial
     // is logged. The 10s starts at that dial (`note_connection_attempt`).
@@ -932,6 +949,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         sh_tip_ready && config.listen.esplora.is_some() && esplora_handles.is_empty();
     if let Some(h) = esplora_handles.first() {
         publish_listener_addr(config.datadir.path(), "esplora", h.local_addr);
+    }
+    if defer_rpc && !shutdown.requested() {
+        rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
     }
     let sv2_tp = start_sv2_tp(&config, &node.hub).await;
     let sv2_stats = sv2_tp.as_ref().map(Sv2TpHandle::stats);
