@@ -3,6 +3,8 @@
 mod archive;
 mod batch_parents;
 mod block_filter;
+#[cfg(test)]
+mod bq_lock_pin;
 mod catchup;
 mod chain_view;
 mod combined_stage;
@@ -1830,6 +1832,28 @@ impl Query {
     ) -> Result<usize, QueryError> {
         let mut g = self.block_queue.lock().unwrap();
         g.mark_resolve_complete_wave(heights)
+    }
+
+    /// Hold lookup's decoded stash. Getdata enqueue and `has_hash` must not
+    /// need this lock. Today it is the one body-queue mutex, so the pin fails.
+    #[cfg(test)]
+    pub(crate) fn bq_test_hold_resolved(&self) -> std::sync::MutexGuard<'_, BodyQueueInner> {
+        self.block_queue.lock().unwrap()
+    }
+
+    /// Hold the getdata hash index. Lookup height reads must not need this lock.
+    #[cfg(test)]
+    pub(crate) fn bq_test_hold_hash_index(&self) -> std::sync::MutexGuard<'_, BodyQueueInner> {
+        self.block_queue.lock().unwrap()
+    }
+
+    /// Hold the row lock for `height`. Another height's enqueue must not wait.
+    #[cfg(test)]
+    pub(crate) fn bq_test_hold_height_stripe(
+        &self,
+        _height: u32,
+    ) -> std::sync::MutexGuard<'_, BodyQueueInner> {
+        self.block_queue.lock().unwrap()
     }
 
     /// Cheap process-owned cache sizes for the IBD `ibd: sizes` line.
