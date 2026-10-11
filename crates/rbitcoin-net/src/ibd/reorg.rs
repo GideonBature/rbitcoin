@@ -520,7 +520,9 @@ pub(crate) fn apply_header_rewind(
         return Ok(false);
     }
     if tip_h > lca_h {
-        hub.rewind_to_height(lca_h)?;
+        if !hub.try_rewind_to_height(lca_h)? {
+            return Ok(false);
+        }
         info!(
             "ibd: most-work header rewind tip {tip_h} → {lca_h} (winning path {} header(s))",
             path.len()

@@ -213,13 +213,15 @@ pub struct TxApply {
 pub struct ResumeWorkEntry {
     pub height: u32,
     pub hash: [u8; 32],
+    /// Parent header hash. Genesis uses the zero hash.
+    pub prev_hash: [u8; 32],
     pub header_fk: Fk,
     /// True if `header_txs` has a body for this header (Class A ready).
     pub has_body: bool,
 }
 
 type ResumeChildMap = U64Map<Vec<(Fk, [u8; 32])>>;
-type ResumeSibPick = (Fk, [u8; 32], bool, u32);
+type ResumeSibPick = (Fk, [u8; 32], bool, u32, [u8; 32]);
 
 /// One sequential pass over `header.body`: child edges, `nBits`, and `prev_fk`.
 struct ResumeHeaderIndex {
@@ -353,6 +355,9 @@ pub struct Query {
     /// Confirmed tip hash published by the write that advanced `confirmed[]`.
     /// The IBD orchestration loop loads this instead of reading the header store.
     published_tip: arc_swap::ArcSwapOption<PublishedTip>,
+    /// Held from the tip-height check through `flush_class_c_tip` / disconnect
+    /// flush. Rewind tries it and retries; it does not disconnect mid-flush.
+    tip_commit: Mutex<()>,
     /// Confirm / archive / load window meters (`ibd: perf`). One instance per Query.
     confirm_stats: Arc<ConfirmStats>,
     /// Tip height of last in-process io_uring recover (`u32::MAX` = none).
@@ -496,6 +501,7 @@ impl Query {
             disconnect_height: AtomicU32::new(0),
             disconnect_gen: AtomicU64::new(0),
             published_tip: arc_swap::ArcSwapOption::empty(),
+            tip_commit: Mutex::new(()),
             confirm_stats: Arc::new(ConfirmStats::default()),
             uring_recover_tip: AtomicU32::new(u32::MAX),
             pruneheight: AtomicU32::new(ph),
@@ -2356,7 +2362,7 @@ impl Query {
                     }
                     let take = match best_sib {
                         None => true,
-                        Some((best_fk, _, best_body, _)) => {
+                        Some((best_fk, _, best_body, _, _)) => {
                             let (best_w, best_d) =
                                 Self::resume_subtree_score(index, best_fk, score_memo)?;
                             if sub_w != best_w {
@@ -2371,7 +2377,8 @@ impl Query {
                         }
                     };
                     if take {
-                        best_sib = Some((fk, hash, has_body, path_h));
+                        let parent_hash = self.get_header(Fk(parent_fk))?.hash;
+                        best_sib = Some((fk, hash, has_body, path_h, parent_hash));
                     }
                 }
             }
@@ -2397,17 +2404,19 @@ impl Query {
         score_memo: &mut U64Map<(bitcoin::Work, u32)>,
     ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
         let mut out = Vec::with_capacity(max.min(4096));
-        let (mut cur_fk, mut height) = if let Some((fk, hash, has_body, sib_h)) = best_sib {
-            out.push(ResumeWorkEntry {
-                height: sib_h,
-                hash,
-                header_fk: fk,
-                has_body,
-            });
-            (fk, sib_h)
-        } else {
-            (tip_fk, tip_height)
-        };
+        let (mut cur_fk, mut height, mut prev_hash) =
+            if let Some((fk, hash, has_body, sib_h, parent)) = best_sib {
+                out.push(ResumeWorkEntry {
+                    height: sib_h,
+                    hash,
+                    prev_hash: parent,
+                    header_fk: fk,
+                    has_body,
+                });
+                (fk, sib_h, hash)
+            } else {
+                (tip_fk, tip_height, self.get_header(tip_fk)?.hash)
+            };
 
         while out.len() < max {
             let Some(kids) = index.children.get(&cur_fk.0) else {
@@ -2445,9 +2454,11 @@ impl Query {
             out.push(ResumeWorkEntry {
                 height,
                 hash,
+                prev_hash,
                 header_fk: fk,
                 has_body,
             });
+            prev_hash = hash;
             cur_fk = fk;
         }
         Ok(out)

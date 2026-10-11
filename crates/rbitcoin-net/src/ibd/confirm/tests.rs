@@ -986,6 +986,66 @@ fn offer_confirm_ready_walks_height_map() {
 }
 
 #[test]
+fn offer_confirm_ready_requires_a_recorded_parent() {
+    use super::super::body::BodyPresence;
+    use super::offer_confirm_ready;
+
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("offer-prev");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    hub.query.set_lookup_taken_hi(Some(1));
+
+    let feed = ConfirmFeed::new();
+    let mut body = BodyPresence::new();
+    let h1 = bh(0x41);
+    let mut h2h = HashMap::new();
+    h2h.insert(1u32, h1);
+    let mut max_arch = 0u32;
+    let shared = AtomicU32::new(0);
+
+    let n = offer_confirm_ready(
+        &feed,
+        &h2h,
+        &HashMap::new(),
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
+    assert_eq!(n, 0, "tip+1 with no recorded parent is not offered");
+    assert_eq!(feed.size_snap().0, 0);
+
+    let mut prev_of = HashMap::new();
+    prev_of.insert(h1, bh(0x42));
+    let n_other = offer_confirm_ready(
+        &feed,
+        &h2h,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
+    assert_eq!(n_other, 0, "a parent other than the tip is not offered");
+
+    prev_of.insert(h1, tip);
+    let n_child = offer_confirm_ready(
+        &feed,
+        &h2h,
+        &prev_of,
+        &mut body,
+        &hub,
+        &mut max_arch,
+        &shared,
+    );
+    assert_eq!(n_child, 1, "the recorded child of the tip is offered");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn claim_feed_skips_inflight_and_confirmed_in_helper() {
     // Pure claim helper: inflight-like skip is modeled by already_confirmed.
     // Heights 1..=10 present; skip 1,2,5 → claim 3,4,6,7,8,9,10 (7).

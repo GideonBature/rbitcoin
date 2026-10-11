@@ -2724,10 +2724,9 @@ pub(crate) fn offer_confirm_ready(
             continue;
         }
         if ht == expect {
-            if let Some(prev) = prev_of.get(&hash) {
-                if hub.tip_hash() != Some(*prev) {
-                    break;
-                }
+            match prev_of.get(&hash) {
+                Some(prev) if hub.tip_hash() == Some(*prev) => {}
+                _ => break,
             }
         }
         if body.is_rejected(&hash) {

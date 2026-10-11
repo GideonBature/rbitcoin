@@ -22,11 +22,6 @@ use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
-
-/// Header-store reads inside [`ChainHub::try_tip_hash`]. The orchestration
-/// loop calls `tip_hash` every pass; a published tip must not add to this.
-#[cfg(test)]
-pub(crate) static TIP_HASH_HEADER_READS: AtomicU64 = AtomicU64::new(0);
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::{broadcast, Notify};
@@ -804,18 +799,17 @@ impl ChainHub {
         let c_h = self.cache.tip_height();
         Ok(match (q_h, c_h) {
             (Some(qh), Some(ch)) if ch > qh => self.cache.tip_hash(),
-            (Some(qh), _) => {
-                if let Some(p) = self.query.published_tip() {
-                    if p.height == qh {
-                        return Ok(Some(BlockHash::from_byte_array(p.hash)));
+            (Some(_), _) => {
+                // Publish lands in the same commit as `tip_height`. One retry
+                // covers the few instructions between those two stores.
+                for _ in 0..2 {
+                    if let Some(p) = self.query.published_tip() {
+                        if self.query.tip_height().map(|h| h.0) == Some(p.height) {
+                            return Ok(Some(BlockHash::from_byte_array(p.hash)));
+                        }
                     }
                 }
-                #[cfg(test)]
-                TIP_HASH_HEADER_READS.fetch_add(1, Ordering::Relaxed);
-                self.query
-                    .header_at_height(rbitcoin_primitives::Height(qh))
-                    .map_err(NetError::store)?
-                    .map(|(_, rec)| BlockHash::from_byte_array(rec.hash))
+                None
             }
             (None, Some(_)) => self.cache.tip_hash(),
             (None, None) => None,
@@ -2491,11 +2485,14 @@ impl ChainHub {
         if let Some(fh) = fork_height {
             self.disconnect_to(fh)?;
         } else {
+            let _commit = self.query.lock_tip_commit();
             while self.query.tip_height().is_some() {
                 if let Some(th) = self.tip_hash() {
                     self.confirmed.write().unwrap().remove(&th);
                 }
-                self.query.disconnect_tip().map_err(NetError::store)?;
+                self.query
+                    .disconnect_tip_in_commit()
+                    .map_err(NetError::store)?;
             }
             self.cache.clear();
             self.confirmed.write().unwrap().clear();
@@ -2577,16 +2574,32 @@ impl ChainHub {
     /// bodies stay in Class A. Does not connect a replacement — IBD then
     /// confirms the heavier header path as a linear extension.
     pub fn rewind_to_height(&self, keep_height: u32) -> Result<(), NetError> {
-        crate::tip_accept::run_on_tip_accept(|| self.rewind_to_height_inner(keep_height))
+        crate::tip_accept::run_on_tip_accept(|| self.rewind_to_height_inner(keep_height, true))
+            .map(|_| ())
     }
 
-    fn rewind_to_height_inner(&self, keep_height: u32) -> Result<(), NetError> {
+    /// Disconnect down to `keep_height`, or return `Ok(false)` when a tip
+    /// flush already holds the commit. The caller retries; this does not wait
+    /// on that disk.
+    pub(crate) fn try_rewind_to_height(&self, keep_height: u32) -> Result<bool, NetError> {
+        crate::tip_accept::run_on_tip_accept(|| self.rewind_to_height_inner(keep_height, false))
+    }
+
+    fn rewind_to_height_inner(&self, keep_height: u32, wait: bool) -> Result<bool, NetError> {
         let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
         let tip = self.tip_height().unwrap_or(0);
         if keep_height > tip {
             return Err(NetError::Protocol("rewind above tip"));
         }
-        self.disconnect_to(keep_height)
+        let _commit = if wait {
+            self.query.lock_tip_commit()
+        } else if let Some(g) = self.query.try_lock_tip_commit() {
+            g
+        } else {
+            return Ok(false);
+        };
+        self.disconnect_to_in_commit(keep_height)?;
+        Ok(true)
     }
 
     /// Production "we received a full block" (P2P `block` / compact, RPC
@@ -3027,6 +3040,11 @@ impl ChainHub {
     }
 
     fn disconnect_to(&self, keep_height: u32) -> Result<(), NetError> {
+        let _commit = self.query.lock_tip_commit();
+        self.disconnect_to_in_commit(keep_height)
+    }
+
+    fn disconnect_to_in_commit(&self, keep_height: u32) -> Result<(), NetError> {
         let mp = self.mempool().cloned();
         let mut disconnected_txs: Vec<Transaction> = Vec::new();
         while let Some(h) = self.query.tip_height() {
@@ -3045,7 +3063,7 @@ impl ChainHub {
                 self.confirmed.write().unwrap().remove(&th);
             }
             self.query
-                .disconnect_tip_keep_pending()
+                .disconnect_tip_keep_pending_in_commit()
                 .map_err(NetError::store)?;
         }
         self.cache.truncate_to_height(keep_height);
@@ -3831,16 +3849,38 @@ mod tests {
     }
 
     #[test]
-    fn tip_hash_after_genesis_does_not_reread_the_header() {
+    fn tip_hash_after_genesis_is_the_published_snapshot() {
         let (_dir, hub) = super::tiny_regtest_hub_labeled("pub-tip");
         hub.ensure_genesis().unwrap();
-        let before = super::TIP_HASH_HEADER_READS.load(Ordering::Relaxed);
-        assert!(hub.tip_hash().is_some());
+        let published = hub
+            .query
+            .published_tip()
+            .expect("genesis publishes the tip");
+        assert_eq!(hub.tip_height(), Some(published.height));
         assert_eq!(
-            super::TIP_HASH_HEADER_READS.load(Ordering::Relaxed),
-            before,
-            "tip hash must come from the snapshot confirm published"
+            hub.tip_hash().map(|h| h.to_byte_array()),
+            Some(published.hash)
         );
+    }
+
+    #[test]
+    fn rewind_defers_while_a_tip_commit_is_open() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_041_000, 1);
+        hub.accept_block(b1).unwrap();
+        assert_eq!(hub.tip_height(), Some(1));
+        let hold = hub.query.lock_tip_commit();
+        assert!(
+            !hub.try_rewind_to_height(0).unwrap(),
+            "rewind must not disconnect while the tip commit is open"
+        );
+        assert_eq!(hub.tip_height(), Some(1));
+        drop(hold);
+        assert!(hub.try_rewind_to_height(0).unwrap());
+        assert_eq!(hub.tip_height(), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

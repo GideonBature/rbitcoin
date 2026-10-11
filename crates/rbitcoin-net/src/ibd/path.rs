@@ -93,18 +93,7 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
             break;
         }
         let hash = BlockHash::from_byte_array(e.hash);
-        let prev = if e.height == 0 {
-            BlockHash::from_byte_array([0u8; 32])
-        } else {
-            st.height_to_hash
-                .get(&e.height.saturating_sub(1))
-                .copied()
-                .or_else(|| {
-                    tip.filter(|(th, _)| e.height == th.saturating_add(1))
-                        .map(|(_, h)| h)
-                })
-                .unwrap_or(BlockHash::from_byte_array([0u8; 32]))
-        };
+        let prev = BlockHash::from_byte_array(e.prev_hash);
         let on_path = st.try_set_path_slot(hash, e.height, prev, tip);
         st.max_ordered_height = st.max_ordered_height.max(e.height);
         if on_path && st.ordered_set.insert(hash) {

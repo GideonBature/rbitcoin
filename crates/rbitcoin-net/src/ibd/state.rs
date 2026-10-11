@@ -289,7 +289,6 @@ impl IbdWorkState {
     ///
     /// Always records `hash_height`. Returns whether the path slot was set
     /// to `hash`.
-    #[cfg(test)]
     pub(crate) fn note_path_prev(&mut self, hash: BlockHash, prev: BlockHash) {
         self.path_prev.insert(hash, prev);
     }
