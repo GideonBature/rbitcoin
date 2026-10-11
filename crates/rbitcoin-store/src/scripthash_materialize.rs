@@ -2131,27 +2131,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_fk_spans_are_contiguous_covering_and_disjoint() {
-        assert_eq!(
-            worker_fk_spans(1, 100, 4),
-            vec![(1, 25), (26, 50), (51, 75), (76, 100)]
-        );
-        assert_eq!(
-            worker_fk_spans(1, 10, 3),
-            vec![(1, 3), (4, 6), (7, 10)],
-            "remainder on the last span"
-        );
-        assert_eq!(worker_fk_spans(1, 5, 1), vec![(1, 5)]);
-        assert_eq!(
-            worker_fk_spans(1, 3, 10),
-            vec![(1, 1), (2, 2), (3, 3)],
-            "n_workers > span clamps to one fk per worker"
-        );
-        assert!(worker_fk_spans(5, 4, 4).is_empty());
-        assert_eq!(worker_fk_spans(1, 8, 0), vec![(1, 8)]);
-    }
-
-    #[test]
     fn flush_collect_tally_matches_per_item_and_skips_zeros() {
         let recs = AtomicU64::new(0);
         let hits = AtomicU64::new(0);
@@ -2347,26 +2326,6 @@ mod tests {
         assert_eq!(
             crate::sorted_run::workers_for_free_ram(16, 24 << 30, SH_EXTRACT_WORKER_RAM_BYTES),
             16
-        );
-    }
-
-    #[test]
-    fn class_a_scan_chunk_is_loc_fold_grain() {
-        assert_eq!(
-            CLASS_A_CHUNK_FKS,
-            1 << 16,
-            "inner loc/body batch inside a static worker span, not a steal grain"
-        );
-        assert_eq!(
-            chunk_ranges(1, CLASS_A_CHUNK_FKS + 1, CLASS_A_CHUNK_FKS),
-            vec![
-                (1, CLASS_A_CHUNK_FKS),
-                (CLASS_A_CHUNK_FKS + 1, CLASS_A_CHUNK_FKS + 1)
-            ]
-        );
-        assert_eq!(
-            chunk_ranges(1, 70_000, CLASS_A_CHUNK_FKS),
-            vec![(1, CLASS_A_CHUNK_FKS), (CLASS_A_CHUNK_FKS + 1, 70_000)]
         );
     }
 

@@ -381,6 +381,6 @@ async fn out_of_range_timing_refuses_to_start() {
         .await
         .err()
         .expect("out-of-range config must not start");
-        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
     }
 }

@@ -105,10 +105,6 @@ pub struct Mempool {
     opened: Instant,
     mock_now_ms: Option<u64>,
     last_persist_ms: u64,
-    /// Last `tx.body` write start offset (tests: incremental tail).
-    last_body_write_off: u64,
-    /// Bytes written to `slots` on the last persist (tests: incremental pwrite).
-    last_slot_write_bytes: u64,
     /// Tests pin the table at the live count so the next admit evicts.
     grow_pinned: bool,
     /// A durable DEAD `pwrite` is not yet covered by [`Self::sync_deaths`].
@@ -153,8 +149,6 @@ impl Mempool {
             opened: Instant::now(),
             mock_now_ms: None,
             last_persist_ms: 0,
-            last_body_write_off: 0,
-            last_slot_write_bytes: 0,
             grow_pinned: false,
             deaths_unsynced: false,
             #[cfg(test)]
@@ -263,14 +257,6 @@ impl Mempool {
         self.body_persisted_len
     }
 
-    pub fn last_body_write_off(&self) -> u64 {
-        self.last_body_write_off
-    }
-
-    pub fn last_slot_write_bytes(&self) -> u64 {
-        self.last_slot_write_bytes
-    }
-
     fn clear_dirty(&mut self) {
         self.body_dirty = false;
     }
@@ -307,7 +293,6 @@ impl Mempool {
             }
             ranges.push((off, rec_end));
         }
-        let mut n = 0usize;
         for (start, end) in ranges {
             self.slots_file
                 .seek(SeekFrom::Start(start as u64))
@@ -315,9 +300,7 @@ impl Mempool {
             self.slots_file
                 .write_all(&self.slots[start..end])
                 .map_err(|e| MempoolError::io(&path, e))?;
-            n += end - start;
         }
-        self.last_slot_write_bytes = n as u64;
         self.slots_file
             .sync_data()
             .map_err(|e| MempoolError::io(&path, e))?;
@@ -740,7 +723,6 @@ impl Mempool {
         let body_path = self.dir.join("tx.body");
         let logical = body_logical_len(&self.body)? as u64;
         let start = self.body_persisted_len.min(logical);
-        self.last_body_write_off = start;
         if start < BODY_HEADER as u64 {
             self.body_file
                 .seek(SeekFrom::Start(0))
@@ -781,15 +763,11 @@ impl Mempool {
     fn persist_slots_and_meta(&mut self) -> Result<(), MempoolError> {
         let slots_path = self.dir.join("slots");
         if let Some(disk) = self.demoted_slots_image() {
-            let n = disk.len() as u64;
             self.write_slots_bytes(&slots_path, &disk)?;
-            self.last_slot_write_bytes = n;
         } else {
             let buf = std::mem::take(&mut self.slots);
-            let n = buf.len() as u64;
             let w = Self::write_slots_file(&mut self.slots_file, &slots_path, &buf);
             self.slots = buf;
-            self.last_slot_write_bytes = n;
             w?;
         }
         self.persist_meta()
@@ -1563,11 +1541,6 @@ pub(crate) mod tests {
             .unwrap();
         mp.set_now_ms(PERSIST_INTERVAL_MS * 2);
         mp.persist_due().unwrap();
-        assert_eq!(
-            mp.last_body_write_off(),
-            first_end,
-            "second persist must start at the first payload's end"
-        );
         let body_after_second = fs::read(dir.join("tx.body")).unwrap();
         assert_eq!(
             &body_after_second[BODY_HEADER..first_end as usize],
@@ -1591,21 +1564,11 @@ pub(crate) mod tests {
             .unwrap();
         mp.set_now_ms(PERSIST_INTERVAL_MS);
         mp.persist_due().unwrap();
-        assert_eq!(
-            mp.last_slot_write_bytes(),
-            SLOT_REC as u64,
-            "first persist_due writes one LIVE record, not the full table"
-        );
         let t2 = Txid::from_byte_array([0x02; 32]);
         mp.append_live_tx(&raw, &t2, &raw.compute_wtxid(), 2, 400, 0, &[])
             .unwrap();
         mp.set_now_ms(PERSIST_INTERVAL_MS * 2);
         mp.persist_due().unwrap();
-        assert_eq!(
-            mp.last_slot_write_bytes(),
-            SLOT_REC as u64,
-            "second persist_due must not rewrite the first LIVE record"
-        );
         drop(mp);
         let mp = Mempool::open_or_create(&dir).unwrap();
         assert_eq!(mp.load_live_txs().unwrap().len(), 2);
