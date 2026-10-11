@@ -913,7 +913,13 @@ mod tests {
             panic!("occupy test boom");
         }));
         std::panic::set_hook(prev);
-        assert!(panicked.is_err());
+        let err = panicked.expect_err("occupy must panic");
+        let text = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(text.contains("occupy test boom"), "panic payload {text:?}");
         run_owned(vec![1, 2, 3, 4], ok_u32).unwrap();
     }
 
