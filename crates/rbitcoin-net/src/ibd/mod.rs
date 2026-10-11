@@ -454,6 +454,7 @@ pub async fn ibd_cancellable(
     offer_confirm_ready(
         &confirm_feed,
         &st.height_to_hash,
+        &st.path_prev,
         &mut st.body,
         hub.as_ref(),
         &mut st.max_ready_height,
@@ -557,6 +558,7 @@ pub async fn ibd_cancellable(
         offer_confirm_ready(
             &confirm_feed,
             &st.height_to_hash,
+            &st.path_prev,
             &mut st.body,
             hub.as_ref(),
             &mut st.max_ready_height,
@@ -919,6 +921,7 @@ pub async fn ibd_cancellable(
                 let noted = offer_confirm_ready(
                     &confirm_feed,
                     &st.height_to_hash,
+                    &st.path_prev,
                     &mut st.body,
                     hub.as_ref(),
                     &mut st.max_ready_height,
@@ -948,6 +951,7 @@ pub async fn ibd_cancellable(
             offer_confirm_ready(
                 &confirm_feed,
                 &st.height_to_hash,
+                &st.path_prev,
                 &mut st.body,
                 hub.as_ref(),
                 &mut st.max_ready_height,
@@ -1034,6 +1038,7 @@ pub async fn ibd_cancellable(
                 offer_confirm_ready(
                     &confirm_feed,
                     &st.height_to_hash,
+                    &st.path_prev,
                     &mut st.body,
                     hub.as_ref(),
                     &mut st.max_ready_height,

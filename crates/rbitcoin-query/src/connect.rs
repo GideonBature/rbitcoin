@@ -40,9 +40,58 @@ pub struct ConfirmPrepared {
     pub height: Height,
     pub header_fk: Fk,
     pub tx_fks: Vec<Fk>,
+    /// Block hash. Published as the tip when this run extends `confirmed[]`.
+    pub hash: [u8; 32],
 }
 
 impl Query {
+    /// Tip hash from the last confirm or disconnect, if it still matches `height`.
+    pub fn published_tip(&self) -> Option<PublishedTip> {
+        self.published_tip.load_full().as_deref().copied()
+    }
+
+    /// Publish `hash` as the confirmed tip at `height`. Called in the same
+    /// confirm that advanced `confirmed[]`, before the Class C flush.
+    pub fn publish_confirmed_tip(&self, height: u32, hash: [u8; 32]) {
+        self.published_tip
+            .store(Some(std::sync::Arc::new(PublishedTip { height, hash })));
+    }
+
+    pub fn clear_published_tip(&self) {
+        self.published_tip.store(None);
+    }
+
+    /// Block until the in-flight tip flush or disconnect releases the commit.
+    pub fn lock_tip_commit(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.tip_commit.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `None` while a confirm flush or disconnect holds the commit.
+    /// Rewind uses this so the orchestration task does not wait on that disk.
+    pub fn try_lock_tip_commit(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        match self.tip_commit.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// One header read at open, so the first orchestration pass does not
+    /// re-read the tip. Later tips come from [`Self::publish_confirmed_tip`].
+    /// A tip height with no header row is corrupt: leaving the snapshot empty
+    /// would make every later `tip_hash` miss.
+    pub(crate) fn seed_published_tip(&self) -> Result<(), QueryError> {
+        let Some(tip) = self.tip_height() else {
+            self.clear_published_tip();
+            return Ok(());
+        };
+        let Some((_, rec)) = self.header_at_height(tip)? else {
+            return Err(StoreError::Corrupt("confirmed tip has no header"));
+        };
+        self.publish_confirmed_tip(tip.0, rec.hash);
+        Ok(())
+    }
+
     pub fn confirm_block(&self, height: Height, header_hash: &[u8; 32]) -> Result<Fk, QueryError> {
         if let Some(h) = self.height_of_hash(header_hash)? {
             if h == height {
@@ -65,6 +114,7 @@ impl Query {
             height,
             header_fk,
             tx_fks,
+            hash: *header_hash,
         };
         let out = self.confirm_blocks_run(std::slice::from_ref(&prepared))?;
         self.annotate_spends_for_confirmed(std::slice::from_ref(&prepared))?;
@@ -166,6 +216,7 @@ impl Query {
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        let commit = self.lock_tip_commit();
         for w in items.windows(2) {
             if w[1].height.0 != w[0].height.0.saturating_add(1) {
                 return Err(StoreError::Corrupt("confirm run not contiguous heights"));
@@ -236,12 +287,18 @@ impl Query {
                 .height_fence_extend(item.height, item.header_fk)?;
         }
         self.store.confirmed.set_many(&confirmed_pairs)?;
+        // Same commit as `confirmed[]`, before the flush. `tip_height` is
+        // already the new tip; the orchestration loop reads this snapshot.
+        if let Some(last) = items.last() {
+            self.publish_confirmed_tip(last.height.0, last.hash);
+        }
         // Do not forget pending here: drain may still be inserting tx.head
         // (67438). Write forgets after drain.join() *and* this extend.
         // L2 write-behind barrier: complete-or-fail Class C image to disk **before**
         // callers dequeue the body queue. Kill after this returns → tip durable;
         // kill before → BQ still holds blocks for re-drive.
         self.store.flush_class_c_tip()?;
+        drop(commit);
         crate::note_confirm(
             &self.confirm_stats().tip_ns,
             t_tip.elapsed().as_nanos() as u64,
@@ -616,10 +673,12 @@ impl Query {
                     ));
                 }
             };
+            let hash = self.store.get_header(header_fk)?.hash;
             items.push(ConfirmPrepared {
                 height: Height(h),
                 header_fk,
                 tx_fks,
+                hash,
             });
         }
         if !items.is_empty() {
@@ -758,15 +817,29 @@ impl Query {
     ///
     /// Every successful tip shrink logs [`format_disconnect_tip_line`] at **warn**.
     pub fn disconnect_tip(&self) -> Result<(), QueryError> {
-        self.disconnect_tip_with(true)
+        let _commit = self.lock_tip_commit();
+        self.disconnect_tip_body(true)
+    }
+
+    /// [`Self::disconnect_tip`] for a caller that already holds
+    /// [`Self::lock_tip_commit`].
+    pub fn disconnect_tip_in_commit(&self) -> Result<(), QueryError> {
+        self.disconnect_tip_body(true)
     }
 
     /// Class C disconnect without dropping RAM SH pending (reorg reaccept first).
     pub fn disconnect_tip_keep_pending(&self) -> Result<(), QueryError> {
-        self.disconnect_tip_with(false)
+        let _commit = self.lock_tip_commit();
+        self.disconnect_tip_body(false)
     }
 
-    fn disconnect_tip_with(&self, drop_pending: bool) -> Result<(), QueryError> {
+    /// [`Self::disconnect_tip_keep_pending`] for a caller that already holds
+    /// [`Self::lock_tip_commit`].
+    pub fn disconnect_tip_keep_pending_in_commit(&self) -> Result<(), QueryError> {
+        self.disconnect_tip_body(false)
+    }
+
+    fn disconnect_tip_body(&self, drop_pending: bool) -> Result<(), QueryError> {
         let _utxo_view = self.store.hold_utxo_view();
         let height = self
             .tip_height()
@@ -780,9 +853,10 @@ impl Query {
         } else {
             self.clamp_index_released_before(height);
         }
-        let hash = self
-            .header_at_height(height)?
-            .map(|(_, rec)| rec.hash)
+        let disconnected = self.header_at_height(height)?.map(|(_, rec)| rec);
+        let hash = disconnected
+            .as_ref()
+            .map(|rec| rec.hash)
             .unwrap_or([0u8; 32]);
         let tx_fks = self.block_tx_fks(height)?;
 
@@ -818,14 +892,19 @@ impl Query {
         self.store.height_fence_pop_tip(height);
         self.note_disconnect_height(height.0);
         let _ = self.on_load_pack();
+        if let Some(new_tip) = self.tip_height() {
+            let (_, rec) = self
+                .header_at_height(new_tip)?
+                .ok_or(StoreError::Corrupt("disconnect left a tip with no header"))?;
+            self.publish_confirmed_tip(new_tip.0, rec.hash);
+            let _ = self.ensure_height_by_hash_index(new_tip);
+        } else {
+            self.clear_published_tip();
+            self.invalidate_height_by_hash_index();
+        }
         self.store.flush_confirmed_only()?;
         self.store.clamp_spend_durable()?;
         log_disconnect_tip(height.0, &hash, tx_fks.len());
-        if let Some(new_tip) = self.tip_height() {
-            let _ = self.ensure_height_by_hash_index(new_tip);
-        } else {
-            self.invalidate_height_by_hash_index();
-        }
 
         for &tx_fk in &tx_fks {
             self.store.strong_tx.set_unstrong(tx_fk)?;

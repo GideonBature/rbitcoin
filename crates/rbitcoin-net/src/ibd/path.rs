@@ -93,18 +93,7 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
             break;
         }
         let hash = BlockHash::from_byte_array(e.hash);
-        let prev = if e.height == 0 {
-            BlockHash::from_byte_array([0u8; 32])
-        } else {
-            st.height_to_hash
-                .get(&e.height.saturating_sub(1))
-                .copied()
-                .or_else(|| {
-                    tip.filter(|(th, _)| e.height == th.saturating_add(1))
-                        .map(|(_, h)| h)
-                })
-                .unwrap_or(BlockHash::from_byte_array([0u8; 32]))
-        };
+        let prev = BlockHash::from_byte_array(e.prev_hash);
         let on_path = st.try_set_path_slot(hash, e.height, prev, tip);
         st.max_ordered_height = st.max_ordered_height.max(e.height);
         if on_path && st.ordered_set.insert(hash) {
@@ -163,7 +152,7 @@ fn plant_find_valid_child(
         if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
             continue;
         }
-        let Ok(Some(prev)) = super::reorg::parent_hash_of(hub, h) else {
+        let Some(prev) = st.path_prev.get(&h).copied() else {
             continue;
         };
         if prev != tip_hash {
@@ -228,14 +217,12 @@ fn plant_hash_at_height(st: &IbdWorkState, ht: u32) -> Option<BlockHash> {
 
 fn plant_next_connected(
     st: &IbdWorkState,
-    hub: &ChainHub,
+    _hub: &ChainHub,
     parent: BlockHash,
     ht: u32,
 ) -> Option<BlockHash> {
     let n = plant_hash_at_height(st, ht)?;
-    let Ok(Some(p)) = super::reorg::parent_hash_of(hub, n) else {
-        return None;
-    };
+    let p = st.path_prev.get(&n).copied()?;
     (p == parent).then_some(n)
 }
 
@@ -431,7 +418,9 @@ mod tests {
 
         let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
         st.hash_height.insert(child.block_hash(), 1);
+        st.note_path_prev(child.block_hash(), hub.tip_hash().unwrap());
         st.hash_height.insert(ext.block_hash(), 2);
+        st.note_path_prev(ext.block_hash(), child.block_hash());
         super::plant_valid_tip_child(&mut st, &hub);
         assert!(st.ordered_set.contains(&child.block_hash()));
         assert!(st.ordered_set.contains(&ext.block_hash()));

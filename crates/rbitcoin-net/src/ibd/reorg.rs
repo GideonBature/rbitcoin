@@ -329,8 +329,11 @@ pub(crate) fn connecting_search_candidates(
     let Some(&h) = st.height_to_hash.get(&tip_h.saturating_add(1)) else {
         return Ok(Vec::new());
     };
-    match parent_hash_of(hub, h)? {
-        Some(p) if p != tip => Ok(vec![h]),
+    // Parent was stored when the header was admitted. A missing parent is not
+    // a fork signal — reading the header store here stalls the orchestration
+    // loop behind confirm's disk.
+    match st.path_prev.get(&h) {
+        Some(p) if *p != tip => Ok(vec![h]),
         _ => Ok(Vec::new()),
     }
 }
@@ -517,7 +520,9 @@ pub(crate) fn apply_header_rewind(
         return Ok(false);
     }
     if tip_h > lca_h {
-        hub.rewind_to_height(lca_h)?;
+        if !hub.try_rewind_to_height(lca_h)? {
+            return Ok(false);
+        }
         info!(
             "ibd: most-work header rewind tip {tip_h} → {lca_h} (winning path {} header(s))",
             path.len()
@@ -800,6 +805,7 @@ mod tests {
         let mut st =
             super::super::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
         st.record_height(w3.block_hash(), 3);
+        st.note_path_prev(w3.block_hash(), w2.block_hash());
         st.record_height(w4.block_hash(), 4);
         st.max_ordered_height = 4;
         assert!(consider_disconnected_heavier(&mut st, &hub).unwrap());
@@ -1003,6 +1009,30 @@ mod tests {
     }
 
     #[test]
+    fn connecting_search_uses_recorded_prev_not_the_header_store() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut st =
+            super::super::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+        let child = BlockHash::from_byte_array([0xab; 32]);
+        st.record_height(child, 1);
+        st.note_path_prev(child, BlockHash::from_byte_array([0xcd; 32]));
+        assert!(
+            hub.query
+                .get_header_by_hash(&child.to_byte_array())
+                .unwrap()
+                .is_none(),
+            "this hash was never stored"
+        );
+        assert_eq!(
+            connecting_search_candidates(&st, &hub).unwrap(),
+            vec![child],
+            "a recorded parent that is not the tip is a competing child"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn connecting_search_candidates_is_tip_plus_one_when_competing() {
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
@@ -1022,6 +1052,7 @@ mod tests {
         let mut st =
             super::super::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
         st.record_height(w3.block_hash(), 3);
+        st.note_path_prev(w3.block_hash(), w2.block_hash());
         st.record_height(w4.block_hash(), 4);
         st.max_ordered_height = 4;
         assert_eq!(

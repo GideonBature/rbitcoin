@@ -794,6 +794,7 @@ fn pin_disconnect_to_genesis_reconnect_and_tip_shrink(
             height: Height(top),
             header_fk: tip_fk,
             tx_fks,
+            hash: hashes[top as usize],
         }])
         .unwrap(),
         [tip_fk],
@@ -2268,6 +2269,7 @@ fn pin_block_and_tx_surface_on_pad(q: &Query, chain: &rbitcoin_test::MatureRegte
         height: Height(height),
         header_fk,
         tx_fks: vec![fks[0]],
+        hash: tip_hash,
     };
     for bad in [
         vec![prepared(spend_h.0 + 1, Fk::NULL)],
@@ -3065,6 +3067,7 @@ fn pin_confirm_refuses_without_advancing_tip(
             height: Height(2),
             header_fk: hfk,
             tx_fks: vec![],
+            hash: header_only.block_hash().to_byte_array(),
         }])
         .expect_err("a header without a body cannot confirm");
     assert!(err.to_string().contains("header_txs"), "{err}");

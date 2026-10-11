@@ -2704,6 +2704,7 @@ pub(crate) fn spawn_confirm_engine(
 pub(crate) fn offer_confirm_ready(
     feed: &ConfirmFeed,
     height_to_hash: &HashMap<u32, BlockHash>,
+    prev_of: &HashMap<BlockHash, BlockHash>,
     body: &mut BodyPresence,
     hub: &ChainHub,
     max_ready_height: &mut u32,
@@ -2723,10 +2724,9 @@ pub(crate) fn offer_confirm_ready(
             continue;
         }
         if ht == expect {
-            if let Ok(Some(prev)) = super::reorg::parent_hash_of(hub, hash) {
-                if hub.tip_hash() != Some(prev) {
-                    break;
-                }
+            match prev_of.get(&hash) {
+                Some(prev) if hub.tip_hash() == Some(*prev) => {}
+                _ => break,
             }
         }
         if body.is_rejected(&hash) {

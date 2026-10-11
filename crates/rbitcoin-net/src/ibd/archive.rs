@@ -12,6 +12,44 @@ use rbitcoin_primitives::Fk;
 
 use std::time::Instant;
 
+/// Parent from the stored header, once. The orchestration loop does not do this.
+fn header_parent(hub: &ChainHub, header_fk: Fk) -> Option<BlockHash> {
+    if header_fk.is_null() {
+        return None;
+    }
+    let rec = hub.query.get_header(header_fk).ok()?;
+    if rec.prev_fk.is_null() {
+        return Some(BlockHash::from_byte_array([0u8; 32]));
+    }
+    let parent = hub.query.get_header(rec.prev_fk).ok()?;
+    Some(BlockHash::from_byte_array(parent.hash))
+}
+
+/// True when `hash` extends the work path or the confirmed tip. Records the
+/// parent either way. A competing leftover stays off the slot and the feed.
+fn leftover_chains(
+    hub: &ChainHub,
+    st: &mut super::state::IbdWorkState,
+    height: u32,
+    header_fk: Fk,
+    hash: BlockHash,
+) -> bool {
+    let Some(prev) = header_parent(hub, header_fk) else {
+        return false;
+    };
+    st.note_path_prev(hash, prev);
+    if height == 0 {
+        return prev.to_byte_array() == [0u8; 32];
+    }
+    if let Some(parent) = st.height_to_hash.get(&height.saturating_sub(1)) {
+        return *parent == prev;
+    }
+    match hub.tip_height() {
+        Some(t) if height == t.saturating_add(1) => hub.tip_hash() == Some(prev),
+        _ => false,
+    }
+}
+
 pub(crate) fn rehydrate_block_queue_into_confirm(
     hub: &ChainHub,
     st: &mut super::state::IbdWorkState,
@@ -65,19 +103,19 @@ pub(crate) fn rehydrate_block_queue_into_confirm(
         }
         let wire_bytes = qb.payload_len;
         st.body.mark_pending(hash);
-        if qb.height != u32::MAX {
-            st.record_height(hash, qb.height);
-        }
         let header_fk = Fk(qb.header_fk);
         if !header_fk.is_null() {
             st.header_fks.insert(hash, header_fk);
         }
         if qb.height != u32::MAX {
-            confirm_feed.note(qb.height, hash);
-            bytes = bytes.saturating_add(wire_bytes);
-            h_min = h_min.min(qb.height);
-            h_max = h_max.max(qb.height);
-            n = n.saturating_add(1);
+            if leftover_chains(hub, st, qb.height, header_fk, hash) {
+                st.record_height(hash, qb.height);
+                confirm_feed.note(qb.height, hash);
+                bytes = bytes.saturating_add(wire_bytes);
+                h_min = h_min.min(qb.height);
+                h_max = h_max.max(qb.height);
+                n = n.saturating_add(1);
+            }
         } else {
             st.body.mark_missing(hash);
             unknown_h = unknown_h.saturating_add(1);
@@ -462,9 +500,10 @@ mod class_a_rehydrate_tests {
         let mut prev = gen;
         let mut hashes = Vec::new();
         let mut headers = Vec::new();
+        let mut fks = Vec::new();
         for h in 1u32..=4 {
             let b = mine(prev, time + h * 600, h);
-            hub.ensure_header(&b.header).unwrap();
+            fks.push(hub.ensure_header_fk(&b.header).unwrap());
             hashes.push(b.block_hash());
             headers.push(b.header);
             prev = b.block_hash();
@@ -486,7 +525,7 @@ mod class_a_rehydrate_tests {
             .unwrap();
         st.body.mark_archived(hashes[1]);
         hub.query
-            .block_queue_enqueue(2, hashes[1].to_byte_array(), 7, b"wire2")
+            .block_queue_enqueue(2, hashes[1].to_byte_array(), fks[1].0, b"wire2")
             .unwrap();
         hub.note_confirmed_tip(&[(3, hashes[2])], &[headers[2]])
             .unwrap();
@@ -496,7 +535,7 @@ mod class_a_rehydrate_tests {
         );
         assert_eq!(hub.tip_height(), Some(0));
         hub.query
-            .block_queue_enqueue(3, hashes[2].to_byte_array(), 0, b"wire3")
+            .block_queue_enqueue(3, hashes[2].to_byte_array(), fks[2].0, b"wire3")
             .unwrap();
         let unk = BlockHash::from_byte_array([0x11; 32]);
         hub.query
@@ -536,7 +575,7 @@ mod class_a_rehydrate_tests {
             st.body.is_missing(&hashes[0]),
             "tip+1 gap marked missing for densify"
         );
-        assert_eq!(st.header_fks.get(&hashes[1]).copied(), Some(Fk(7)));
+        assert_eq!(st.header_fks.get(&hashes[1]).copied(), Some(fks[1]));
         assert_eq!(feed.size_snap().0, 2);
 
         let _ = std::fs::remove_dir_all(dir);
@@ -553,12 +592,55 @@ mod class_a_rehydrate_tests {
         let mut st = IbdWorkState::new(Vec::new(), None, None);
         let feed = ConfirmFeed::new();
         let n = rehydrate_block_queue_into_confirm(&hub, &mut st, &feed).unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 0, "a height with no stored parent is not offered");
         assert!(hub.query.block_queue_has_height(0));
         assert!(st.body.is_pending(&h));
         assert_eq!(st.header_fks.get(&h).copied(), Some(Fk(1)));
-        assert_eq!(feed.size_snap().0, 1);
+        assert_eq!(feed.size_snap().0, 0);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bq_rehydrate_does_not_offer_a_competing_leftover() {
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("bq-rehydrate-fork");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let tip = mine(gen, 1_300_010_000, 1);
+        hub.accept_block(tip.clone()).unwrap();
+        let linear = mine(tip.block_hash(), 1_300_010_600, 2);
+        let sib = mine(gen, 1_300_010_100, 1);
+        hub.ensure_header_fk(&sib.header).unwrap();
+        let fork_child = mine(sib.block_hash(), 1_300_010_700, 2);
+        let child_fk = hub.ensure_header_fk(&fork_child.header).unwrap();
+        hub.query
+            .block_queue_enqueue(
+                2,
+                fork_child.block_hash().to_byte_array(),
+                child_fk.0,
+                b"fork",
+            )
+            .unwrap();
+
+        let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+        st.record_height(linear.block_hash(), 2);
+        st.note_path_prev(linear.block_hash(), tip.block_hash());
+        let feed = ConfirmFeed::new();
+        let n = rehydrate_block_queue_into_confirm(&hub, &mut st, &feed).unwrap();
+        assert_eq!(
+            n, 0,
+            "a leftover that does not extend the tip is not offered"
+        );
+        assert_eq!(feed.size_snap().0, 0);
+        assert_eq!(
+            st.height_to_hash.get(&2),
+            Some(&linear.block_hash()),
+            "the competing leftover must not take the tip+1 slot"
+        );
+        assert_eq!(
+            st.path_prev.get(&fork_child.block_hash()).copied(),
+            Some(sib.block_hash())
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
