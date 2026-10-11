@@ -275,6 +275,15 @@ impl SegmentedTxHead {
             .sum()
     }
 
+    /// Sealed g-page preads since the last take. A fuse miss must stay at zero.
+    #[cfg(test)]
+    pub(crate) fn take_sealed_g_page_preads(&self) -> u64 {
+        self.segments_snapshot()
+            .iter()
+            .map(|s| s.pack.as_ref().map(|p| p.take_g_page_preads()).unwrap_or(0))
+            .sum()
+    }
+
     /// Heap-owned sealed fuse8 fingerprints (**0** when mapped from `.fuse8`).
     pub fn sealed_fuse_resident_bytes(&self) -> u64 {
         self.segments_snapshot()
@@ -1511,11 +1520,18 @@ mod tests {
         let cands = h.probe_candidates(&mixed(1)).unwrap();
         assert_eq!(cands.len(), 1, "cands={cands:?}");
         assert_eq!(cands[0], Fk(1));
-        let miss = h.probe_candidates(&mixed(0xDEAD_BEEF)).unwrap();
-        assert!(
-            miss.is_empty() || !miss.iter().any(|f| f.0 == 0xDEAD_BEEF),
-            "unknown key is not a member"
-        );
+        let mut saw_miss = false;
+        for i in 0..32u64 {
+            let _ = h.take_sealed_g_page_preads();
+            let miss = h.probe_candidates(&mixed(0xDEAD_BEEF + i)).unwrap();
+            let g_pages = h.take_sealed_g_page_preads();
+            if miss.is_empty() {
+                assert_eq!(g_pages, 0, "fuse miss must not pread g pages");
+                saw_miss = true;
+                break;
+            }
+        }
+        assert!(saw_miss, "fuse miss must not pread g pages");
 
         let k = mixed(0xB1B0);
         let collect: SealCollect = Arc::new(move |first_fk, count| {

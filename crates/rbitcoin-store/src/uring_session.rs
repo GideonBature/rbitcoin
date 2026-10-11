@@ -240,6 +240,9 @@ pub struct UringSession {
     /// Set on undrained leftover, unexpected CQE, CQ overflow, or wait timeout.
     /// Push and [`Self::begin_batch`] fail closed; [`with_thread_local`] drops the TLS ring.
     poisoned: bool,
+    /// SQEs whose `rw_flags` were nonzero. Test builds only.
+    #[cfg(test)]
+    sqe_rw_nonzero: u64,
 }
 
 impl UringSession {
@@ -314,7 +317,16 @@ impl UringSession {
             epoch: 0,
             kind,
             poisoned: false,
+            #[cfg(test)]
+            sqe_rw_nonzero: 0,
         })
+    }
+
+    #[cfg(test)]
+    fn note_rw_flags(&mut self, rw_flags: i32) {
+        if rw_flags != 0 {
+            self.sqe_rw_nonzero = self.sqe_rw_nonzero.saturating_add(1);
+        }
     }
 
     pub fn kind(&self) -> SessionKind {
@@ -407,6 +419,8 @@ impl UringSession {
         user_data: u64,
         rw_flags: i32,
     ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        self.note_rw_flags(rw_flags);
         #[cfg(not(target_os = "linux"))]
         let _ = rw_flags;
         if buf.is_empty() {
@@ -482,6 +496,8 @@ impl UringSession {
         user_data: u64,
         rw_flags: i32,
     ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        self.note_rw_flags(rw_flags);
         #[cfg(not(target_os = "linux"))]
         let _ = rw_flags;
         if buf.is_empty() {
@@ -1119,6 +1135,17 @@ pub fn with_thread_local<R>(
             out
         })
     }
+}
+
+/// Nonzero-`rw_flags` SQEs on this thread's session since the last take.
+#[cfg(test)]
+pub fn tls_take_sqe_rw_nonzero() -> u64 {
+    SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|s| std::mem::take(&mut s.sqe_rw_nonzero))
+            .unwrap_or(0)
+    })
 }
 
 /// Kind byte for [`pack_ud`]. Distinct per machine so a leftover CQE cannot

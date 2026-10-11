@@ -125,6 +125,11 @@ impl TxHeadMphf {
     }
 
     #[cfg(test)]
+    pub fn take_g_page_preads(&self) -> u64 {
+        self.mphf.take_g_page_preads()
+    }
+
+    #[cfg(test)]
     pub fn slots_for(&self, mixed_u64: &[u64]) -> Result<Vec<u32>, StoreError> {
         self.slots_for_ctx(mixed_u64, &mut crate::IoCtx::none())
     }

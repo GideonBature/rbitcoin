@@ -781,6 +781,7 @@ mod tests {
         let abs = crate::tx_table::spent_abs(off, 0);
         let bulk = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         let (field, flags, _vin) = bulk[0].unwrap();
+        let _ = uring_session::tls_take_sqe_rw_nonzero();
         let cold = put_spend_batch_by_abs_meta_known(
             &t,
             &spenders,
@@ -790,6 +791,11 @@ mod tests {
         )
         .unwrap();
         assert!(cold.is_empty());
+        assert_eq!(
+            uring_session::tls_take_sqe_rw_nonzero(),
+            0,
+            "annotate SQEs must not set RWF_DONTCACHE"
+        );
         let after = t.get_spender_meta_at_abs_batch(&[abs]).unwrap();
         assert_eq!(after[0].unwrap().0, Fk(55));
         let _ = std::fs::remove_dir_all(&dir);
