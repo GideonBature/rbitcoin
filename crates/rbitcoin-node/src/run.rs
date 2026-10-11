@@ -598,6 +598,12 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
+    // Before catch-up. `setmocktime` freezes `hub.clock` (a non-zero mock
+    // ignores wall time). `p2p_seednode.py` jumps that clock while catch-up
+    // is still dialing, then expects the 10s seednode line. Sampling at the
+    // spawn below would start the wait after the jump, and it would never
+    // elapse.
+    let seed_delay_from = node.hub.clock.now_secs();
     status.enter(Phase::CatchUp);
     let catch_up = run_ibd_or_skip(
         &node,
@@ -708,19 +714,18 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         }
     }
     if !shutdown.requested() && !addrman.is_empty() && seednodes_allowed(&config.listen) {
-        const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
         let seeds = config.listen.seednodes.clone();
         let network = config.network;
         let peers = Arc::clone(&node.peers);
         let clock = Arc::clone(&node.hub.clock);
         let stop = Arc::clone(&shutdown.flag);
-        let start_secs = clock.now_secs();
+        let start_secs = seed_delay_from;
         tokio::spawn(async move {
             loop {
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
-                if clock.now_secs().saturating_sub(start_secs) >= ADD_NEXT_SEEDNODE_SECS {
+                if seednode_delay_elapsed(start_secs, clock.now_secs()) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2318,6 +2323,16 @@ pub(crate) fn follow_dial_type(connect: &[rbitcoin_net::NetAddr]) -> PeerConnTyp
     }
 }
 
+const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
+
+/// True once `now` is at least 10s after outbound attempts started.
+///
+/// `started_at` is the clock sample from before catch-up. A later
+/// `setmocktime` jump moves `now` without moving `started_at`.
+pub(crate) fn seednode_delay_elapsed(started_at: u64, now: u64) -> bool {
+    now.saturating_sub(started_at) >= ADD_NEXT_SEEDNODE_SECS
+}
+
 /// Whether `--seednode` may be dialled as addr-fetch: at startup with an
 /// empty addrman, or by the 10 s fallback when fewer than 2 outbound
 /// full-relay peers are live. Core never dials seednodes under `-connect`.
@@ -2476,6 +2491,22 @@ mod tests {
     }
 
     #[test]
+    fn seednode_delay_sees_a_mock_jump_from_before_catch_up() {
+        let started = 1_700_000_000u64;
+        assert!(
+            !seednode_delay_elapsed(started, started),
+            "arming the wait must not dial the seednode immediately"
+        );
+        assert!(
+            !seednode_delay_elapsed(started, started + 9),
+            "nine seconds is still inside the addrman window"
+        );
+        assert!(
+            seednode_delay_elapsed(started, started + 11),
+            "setmocktime(now+11) from a pre-catch-up sample must open the window"
+        );
+    }
+
     fn seednodes_are_off_under_connect() {
         let mut listen = NodeConfig::default().listen;
         assert!(!seednodes_allowed(&listen), "no seednodes");
