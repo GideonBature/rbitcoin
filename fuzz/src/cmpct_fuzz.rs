@@ -24,8 +24,8 @@ use tokio::sync::mpsc;
 use rbitcoin_primitives::hex_encode;
 
 use crate::block_diff::{
-    same_hash_merkle_mutant, verdict_from_core_reply, BlockOracle, CompareOne, DiffVerdict,
-    OracleReply,
+    same_hash_merkle_mutant, verdict_from_core_reply, BlockOracle, BlockStanding, CompareOne,
+    DiffVerdict, OracleReply,
 };
 
 /// BIP324 application contents for `cmpctblock`.
@@ -238,8 +238,22 @@ fn follow_core_verdict(
         OracleReply::Reason(s) => s.clone(),
         _ => String::new(),
     };
-    if matches!(reply, OracleReply::NullAccept) || reason == "duplicate" {
+    if matches!(reply, OracleReply::NullAccept) {
         return Ok((DiffVerdict::Accept, String::new()));
+    }
+    // `submitblock` returns "duplicate" on `!new_block && accepted` before the
+    // state catcher. That is also a body already stored by the compact
+    // announcement whose connect failed. Accept only an active or valid fork.
+    if reason == "duplicate" {
+        return match oracle.block_standing(hash) {
+            Ok(BlockStanding::Active | BlockStanding::ValidFork) => {
+                Ok((DiffVerdict::Accept, String::new()))
+            }
+            Ok(BlockStanding::NotConnected | BlockStanding::Invalid) => {
+                Ok((DiffVerdict::Reject, reason))
+            }
+            Err(_) => Err(CompareOne::Harness("duplicate standing")),
+        };
     }
     if reason == "duplicate-invalid" || reason == "duplicate-inconclusive" {
         return Ok((DiffVerdict::Reject, reason));
@@ -590,9 +604,16 @@ mod tests {
         fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
             Ok(())
         }
+        fn block_standing(
+            &self,
+            hash: &str,
+        ) -> Result<crate::block_diff::BlockStanding, &'static str> {
+            assert_eq!(hash.len(), 64);
+            Ok(crate::block_diff::BlockStanding::Active)
+        }
     }
 
-    fn follow_coinbase_only(label: &str, oracle: &StickyInvalidate) -> CompareOne {
+    fn follow_coinbase_only(label: &str, oracle: &dyn BlockOracle) -> CompareOne {
         use rbitcoin_consensus::{genesis_block, mine_regtest_paying, Milestone};
         use rbitcoin_net::ChainHub;
 
@@ -610,6 +631,101 @@ mod tests {
         );
         let mutated = same_hash_merkle_mutant(&honest).expect("mutant");
         follow_invalid_cmpct(&hub, oracle, mutated, honest)
+    }
+
+    /// `submitblock` answers BIP22 `duplicate` and reports chain standing.
+    struct DuplicateStanding {
+        standing: crate::block_diff::BlockStanding,
+        submits: std::cell::Cell<u32>,
+    }
+
+    impl BlockOracle for DuplicateStanding {
+        fn submitblock_hex(&self, _hex: &str) -> OracleReply {
+            self.submits.set(self.submits.get() + 1);
+            OracleReply::Reason("duplicate".into())
+        }
+        fn liveness_ok(&self) -> bool {
+            true
+        }
+        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn block_standing(
+            &self,
+            hash: &str,
+        ) -> Result<crate::block_diff::BlockStanding, &'static str> {
+            assert_eq!(hash.len(), 64);
+            Ok(self.standing)
+        }
+    }
+
+    /// Run 38145491136 input `[1, 221, 181]`. Core's `!new_block && accepted`
+    /// arm returns `duplicate` for a block already stored by the compact
+    /// announcement, including one whose connect failed.
+    #[test]
+    fn seen_invalid_duplicate_is_not_a_core_accept() {
+        use rbitcoin_consensus::Milestone;
+        use rbitcoin_net::ChainHub;
+
+        let data = [1u8, 221, 181];
+        let case = prepare_cmpct_fuzz_case(&data).expect("recipe");
+        let block = reconstructed_cmpct_block(&case).expect("reconstruct");
+        assert_eq!(
+            block.block_hash().to_string(),
+            "65cf78f7756e9040065276fbbfc42c8c7fd07636edfde1eb703aa735bd274ca5"
+        );
+        assert_eq!(
+            hex_encode(
+                block.txdata[1].input[0]
+                    .previous_output
+                    .txid
+                    .as_byte_array()
+            ),
+            "9213e78bc5a99212e9a1ebf1ac29f173742cc203dde8f53447c390b78e209684"
+        );
+        assert_eq!(block.txdata[1].input[0].previous_output.vout, 0);
+
+        let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("cmpct-seen-invalid");
+        let params = crate::block_diff::diff_regtest_params();
+        let hub = ChainHub::new(q, params, Milestone::NONE);
+        hub.ensure_genesis().unwrap();
+        let oracle = DuplicateStanding {
+            standing: crate::block_diff::BlockStanding::Invalid,
+            submits: std::cell::Cell::new(0),
+        };
+        let fate = follow_reconstructed_cmpct(&hub, &oracle, &case).expect("follow");
+        assert!(
+            matches!(
+                fate,
+                CompareOne::Agreed { accept: false } | CompareOne::Skipped
+            ),
+            "{fate:?}"
+        );
+        assert_ne!(hub.tip_hash(), Some(block.block_hash()));
+        assert!(oracle.submits.get() >= 1);
+    }
+
+    #[test]
+    fn active_coinbase_duplicate_stays_accept() {
+        let oracle = DuplicateStanding {
+            standing: crate::block_diff::BlockStanding::Active,
+            submits: std::cell::Cell::new(0),
+        };
+        let fate = follow_coinbase_only("cmpct-dup-active", &oracle);
+        assert!(
+            matches!(fate, CompareOne::Agreed { accept: true }),
+            "{fate:?}"
+        );
+        assert_eq!(oracle.submits.get(), 1);
     }
 
     #[test]
