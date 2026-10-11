@@ -799,18 +799,10 @@ impl ChainHub {
         let c_h = self.cache.tip_height();
         Ok(match (q_h, c_h) {
             (Some(qh), Some(ch)) if ch > qh => self.cache.tip_hash(),
-            (Some(_), _) => {
-                // Publish lands in the same commit as `tip_height`. One retry
-                // covers the few instructions between those two stores.
-                for _ in 0..2 {
-                    if let Some(p) = self.query.published_tip() {
-                        if self.query.tip_height().map(|h| h.0) == Some(p.height) {
-                            return Ok(Some(BlockHash::from_byte_array(p.hash)));
-                        }
-                    }
-                }
-                None
-            }
+            (Some(qh), _) => self
+                .query
+                .published_tip()
+                .and_then(|p| (p.height == qh).then_some(BlockHash::from_byte_array(p.hash))),
             (None, Some(_)) => self.cache.tip_hash(),
             (None, None) => None,
         })

@@ -97,6 +97,20 @@ fn held_pread_fault_string_exhausts_lookup_recover_at_same_tip() {
     );
 }
 
+#[test]
+fn seed_published_tip_refuses_a_tip_with_no_header() {
+    let (dir, q) = temp_query("seed-no-header");
+    q.store().confirmed.set_raw_for_test(Height(0), 0).unwrap();
+    assert_eq!(q.tip_height(), Some(Height(0)));
+    let err = q.seed_published_tip().unwrap_err();
+    assert!(
+        err.to_string().contains("confirmed tip has no header"),
+        "{err}"
+    );
+    assert!(q.published_tip().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn temp_query(label: &str) -> (crate::testutil::TempDir, Query) {
     crate::testutil::tiny_query_labeled(label)
 }

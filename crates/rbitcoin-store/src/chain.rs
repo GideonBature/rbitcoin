@@ -50,6 +50,13 @@ impl ConfirmedTable {
         Ok(out)
     }
 
+    /// Write a raw slot, including 0. For tests that need a tip length with
+    /// no header fk. Production `set` refuses 0.
+    #[doc(hidden)]
+    pub fn set_raw_for_test(&self, height: Height, value: u64) -> Result<(), StoreError> {
+        self.arr.set(u64::from(height.0), value)
+    }
+
     pub fn set(&self, height: Height, header_fk: Fk) -> Result<(), StoreError> {
         if header_fk.is_null() {
             return Err(StoreError::InvalidFk);

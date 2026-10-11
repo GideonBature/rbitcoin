@@ -78,14 +78,17 @@ impl Query {
 
     /// One header read at open, so the first orchestration pass does not
     /// re-read the tip. Later tips come from [`Self::publish_confirmed_tip`].
+    /// A tip height with no header row is corrupt: leaving the snapshot empty
+    /// would make every later `tip_hash` miss.
     pub(crate) fn seed_published_tip(&self) -> Result<(), QueryError> {
         let Some(tip) = self.tip_height() else {
             self.clear_published_tip();
             return Ok(());
         };
-        if let Some((_, rec)) = self.header_at_height(tip)? {
-            self.publish_confirmed_tip(tip.0, rec.hash);
-        }
+        let Some((_, rec)) = self.header_at_height(tip)? else {
+            return Err(StoreError::Corrupt("confirmed tip has no header"));
+        };
+        self.publish_confirmed_tip(tip.0, rec.hash);
         Ok(())
     }
 
