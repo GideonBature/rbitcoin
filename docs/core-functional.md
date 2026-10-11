@@ -145,7 +145,7 @@ First production-green pair (historical): `feature_uacomment.py`
 | `no-prune` | prune / blk xor / `-blocksdir` |
 | `no-utxo-set` | coins DB / assumeutxo |
 | `no-zmq` / `no-ipc` / `no-qt` | those interfaces |
-| `no-core-rest` | Core REST (`interface_rest.py`); we have Esplora instead |
+| `no-core-rest` | Unmodified `interface_rest.py` (`-rest` on the RPC port, MiniWallet, binary `getutxos`, `-blockfilterindex`). Node `/rest/` is a subset (`methods/rest.rs`, `--rest`), not Esplora, and this script stays `skip` until it is green |
 | `no-tool` | bitcoin-wallet / bitcoin-tx / bitcoin-util / bitcoin-chainstate |
 | `v1-only` | requires v1 or v2→v1 downgrade |
 | `core-log` | `assert_debug_log` string not yet in the debug.log map |
