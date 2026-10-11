@@ -1778,7 +1778,10 @@ fn pin_restart_empty_and_same_process_bq_residue(seed: &P2PNode) {
         .unwrap();
 
     let n = rehydrate_block_queue_residue(&seed.hub).expect("same-process rehydrate");
-    assert_eq!(n, 1, "only above-tip wire is ready");
+    assert_eq!(
+        n, 0,
+        "headerless above-tip wire stays queued but is not confirm-ready"
+    );
     assert!(
         !seed.query.block_queue_has_height(below),
         "drop at/below tip"
