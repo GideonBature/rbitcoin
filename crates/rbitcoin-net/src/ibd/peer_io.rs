@@ -21,7 +21,7 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::BlockHash;
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
@@ -118,6 +118,8 @@ pub(crate) struct PeerSlot {
     pub solicited_bytes: Arc<AtomicU64>,
     /// Mono ms of the last solicited block the reader accepted.
     pub solicited_ms: Arc<AtomicU64>,
+    /// Getdata queued on this peer and not yet written, plus the last write time.
+    pub getdata_wire: Arc<GetdataWire>,
     /// Peer's `version.start_height` (best-effort network tip signal).
     pub peer_height: u32,
     /// Mono ms when the slot became live (post-handshake).
@@ -142,6 +144,75 @@ pub(crate) fn solicit_track() -> (
         Arc::new(AtomicU64::new(0)),
         Arc::new(AtomicU64::new(0)),
     )
+}
+
+/// Outstanding getdata that has not left the process, and when the last new
+/// hash did leave.
+///
+/// The stall window opens at [`Self::wrote`], not when the main loop queues
+/// the command. A repeat of a hash already in flight is not queued, so it
+/// does not move the window.
+pub(crate) struct GetdataWire {
+    unwritten: AtomicUsize,
+    written_ms: AtomicU64,
+}
+
+impl GetdataWire {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            unwritten: AtomicUsize::new(0),
+            written_ms: AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn queue(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.unwritten.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// `n` hashes from one getdata chunk just went out on the socket.
+    pub(crate) fn wrote(&self, n: usize, now_ms: u64) {
+        if n == 0 {
+            return;
+        }
+        self.written_ms.store(now_ms, Ordering::Relaxed);
+        let _ = self
+            .unwritten
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(n))
+            });
+    }
+
+    pub(crate) fn unwritten(&self) -> usize {
+        self.unwritten.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn written_ms(&self) -> u64 {
+        self.written_ms.load(Ordering::Relaxed)
+    }
+}
+
+/// True when this peer owes a block that is already on the wire and neither
+/// that write nor a later requested block is inside `stall_ms`.
+///
+/// An empty window is not a stall. A window whose every hash is still sitting
+/// in the writer is not a stall: the peer has not been asked yet.
+pub(crate) fn getdata_on_wire_stalled(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
+    let outstanding = slot.in_flight.len();
+    if outstanding == 0 {
+        return false;
+    }
+    if slot.getdata_wire.unwritten() >= outstanding {
+        return false;
+    }
+    let mut rate = slot.rate;
+    let written = slot.getdata_wire.written_ms();
+    if written > rate.work_started_ms {
+        rate.work_started_ms = written;
+    }
+    rate.stalled(now_ms, stall_ms, true)
 }
 
 /// In-flight light decodes (inv, addr, tx, cmpct) per IBD peer. Not a knob.
@@ -295,6 +366,10 @@ pub(crate) fn sample_peer_rates(slots: &mut [PeerSlot], now_ms: u64) {
         let mark = s.solicited_ms.load(Ordering::Relaxed);
         if mark > s.rate.progress_ms {
             s.rate.progress_ms = mark;
+        }
+        let asked = s.getdata_wire.written_ms();
+        if asked > s.rate.work_started_ms {
+            s.rate.work_started_ms = asked;
         }
         let bytes = s.solicited_bytes.load(Ordering::Relaxed);
         s.rate.sample(now_ms, bytes, !s.in_flight.is_empty());
@@ -601,6 +676,7 @@ async fn write_ibd_peer(
     mut out_rx: mpsc::UnboundedReceiver<NetworkMessage>,
     mut writer: V2Writer,
     sinks_w: PeerEventSinks,
+    wire: Arc<GetdataWire>,
 ) {
     loop {
         tokio::select! {
@@ -653,6 +729,7 @@ async fn write_ibd_peer(
                                 });
                                 return;
                             }
+                            wire.wrote(chunk.len(), ibd_mono_ms());
                         }
                     }
                     Some(PeerCmd::Shutdown) | None => break,
@@ -712,6 +789,8 @@ pub(crate) async fn spawn_peer(
     let bytes_rx_total = Arc::new(AtomicU64::new(0));
     let bytes_io = Arc::clone(&bytes_rx_total);
     let (requested, solicited_bytes, solicited_ms) = solicit_track();
+    let getdata_wire = GetdataWire::new();
+    let wire_w = Arc::clone(&getdata_wire);
     let req_r = Arc::clone(&requested);
     let sol_bytes_r = Arc::clone(&solicited_bytes);
     let sol_ms_r = Arc::clone(&solicited_ms);
@@ -755,7 +834,7 @@ pub(crate) async fn spawn_peer(
         tokio::task::yield_now().await;
 
         let sinks_w = sinks;
-        let writer_task = tokio::spawn(write_ibd_peer(id, cmd_rx, out_rx, writer, sinks_w));
+        let writer_task = tokio::spawn(write_ibd_peer(id, cmd_rx, out_rx, writer, sinks_w, wire_w));
 
         let mut guard = PeerIoTasks {
             reader: reader_task,
@@ -776,6 +855,7 @@ pub(crate) async fn spawn_peer(
         requested,
         solicited_bytes,
         solicited_ms,
+        getdata_wire,
         peer_height,
         connected_ms: ibd_mono_ms(),
         first_data_ms: 0,
@@ -874,6 +954,7 @@ mod tests {
             requested: Arc::new(Mutex::new(HashSet::new())),
             solicited_bytes: Arc::new(AtomicU64::new(0)),
             solicited_ms: Arc::new(AtomicU64::new(0)),
+            getdata_wire: GetdataWire::new(),
             peer_height: 100,
             connected_ms: 1,
             first_data_ms: 0,
