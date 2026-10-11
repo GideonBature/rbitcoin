@@ -1,3 +1,3 @@
 Fixed
 
-- **IBD block accept and confirm lookup no longer share one body-queue lock.** Height rows are striped, hash presence is its own index, and the decoded stash is a third lock. A lookup wave cannot stall getdata into RAM, and a presence check cannot stall lookup.
+- **IBD block accept no longer scans the body queue under the lock lookup uses.** Hash presence is a map lookup, and lookup's decoded stash is its own lock, so a presence check cannot stall confirm lookup.

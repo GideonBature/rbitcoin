@@ -3,7 +3,6 @@
 mod archive;
 mod batch_parents;
 mod block_filter;
-mod body_queue;
 #[cfg(test)]
 mod bq_lock_pin;
 mod catchup;
@@ -285,12 +284,13 @@ pub struct Query {
     index_released_through: AtomicU32,
     /// Block-structured confirm parent cache.
     confirm_parents: confirm_parent_cache::ConfirmParentCache,
-    /// In-RAM body queue. Height stripes, the getdata hash index, and lookup's
-    /// decoded stash are separate locks ([`body_queue::BodyQueue`]).
+    /// In-RAM body rows. `has_hash` is a map lookup on this mutex, not a scan.
     ///
     /// RAM-only by design: avoids double-writing every block (queue + Class A).
     /// Accepts redownload on restart and peak RAM of soft densify depth.
-    block_queue: body_queue::BodyQueue,
+    block_queue: Mutex<rbitcoin_store::BlockQueue>,
+    /// Lookup's decoded wires. Getdata enqueue and `has_hash` never lock this.
+    bq_resolved: Mutex<HashMap<u32, ResolvedWire>>,
     /// Last soft-assign restricted flag (over free-byte floor; cache for meters).
     block_queue_pressure: AtomicBool,
     /// Last 1-min confirm window (`bq soft=n/win` `win`). 0 = rate unknown.
@@ -458,7 +458,8 @@ impl Query {
             sh: ShWriteBehind::new(),
             index_released_through: AtomicU32::new(0),
             confirm_parents: confirm_parent_cache::ConfirmParentCache::new(),
-            block_queue: body_queue::BodyQueue::open(&store_path)?,
+            block_queue: Mutex::new(rbitcoin_store::BlockQueue::open_or_create(&store_path)?),
+            bq_resolved: Mutex::new(HashMap::new()),
             block_queue_pressure: AtomicBool::new(false),
             soft_confirm_window: AtomicU32::new(0),
             lookup_taken: AtomicU64::new(u32::MAX as u64),
@@ -1365,18 +1366,18 @@ impl Query {
     /// Bytes are process heap (wire payloads). First field is the densify
     /// assign-stop ([`bq_assign_stop_bytes`]; `u64::MAX` when unlimited).
     pub fn block_queue_stats(&self) -> (u64, u64, usize) {
-        let (bytes, count) = self.block_queue.bytes_and_count();
-        (bq_assign_stop_bytes(), bytes, count)
+        let g = self.block_queue.lock().unwrap();
+        (bq_assign_stop_bytes(), g.bytes(), g.count())
     }
 
     /// In-RAM entry count (soft time-depth meter).
     pub fn block_queue_count(&self) -> usize {
-        self.block_queue.count()
+        self.block_queue.lock().unwrap().count()
     }
 
     /// Highest height on the in-RAM body queue (`None` if empty).
     pub fn block_queue_max_height(&self) -> Option<u32> {
-        self.block_queue.max_height()
+        self.block_queue.lock().unwrap().max_height()
     }
 
     /// Refresh soft-assign restricted flag from current BQ bytes (no latch).
@@ -1390,7 +1391,7 @@ impl Query {
             soft_confirm_window_n(rate_blocks_per_s),
             AtomicOrdering::Relaxed,
         );
-        let depth_bytes = self.block_queue.bytes();
+        let depth_bytes = self.block_queue.lock().unwrap().bytes();
         let restricted = soft_assign_restricted(depth_bytes);
         self.block_queue_pressure
             .store(restricted, AtomicOrdering::Relaxed);
@@ -1563,7 +1564,7 @@ impl Query {
         payload: &[u8],
         sender: Option<u64>,
     ) -> Result<BlockQueueOffer, QueryError> {
-        if let Some(id) = self.block_queue.id_for_height(height) {
+        if let Some(id) = self.block_queue.lock().unwrap().id_for_height(height) {
             return Ok(BlockQueueOffer { queue_id: id });
         }
         let Some(n_inputs) = rbitcoin_store::block_wire_input_count(payload) else {
@@ -1600,6 +1601,8 @@ impl Query {
     ) -> Result<BlockQueueOffer, QueryError> {
         let id = self
             .block_queue
+            .lock()
+            .unwrap()
             .enqueue_vec(height, hash, header_fk, owned, n_inputs, sender)?;
         Ok(BlockQueueOffer { queue_id: id })
     }
@@ -1613,30 +1616,41 @@ impl Query {
         payload: &[u8],
     ) -> Result<u64, QueryError> {
         let n_inputs = rbitcoin_store::block_wire_input_count(payload).unwrap_or(0);
-        self.block_queue
-            .enqueue_vec(height, hash, header_fk, payload.to_vec(), n_inputs, None)
+        self.block_queue.lock().unwrap().enqueue_vec(
+            height,
+            hash,
+            header_fk,
+            payload.to_vec(),
+            n_inputs,
+            None,
+        )
     }
 
     /// Remove RAM queue entry after combined confirm-write (or permanent drop).
     pub fn block_queue_dequeue_height(&self, height: u32) -> Result<usize, QueryError> {
-        self.block_queue.dequeue_height(height)
+        let n = self.block_queue.lock().unwrap().dequeue_height(height)?;
+        self.bq_resolved.lock().unwrap().remove(&height);
+        Ok(n)
     }
 
-    /// Index-only queue entries (no payload clone). Empty after restart.
-    ///
-    /// Locks one height stripe at a time. Not the getdata hot path.
+    /// Index-only queue entries (ascending id, no payload clone). Empty after restart.
     pub fn block_queue_list_meta(&self) -> Vec<rbitcoin_store::QueuedBlockMeta> {
-        self.block_queue.list_meta()
+        self.block_queue.lock().unwrap().list_meta()
     }
 
     /// Distinct queued heights. Lookup keep must not use `list_meta`.
     pub fn block_queue_queued_heights(&self) -> std::collections::BTreeSet<u32> {
-        self.block_queue.queued_heights()
+        self.block_queue
+            .lock()
+            .unwrap()
+            .heights()
+            .into_iter()
+            .collect()
     }
 
     /// Lowest unresolved BQ heights `≥ path_lo` not in `skip`, capped at `cap`.
     ///
-    /// One height stripe at a time. Lookup wave select must use this instead of
+    /// One row-lock. Lookup wave select must use this instead of
     /// `list_meta` + per-height `is_resolve_complete`.
     ///
     /// Heights `≤ lookup_taken_hi` are already on loadq (`take_raw` removed
@@ -1652,7 +1666,10 @@ impl Query {
             Some(hi) => path_lo.max(hi.saturating_add(1)),
             None => path_lo,
         };
-        self.block_queue.unresolved_heights(start, skip, cap)
+        self.block_queue
+            .lock()
+            .unwrap()
+            .unresolved_heights(start, skip, cap)
     }
 
     /// Body-queue intake: raw payload for `height` without dequeue.
@@ -1660,7 +1677,12 @@ impl Query {
     /// Empty after lookup promote (decoded lives in [`Self::block_queue_resolved`]).
     /// Peer enqueues raw; lookup promotes to decoded-only — never both.
     pub fn block_queue_payload(&self, height: u32) -> Result<Option<Vec<u8>>, QueryError> {
-        self.block_queue.payload(height)
+        Ok(self
+            .block_queue
+            .lock()
+            .unwrap()
+            .get_by_height(height)?
+            .map(|q| q.payload))
     }
 
     /// Raw frame only. `None` when missing or already promoted.
@@ -1668,12 +1690,12 @@ impl Query {
         &self,
         height: u32,
     ) -> Result<Option<std::sync::Arc<Vec<u8>>>, QueryError> {
-        Ok(self.block_queue.raw_payload(height))
+        Ok(self.block_queue.lock().unwrap().raw_payload(height))
     }
 
     /// Take-and-reset BQ raw-payload clone count (instance stats).
     pub fn block_queue_take_raw_clone_n(&self) -> u64 {
-        self.block_queue.take_raw_clone_n()
+        self.block_queue.lock().unwrap().take_raw_clone_n()
     }
 
     /// Payload for a block **hash** if present on the RAM queue (any height).
@@ -1684,26 +1706,61 @@ impl Query {
         &self,
         hash: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, QueryError> {
-        self.block_queue.payload_by_hash(hash)
+        use bitcoin::consensus::encode::serialize;
+        let promoted = {
+            let g = self.block_queue.lock().unwrap();
+            let mut raw = None;
+            let mut promoted = None;
+            for height in g.heights_for_hash(hash) {
+                if g.hash_at_height(height) != Some(*hash) {
+                    continue;
+                }
+                if let Some(payload) = g.raw_payload(height) {
+                    raw = Some((*payload).clone());
+                    break;
+                }
+                if g.contains_height(height) {
+                    promoted = Some(height);
+                    break;
+                }
+            }
+            if let Some(bytes) = raw {
+                return Ok(Some(bytes));
+            }
+            promoted
+        };
+        let Some(height) = promoted else {
+            return Ok(None);
+        };
+        Ok(self
+            .bq_resolved
+            .lock()
+            .unwrap()
+            .get(&height)
+            .map(|w| serialize(w.block.as_ref())))
     }
 
     /// True if any RAM queue entry has `hash` (meta only — no payload clone).
     ///
     /// Prefer this over [`Self::block_queue_payload_by_hash`] on hot readiness
-    /// checks (reorg densify / exploration gate). Locks one hash stripe, not
-    /// the height rows or the decoded stash.
+    /// checks (reorg densify / exploration gate). One map lookup on the row
+    /// lock, not a scan, and never the decoded stash.
     pub fn block_queue_has_hash(&self, hash: &[u8; 32]) -> bool {
-        self.block_queue.has_hash(hash)
+        self.block_queue.lock().unwrap().has_hash(hash)
     }
 
     /// True if the in-RAM body queue holds `height`.
     pub fn block_queue_has_height(&self, height: u32) -> bool {
-        self.block_queue.contains_height(height)
+        self.block_queue.lock().unwrap().contains_height(height)
     }
 
     /// Take raw payload and remove the BQ row (lookup consume).
     pub fn block_queue_take_raw(&self, height: u32) -> Option<rbitcoin_store::TakenRaw> {
-        self.block_queue.take_raw(height)
+        let taken = self.block_queue.lock().unwrap().take_raw(height);
+        if taken.is_some() {
+            self.bq_resolved.lock().unwrap().remove(&height);
+        }
+        taken
     }
 
     /// Hash of the first body-queue entry at `height`, if any.
@@ -1711,57 +1768,97 @@ impl Query {
     /// Used by claim-ready so a **wrong** first-wins body at tip+1 is not treated
     /// as ready (hole forever / BadPrev thrash).
     pub fn block_queue_hash_at_height(&self, height: u32) -> Option<[u8; 32]> {
-        self.block_queue.hash_at_height(height)
+        self.block_queue.lock().unwrap().hash_at_height(height)
     }
 
     /// Lookup finished TipOnly for this height (even if some keys missed).
     pub fn block_queue_mark_resolve_complete(&self, height: u32) -> Result<(), QueryError> {
-        self.block_queue.mark_resolve_complete(height)
+        self.block_queue
+            .lock()
+            .unwrap()
+            .mark_resolve_complete(height)
     }
 
     pub fn block_queue_is_resolve_complete(&self, height: u32) -> bool {
-        self.block_queue.is_resolve_complete(height)
+        self.block_queue.lock().unwrap().is_resolve_complete(height)
     }
 
     /// Classify `heights` as still-raw vs already promoted.
     ///
-    /// One height stripe at a time, then the decoded stash. Skips
+    /// Row lock, then the decoded stash (not held together). Skips
     /// resolve-complete rows. **Does not clone raw payloads.** Decode pulls
     /// [`Self::block_queue_raw_payload`] per height outside these locks.
-    /// Does not take the getdata hash index.
     pub fn block_queue_wave_intake(&self, heights: &[u32]) -> BlockQueueWaveIntake {
-        self.block_queue.wave_intake(heights)
+        let mut out = BlockQueueWaveIntake::default();
+        let mut promoted = Vec::new();
+        {
+            let g = self.block_queue.lock().unwrap();
+            for &h in heights {
+                if g.is_resolve_complete(h) {
+                    continue;
+                }
+                if g.has_raw(h) {
+                    out.raw.push((
+                        h,
+                        g.input_count_at(h).unwrap_or(0),
+                        g.header_fk_at(h).unwrap_or(0),
+                        g.sender_at(h),
+                    ));
+                } else if g.contains_height(h) {
+                    promoted.push(h);
+                }
+            }
+        }
+        if !promoted.is_empty() {
+            let stash = self.bq_resolved.lock().unwrap();
+            for h in promoted {
+                if let Some(wire) = stash.get(&h) {
+                    out.resolved.push((h, wire.clone()));
+                }
+            }
+        }
+        out
     }
 
     /// Drop raw and insert decoded, charging `max(payload, decoded)`.
     ///
-    /// Height stripes one at a time, then the decoded stash. Does not take
-    /// the getdata hash index.
+    /// Decoded stash first, then the row lock, so a promoted row always has
+    /// a stash entry. The two locks are not held together.
     pub fn block_queue_promote_wave(
         &self,
         items: Vec<(u32, ResolvedWire, u64)>,
     ) -> Result<usize, QueryError> {
-        self.block_queue.promote_wave(items)
+        {
+            let mut stash = self.bq_resolved.lock().unwrap();
+            for (height, wire, _) in &items {
+                stash.insert(*height, wire.clone());
+            }
+        }
+        let charges: Vec<(u32, u64)> = items.iter().map(|(h, _, c)| (*h, *c)).collect();
+        self.block_queue.lock().unwrap().promote_wave(&charges)
     }
 
     pub fn block_queue_resolved(&self, height: u32) -> Option<ResolvedWire> {
-        self.block_queue.resolved(height)
+        self.bq_resolved.lock().unwrap().get(&height).cloned()
     }
 
     /// Disconnect: drop decoded stash at `height` and above.
     pub fn block_queue_drop_resolved_from(&self, height: u32) {
-        self.block_queue.drop_resolved_from(height);
+        self.bq_resolved.lock().unwrap().retain(|&h, _| h < height);
     }
 
     pub fn block_queue_promoted_count(&self) -> usize {
-        self.block_queue.promoted_count()
+        self.block_queue.lock().unwrap().promoted_count()
     }
 
     pub fn block_queue_mark_resolve_complete_wave(
         &self,
         heights: &[u32],
     ) -> Result<usize, QueryError> {
-        self.block_queue.mark_resolve_complete_wave(heights)
+        self.block_queue
+            .lock()
+            .unwrap()
+            .mark_resolve_complete_wave(heights)
     }
 
     /// Cheap process-owned cache sizes for the IBD `ibd: sizes` line.

@@ -1,6 +1,5 @@
-//! Pins: getdata→BQ and lookup do not share a lock.
-//!
-//! Each test holds one side and requires the other side to finish.
+//! Pins: getdata→BQ does not take lookup's decoded-stash lock, and queue
+//! ids stay unique in enqueue order.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,7 +8,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use super::body_queue::height_stripe;
 use super::Query;
 
 fn open() -> Arc<Query> {
@@ -43,25 +41,26 @@ fn assert_independent(reason: &str, hold: impl Sized, work: impl FnOnce() + Send
 #[test]
 fn getdata_enqueue_does_not_wait_on_lookup_resolved() {
     let q = open();
-    let hold = q.block_queue.hold_resolved();
+    let hold = q.bq_resolved.lock().unwrap();
     let q2 = Arc::clone(&q);
     assert_independent(
         "getdata enqueue waited on lookup's decoded stash",
         hold,
         move || {
             q2.block_queue_enqueue(7, [7u8; 32], 1, b"payload").unwrap();
+            assert!(q2.block_queue_has_hash(&[7u8; 32]));
         },
     );
 }
 
 #[test]
-fn lookup_read_does_not_wait_on_getdata_hash_index() {
+fn lookup_read_does_not_wait_on_decoded_stash() {
     let q = open();
     q.block_queue_enqueue(4, [4u8; 32], 1, b"raw").unwrap();
-    let hold = q.block_queue.hold_hash_index();
+    let hold = q.bq_resolved.lock().unwrap();
     let q2 = Arc::clone(&q);
     assert_independent(
-        "lookup read waited on the getdata hash index",
+        "lookup row read waited on the decoded stash",
         hold,
         move || {
             assert!(q2.block_queue_hash_at_height(4).is_some());
@@ -73,44 +72,11 @@ fn lookup_read_does_not_wait_on_getdata_hash_index() {
 }
 
 #[test]
-fn getdata_other_height_does_not_wait_on_lookup_stripe() {
-    assert_ne!(
-        height_stripe(1),
-        height_stripe(2),
-        "pin heights must not share a stripe"
-    );
-    let q = open();
-    q.block_queue_enqueue(1, [1u8; 32], 1, b"a").unwrap();
-    let hold = q.block_queue.hold_height_stripe(1);
-    let q2 = Arc::clone(&q);
-    assert_independent(
-        "getdata on another height waited on lookup's height stripe",
-        hold,
-        move || {
-            q2.block_queue_enqueue(2, [2u8; 32], 1, b"b").unwrap();
-            assert!(q2.block_queue_has_hash(&[2u8; 32]));
-        },
-    );
-}
-
-#[test]
-fn has_hash_does_not_wait_on_height_stripe() {
-    let q = open();
-    q.block_queue_enqueue(3, [9u8; 32], 1, b"c").unwrap();
-    let hold = q.block_queue.hold_height_stripe(3);
-    let q2 = Arc::clone(&q);
-    assert_independent("has_hash waited on a height stripe", hold, move || {
-        assert!(q2.block_queue_has_hash(&[9u8; 32]));
-    });
-}
-
-#[test]
 fn has_hash_tracks_each_height_until_dequeue() {
     let q = open();
     let hash = [9u8; 32];
     q.block_queue_enqueue(1, hash, 1, b"a").unwrap();
     q.block_queue_enqueue(17, hash, 1, b"b").unwrap();
-    assert_eq!(height_stripe(1), height_stripe(17));
     assert!(q.block_queue_has_hash(&hash));
     assert_eq!(q.block_queue_dequeue_height(1).unwrap(), 1);
     assert!(q.block_queue_has_hash(&hash));
