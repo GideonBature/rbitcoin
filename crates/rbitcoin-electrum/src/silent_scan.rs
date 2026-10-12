@@ -149,11 +149,7 @@ fn encode_sp_address(network: Network, scan_sk: &SecretKey, spend: &PublicKey) -
 }
 
 fn param_str(params: &Value, i: usize) -> Result<&str, String> {
-    params
-        .as_array()
-        .and_then(|a| a.get(i))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "expected string".into())
+    crate::server::param_str(params, i)
 }
 
 #[cfg(test)]
@@ -161,6 +157,14 @@ mod tests {
     use super::*;
     use bitcoin::secp256k1::Secp256k1;
     use serde_json::json;
+
+    #[test]
+    fn parse_sub_indexes_a_non_string_param() {
+        match parse_sub(&json!([1, "02"]), Network::Regtest, Some(0)) {
+            Err(err) => assert_eq!(err, "param 0 expected string"),
+            Ok(_) => panic!("a non-string scan key must fail"),
+        }
+    }
 
     #[test]
     fn parse_sub_rejects_short_scan_key() {

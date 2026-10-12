@@ -2111,7 +2111,7 @@ fn header_hex(hdr: &bitcoin::block::Header) -> String {
     rbitcoin_primitives::hex_encode(buf)
 }
 
-fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {
+pub(crate) fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {
     params
         .as_array()
         .and_then(|a| a.get(idx))
@@ -2341,7 +2341,7 @@ fn parse_get_history_window(params: &Value) -> Result<(HistoryFilter, bool), Str
     Ok((HistoryFilter::height_window(from, to_excl), include_mempool))
 }
 
-fn param_str(params: &Value, idx: usize) -> Result<&str, String> {
+pub(crate) fn param_str(params: &Value, idx: usize) -> Result<&str, String> {
     params
         .as_array()
         .and_then(|a| a.get(idx))
