@@ -57,8 +57,8 @@ use exit::{
 };
 use peer_io::{empty_header_fk_bus, sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
 use progress::{
-    claim_ready, format_progress_line, ibd_pct, work_chain_progress, ProgressLineInput,
-    TipRateTracker,
+    claim_ready, format_progress_line, ibd_pct, read_progress_published, work_chain_progress_at,
+    ProgressLineInput, TipRateTracker,
 };
 use published::{apply_published_header_rows, spawn_header_thread};
 use state::HeaderCmd;
@@ -815,8 +815,10 @@ pub async fn ibd_cancellable(
                 let window_secs = last_status.elapsed().as_secs_f64().max(0.001);
                 let scan_t0 = Instant::now();
                 let horizon = header_walk::peer_horizon(st);
-                let prog = work_chain_progress(
+                let published = read_progress_published(&hub.query);
+                let prog = work_chain_progress_at(
                     hub.as_ref(),
+                    published.tip,
                     &st.height_to_hash,
                     &mut st.body,
                     horizon,
@@ -830,13 +832,13 @@ pub async fn ibd_cancellable(
                 let tip_rate = tip_delta as f64 / window_secs;
                 let peers_n = st.slots.iter().filter(|s| s.alive).count();
                 let (load_q, script_q, write_q) = confirm_queues.snap();
-                let path_lo = hub.tip_height().map(|t| t.saturating_add(1)).unwrap_or(0);
+                let path_lo = published.tip.map(|t| t.saturating_add(1)).unwrap_or(0);
                 let inflight_h = {
                     let g = confirm_feed.inner.lock().unwrap();
                     g.inflight.clone()
                 };
                 let ready_n = confirm::confirm_ready_count(&hub.query, path_lo, &inflight_h);
-                let txs = hub.query.tx_body_count();
+                let txs = published.txs;
                 let pct = ibd_pct(prog.tip, prog.headers);
                 let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
 
@@ -887,8 +889,9 @@ pub async fn ibd_cancellable(
                 conf_pipe.ready = ready_n;
                 conf_pipe.feed_ready = feed_ready;
                 conf_pipe.feed_inflight = feed_inflight;
-                let work_sizes = st.structure_sizes();
-                let owned_sizes = hub.query.process_owned_size_snapshot();
+                let mut work_sizes = st.structure_sizes();
+                work_sizes.ordered = usize::try_from(published.header_rows).unwrap_or(usize::MAX);
+                let owned_sizes = published.owned;
                 let rss = perf_log::read_platform_rss();
                 let perf = perf_log::sample(
                     &loop_stats,
@@ -903,7 +906,7 @@ pub async fn ibd_cancellable(
                     script_q,
                     write_q,
                     conf_q_hwm,
-                    hub.query.scripthash_run_count(),
+                    published.sh_runs,
                     work_sizes,
                     owned_sizes,
                     conf_pipe,
@@ -939,7 +942,7 @@ pub async fn ibd_cancellable(
                         &mut st.max_ready_height,
                         &max_ready_shared,
                     );
-                    update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
+                    update_confirm_lag(&confirm_lag, published.tip, st.max_ready_height);
                     warn!(
                     "ibd: tip stall tip={} expect={expect} hth={} claim_ready={ready} has_block={has} \
                      in_ordered={in_set} offer_noted={noted} hwm={} ordered_len={} feed_ready={} \

@@ -368,6 +368,7 @@ impl Query {
 
     /// On-disk scripthash sorted-run count (Direct IBD cache).
     pub fn scripthash_run_count(&self) -> usize {
+        super::note_scripthash_run_count_call();
         self.sh_run.on_disk_run_count()
     }
 

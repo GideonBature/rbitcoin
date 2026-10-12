@@ -68,6 +68,7 @@ pub(crate) fn apply_published_and_stall(
 fn publish_new_rows(
     published: &ArcSwap<Vec<HeaderPathRow>>,
     header_fks: &super::peer_io::HeaderFkBus,
+    query: &rbitcoin_query::Query,
     st: &IbdWorkState,
     before: &HashSet<BlockHash>,
 ) {
@@ -92,6 +93,7 @@ fn publish_new_rows(
             fk,
         });
     }
+    query.publish_header_rows(st.ordered.len() as u64);
     if rows.is_empty() {
         return;
     }
@@ -130,7 +132,7 @@ pub(crate) fn spawn_header_thread(
                         let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
                         let before: HashSet<BlockHash> = st.ordered.iter().copied().collect();
                         apply_headers_event(&mut st, hub.as_ref(), peer, headers);
-                        publish_new_rows(&published, &header_fks, &st, &before);
+                        publish_new_rows(&published, &header_fks, &hub.query, &st, &before);
                     }
                     set_apply_inline(false);
                     clear_prepared_batch();
@@ -164,7 +166,7 @@ pub(crate) fn spawn_header_thread(
                     let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
                     let before: HashSet<BlockHash> = st.ordered.iter().copied().collect();
                     install_resumed_path(&mut st, hub.as_ref(), &path);
-                    publish_new_rows(&published, &header_fks, &st, &before);
+                    publish_new_rows(&published, &header_fks, &hub.query, &st, &before);
                 }
             }
         }

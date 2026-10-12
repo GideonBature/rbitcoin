@@ -750,6 +750,23 @@ pub(crate) enum ConfirmEvent {
     },
 }
 
+fn publish_confirm_progress(query: &rbitcoin_query::Query) {
+    use std::cell::Cell;
+    thread_local! {
+        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+    let due = LAST.with(|cell| match cell.get() {
+        Some(t) if t.elapsed() < Duration::from_secs(5) => false,
+        _ => {
+            cell.set(Some(Instant::now()));
+            true
+        }
+    });
+    if due {
+        query.publish_progress_snapshots();
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 fn emit_confirm_reject(
     tx: &std::sync::mpsc::Sender<ConfirmEvent>,
@@ -1708,6 +1725,7 @@ pub(crate) fn spawn_confirm_engine(
                 if feed_wb.stopped() || hub_wb.query.confirm_cancelled() {
                     break;
                 }
+                publish_confirm_progress(&hub_wb.query);
                 let n = batch.len();
                 let first_h = batch.heights_hashes().first().map(|(h, _)| *h).unwrap_or(0);
                 let t0 = Instant::now();
