@@ -34,6 +34,22 @@ pub const BQ_RESOLVE_WAVE_MIN_INPUTS: u32 = 8000;
 /// Safety cap so one megablock run cannot stall the wave.
 pub const BQ_RESOLVE_WAVE_MAX_KEYS: usize = 256_000;
 
+/// Stop before another height once the key cap is hit and this wave already
+/// has a height. An empty `done` still emits the height that filled the cap.
+fn stop_for_key_cap(n_keys: usize, done: usize) -> bool {
+    n_keys >= BQ_RESOLVE_WAVE_MAX_KEYS && done > 0
+}
+
+/// Soft window at least one day of blocks, and the queue has not filled it.
+fn wave_queue_still_filling(win: u32, queued: u32) -> bool {
+    win >= 144 && queued < win
+}
+
+/// More BQ heights than this wave, or the queue is still filling that window.
+fn wave_more_remain(selected: usize, requested: usize, filling: bool) -> bool {
+    selected < requested || filling
+}
+
 /// Same include-overshoot rule as load [`pack_stop_after`]: stop after the
 /// block that crosses the soft input budget or hits the hard height cap.
 #[inline]
@@ -230,8 +246,8 @@ pub fn confirm_bq_resolve_wave_capped(
             .map(|h| h.0.saturating_add(1))
             .unwrap_or(0);
         let win = query.soft_confirm_window();
-        let filling = win >= 144 && (query.block_queue_count() as u32) < win;
-        let more_remain = selected.len() < heights.len() || filling;
+        let filling = wave_queue_still_filling(win, query.block_queue_count() as u32);
+        let more_remain = wave_more_remain(selected.len(), heights.len(), filling);
         if bq_resolve_wave_hold_partial(
             query.block_queue_count() as u32,
             query.soft_confirm_window(),
@@ -263,7 +279,7 @@ pub fn confirm_bq_resolve_wave_capped(
 
     let mut undecodable = None;
     for &h in &selected {
-        if all_keys.len() >= BQ_RESOLVE_WAVE_MAX_KEYS && !done.is_empty() {
+        if stop_for_key_cap(all_keys.len(), done.len()) {
             break;
         }
         let hash = query.block_queue_hash_at_height(h).unwrap_or([0u8; 32]);
@@ -629,6 +645,30 @@ mod tests {
             vec![(prev.to_byte_array(), 0), (prev.to_byte_array(), 1),],
             "spend_keys must still carry same-wave prevs for in-flight stamp"
         );
+
+        // Regtest BIP34 starts at height 1. Height 0 still records the create txid.
+        let pre = Block {
+            header: block.header,
+            txdata: block.txdata.clone(),
+        };
+        let pre_pres: Vec<TxPrecompute> = pre.txdata.iter().map(TxPrecompute::from_tx).collect();
+        let cb = pre_pres[0].txid;
+        let mut pre_keys: HashSet<[u8; 32], BuildHasherDefault<TxidHasher>> =
+            HashSet::with_hasher(BuildHasherDefault::default());
+        push_resolve_keys(&params, 0, &pre, &pre_pres, &skip, &mut pre_keys, 1);
+        assert!(
+            pre_keys.contains(&cb),
+            "before BIP34 the create txid is a resolve key"
+        );
+        let mut skip_cb = HashSet::with_hasher(BuildHasherDefault::default());
+        skip_cb.insert(cb);
+        let mut hidden: HashSet<[u8; 32], BuildHasherDefault<TxidHasher>> =
+            HashSet::with_hasher(BuildHasherDefault::default());
+        push_resolve_keys(&params, 0, &pre, &pre_pres, &skip_cb, &mut hidden, 1);
+        assert!(
+            !hidden.contains(&cb),
+            "a skipped create txid is not a TipOnly key"
+        );
     }
 
     #[test]
@@ -801,6 +841,17 @@ mod tests {
         assert_eq!(BQ_RESOLVE_WAVE_MAX_INPUTS, 64_000);
         assert_eq!(BQ_RESOLVE_WAVE_MIN_INPUTS, 8000);
         assert_eq!(BQ_RESOLVE_WAVE_MAX_KEYS, 256_000);
+        assert!(!stop_for_key_cap(BQ_RESOLVE_WAVE_MAX_KEYS, 0));
+        assert!(stop_for_key_cap(BQ_RESOLVE_WAVE_MAX_KEYS, 1));
+        assert!(!stop_for_key_cap(BQ_RESOLVE_WAVE_MAX_KEYS - 1, 1));
+        assert!(!wave_queue_still_filling(143, 10));
+        assert!(wave_queue_still_filling(144, 143));
+        assert!(wave_queue_still_filling(200, 10));
+        assert!(!wave_queue_still_filling(144, 144));
+        assert!(!wave_queue_still_filling(100, 50));
+        assert!(wave_more_remain(1, 2, false));
+        assert!(!wave_more_remain(1, 1, false));
+        assert!(wave_more_remain(1, 1, true));
         const {
             assert!(BQ_RESOLVE_WAVE_MAX_BLOCKS >= 144 * 4);
             assert!(BQ_RESOLVE_WAVE_MAX_INPUTS >= BQ_RESOLVE_WAVE_MIN_INPUTS * 8);
@@ -864,6 +915,14 @@ mod tests {
         assert!(
             !bq_resolve_wave_hold_partial(0, 180, 4_000, 1, 100, 100, false, MAX_IN, MAX_BL),
             "last available thin wave must emit (tip / empty BQ)"
+        );
+        assert!(
+            !bq_resolve_wave_hold_partial(0, 0, 8_000, 1, 100, 150, true, MAX_IN, MAX_BL),
+            "exactly 8000 inputs is not under the floor"
+        );
+        assert!(
+            !bq_resolve_wave_hold_partial(90, 180, 9_000, 1, 100, 191, false, MAX_IN, MAX_BL),
+            "ready equal to half the window does not hold"
         );
         assert!(!bq_resolve_wave_hold_partial(
             0, 180, 8_000, 2, 100, 100, true, MAX_IN, MAX_BL
@@ -1007,6 +1066,34 @@ mod tests {
             q.lookup_started_hi().is_none(),
             "hold_partial must not bump started_hi; got {:?}",
             q.lookup_started_hi()
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn resolve_wave_emits_a_promoted_height() {
+        use rbitcoin_query::{ResolvedWire, TxPrecompute};
+        use std::sync::Arc;
+
+        let (path, q) = tmp_query();
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        q.block_queue_enqueue(1, b1.block_hash().to_byte_array(), 1, &serialize(&b1))
+            .unwrap();
+        let pres: Arc<[TxPrecompute]> = b1
+            .txdata
+            .iter()
+            .map(TxPrecompute::from_tx)
+            .collect::<Vec<_>>()
+            .into();
+        let wire = ResolvedWire::new(Arc::new(b1), pres);
+        q.block_queue_promote_wave(vec![(1, wire, 64)]).unwrap();
+        let wave = resolve_wave(&q, &params, Milestone::NONE, &[1]);
+        assert_eq!(
+            wave.stats.heights, 1,
+            "a promoted row is still part of the wave"
         );
         let _ = std::fs::remove_dir_all(&path);
     }

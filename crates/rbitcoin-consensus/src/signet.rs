@@ -545,6 +545,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)] // one parser, many length boundaries
     fn compact_size_and_solution_parse_errors() {
         use rbitcoin_primitives::read_compact_size_from;
         assert_eq!(read_compact_size_from(&mut (&[0u8][..])).unwrap(), 0);
@@ -564,6 +565,17 @@ mod tests {
         assert!(read_compact_size_from(&mut (&[254u8, 0][..])).is_err());
         assert!(read_compact_size_from(&mut (&[255u8, 0, 0, 0][..])).is_err());
 
+        // A push that is only the header has no payload (`len > header`, not `>=`).
+        let mut header_only = vec![SIGNET_HEADER.len() as u8];
+        header_only.extend_from_slice(&SIGNET_HEADER);
+        assert!(fetch_and_clear_signet_section(&header_only).is_none());
+        // Script bytes that end the buffer are not "short"; the witness count is.
+        let err = parse_signet_solution(&[0x01, 0xaa]).unwrap_err();
+        assert!(!err.to_string().contains("scriptSig short"), "{err}");
+        // A witness item that fills the buffer is complete.
+        let (ss, wit) = parse_signet_solution(&[0x00, 0x01, 0x01, 0xaa]).unwrap();
+        assert!(ss.is_empty());
+        assert_eq!(wit.to_vec(), vec![vec![0xaa]]);
         // Empty solution: scriptSig compact 0 + witness count 0.
         let (ss, wit) = parse_signet_solution(&[0x00, 0x00]).unwrap();
         assert!(ss.is_empty());
@@ -675,6 +687,9 @@ mod tests {
         let cb = block.txdata[0].clone();
         let root = modified_merkle_root(&cb, &block).unwrap();
         assert_ne!(root.to_byte_array(), [0u8; 32]);
+        if block.txdata.len() > 1 {
+            assert_ne!(root.to_byte_array(), cb.compute_txid().to_byte_array());
+        }
         // Odd: only coinbase
         let solo = Block {
             header: block.header,
@@ -824,7 +839,7 @@ mod tests {
             txdata: vec![cb.clone(), dummy(1), dummy(2)],
         };
         let root = modified_merkle_root(&cb, &multi).unwrap();
-        assert_ne!(root.to_byte_array(), [0u8; 32]);
+        assert_ne!(root.to_byte_array(), cb.compute_txid().to_byte_array());
         let _ = cb;
     }
 }

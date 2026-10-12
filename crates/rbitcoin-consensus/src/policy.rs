@@ -99,7 +99,7 @@ pub fn check_libre_annex(tx: &Transaction) -> PolicyResult {
         let Some(last) = stack.last() else {
             continue;
         };
-        if !last.is_empty() && last[0] == 0x50 && !is_annex_standard(last) {
+        if !is_annex_standard(last) {
             return PolicyResult::NonStandard("libre annex");
         }
     }
@@ -234,6 +234,20 @@ mod tests {
         assert!(is_annex_standard(&[0x50, 0x00, 0xab]));
         assert!(!is_annex_standard(&[0x50, 0x01]));
         assert!(!is_annex_standard(&[0x50, 0xff, 0x00]));
+        // A one-item stack is never an annex, even when it starts with 0x50.
+        let mut lone = bare_tx(1);
+        lone.input[0].witness = Witness::from_slice(&[vec![0x50, 0x01]]);
+        assert!(check_libre_annex(&lone).is_standard());
+        // An empty last item is not an annex. `&&` must not become `||`.
+        let mut empty_last = bare_tx(1);
+        empty_last.input[0].witness = Witness::from_slice(&[vec![0x01], vec![]]);
+        assert!(check_libre_annex(&empty_last).is_standard());
+        let mut untagged = bare_tx(1);
+        untagged.input[0].witness = Witness::from_slice(&[vec![0x50, 0x01], vec![0x51]]);
+        assert!(check_libre_annex(&untagged).is_standard());
+        let mut standard_annex = bare_tx(1);
+        standard_annex.input[0].witness = Witness::from_slice(&[vec![0x01], vec![0x50, 0x00]]);
+        assert!(check_libre_annex(&standard_annex).is_standard());
     }
 
     fn bare_tx(fee_out: u64) -> Transaction {
@@ -342,11 +356,21 @@ mod tests {
             PolicyResult::NonStandard("no outputs")
         );
 
-        // Weight cap.
+        // Weight cap. The exact maximum is still standard.
         let tx = bare_tx(1);
+        assert!(check_libre_shape(&tx, MAX_STANDARD_TX_WEIGHT).is_standard());
         assert_eq!(
             check_libre_admission(&tx, 1_000_000, MAX_STANDARD_TX_WEIGHT + 1),
             PolicyResult::NonStandard("tx weight")
+        );
+        // 10_000 bytes is spendable. One more byte, or equality, is not.
+        assert!(!is_unspendable(&[0x51; 10_000]));
+        assert!(is_unspendable(&[0x51; 10_001]));
+        let mut zero_exact = bare_tx(0);
+        zero_exact.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51; 10_000]);
+        assert_eq!(
+            check_libre_shape(&zero_exact, 100),
+            PolicyResult::NonStandard("dust")
         );
 
         // Annex not tagged 0x50 is ignored by is_annex_standard.

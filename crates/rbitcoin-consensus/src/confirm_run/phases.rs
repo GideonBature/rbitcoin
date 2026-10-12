@@ -100,6 +100,12 @@ fn assemble_chained_header(
     Ok(mtp)
 }
 
+/// Median-time-past uses the last 11 timestamps. Older ones drop.
+fn trim_mtp_window(time_window: &mut Vec<u32>) {
+    let overflow = time_window.len().saturating_sub(11);
+    time_window.drain(..overflow);
+}
+
 pub(super) struct Assembled {
     pub(super) prepared: Vec<Prepared>,
     pub(super) tx_fees: Vec<u64>,
@@ -206,10 +212,7 @@ pub(super) fn assemble_run(
         );
 
         time_window.push(block.header.time);
-        if time_window.len() > 11 {
-            let n = time_window.len() - 11;
-            time_window.drain(0..n);
-        }
+        trim_mtp_window(&mut time_window);
 
         prepared.push(Prepared {
             height,
@@ -462,4 +465,152 @@ pub(super) fn expected_bits_extending(
         },
     )
     .ok_or(ConsensusError::BadPrev)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::regtest_pad::mine_empty_regtest;
+    use crate::{accept_and_connect_block, ChainParams, Checkpoint, Milestone};
+    use bitcoin::blockdata::constants;
+    use bitcoin::{BlockHash, ScriptBuf};
+    use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::TxPrecompute;
+    use rbitcoin_store::HeaderRecord;
+    use std::sync::Arc;
+
+    #[test]
+    fn mtp_window_keeps_the_last_eleven_times() {
+        let mut window: Vec<u32> = (1..=11).collect();
+        trim_mtp_window(&mut window);
+        assert_eq!(window, (1..=11).collect::<Vec<_>>());
+        window.push(12);
+        trim_mtp_window(&mut window);
+        assert_eq!(window, (2..=12).collect::<Vec<_>>());
+        window.push(13);
+        window.push(14);
+        trim_mtp_window(&mut window);
+        assert_eq!(window, (4..=14).collect::<Vec<_>>());
+    }
+
+    fn tiny() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
+        rbitcoin_query::testutil::tiny_query_labeled("phases-pin")
+    }
+
+    #[test]
+    fn checkpoint_mismatch_rejects_parent_and_chained_headers() {
+        let (path, q) = tiny();
+        let mut params = ChainParams::regtest();
+        let genesis = constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        params.checkpoints = vec![Checkpoint {
+            height: 1,
+            hash: BlockHash::from_byte_array([0xab; 32]),
+        }];
+        let err = assemble_parent_mtp_and_bits(
+            &q,
+            &params,
+            Height(1),
+            &b1.header,
+            b1.block_hash().to_byte_array(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::BadHeader("checkpoint mismatch")),
+            "parent header: {err}"
+        );
+
+        params.checkpoints = vec![Checkpoint {
+            height: 2,
+            hash: BlockHash::from_byte_array([0xcd; 32]),
+        }];
+        let prev = Prepared {
+            height: Height(1),
+            header_fk: Fk(1),
+            tx_fks: Vec::new(),
+            jobs: Vec::new(),
+            spends: Vec::new(),
+            fees: 0,
+            check_scripts: false,
+            time: b1.header.time,
+            bits: b1.header.bits,
+            hash: b1.block_hash().to_byte_array(),
+            prev_mtp: 0,
+        };
+        let b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
+        let err = assemble_chained_header(
+            &q,
+            &params,
+            Height(2),
+            &b2.header,
+            b2.block_hash().to_byte_array(),
+            &prev,
+            &[b1.header.time],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::BadHeader("checkpoint mismatch")),
+            "chained header: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn signet_challenge_applies_above_genesis() {
+        let (path, q) = tiny();
+        let mut params = ChainParams::regtest();
+        params.signet_challenge = Some(ScriptBuf::from_bytes(vec![0x51]));
+        let genesis = constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        let block = Arc::new(b1);
+        let pres: Arc<[TxPrecompute]> = block
+            .txdata
+            .iter()
+            .map(TxPrecompute::from_tx)
+            .collect::<Vec<_>>()
+            .into();
+        let meta = BodyMeta {
+            height: Height(1),
+            hash: block.block_hash().to_byte_array(),
+            header_fk: Fk(1),
+            header_rec: HeaderRecord {
+                prev_fk: Fk(1),
+                version: block.header.version.to_consensus(),
+                timestamp: block.header.time,
+                bits: block.header.bits.to_consensus(),
+                nonce: block.header.nonce,
+                merkle_root: block.header.merkle_root.to_byte_array(),
+                hash: block.block_hash().to_byte_array(),
+                size: 0,
+                weight: 0,
+            },
+            tx_fks: Vec::new(),
+            txids: block
+                .txdata
+                .iter()
+                .map(|tx| tx.compute_txid().to_byte_array())
+                .collect(),
+            pres,
+        };
+        let err = match assemble_run(
+            &q,
+            &params,
+            Milestone::NONE,
+            vec![meta],
+            std::slice::from_ref(&block),
+            &rbitcoin_query::BatchParents::new(),
+            &rbitcoin_query::SpendEdges::default(),
+        ) {
+            Ok(_) => panic!("height 1 with a challenge must reject a block that has no solution"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("signet"),
+            "height 1 with a challenge must check the solution, got {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }

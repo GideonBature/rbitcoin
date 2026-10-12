@@ -657,18 +657,12 @@ fn lookup_note_stamp(
     query
         .confirm_stats()
         .note_stamp(struct_ns, prepare_ns, filter_ns, batch_ns);
-    if struct_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_struct_ns, struct_ns);
-    }
-    if header_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_header_ns, header_ns);
-    }
-    if prepare_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_prepare_ns, prepare_ns);
-    }
-    if plan_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_filter_plan_ns, plan_ns);
-    }
+    // `note_confirm` already ignores a zero add. A `> 0` gate here is the
+    // same call, and `>` versus `==` would drop a real sample.
+    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_struct_ns, struct_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_header_ns, header_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_prepare_ns, prepare_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_filter_plan_ns, plan_ns);
 }
 
 fn lookup_bind_have_body(
@@ -1142,12 +1136,28 @@ mod tests {
             carried_header_fks: vec![rbitcoin_primitives::Fk(1), rbitcoin_primitives::Fk(1)],
             carried_header_hashes: vec![hash],
         };
+        let fks_only = WireLoadPipeline {
+            path_lo: 1,
+            parent_hash: None,
+            next_tx_start: pipe.next_tx_start,
+            in_flight: &inflight,
+            skeleton: None,
+            carried_need: Vec::new(),
+            carried_header_fks: Vec::new(),
+            carried_header_hashes: vec![hash],
+        };
         let items = [(Height(1), Arc::new(b1), None)];
         match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&pipe)) {
             Err(ConsensusError::Store(StoreError::Corrupt("invariant: carried header length"))) => {
             }
             Err(e) => panic!("expected carried header length, got {e}"),
             Ok(_) => panic!("expected carried header length, got Ok"),
+        }
+        match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&fks_only)) {
+            Err(ConsensusError::Store(StoreError::Corrupt("invariant: carried header length"))) => {
+            }
+            Err(e) => panic!("one carried side must still be checked, got {e}"),
+            Ok(_) => panic!("empty fks with a hash must fail the length check"),
         }
         let _ = std::fs::remove_dir_all(&path);
     }

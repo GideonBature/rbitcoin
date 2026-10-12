@@ -332,6 +332,28 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
 /// Cap for Esplora `/mempool/recent` (newest accepts, process-local).
 pub const MEMPOOL_RECENT_CAP: usize = 32;
 
+/// Flow fullness `0.0..=1.0` as a decile. `* 10` is the scale; `+` and `/` are not.
+fn fullness_decile(alpha: f64) -> u32 {
+    (alpha * 10.0).floor().clamp(0.0, 10.0) as u32
+}
+
+/// A preload is done only when the byte budget is still open and the walk
+/// reached genesis. Equality with the budget is not exhausted.
+fn fee_history_scan_exhausted(txstat_bytes: u64, budget: u64, oldest_height: Option<u32>) -> bool {
+    txstat_bytes < budget && oldest_height == Some(0)
+}
+
+/// Mempool-full package stamp applies only to a remainder slot that already failed.
+fn package_full_slot(in_rest: bool, slot_err: bool) -> bool {
+    in_rest && slot_err
+}
+
+/// Progress lines are at most once per ten seconds, including the instant the
+/// window elapses.
+fn fee_progress_due(elapsed: Duration) -> bool {
+    elapsed >= Duration::from_secs(10)
+}
+
 fn package_rpc_retry(e: &AcceptError) -> bool {
     // A parent under the dynamic mempool floor is still package-eligible:
     // Core `AcceptPackage` CPFPs it when the child pays.
@@ -1421,17 +1443,16 @@ impl MempoolHub {
             .collect();
         let spent_ops = self.spent_chain_prevouts(&g, &remain);
         let confirmed: Vec<Txid> = drop_set.into_iter().collect();
-        let (n, conflicts) = g
+        let (_, conflicts) = g
             .remove_block_txids(&confirmed, &spent_ops)
             .unwrap_or((0, Vec::new()));
-        let mut gone = if n == confirmed.len() {
-            confirmed
-        } else {
-            confirmed
-                .into_iter()
-                .filter(|t| !g.graph.contains(t))
-                .collect()
-        };
+        // Only txs the graph actually dropped. A count check here is the same
+        // result whenever every listed tx left, and the other branch kept a
+        // still-live tx in the unindex set.
+        let mut gone: Vec<Txid> = confirmed
+            .into_iter()
+            .filter(|t| !g.graph.contains(t))
+            .collect();
         gone.extend(conflicts);
         if gone.is_empty() {
             return 0;
@@ -2517,7 +2538,7 @@ impl MempoolHub {
             let rate = published_depth_rate(depth, alpha, flow, frontier, hist, confirm_floor);
             ordered.push((depth, rate.map(|r| r.max(min_r))));
         }
-        let decile = (alpha * 10.0).floor().clamp(0.0, 10.0) as u32;
+        let decile = fullness_decile(alpha);
         self.log_fee_readiness(decile, &history);
         let mut held: Vec<Option<u64>> = ordered.iter().map(|(_, r)| *r).collect();
         hold_defined_then_monotone(&mut held);
@@ -3652,7 +3673,7 @@ impl MempoolHub {
                     let rest_ids: std::collections::BTreeSet<Txid> =
                         rest.iter().map(|t| t.compute_txid()).collect();
                     for (tx, slot) in txs.iter().zip(out.iter_mut()) {
-                        if rest_ids.contains(&tx.compute_txid()) && slot.is_err() {
+                        if package_full_slot(rest_ids.contains(&tx.compute_txid()), slot.is_err()) {
                             *slot = Err(AcceptError::Policy("mempool full"));
                         }
                     }
@@ -4164,7 +4185,8 @@ impl MempoolHub {
     /// Log when the flow-fullness decile changes or a target's history becomes ready.
     fn log_fee_readiness(&self, fullness_decile: u32, history: &HashMap<u32, Option<u64>>) {
         let ready = history.values().filter(|r| r.is_some()).count() as u32;
-        let code = (fullness_decile << 16) | ready;
+        // High and low halves never overlap, so `|` and `^` store the same code.
+        let code = fullness_decile.wrapping_mul(1u32 << 16).wrapping_add(ready);
         if self.fee_readiness.swap(code, Ordering::Relaxed) != code {
             rbitcoin_log::info!(
                 "mempool: fee estimates: flow fullness {fullness_decile}/10, history ready for {ready}/{} targets",
@@ -4175,7 +4197,7 @@ impl MempoolHub {
 
     fn log_fee_history_progress(stats: &FeeHistoryBackfillStats, last_progress: &mut Instant) {
         let now = Instant::now();
-        if now.duration_since(*last_progress) < Duration::from_secs(10) {
+        if !fee_progress_due(now.duration_since(*last_progress)) {
             return;
         }
         rbitcoin_log::info!(
@@ -4214,8 +4236,11 @@ impl MempoolHub {
             self.backfill_fee_history_height(height, &mut stats);
             Self::log_fee_history_progress(&stats, &mut last_progress);
         }
-        stats.history_exhausted =
-            stats.txstat_bytes < FEE_HISTORY_TXSTAT_BYTE_BUDGET && stats.oldest_height == Some(0);
+        stats.history_exhausted = fee_history_scan_exhausted(
+            stats.txstat_bytes,
+            FEE_HISTORY_TXSTAT_BYTE_BUDGET,
+            stats.oldest_height,
+        );
         let mut journal = self.fee_journal.lock().unwrap();
         self.write_fee_history_snapshot(&mut journal);
         drop(journal);
@@ -4254,6 +4279,85 @@ mod tests {
             .as_nanos();
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("rbitcoin-txrelay-{n}-{seq}"))
+    }
+
+    #[test]
+    fn fullness_decile_scales_by_ten() {
+        assert_eq!(fullness_decile(0.0), 0);
+        assert_eq!(fullness_decile(0.15), 1);
+        assert_eq!(fullness_decile(0.99), 9);
+        assert_eq!(fullness_decile(1.0), 10);
+    }
+
+    #[test]
+    fn fee_history_scan_is_exhausted_only_under_budget_at_genesis() {
+        assert!(fee_history_scan_exhausted(50, 100, Some(0)));
+        assert!(
+            !fee_history_scan_exhausted(100, 100, Some(0)),
+            "landing on the budget is not under it"
+        );
+        assert!(
+            !fee_history_scan_exhausted(50, 100, Some(3)),
+            "bytes still under the budget do not finish the scan above genesis"
+        );
+    }
+
+    #[test]
+    fn package_full_slot_requires_both() {
+        assert!(package_full_slot(true, true));
+        assert!(!package_full_slot(true, false));
+        assert!(!package_full_slot(false, true));
+    }
+
+    #[test]
+    fn fee_readiness_logs_once_per_code() {
+        let dir = tmp();
+        let store_dir = tmp();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
+        let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+        let mut history = std::collections::HashMap::new();
+        history.insert(2u32, Some(1u64));
+        history.insert(3u32, None);
+        rbitcoin_log::capture_logs(true);
+        hub.log_fee_readiness(3, &history);
+        let first = rbitcoin_log::take_logs();
+        hub.log_fee_readiness(3, &history);
+        let second = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert_eq!(
+            hub.fee_readiness.load(Ordering::Relaxed),
+            3 * (1u32 << 16) + 1
+        );
+        assert!(
+            first.iter().any(|(_, line)| line.contains("fee estimates")),
+            "a new decile logs, got {first:?}"
+        );
+        assert!(
+            second
+                .iter()
+                .all(|(_, line)| !line.contains("fee estimates")),
+            "the same code does not log again, got {second:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
+    fn fee_history_progress_is_due_at_ten_seconds() {
+        assert!(!fee_progress_due(Duration::from_secs(9)));
+        assert!(fee_progress_due(Duration::from_secs(10)));
+        assert!(fee_progress_due(Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn default_cluster_limits_are_the_mempool_caps() {
+        assert_eq!(
+            MempoolHub::default_cluster_limits(),
+            (
+                rbitcoin_mempool::MAX_CLUSTER_COUNT as u32,
+                rbitcoin_mempool::MAX_CLUSTER_VSIZE,
+            )
+        );
     }
 
     /// `estimatesmartfee` / Electrum `blockchain.estimatefee` forward this rate.
@@ -4354,7 +4458,13 @@ mod tests {
         hub.set_expiry_hours(0);
         hub.note_mock_now(N as u64 + 1);
         let newest = *ids.last().unwrap();
+        let updates = hub.template_updates();
         assert_eq!(hub.expire_stale(), 256);
+        assert_eq!(
+            hub.template_updates(),
+            updates + 1,
+            "dropping more than one expired root notes the template once"
+        );
         assert_eq!(hub.live_count(), 1);
         assert!(hub.contains(&newest), "newest accept must survive the cap");
         for id in &ids[..ids.len() - 1] {
@@ -5731,6 +5841,48 @@ mod tests {
         assert!(hub.contains(&stay.compute_txid()));
         assert!(hub.relay_seq_of(&gone_w).is_none());
         assert!(hub.relay_seq_of(&stay_w).is_some());
+        // A live tx stays indexed. A gone tx that is not parked drops its maps.
+        // An orphan that is only parked keeps them.
+        hub.unindex_if_absent(&stay);
+        assert!(hub.relay_seq_of(&stay_w).is_some());
+        let orphan = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x7eu8; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        assert!(matches!(
+            hub.accept_tx(&orphan),
+            Err(AcceptError::Orphaned { .. })
+        ));
+        let orphan_w = orphan.compute_wtxid();
+        hub.insert_relay_maps(orphan.compute_txid(), orphan_w, 1);
+        assert!(hub.relay_seq_of(&orphan_w).is_some());
+        hub.unindex_if_absent(&orphan);
+        assert!(
+            hub.relay_seq_of(&orphan_w).is_some(),
+            "a parked orphan is still indexed"
+        );
+        let absent = spend_true(cbs[2], 3_000, ScriptBuf::from_bytes(vec![0x51]));
+        let absent_w = absent.compute_wtxid();
+        hub.insert_relay_maps(absent.compute_txid(), absent_w, 1);
+        assert!(hub.relay_seq_of(&absent_w).is_some());
+        hub.unindex_if_absent(&absent);
+        assert!(
+            hub.relay_seq_of(&absent_w).is_none(),
+            "a tx in neither the graph nor the orphanage drops its relay maps"
+        );
         hub.note_mock_now(40);
         assert!(!hub.tx_inv_due(&gone_w));
         assert!(hub.tx_inv_due(&stay_w));
@@ -5773,6 +5925,48 @@ mod tests {
         );
         assert!(hub.any_tx_inv_due());
         let _ = std::fs::remove_dir_all(&mp);
+    }
+
+    /// A tx that is already confirmed-strong leaves the relay maps when purge
+    /// drops it. The graph filter is what decides, including a tx that is gone.
+    #[test]
+    fn purge_confirmed_drops_relay_maps() {
+        use rbitcoin_consensus::{
+            accept_and_connect_block, mine_regtest_paying, ChainParams, Milestone,
+        };
+        use rbitcoin_primitives::Height;
+
+        let (store, q, cbs) = copy_maturity_pad(3);
+        let params = ChainParams::regtest();
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        hub.accept_tx(&tx).expect("admit");
+        let w = tx.compute_wtxid();
+        assert!(hub.relay_seq_of(&w).is_some());
+        let tip_h = q.tip_height().unwrap().0;
+        let fk = q.tip_header_fk().unwrap().unwrap();
+        let rec = q.get_header(fk).unwrap();
+        let prev = bitcoin::BlockHash::from_byte_array(rec.hash);
+        let block = mine_regtest_paying(
+            prev,
+            rec.timestamp + 600,
+            tip_h + 1,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![tx.clone()],
+        );
+        accept_and_connect_block(&q, &params, Height(tip_h + 1), &block, Milestone::NONE)
+            .expect("connect the mempool tx");
+        assert!(hub.contains(&tx.compute_txid()));
+        assert!(hub.purge_confirmed_on_chain() >= 1);
+        assert!(!hub.contains(&tx.compute_txid()));
+        assert!(
+            hub.relay_seq_of(&w).is_none(),
+            "purge drops relay maps for a tx the graph no longer holds"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store);
     }
 
     /// While relay is off, per-block remove is deferred; enabling relay runs purge.
@@ -6242,6 +6436,46 @@ mod tests {
     }
 
     #[test]
+    fn rejected_wtxid_is_not_requested() {
+        let dir = tmp();
+        let store_dir = tmp();
+        let q = Query::open_or_create_tiny(&store_dir).unwrap();
+        let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
+        let now = 1_000u64;
+        let rejected = [0x11u8; 32];
+        let fresh = [0x22u8; 32];
+        assert_eq!(
+            hub.note_inv_tx_requested(1, rejected, true, now, true),
+            ParentNote::RequestNow
+        );
+        assert_eq!(
+            hub.note_inv_tx_requested(3, rejected, true, now, true),
+            ParentNote::Deferred
+        );
+        assert_eq!(
+            hub.note_inv_tx_requested(1, fresh, true, now, true),
+            ParentNote::RequestNow
+        );
+        assert_eq!(
+            hub.note_inv_tx_requested(3, fresh, true, now, true),
+            ParentNote::Deferred
+        );
+        hub.note_recent_reject(Wtxid::from_byte_array(rejected));
+        hub.forget_parent_anns_for_peer(1);
+        let due = hub.take_due_parent_getdata(3, now);
+        assert!(
+            due.iter().all(|d| d.hash != rejected),
+            "a wtxid already in recent-reject is not fetched"
+        );
+        assert!(
+            due.iter().any(|d| d.hash == fresh && d.wtxid),
+            "a wtxid that is neither live nor rejected is still fetched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    #[test]
     fn wtxid_followup_is_requested_as_wtx() {
         let dir = tmp();
         let store_dir = tmp();
@@ -6545,6 +6779,29 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x63]),
             }],
         };
+        let unpaid = Transaction {
+            output: vec![TxOut {
+                value: Amount::from_sat(50_0000_0000 - 1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x63]),
+            }],
+            ..child.clone()
+        };
+        let missed = hub.submit_package_rpc(&[parent.clone(), unpaid]);
+        assert!(
+            missed.iter().all(|r| r.fee_with.is_none()),
+            "a remainder that does not land has no package feerate set, got {missed:?}"
+        );
+        assert!(!hub.try_contains(&parent.compute_txid()));
+        let held = hub.submit_package_rpc_eval(&[parent.clone(), child.clone()], false);
+        assert!(
+            held[0].result.is_err(),
+            "package_eval off must keep the individual min-relay failure"
+        );
+        assert!(
+            held.iter().all(|r| r.fee_with.is_none()),
+            "a disabled package eval has no effective-feerate set"
+        );
+        assert!(!hub.try_contains(&parent.compute_txid()));
         let rows = hub.submit_package_rpc(&[parent.clone(), child.clone()]);
         assert!(
             rows.iter().all(|r| r.result.is_ok()),
@@ -7430,6 +7687,21 @@ mod tests {
         // a connect after the preload goes to the journal
         rbitcoin_consensus::pad_empty_from(&q, &params, tip, tip_time, 6, 6, 0);
         hub.note_block_fee_history(Height(6));
+        let journaled = fee_history_file::load(&mp_dir).unwrap().unwrap();
+        assert_eq!(
+            journaled.journal.len(),
+            1,
+            "one connect stays in the journal until {COMPACT} connects",
+            COMPACT = fee_history_file::COMPACT_EVERY
+        );
+        for _ in 1..fee_history_file::COMPACT_EVERY {
+            hub.note_block_fee_history(Height(6));
+        }
+        let compacted = fee_history_file::load(&mp_dir).unwrap().unwrap();
+        assert!(
+            compacted.journal.is_empty(),
+            "144 connects rewrite the snapshot and start an empty journal"
+        );
         drop(hub);
 
         let hub = MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap();

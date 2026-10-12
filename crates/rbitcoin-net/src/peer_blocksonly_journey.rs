@@ -305,6 +305,11 @@ fn force_announce_picks_peers(
     let mut pricey_rx = writer_of(&pricey);
     pricey.note_minfeefilter_sat_kvb(u64::MAX);
     let ok = relay_peer(peers, [127, 0, 0, 1], OutboundFullRelay);
+    assert_eq!(
+        ok.sent_feefilter_sat_kvb(),
+        -1,
+        "a new peer has not sent a feefilter"
+    );
     let mut ok_rx = writer_of(&ok);
 
     crate::force_announce_txid(hub, peers, missing);

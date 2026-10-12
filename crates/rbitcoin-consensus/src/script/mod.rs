@@ -323,8 +323,10 @@ pub(crate) mod crypto {
         if strict_der && !is_valid_signature_encoding(sig_raw) {
             return Err(ConsensusError::Script("der sig".into()));
         }
-        let sighash_ty = sig_raw[sig_raw.len() - 1] as u32;
-        let der = &sig_raw[..sig_raw.len() - 1];
+        let (&sighash_byte, der) = sig_raw
+            .split_last()
+            .ok_or_else(|| ConsensusError::Script("der sig".into()))?;
+        let sighash_ty = u32::from(sighash_byte);
         let sig = ecdsa::Signature::from_der_lax(der)
             .map_err(|_| ConsensusError::Script("der sig".into()))?;
         Ok((sig, sighash_ty))
@@ -813,6 +815,13 @@ pub(crate) mod crypto {
             assert!(!is_compressed_or_uncompressed_pubkey(&hybrid));
             assert!(!is_compressed_or_uncompressed_pubkey(&[]));
             assert!(!is_compressed_or_uncompressed_pubkey(&[0x02; 32]));
+            // `0x04` is uncompressed only at 65 bytes. A shorter key is not
+            // accepted by dropping the length guard.
+            assert!(!is_compressed_or_uncompressed_pubkey(&[0x04; 64]));
+            assert!(!is_compressed_or_uncompressed_pubkey(&[0x04; 66]));
+            assert!(is_compressed_pubkey(&[0x02; 33]));
+            assert!(!is_compressed_pubkey(&[0x02; 32]));
+            assert!(!is_compressed_pubkey(&[0x04; 33]));
 
             assert!(is_defined_hashtype(&[0x30, 0x01])); // ALL
             assert!(is_defined_hashtype(&[0x30, 0x02])); // NONE
@@ -869,6 +878,13 @@ pub(crate) mod crypto {
             assert!(!is_valid_signature_encoding(&sm));
 
             assert!(is_valid_signature_encoding(&valid_der_sig()));
+            // A one-byte zero integer is minimal. `len > 1` must not become `>=`.
+            assert!(is_valid_signature_encoding(&[
+                0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01, 0x01
+            ]));
+            assert!(is_valid_signature_encoding(&[
+                0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x00, 0x01
+            ]));
             let _ = (neg, pad, sneg, spad);
         }
 
@@ -1176,7 +1192,7 @@ mod verify_routing_tests {
             3,
         );
         match e2 {
-            ConsensusError::Script(m) => assert!(m.contains("already txid=")),
+            ConsensusError::Script(m) => assert_eq!(m, "already txid=abc vin=0"),
             other => panic!("{other:?}"),
         }
     }

@@ -157,6 +157,15 @@ mod tests {
             !blended.note_at(1_600, t0 + RATE_WINDOW + Duration::from_millis(500)),
             "500ms later half of the previous 1000 bytes plus this frame exceeds 2000"
         );
+        // Half of the previous window is 500 bytes, so 1000 still fits in 2000.
+        // Adding the elapsed time instead of subtracting it would not.
+        let mut half = PeerRateLimiter::new(10_000, 2_000);
+        assert!(half.note_at(1_000, t0));
+        assert!(half.note_at(1, t0 + RATE_WINDOW));
+        assert!(
+            half.note_at(1_000, t0 + RATE_WINDOW + Duration::from_millis(500)),
+            "500 of the previous 1000 bytes plus 1000 still fits"
+        );
     }
 
     #[test]

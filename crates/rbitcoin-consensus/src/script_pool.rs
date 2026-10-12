@@ -892,6 +892,57 @@ mod tests {
         );
     }
 
+    fn boom_immediate(_: &u32) -> Result<(), ConsensusError> {
+        Err(ConsensusError::BadBlock("boom"))
+    }
+
+    /// Drop the occupy gate before the wave. `OwnedWave`'s drop waits until
+    /// the wave is complete, and that wait cannot run while every worker is
+    /// parked in the gate.
+    struct ReleaseOccupy(Option<OccupyGate>);
+    impl Drop for ReleaseOccupy {
+        fn drop(&mut self) {
+            self.0.take();
+        }
+    }
+
+    /// The stage thread steals while pool workers are busy. A failed wave
+    /// is not still claimable, and `next == n` is finished.
+    #[test]
+    fn help_steal_runs_the_chunk_the_workers_cannot() {
+        let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        ALL_HITS.store(0, Ordering::Relaxed);
+        let occupy = OccupyGate::occupy_all();
+        let wave = start_for_each_owned_chunk((0..4u32).collect(), count_all, 1)
+            .unwrap()
+            .expect("wave");
+        let _release = ReleaseOccupy(Some(occupy));
+        assert!(wave.has_unclaimed(), "next < n while workers are busy");
+        for _ in 0..4 {
+            assert!(help_steal(), "one index claim");
+        }
+        assert_eq!(ALL_HITS.load(Ordering::Relaxed), 4);
+        assert!(!wave.has_unclaimed(), "next == n is not still unclaimed");
+        assert!(!help_steal(), "an empty wave is not a steal");
+        drop(_release);
+        wave.finish().unwrap();
+
+        let occupy = OccupyGate::occupy_all();
+        let failed = start_for_each_owned_chunk((0..8u32).collect(), boom_immediate, 1)
+            .unwrap()
+            .expect("failed wave");
+        let _release = ReleaseOccupy(Some(occupy));
+        assert!(failed.has_unclaimed());
+        assert!(help_steal());
+        assert!(
+            !failed.has_unclaimed(),
+            "a failed wave is not stealable while jobs remain"
+        );
+        drop(_release);
+        let err = failed.finish().expect_err("boom");
+        assert!(format!("{err}").contains("boom"));
+    }
+
     #[test]
     fn owned_wave_from_script_worker_is_refused() {
         let got =
