@@ -572,27 +572,18 @@ pub(crate) fn eval_script(
 
                 let rm = ctx.minimal_data;
                 match code {
-                    0x00 => push(stack, altstack.len(), vec![])?,
+                    // OP_0 is PushBytes, not an opcode. OP_RESERVED, OP_VER,
+                    // OP_VERIF, and OP_RETURN fail from the unknown-opcode arm
+                    // (OP_VERIF already returned above, including unexecuted).
                     0x4f => push(stack, altstack.len(), vec![0x81])?,
                     n if (0x51..=0x60).contains(&n) => push(stack, altstack.len(), vec![n - 0x50])?,
-
-                    0x50 => {
-                        return Err(ConsensusError::Script("OP_RESERVED".into()));
-                    }
                     0x61 => {}
-                    0x62 => {
-                        return Err(ConsensusError::Script("OP_VER".into()));
-                    }
-                    0x65 | 0x66 => {
-                        return Err(ConsensusError::Script("OP_VERIF".into()));
-                    }
                     0x69 => {
                         let v = pop(stack)?;
                         if !cast_to_bool(&v) {
                             return Err(ConsensusError::Script("OP_VERIFY".into()));
                         }
                     }
-                    0x6a => return Err(ConsensusError::Script("OP_RETURN".into())),
 
                     0x6b => {
                         let v = pop(stack)?;
@@ -710,17 +701,11 @@ pub(crate) fn eval_script(
                         require_n(stack, 2)?;
                         let v = stack[stack.len() - 1].clone();
                         stack.insert(stack.len() - 2, v);
-                        if stack.len() + altstack.len() > MAX_STACK_SIZE {
-                            return Err(ConsensusError::Script("stack size".into()));
-                        }
                     }
                     0x82 => {
                         require_n(stack, 1)?;
                         let sz = stack.last().unwrap().len() as i64;
                         push(stack, altstack.len(), scriptnum_encode(sz))?;
-                    }
-                    0x89 | 0x8a => {
-                        return Err(ConsensusError::Script("OP_RESERVED".into()));
                     }
                     0x87 => {
                         let a = pop(stack)?;
@@ -917,11 +902,7 @@ pub(crate) fn eval_script(
                         if ctx.sig_version == SigVersion::TapScript && is_op_success(code) {
                             return Ok(false);
                         }
-                        if ctx.sig_version != SigVersion::TapScript && is_disabled_legacy(code) {
-                            return Err(ConsensusError::Script(format!(
-                                "disabled opcode 0x{code:02x}"
-                            )));
-                        }
+                        // Non-tapscript disabled opcodes already returned above.
                         return Err(ConsensusError::Script(format!(
                             "unknown opcode 0x{code:02x}"
                         )));
@@ -941,15 +922,22 @@ pub(crate) fn eval_script(
     Ok(true)
 }
 
+/// The type bit does not overlap the low 16, so `|` and `^` are the same mask.
+#[mutants::skip]
+fn csv_locktime_mask(type_bit: u32) -> u32 {
+    0x0000_ffff | type_bit
+}
+
 fn sequence_csv_ok(seq: Sequence, csv: u32) -> bool {
     let seq_n = seq.to_consensus_u32();
     if seq_n & (1 << 31) != 0 {
         return false; // SEQUENCE_LOCKTIME_DISABLE_FLAG on input
     }
-    let mask = 0x0000_ffff | (1 << 22);
+    let type_bit = 1 << 22;
+    let mask = csv_locktime_mask(type_bit);
     let seq_masked = seq_n & mask;
     let csv_masked = csv & mask;
-    let type_flag = 1 << 22;
+    let type_flag = type_bit;
     if (seq_masked ^ csv_masked) & type_flag != 0 {
         return false;
     }
@@ -1250,7 +1238,8 @@ pub(crate) fn find_and_delete(script: &[u8], data: &[u8]) -> Vec<u8> {
 fn script_code_bytes<'a>(ctx: &'a EvalContext<'_>) -> &'a [u8] {
     let full = ctx.script_code.as_bytes();
     match ctx.codeseparator_script_off.get() {
-        Some(off) if off <= full.len() => &full[off..],
+        // The only writer is OP_CODESEPARATOR's byte index, which is in range.
+        Some(off) => &full[off..],
         _ => full,
     }
 }
@@ -1594,6 +1583,35 @@ mod success_and_disabled_tests {
         eval_script(script, &mut stack, &ctx)
     }
 
+    fn eval_stack(
+        script_bytes: &[u8],
+        sig_version: SigVersion,
+    ) -> Result<Vec<Vec<u8>>, ConsensusError> {
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let script = Script::from_bytes(script_bytes);
+        let ctx = EvalContext::new(&tx, 0, Amount::from_sat(50_000), script, sig_version);
+        let mut stack = Vec::new();
+        eval_script(script, &mut stack, &ctx)?;
+        Ok(stack)
+    }
+
+    fn num(n: u8) -> Vec<u8> {
+        vec![n]
+    }
+
     #[test]
     fn tapscript_op_success126_accepts() {
         // Real signet leaf fragment starts with normal ops then hits 0x7e (OP_SUCCESS126).
@@ -1750,6 +1768,28 @@ mod success_and_disabled_tests {
             format!("{err}").contains("validation weight"),
             "Core order: weight before empty pubkey, got {err}"
         );
+
+        // One nonempty unknown-key sig at remaining weight exactly 0 is allowed.
+        let script = vec![0x01, 0x02, 0x01, 0xaa, 0xac];
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let sc = Script::from_bytes(&script);
+        let ctx = EvalContext::new(&tx, 0, Amount::from_sat(1), sc, SigVersion::TapScript);
+        ctx.validation_weight_left
+            .set(TAPSCRIPT_VALIDATION_WEIGHT_PER_SIGOP);
+        eval_script(sc, &mut Vec::new(), &ctx).expect("remaining weight 0 still passes");
     }
 
     #[test]
@@ -1766,6 +1806,33 @@ mod success_and_disabled_tests {
         assert!(need);
         let err = eval(&script, SigVersion::WitnessV0).unwrap_err();
         assert!(format!("{err}").contains("too large"));
+
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let nop = Script::from_bytes(&[0x61]);
+        let ctx = EvalContext::new(&tx, 0, Amount::from_sat(1), nop, SigVersion::TapScript);
+        let mut at_limit = vec![vec![1u8]; MAX_STACK_SIZE];
+        eval_script(nop, &mut at_limit, &ctx).expect("1000 stack items");
+        let mut over_stack = vec![vec![1u8]; MAX_STACK_SIZE + 1];
+        let err = eval_script(nop, &mut over_stack, &ctx).unwrap_err();
+        assert!(format!("{err}").contains("stack size"), "{err}");
+        let mut at_elem = vec![vec![0u8; MAX_SCRIPT_ELEMENT_SIZE]];
+        eval_script(nop, &mut at_elem, &ctx).expect("520-byte element");
+        let mut over_elem = vec![vec![0u8; MAX_SCRIPT_ELEMENT_SIZE + 1]];
+        let err = eval_script(nop, &mut over_elem, &ctx).unwrap_err();
+        assert!(format!("{err}").contains("PUSH_SIZE"), "{err}");
     }
 
     /// Every consensus-enabled opcode must not report "unknown opcode".
@@ -1929,6 +1996,55 @@ mod success_and_disabled_tests {
             format!("{err}").contains("CSV"),
             "v2 should enforce CSV, got {err}"
         );
+
+        // The CSV operand's disable bit is a NOP, before the version gate.
+        let nop = [0x05u8, 0x00, 0x00, 0x00, 0x80, 0x00, 0xb2, 0x75, 0x51];
+        let nop_script = Script::from_bytes(&nop);
+        let ctx_nop = EvalContext::new_with_flags(
+            &tx1,
+            0,
+            Amount::from_sat(50_000),
+            nop_script,
+            SigVersion::Base,
+            true,
+            true,
+            true,
+        );
+        let mut stack_nop = Vec::new();
+        eval_script(nop_script, &mut stack_nop, &ctx_nop)
+            .expect("CSV disable bit does not enforce");
+
+        // Input disable flag fails even when the numeric lock would pass.
+        let tx_dis = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus(0x8000_0001),
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let ctx_dis = EvalContext::new_with_flags(
+            &tx_dis,
+            0,
+            Amount::from_sat(50_000),
+            script,
+            SigVersion::Base,
+            true,
+            true,
+            true,
+        );
+        let mut stack_dis = Vec::new();
+        let err = eval_script(script, &mut stack_dis, &ctx_dis).unwrap_err();
+        assert!(
+            format!("{err}").contains("CSV"),
+            "input disable flag fails CSV, got {err}"
+        );
     }
 
     #[test]
@@ -1980,6 +2096,42 @@ mod success_and_disabled_tests {
         // Non-matching copy through PUSHDATA encodings
         let passthrough = vec![0x4c, 0x01, 0xaa, 0x4d, 0x01, 0x00, 0xbb];
         assert_eq!(find_and_delete(&passthrough, &[0xff]), passthrough);
+
+        // Length 76 is PUSHDATA1, not a direct push.
+        let wide = vec![0x44u8; 76];
+        let mut wide_script = vec![0x4c, 76];
+        wide_script.extend_from_slice(&wide);
+        wide_script.push(0x51);
+        assert_eq!(find_and_delete(&wide_script, &wide), vec![0x51]);
+
+        // Truncated PUSHDATA2 stops before the missing length byte.
+        assert_eq!(find_and_delete(&[0x4d, 0x01], &[0xff]), vec![0x4d]);
+        // Truncated PUSHDATA4 of four bytes: three length bytes are not enough.
+        assert_eq!(
+            find_and_delete(&[0x4e, 0x01, 0x00, 0x00], &[0xff]),
+            vec![0x4e]
+        );
+
+        let needle = [0x11u8, 0x11, 0x11];
+        let mut pd2 = vec![0x4d, 0x02, 0x00, 0xaa, 0xbb];
+        pd2.extend_from_slice(&[0x03, 0x11, 0x11, 0x11]);
+        assert_eq!(
+            find_and_delete(&pd2, &needle),
+            vec![0x4d, 0x02, 0x00, 0xaa, 0xbb]
+        );
+
+        // NOPs after the payload: a direct-push opcode here would swallow the needle.
+        // Index 10 and 15 differ from the zero length bytes at i+2 and i+3.
+        let mut pd4 = vec![0x61; 4];
+        pd4.extend_from_slice(&[0x4e, 0x01, 0x00, 0x00, 0x00, 0xee]);
+        pd4.extend_from_slice(&[0x61; 6]);
+        pd4.extend_from_slice(&[0x03, 0x11, 0x11, 0x11]);
+        let out4 = find_and_delete(&pd4, &needle);
+        assert!(out4.contains(&0xee), "{out4:?}");
+        assert!(
+            out4.windows(3).all(|w| w != needle),
+            "payload must not swallow the following push: {out4:?}"
+        );
     }
 
     #[test]
@@ -1998,6 +2150,28 @@ mod success_and_disabled_tests {
         let sc3 = vec![0x4e, 0x01, 0x00, 0x00, 0x00, 0x01, 0xab];
         let s3 = strip_op_codeseparator(&sc3);
         assert!(!s3.contains(&0xab));
+
+        let pd2 = vec![0x4d, 0x02, 0x00, 0xde, 0xad, 0xab];
+        assert_eq!(
+            strip_op_codeseparator(&pd2),
+            vec![0x4d, 0x02, 0x00, 0xde, 0xad]
+        );
+        assert_eq!(
+            strip_op_codeseparator(&[0x4e, 0x01, 0x00, 0x00]),
+            vec![0x4e]
+        );
+        // Four prefixes put the length word at i=5. At i=2, i*2 equals i+2.
+        // Index 15 is in range and is not the same byte as i+3.
+        let mut pd4 = vec![0x61; 4];
+        pd4.extend_from_slice(&[0x4e, 0x01, 0x00, 0x00, 0x00, 0xee, 0xab]);
+        pd4.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x11, 0x02]);
+        let stripped4 = strip_op_codeseparator(&pd4);
+        assert!(
+            stripped4.windows(2).any(|w| w == [0x4e, 0x01]),
+            "{stripped4:?}"
+        );
+        assert!(stripped4.contains(&0xee), "{stripped4:?}");
+        assert!(!stripped4.contains(&0xab), "{stripped4:?}");
         let _ = (sc, sc2, sc3);
     }
 
@@ -2015,6 +2189,19 @@ mod success_and_disabled_tests {
         assert!(!tapscript_has_op_success(Script::from_bytes(&[0x4d, 0x01])));
         assert!(!tapscript_has_op_success(Script::from_bytes(&[
             0x4e, 0x01, 0x00
+        ])));
+        // OP_SUCCESS inside a push is data. The same byte after the push is success.
+        assert!(!tapscript_has_op_success(Script::from_bytes(&[
+            0x4c, 0x01, 0x7e
+        ])));
+        assert!(!tapscript_has_op_success(Script::from_bytes(&[
+            0x4d, 0x01, 0x00, 0x7e
+        ])));
+        assert!(!tapscript_has_op_success(Script::from_bytes(&[
+            0x4e, 0x01, 0x00, 0x00, 0x00, 0x7e
+        ])));
+        assert!(tapscript_has_op_success(Script::from_bytes(&[
+            0x4c, 0x01, 0x00, 0x7e
         ])));
         let _ = (leaf, leaf2, leaf3);
     }
@@ -2244,6 +2431,48 @@ mod success_and_disabled_tests {
 
     #[test]
     fn stack_size_limit_on_2dup() {
+        let top3 =
+            eval_stack(&[0x51, 0x52, 0x53, 0x54, 0x55, 0x6f], SigVersion::WitnessV0).expect("3DUP");
+        assert_eq!(
+            top3,
+            vec![
+                num(1),
+                num(2),
+                num(3),
+                num(4),
+                num(5),
+                num(3),
+                num(4),
+                num(5)
+            ]
+        );
+        let over = eval_stack(&[0x51, 0x52, 0x53, 0x54, 0x55, 0x70], SigVersion::WitnessV0)
+            .expect("2OVER");
+        assert_eq!(
+            over,
+            vec![num(1), num(2), num(3), num(4), num(5), num(2), num(3)]
+        );
+        let rot = eval_stack(
+            &[0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x71],
+            SigVersion::WitnessV0,
+        )
+        .expect("2ROT");
+        assert_eq!(
+            rot,
+            vec![num(1), num(4), num(5), num(6), num(7), num(2), num(3)]
+        );
+        let swap4 =
+            eval_stack(&[0x51, 0x52, 0x53, 0x54, 0x72], SigVersion::WitnessV0).expect("2SWAP");
+        assert_eq!(swap4, vec![num(3), num(4), num(1), num(2)]);
+        let swap5 = eval_stack(&[0x51, 0x52, 0x53, 0x54, 0x55, 0x72], SigVersion::WitnessV0)
+            .expect("2SWAP");
+        assert_eq!(swap5, vec![num(1), num(4), num(5), num(2), num(3)]);
+
+        // 201 counted ops still pass. 202 OP_16 passes only while OP_16 is not counted.
+        eval(&vec![0x60; 202], SigVersion::WitnessV0).expect("OP_16 is not an op-count");
+        let err = eval(&vec![0x61; 202], SigVersion::WitnessV0).unwrap_err();
+        assert!(format!("{err}").contains("op count"), "{err}");
+
         // MAX_STACK_SIZE is typically 1000; push 999 ones then 2DUP overflows.
         let mut script = vec![0x51; 999];
         script.push(0x6e); // OP_2DUP
@@ -2265,6 +2494,12 @@ mod success_and_disabled_tests {
         script.extend_from_slice(&[0x01, 0x01]); // PushBytes, not OP_1
         let err = eval(&script, SigVersion::WitnessV0).unwrap_err();
         assert!(format!("{err}").contains("stack size"), "got {err}");
+
+        // Both stacks non-empty and the product exceeds 1000 while the sum does not.
+        let mut shared = vec![0x51, 0x51, 0x6b, 0x6b];
+        shared.extend(std::iter::repeat_n(0x51, 501));
+        shared.push(0x61);
+        eval(&shared, SigVersion::WitnessV0).expect("sum under the shared limit");
     }
 
     /// Short `OP_PUSHDATA4` inside a legacy scriptCode. The payload must not be
@@ -2424,6 +2659,40 @@ mod minimal_data_tests {
         let mut stack = Vec::new();
         eval_script(sc, &mut stack, &ctx_off).expect("pre-bip66 soft-false CHECKSIG");
         assert!(!cast_to_bool(stack.last().unwrap()));
+
+        let mut flags = crate::block::ScriptVerifyFlags::buried(false, false, false, false, false);
+        flags.low_s = true;
+        let job = crate::block::ScriptCheckJob::new(vec![], tx.clone(), flags);
+        let ctx_low_s = EvalContext::new_with_flags(
+            &tx,
+            0,
+            Amount::from_sat(50_000),
+            sc,
+            SigVersion::Base,
+            false,
+            false,
+            false,
+        )
+        .apply_job_flags(&job);
+        assert!(ctx_low_s.bip66_active, "LOW_S implies DERSIG");
+        let err = eval_script(sc, &mut Vec::new(), &ctx_low_s).unwrap_err();
+        assert!(format!("{err}").contains("SIG_DER"), "{err}");
+
+        let mut ctx_only_low_s = EvalContext::new_with_flags(
+            &tx,
+            0,
+            Amount::from_sat(50_000),
+            sc,
+            SigVersion::Base,
+            false,
+            false,
+            false,
+        );
+        ctx_only_low_s.low_s = true;
+        ctx_only_low_s.bip66_active = false;
+        ctx_only_low_s.strictenc = false;
+        let err = eval_script(sc, &mut Vec::new(), &ctx_only_low_s).unwrap_err();
+        assert!(format!("{err}").contains("SIG_DER"), "{err}");
     }
 
     #[test]

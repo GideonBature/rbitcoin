@@ -44,10 +44,9 @@ fn leftover_chains(
     if let Some(parent) = st.height_to_hash.get(&height.saturating_sub(1)) {
         return *parent == prev;
     }
-    match hub.tip_height() {
-        Some(t) if height == t.saturating_add(1) => hub.tip_hash() == Some(prev),
-        _ => false,
-    }
+    // Startup seeds the tip into `height_to_hash` before rehydrate, so a
+    // missing parent slot is not the tip's child.
+    false
 }
 
 pub(crate) fn rehydrate_block_queue_into_confirm(
@@ -597,6 +596,37 @@ mod class_a_rehydrate_tests {
         assert!(st.body.is_pending(&h));
         assert_eq!(st.header_fks.get(&h).copied(), Some(Fk(1)));
         assert_eq!(feed.size_snap().0, 0);
+
+        hub.query.block_queue_dequeue_height(0).unwrap();
+        let merkle = [0x44u8; 32];
+        let prev = [0u8; 32];
+        let hash =
+            rbitcoin_store::block_header_hash(1, &prev, &merkle, 1_300_000_000, 0x207f_ffff, 0);
+        let fk = hub
+            .query
+            .put_header(&rbitcoin_store::HeaderRecord {
+                prev_fk: Fk::NULL,
+                version: 1,
+                timestamp: 1_300_000_000,
+                bits: 0x207f_ffff,
+                nonce: 0,
+                merkle_root: merkle,
+                hash,
+                size: 0,
+                weight: 0,
+            })
+            .unwrap();
+        hub.query
+            .block_queue_enqueue(0, hash, fk.0, b"gen-body")
+            .unwrap();
+        let mut st = IbdWorkState::new(Vec::new(), None, None);
+        let n = rehydrate_block_queue_into_confirm(&hub, &mut st, &feed).unwrap();
+        assert_eq!(n, 1, "a pre-tip genesis body with a null parent is offered");
+        assert_eq!(feed.size_snap().0, 1);
+        assert_eq!(
+            st.height_to_hash.get(&0).map(|h| h.to_byte_array()),
+            Some(hash)
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

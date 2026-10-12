@@ -4348,6 +4348,20 @@ mod tests {
         assert!(!fee_progress_due(Duration::from_secs(9)));
         assert!(fee_progress_due(Duration::from_secs(10)));
         assert!(fee_progress_due(Duration::from_secs(11)));
+        let stats = FeeHistoryBackfillStats::default();
+        let started = Instant::now();
+        let mut last = started;
+        rbitcoin_log::capture_logs(true);
+        MempoolHub::log_fee_history_progress(&stats, &mut last);
+        let lines = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert_eq!(last, started, "a sub-10s backfill does not move the window");
+        assert!(
+            lines
+                .iter()
+                .all(|(_, line)| !line.contains("fee history preload progress")),
+            "a sub-10s backfill does not emit the progress line, got {lines:?}"
+        );
     }
 
     #[test]

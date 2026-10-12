@@ -45,7 +45,6 @@ pub fn unknown_rules_warning(bit: i32) -> String {
 /// one header pass per new period instead of 29 passes from genesis per RPC
 /// call (≈4.7 s per `getnetworkinfo` at mainnet height 968k).
 pub(crate) struct UnknownBitsScan {
-    network: Option<Network>,
     /// Periods `0..scanned_periods` are counted.
     scanned_periods: u32,
     /// Hash of the last header of the last counted period (reorg check).
@@ -57,7 +56,6 @@ pub(crate) struct UnknownBitsScan {
 impl UnknownBitsScan {
     const fn new() -> Self {
         Self {
-            network: None,
             scanned_periods: 0,
             boundary: [0; 32],
             locked: 0,
@@ -65,10 +63,6 @@ impl UnknownBitsScan {
     }
 
     pub(crate) fn active_bits(&mut self, query: &Query, network: Network) -> Vec<i32> {
-        if self.network != Some(network) {
-            *self = Self::new();
-            self.network = Some(network);
-        }
         let Some(tip) = query.tip_height() else {
             return Vec::new();
         };
@@ -111,7 +105,7 @@ impl UnknownBitsScan {
         if target > self.scanned_periods {
             self.scanned_periods = target;
             self.boundary = query
-                .header_at_height(Height(target * period - 1))
+                .header_at_height(Height(period_boundary_height(target, period)))
                 .ok()
                 .flatten()
                 .map_or([0; 32], |(_, rec)| rec.hash);
@@ -125,9 +119,14 @@ impl UnknownBitsScan {
         if self.scanned_periods == 0 {
             return true;
         }
-        let h = self.scanned_periods * period - 1;
+        let h = period_boundary_height(self.scanned_periods, period);
         matches!(query.header_at_height(Height(h)), Ok(Some((_, rec))) if rec.hash == self.boundary)
     }
+}
+
+/// Last header of period index `periods` (the block at `periods * period - 1`).
+fn period_boundary_height(periods: u32, period: u32) -> u32 {
+    periods * period - 1
 }
 
 fn signals_unknown(version: &i32, bit: i32) -> bool {
@@ -233,15 +232,43 @@ mod tests {
         assert!(UnknownBitsScan::new().advance(&q, 0, 4, 2, 0).is_empty());
         assert!(UnknownBitsScan::new().advance(&q, 4, 4, 2, 0).is_empty());
 
-        put_chain(&q, 9, |h| h < 4, 0);
+        put_chain(&q, 13, |h| h < 4, 0);
         let mut scan = UnknownBitsScan::new();
         assert_eq!(scan.advance(&q, 8, 4, 2, 0), vec![27]);
         assert_eq!(scan.scanned_periods, 1);
-        assert_eq!(scan.advance(&q, 8, 4, 2, 0), vec![27]);
+        let (_, boundary) = q.header_at_height(Height(3)).unwrap().unwrap();
+        assert_eq!(scan.boundary, boundary.hash, "counted boundary is height 3");
+        scan.locked = 0;
+        assert!(
+            scan.advance(&q, 8, 4, 2, 0).is_empty(),
+            "same tip does not reread a finished period"
+        );
         assert_eq!(scan.scanned_periods, 1, "same tip: nothing new to read");
+        assert!(
+            scan.advance(&q, 12, 4, 2, 0).is_empty(),
+            "a later period that does not signal stays locked-empty"
+        );
+        assert_eq!(scan.scanned_periods, 2);
         assert!(UnknownBitsScan::new().advance(&q, 8, 4, 4, 0).is_empty());
         assert_eq!(UnknownBitsScan::new().advance(&q, 8, 4, 2, 2), vec![27]);
         assert!(UnknownBitsScan::new().advance(&q, 8, 4, 2, 3).is_empty());
+
+        // Period 1 signals only at its last two blocks. Threshold 3 stays
+        // empty; threshold 2 locks. A wider or shorter window would disagree.
+        let (dir3, wide) = rbitcoin_query::testutil::tiny_query_labeled("vb-wide");
+        put_chain(&wide, 13, |h| h < 4 || h == 6 || h == 7, 2);
+        let (_, wide_boundary) = wide.header_at_height(Height(3)).unwrap().unwrap();
+        let mut under = UnknownBitsScan::new();
+        under.scanned_periods = 1;
+        under.boundary = wide_boundary.hash;
+        assert!(
+            under.advance(&wide, 12, 4, 3, 0).is_empty(),
+            "two signals in period 1 are under threshold 3"
+        );
+        let mut over = UnknownBitsScan::new();
+        over.scanned_periods = 1;
+        over.boundary = wide_boundary.hash;
+        assert_eq!(over.advance(&wide, 12, 4, 2, 0), vec![27]);
 
         let (dir2, other) = rbitcoin_query::testutil::tiny_query_labeled("vb-other");
         put_chain(&other, 9, |_| false, 1);
@@ -252,5 +279,6 @@ mod tests {
         assert_eq!(scan.scanned_periods, 1);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+        let _ = std::fs::remove_dir_all(&dir3);
     }
 }

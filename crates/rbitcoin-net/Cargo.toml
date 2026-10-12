@@ -22,6 +22,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 getrandom = "0.4"
 sha3 = "0.12"
+# Attribute only. cargo-mutants reads it; it does not change compiled code.
+mutants = "0.0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # POLLRDHUP: peer FIN with unread bytes still in the receive buffer.
