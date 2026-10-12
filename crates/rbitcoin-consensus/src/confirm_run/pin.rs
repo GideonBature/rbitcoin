@@ -16,17 +16,11 @@ fn spend_edges_from_plan<'a>(
     parent_pin: &mut ParentPinStamp,
 ) -> Result<PlanSpend<'a>, ConsensusError> {
     let mut batch_pin_by_id: U64Map<&CreatePin> = U64Map::default();
-    if plan.batch_pin.len() == plan.planned_fks.len() {
-        for (fk, pin) in plan.planned_fks.iter().zip(plan.batch_pin.iter()) {
-            if let Some(id) = fk.get() {
-                batch_pin_by_id.insert(id, pin);
-            }
-        }
-    } else {
-        for ((pin, _ins), fk) in plan.packed.iter().zip(plan.planned_fks.iter()) {
-            if let Some(id) = fk.get() {
-                batch_pin_by_id.insert(id, pin);
-            }
+    // Reachable plans store the same pin Arc in `packed` and `batch_pin`.
+    // Indexing `packed` is that pin either way.
+    for ((pin, _ins), fk) in plan.packed.iter().zip(plan.planned_fks.iter()) {
+        if let Some(id) = fk.get() {
+            batch_pin_by_id.insert(id, pin);
         }
     }
     if plan.edges.is_empty() && !plan.planned_fks.is_empty() {
@@ -532,7 +526,7 @@ pub(super) fn ensure_spend_abs_layouts(
 mod tests {
     use super::*;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin, ParentIdent, SpendEdge, U64Map};
+    use rbitcoin_query::{CreatePin, ParentIdent, U64Map};
     use rbitcoin_store::{OutputRecord, TxRecord};
 
     fn pin_with(txid: [u8; 32], inputs: u32) -> CreatePin {
@@ -548,29 +542,6 @@ mod tests {
             },
             vec![OutputRecord::unspent(50, vec![0x51])],
         )
-    }
-
-    #[test]
-    fn equal_pin_lens_use_batch_pin_not_packed() {
-        let batch = pin_with([0x11; 32], 1);
-        let packed = pin_with([0x22; 32], 1);
-        let mut plan = ArchiveWritePlan::empty();
-        plan.planned_fks = vec![Fk(1)];
-        plan.batch_pin = vec![batch];
-        plan.packed = vec![(packed, Vec::new())];
-        plan.edges.insert(
-            7,
-            vec![SpendEdge {
-                prev_txid: [1u8; 32],
-                vout: 0,
-                spend_fk: Fk(7),
-                create_fk: Fk(9),
-                vin: 0,
-            }],
-        );
-        let spent = spend_edges_from_plan(&plan, &mut ParentPinStamp::default()).unwrap();
-        let got = spent.batch_pin_by_id.get(&1).expect("fk 1");
-        assert_eq!(got.tx().txid, [0x11; 32]);
     }
 
     #[test]
