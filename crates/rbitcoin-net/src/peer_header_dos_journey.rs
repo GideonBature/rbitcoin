@@ -1586,3 +1586,64 @@ async fn below_floor_headers_do_not_walk_parents() {
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(src_dir);
 }
+
+/// More than one below-floor batch is required before minimum chain work.
+/// The node keeps asking, then stores the chain once the pending path crosses.
+#[tokio::test]
+async fn below_floor_full_batch_continues_until_the_floor() {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("below-floor-full");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let peers = crate::peers::PeerHub::new();
+    let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("below-floor-full-src");
+    src.ensure_genesis().unwrap();
+    let n = MAX_HEADERS_RESULTS as u32;
+    src.generate_to_script(n, op_true(), vec![]).unwrap();
+    let below = src.chain_work().unwrap().to_be_bytes();
+    src.generate_to_script(1, op_true(), vec![]).unwrap();
+    let floor = src.chain_work().unwrap().to_be_bytes();
+    assert!(below < floor, "the full batch is still under the next block");
+    hub.set_minimum_chain_work(Some(floor));
+    let first: Vec<_> = (1..=n).map(|h| header_at(&src, h)).collect();
+    let last = first.last().unwrap().block_hash();
+    let peer = live_peer(&peers, 18611, 51, false);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    push(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        NetworkMessage::Headers(first),
+    )
+    .await;
+    assert!(peer.best_known().is_none());
+    assert_eq!(side_tips(&hub), 0, "the below-floor batch is not stored");
+    let mut locators = Vec::new();
+    for msg in take_msgs(&mut out_rx) {
+        if let NetworkMessage::GetHeaders(gh) = msg {
+            locators.push(gh.locator_hashes);
+        }
+    }
+    assert_eq!(
+        locators.len(),
+        1,
+        "a full below-floor batch asks for the next"
+    );
+    assert_eq!(locators[0].first().copied(), Some(last));
+    let crossing = header_at(&src, n + 1);
+    push(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        NetworkMessage::Headers(vec![crossing]),
+    )
+    .await;
+    assert!(
+        side_tips(&hub) > 0,
+        "the chain is stored once pending work crosses the floor"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(src_dir);
+}

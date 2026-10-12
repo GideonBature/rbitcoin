@@ -3595,7 +3595,6 @@ fn on_headers(
 ) -> Result<(), NetError> {
     let n = headers.len();
     let _ = session.is_some_and(|s| s.take_awaiting_headers());
-    let mut ignored_low_work = false;
     if n == 0 {
         // Empty headers is a failed getheaders response, not an announcement.
     } else if n > 0
@@ -3604,7 +3603,7 @@ fn on_headers(
     {
         // Work stays under the floor from the pending headers alone. Do not
         // read parent headers, and do not move this peer's best-known tip.
-        ignored_low_work = true;
+        // A full batch still continues from its last header below.
         for hdr in headers.iter().take(n) {
             let hash = hdr.block_hash();
             if let Some(s) = session {
@@ -3693,7 +3692,7 @@ fn on_headers(
             }
         }
     }
-    if !ignored_low_work && n >= MAX_HEADERS_RESULTS {
+    if n >= MAX_HEADERS_RESULTS {
         let from = headers.get(n - 1).map(|h| h.block_hash());
         let _ = queue_getheaders(out_tx, hub, session, true, from);
     }
