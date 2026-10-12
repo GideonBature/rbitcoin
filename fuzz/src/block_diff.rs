@@ -70,12 +70,22 @@ pub enum BlockStanding {
 
 pub trait BlockOracle {
     fn submitblock_hex(&self, hex: &str) -> OracleReply;
-    fn liveness_ok(&self) -> bool;
-    fn core_rewind_to_height(&self, keep: u32) -> Result<(), &'static str>;
+    fn liveness_ok(&self) -> bool {
+        true
+    }
+    fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
+        Ok(())
+    }
     /// Undo `invalidateblock` (sticky). Unknown hash may error; callers ignore.
-    fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str>;
-    fn core_invalidate_hash(&self, hash: &str) -> Result<(), &'static str>;
-    fn core_precious_block(&self, hash: &str) -> Result<(), &'static str>;
+    fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
+        Ok(())
+    }
     /// Active-chain tip hash. `"no chain"` means this oracle has no tip to park.
     fn best_block_hash(&self) -> Result<String, &'static str> {
         Err("no chain")

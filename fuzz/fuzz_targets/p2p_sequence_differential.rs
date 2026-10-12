@@ -44,16 +44,11 @@ const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 const READ_WAIT: Duration = Duration::from_millis(200);
 
 fn harness_failure(what: &str) -> ! {
-    eprintln!("=== P2P-SEQUENCE FUZZ HARNESS FAILURE ===");
-    eprintln!("{what}");
-    std::process::exit(2);
+    rbitcoin_fuzz::harness_failure("P2P-SEQUENCE FUZZ HARNESS FAILURE", None, what)
 }
 
 fn note_comparison() {
-    let n = COMPARISONS.fetch_add(1, Ordering::Relaxed) + 1;
-    if n == 1 || n.is_multiple_of(100) {
-        eprintln!("p2p-sequence: comparisons={n}");
-    }
+    rbitcoin_fuzz::note_comparison(None, &COMPARISONS, 1, "p2p-sequence");
 }
 
 fn base() -> &'static Base {

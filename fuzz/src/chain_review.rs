@@ -821,21 +821,6 @@ mod tests {
                 .cloned()
                 .unwrap_or(OracleReply::RpcError)
         }
-        fn liveness_ok(&self) -> bool {
-            true
-        }
-        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
     }
 
     fn reply_for(fate: Fate) -> OracleReply {
@@ -1044,21 +1029,6 @@ mod tests {
         fn submitblock_hex(&self, _hex: &str) -> OracleReply {
             self.reply.clone()
         }
-        fn liveness_ok(&self) -> bool {
-            true
-        }
-        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
         fn block_standing(&self, _hash: &str) -> Result<BlockStanding, &'static str> {
             Ok(self.standing)
         }
@@ -1089,12 +1059,6 @@ mod tests {
                 OracleReply::Reason("duplicate".into())
             }
         }
-        fn liveness_ok(&self) -> bool {
-            true
-        }
-        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-            Ok(())
-        }
         fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str> {
             if hash == self.parent_hash {
                 *self.tip.borrow_mut() = self.heavy.clone();
@@ -1106,9 +1070,6 @@ mod tests {
             if hash == self.heavy {
                 *self.tip.borrow_mut() = self.parent_hash.clone();
             }
-            Ok(())
-        }
-        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
             Ok(())
         }
         fn best_block_hash(&self) -> Result<String, &'static str> {
@@ -1145,22 +1106,10 @@ mod tests {
                 OracleReply::Reason("bad-prevblk".into())
             }
         }
-        fn liveness_ok(&self) -> bool {
-            true
-        }
-        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-            Ok(())
-        }
         fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str> {
             if hash == self.setup_hash {
                 self.reconsidered.set(true);
             }
-            Ok(())
-        }
-        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
             Ok(())
         }
         fn block_standing(&self, hash: &str) -> Result<BlockStanding, &'static str> {

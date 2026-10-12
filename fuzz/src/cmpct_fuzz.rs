@@ -474,21 +474,6 @@ mod tests {
                 self.n.set(self.n.get() + 1);
                 OracleReply::NullAccept
             }
-            fn liveness_ok(&self) -> bool {
-                true
-            }
-            fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-                Ok(())
-            }
-            fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
-                Ok(())
-            }
-            fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-                Ok(())
-            }
-            fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
-                Ok(())
-            }
         }
 
         let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("cmpct-follow");
@@ -529,21 +514,6 @@ mod tests {
             fn submitblock_hex(&self, _hex: &str) -> OracleReply {
                 self.n.set(self.n.get() + 1);
                 OracleReply::Reason("bad-txns-inputs-missingorspent".into())
-            }
-            fn liveness_ok(&self) -> bool {
-                true
-            }
-            fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-                Ok(())
-            }
-            fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
-                Ok(())
-            }
-            fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-                Ok(())
-            }
-            fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
-                Ok(())
             }
         }
 
@@ -589,21 +559,9 @@ mod tests {
                 OracleReply::Reason(self.before.into())
             }
         }
-        fn liveness_ok(&self) -> bool {
-            true
-        }
-        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-            Ok(())
-        }
         fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str> {
             assert_eq!(hash.len(), 64);
             self.reconsidered.set(true);
-            Ok(())
-        }
-        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
             Ok(())
         }
         fn block_standing(
@@ -645,21 +603,6 @@ mod tests {
         fn submitblock_hex(&self, _hex: &str) -> OracleReply {
             self.submits.set(self.submits.get() + 1);
             OracleReply::Reason("duplicate".into())
-        }
-        fn liveness_ok(&self) -> bool {
-            true
-        }
-        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_reconsider_block(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
         }
         fn block_standing(
             &self,
@@ -705,24 +648,12 @@ mod tests {
             *self.scored.borrow_mut() = Some(reply.clone());
             reply
         }
-        fn liveness_ok(&self) -> bool {
-            true
-        }
-        fn core_rewind_to_height(&self, _keep: u32) -> Result<(), &'static str> {
-            Ok(())
-        }
         fn core_reconsider_block(&self, hash: &str) -> Result<(), &'static str> {
             assert_eq!(
                 hash,
                 "65cf78f7756e9040065276fbbfc42c8c7fd07636edfde1eb703aa735bd274ca5"
             );
             self.log.borrow_mut().push("reconsider");
-            Ok(())
-        }
-        fn core_invalidate_hash(&self, _hash: &str) -> Result<(), &'static str> {
-            Ok(())
-        }
-        fn core_precious_block(&self, _hash: &str) -> Result<(), &'static str> {
             Ok(())
         }
         fn block_standing(

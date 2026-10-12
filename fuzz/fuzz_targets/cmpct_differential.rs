@@ -37,21 +37,20 @@ const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 const DRAIN: Duration = Duration::from_millis(200);
 
 fn harness_failure(what: &str) -> ! {
-    eprintln!("=== CMPCT-DIFFERENTIAL FUZZ HARNESS FAILURE ===");
-    eprintln!("{what}");
-    eprintln!(
-        "comparisons_before_failure={}",
-        COMPARISONS.load(Ordering::Relaxed)
-    );
-    std::process::exit(2);
+    rbitcoin_fuzz::harness_failure(
+        "CMPCT-DIFFERENTIAL FUZZ HARNESS FAILURE",
+        Some(COMPARISONS.load(Ordering::Relaxed)),
+        what,
+    )
 }
 
 fn note_comparison() {
-    SESSION_FAIL_STREAK.store(0, Ordering::Relaxed);
-    let n = COMPARISONS.fetch_add(1, Ordering::Relaxed) + 1;
-    if n == 1 || n.is_multiple_of(100) {
-        eprintln!("cmpct-differential: comparisons={n}");
-    }
+    rbitcoin_fuzz::note_comparison(
+        Some(&SESSION_FAIL_STREAK),
+        &COMPARISONS,
+        1,
+        "cmpct-differential",
+    );
 }
 
 fn base() -> &'static Base {
