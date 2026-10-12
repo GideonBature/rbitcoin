@@ -2564,7 +2564,7 @@ fn resolve_prevout(
             confirm_phase_stats::tl_note_batch_hit();
             return Ok(ResolvedPrevout {
                 txout: TxOut {
-                    value: Amount::from_sat(value as u64),
+                    value: Amount::from_sat(value),
                     script_pubkey: ScriptBuf::new(),
                 },
                 shared: need_script_buf.then_some(pinned),

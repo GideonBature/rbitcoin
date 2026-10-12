@@ -3104,7 +3104,7 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
             let (fk, _rec) = hub.query.get_tx_by_txid(&op.txid.to_byte_array()).ok()??;
             let out = hub.query.tx_output_at_fk(fk, op.vout).ok()?;
             Some(TxOut {
-                value: Amount::from_sat(out.value.max(0) as u64),
+                value: Amount::from_sat(out.value),
                 script_pubkey: ScriptBuf::from_bytes(out.script),
             })
         },

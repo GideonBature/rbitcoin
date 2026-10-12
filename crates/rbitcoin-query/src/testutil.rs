@@ -70,7 +70,7 @@ pub fn tx_apply_to_tx(ta: &TxApply) -> bitcoin::Transaction {
             .outputs
             .iter()
             .map(|o| bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(o.value.max(0) as u64),
+                value: bitcoin::Amount::from_sat(o.value),
                 script_pubkey: bitcoin::script::ScriptBuf::from_bytes(o.script.clone()),
             })
             .collect(),

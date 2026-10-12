@@ -557,7 +557,7 @@ fn prevout_map_for_block(
             map.insert(
                 op,
                 TxOut {
-                    value: Amount::from_sat(out.value.max(0) as u64),
+                    value: Amount::from_sat(out.value),
                     script_pubkey: ScriptBuf::from_bytes(out.script),
                 },
             );

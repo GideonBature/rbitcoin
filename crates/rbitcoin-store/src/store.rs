@@ -2556,10 +2556,7 @@ mod tests {
             },
             vec![InputRecord {
                 prev_txid: [10u8; 32],
-                parent: crate::InputParent::Prevout {
-                    create_fk: create_fk,
-                    vout: 0,
-                },
+                parent: crate::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2583,10 +2580,7 @@ mod tests {
             },
             vec![InputRecord {
                 prev_txid: [10u8; 32],
-                parent: crate::InputParent::Prevout {
-                    create_fk: create_fk,
-                    vout: 0,
-                },
+                parent: crate::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2610,10 +2604,7 @@ mod tests {
             },
             vec![InputRecord {
                 prev_txid: [10u8; 32],
-                parent: crate::InputParent::Prevout {
-                    create_fk: create_fk,
-                    vout: 0,
-                },
+                parent: crate::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],

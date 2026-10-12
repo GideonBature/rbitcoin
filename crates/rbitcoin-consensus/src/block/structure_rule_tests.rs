@@ -427,7 +427,7 @@ fn plant_coinbase_with_outputs(
     let outs = first
         .output
         .iter()
-        .map(|o| OutputRecord::unspent(o.value.to_sat() as u64, o.script_pubkey.to_bytes()))
+        .map(|o| OutputRecord::unspent(o.value.to_sat(), o.script_pubkey.to_bytes()))
         .collect();
     let fk = q
         .store()
@@ -1883,10 +1883,7 @@ fn plant_confirmed_spend(
     };
     let input = InputRecord {
         prev_txid: create_txid,
-        parent: rbitcoin_store::InputParent::Prevout {
-            create_fk: create_fk,
-            vout: 0,
-        },
+        parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],

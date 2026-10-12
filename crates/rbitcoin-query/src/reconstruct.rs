@@ -240,7 +240,7 @@ impl Query {
         let mut output = Vec::with_capacity(stored_outputs.len());
         for out in stored_outputs {
             output.push(TxOut {
-                value: Amount::from_sat(out.value as u64),
+                value: Amount::from_sat(out.value),
                 script_pubkey: ScriptBuf::from_bytes(out.script),
             });
         }
@@ -642,7 +642,7 @@ fn encode_class_a_tx(
     }
     let _ = VarInt(outs.len() as u64).consensus_encode(&mut *out);
     for o in outs {
-        let _ = (o.value as u64).consensus_encode(&mut *out);
+        let _ = o.value.consensus_encode(&mut *out);
         let _ = VarInt(o.script.len() as u64).consensus_encode(&mut *out);
         out.extend_from_slice(&o.script);
     }

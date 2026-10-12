@@ -670,7 +670,7 @@ pub(crate) mod crypto {
             txin.previous_output
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
-            (value as u64)
+            value
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
             bitcoin::Script::from_bytes(script)

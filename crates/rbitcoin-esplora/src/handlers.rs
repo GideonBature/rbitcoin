@@ -2114,10 +2114,7 @@ mod pure_helper_tests {
             },
             vec![InputRecord {
                 prev_txid: [0xcb; 32],
-                parent: rbitcoin_store::InputParent::Prevout {
-                    create_fk: create_fk,
-                    vout: 0,
-                },
+                parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],

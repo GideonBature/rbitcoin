@@ -366,10 +366,7 @@ fn spend_op_true(
         },
         inputs: vec![InputRecord {
             prev_txid: create_txid,
-            parent: rbitcoin_store::InputParent::Prevout {
-                create_fk: create_fk,
-                vout: 0,
-            },
+            parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -883,10 +880,7 @@ fn sh_pending_join_holds_while_job_is_in_flight() {
             },
             inputs: vec![InputRecord {
                 prev_txid: create_txid,
-                parent: rbitcoin_store::InputParent::Prevout {
-                    create_fk: create_fk,
-                    vout: 0,
-                },
+                parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
