@@ -548,6 +548,7 @@ mod tests {
         assert!(!p.segwit_active_at(0));
         assert!(p.segwit_active_at(1));
         assert!(p.signet_challenge.is_some());
+        assert_eq!(p.btc.pow_target_spacing, 10 * 60);
     }
 
     #[test]

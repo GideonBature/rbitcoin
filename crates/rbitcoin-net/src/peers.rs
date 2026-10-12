@@ -3092,6 +3092,11 @@ mod tests {
         );
 
         let done = hub.register(a, a, &ver("/rbitcoin:test/"), false, PeerConnType::Inbound);
+        assert_eq!(
+            done.sent_feefilter_sat_kvb(),
+            -1,
+            "registration has not sent a feefilter"
+        );
         done.attach_tcp_shutdown(local);
         assert!(
             hub.snapshot().iter().all(|p| p.id != done.id),
