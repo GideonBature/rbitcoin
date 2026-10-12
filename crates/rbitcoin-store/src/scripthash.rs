@@ -790,6 +790,25 @@ enum KeyHome {
     Absent,
 }
 
+/// A key [`ScriptHashTable::locate_head`] actually found. Absent is not a home
+/// on that path: a miss is `Ok(None)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocatedHome {
+    Main,
+    SealedOvf,
+    Ingest,
+}
+
+impl From<LocatedHome> for KeyHome {
+    fn from(home: LocatedHome) -> Self {
+        match home {
+            LocatedHome::Main => Self::Main,
+            LocatedHome::SealedOvf => Self::SealedOvf,
+            LocatedHome::Ingest => Self::Ingest,
+        }
+    }
+}
+
 impl ScriptHashTable {
     pub fn create(dir: &std::path::Path) -> Result<Self, StoreError> {
         Self::create_with_scale(dir, HeadScale::Mainnet)
@@ -1239,7 +1258,7 @@ impl ScriptHashTable {
     fn key_home(&self, scripthash: &[u8; 32]) -> Result<KeyHome, StoreError> {
         Ok(self
             .locate_head(scripthash)?
-            .map(|(_, h)| h)
+            .map(|(_, h)| KeyHome::from(h))
             .unwrap_or(KeyHome::Absent))
     }
 
@@ -1252,20 +1271,20 @@ impl ScriptHashTable {
     fn locate_head(
         &self,
         scripthash: &[u8; 32],
-    ) -> Result<Option<(ShHeadValue, KeyHome)>, StoreError> {
+    ) -> Result<Option<(ShHeadValue, LocatedHome)>, StoreError> {
         if let Some(v) = self.ingest.lock().unwrap().get(scripthash)? {
-            return Ok(Some((v, KeyHome::Ingest)));
+            return Ok(Some((v, LocatedHome::Ingest)));
         }
         let hk = head_key_from_full(scripthash);
         for h in self.sealed_ovf.lock().unwrap().iter().rev() {
             if let Some(v) = h.get(&hk)? {
-                return Ok(Some((v, KeyHome::SealedOvf)));
+                return Ok(Some((v, LocatedHome::SealedOvf)));
             }
         }
         if let Some(l1) = self.ovf_l1.lock().unwrap().as_ref() {
             if l1.fuse.contains(mix_key16(&hk)) {
                 if let Some(v) = l1.head.get(&hk)? {
-                    return Ok(Some((v, KeyHome::SealedOvf)));
+                    return Ok(Some((v, LocatedHome::SealedOvf)));
                 }
             }
         }
@@ -1275,7 +1294,7 @@ impl ScriptHashTable {
                 let g = slot.read().unwrap();
                 if let Some(h) = g.as_ref() {
                     if let Some(v) = h.get(&hk)? {
-                        return Ok(Some((v, KeyHome::Main)));
+                        return Ok(Some((v, LocatedHome::Main)));
                     }
                 }
             }
@@ -1377,6 +1396,7 @@ impl ScriptHashTable {
         let Some((val, home)) = self.locate_head(scripthash)? else {
             return Ok(0);
         };
+        let home = KeyHome::from(home);
         let used = val.used();
         if used != u32::MAX {
             return Ok(used);
@@ -1400,7 +1420,7 @@ impl ScriptHashTable {
         let Some((val, home)) = self.locate_head(scripthash)? else {
             return Ok(Vec::new());
         };
-        self.collect_entries_from(self.body_for(scripthash, home), &val)
+        self.collect_entries_from(self.body_for(scripthash, KeyHome::from(home)), &val)
     }
 
     /// Live creates for a scripthash (oldest → newest).
@@ -1493,7 +1513,7 @@ impl ScriptHashTable {
             for key in missing {
                 if let Some((v, kh)) = self.locate_head(&key)? {
                     heads.insert(key, v);
-                    home.insert(key, kh);
+                    home.insert(key, KeyHome::from(kh));
                 } else {
                     home.insert(key, KeyHome::Absent);
                 }
@@ -2266,14 +2286,14 @@ impl ScriptHashTable {
         let Some((val, home)) = self.locate_head(scripthash)? else {
             return Ok(false);
         };
-        let body = self.body_for(scripthash, home);
+        let body = self.body_for(scripthash, KeyHome::from(home));
         let mut live = self.collect_entries_from(body, &val)?;
         let Some(pos) = live.iter().position(|fk| *fk == create_tx_fk) else {
             return Ok(false);
         };
         live.remove(pos);
         live.sort_by_key(|fk| fk.0);
-        let alloc_mu = self.alloc_for(scripthash, home);
+        let alloc_mu = self.alloc_for(scripthash, KeyHome::from(home));
         let mut alloc = alloc_mu.lock().unwrap();
         let new_val = self.rewrite_entries_for_key(body, &mut alloc, &val, &live)?;
         write_alloc_header(body, &alloc)?;
@@ -2285,13 +2305,13 @@ impl ScriptHashTable {
     fn unlink_write_home(
         &self,
         scripthash: &[u8; 32],
-        home: KeyHome,
+        home: LocatedHome,
         new_val: &ShHeadValue,
     ) -> Result<(), StoreError> {
         match home {
-            KeyHome::Main | KeyHome::Absent => self.unlink_write_main(scripthash, new_val),
-            KeyHome::Ingest => self.unlink_write_ingest(scripthash, new_val),
-            KeyHome::SealedOvf => self.unlink_write_sealed_ovf(scripthash, new_val),
+            LocatedHome::Main => self.unlink_write_main(scripthash, new_val),
+            LocatedHome::Ingest => self.unlink_write_ingest(scripthash, new_val),
+            LocatedHome::SealedOvf => self.unlink_write_sealed_ovf(scripthash, new_val),
         }
     }
 

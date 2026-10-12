@@ -606,7 +606,7 @@ mod tests {
             items.push((
                 tx,
                 vec![InputRecord::coinbase(u32::MAX, vec![], vec![])],
-                vec![OutputRecord::unspent(1000 + i as i64, script)],
+                vec![OutputRecord::unspent(1000 + i as u64, script)],
             ));
         }
         let _fks = t.put_full_batch_indexed(&items, true).unwrap();
@@ -640,7 +640,7 @@ mod tests {
             items.push((
                 tx,
                 vec![InputRecord::coinbase(u32::MAX, vec![], vec![])],
-                vec![OutputRecord::unspent(1000 + i as i64, script)],
+                vec![OutputRecord::unspent(1000 + i as u64, script)],
             ));
         }
         let _fks = t.put_full_batch_indexed(&items, true).unwrap();
@@ -887,14 +887,7 @@ mod tests {
                     output_start_fk: Fk::NULL,
                     output_count: 1,
                 },
-                vec![InputRecord {
-                    prev_txid: [0u8; 32],
-                    create_fk: Fk::NULL,
-                    prev_index: u32::MAX,
-                    sequence: u32::MAX,
-                    script_sig: vec![hint],
-                    witness: vec![],
-                }],
+                vec![InputRecord::coinbase(u32::MAX, vec![hint], vec![])],
                 vec![OutputRecord::unspent(1, vec![0x51])],
             )
         };

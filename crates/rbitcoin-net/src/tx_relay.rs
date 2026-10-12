@@ -295,15 +295,15 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
         let Some(out) = outs.into_iter().nth(op.vout as usize) else {
             return ChainPrevout::KnownUnavailable;
         };
-        let value = if out.value < 0 {
-            Amount::ZERO
-        } else {
-            Amount::from_sat(out.value as u64)
-        };
+        let value = Amount::from_sat(out.value);
         let is_coinbase = match self.coinbase_flag(fk, create_height) {
             Ok(flag) => flag,
             Err(_) => return ChainPrevout::KnownUnavailable,
         };
+        // Height 0 is the genesis coinbase. A non-coinbase there is not a coin.
+        if create_height == 0 && !is_coinbase {
+            return ChainPrevout::KnownUnavailable;
+        }
         let create_mtp = if create_height == 0 || !self.need_create_mtp.load(Ordering::Relaxed) {
             0
         } else {

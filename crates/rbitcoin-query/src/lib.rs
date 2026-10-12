@@ -2125,7 +2125,10 @@ impl Query {
                     let height = self.store.tx_height_get(fk)?.unwrap_or(0);
                     return Err(StoreError::Pruned { height });
                 };
-                Ok(inputs.iter().map(|i| (i.create_fk, i.prev_index)).collect())
+                Ok(inputs
+                    .iter()
+                    .map(|i| (i.create_fk(), i.prev_index()))
+                    .collect())
             }
             Err(e) => Err(e),
         }

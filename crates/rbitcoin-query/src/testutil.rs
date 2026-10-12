@@ -59,7 +59,7 @@ pub fn tx_apply_to_tx(ta: &TxApply) -> bitcoin::Transaction {
             .map(|inp| bitcoin::TxIn {
                 previous_output: bitcoin::OutPoint {
                     txid: bitcoin::Txid::from_byte_array(inp.prev_txid),
-                    vout: inp.prev_index,
+                    vout: inp.prev_index(),
                 },
                 script_sig: bitcoin::script::ScriptBuf::from_bytes(inp.script_sig.clone()),
                 sequence: bitcoin::Sequence::from_consensus(inp.sequence),

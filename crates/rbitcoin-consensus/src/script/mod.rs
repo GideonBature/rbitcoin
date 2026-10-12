@@ -574,7 +574,7 @@ pub(crate) mod crypto {
             let mut spent = job.pre().clone();
             let n = job.prevouts.len();
             let ok = spent.finish_spent_parts(n, |i| match job.prevout_parts(i) {
-                Ok(parts) => Some(parts),
+                Ok((value, script)) => Some((value as i64, script)),
                 Err(e) => {
                     failed = Some(e);
                     None

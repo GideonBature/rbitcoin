@@ -113,7 +113,7 @@ pub use tx_table::{
     decode_packed_tx_with_spender_rels_secret, decode_seqsigwit_secret, encode_packed_tx,
     encode_packed_tx_with_secret, encode_seqsigwit_with_secret, encode_txout_meta_and_outs,
     encode_unspent_output_into_secret, encode_wire_seqsigwit_input, seqsigwit_input_len_upper,
-    spend_meta_backend, spent_abs, InputRecord, OutputRecord, PackedCreate, TxRecord,
+    spend_meta_backend, spent_abs, InputParent, InputRecord, OutputRecord, PackedCreate, TxRecord,
 };
 pub use txstat::TxStatRow;
 pub(crate) use uring_session::IoCtx;

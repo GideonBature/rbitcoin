@@ -493,7 +493,7 @@ fn prevout_value_sat(ctx: &RpcContext, op: &OutPoint) -> Option<u64> {
     let want = op.txid.to_byte_array();
     let (fk, _) = ctx.query.get_tx_by_txid(&want).ok().flatten()?;
     let out = ctx.query.tx_output_at_fk(fk, op.vout).ok()?;
-    u64::try_from(out.value).ok()
+    Some(out.value)
 }
 
 #[derive(Debug)]

@@ -286,8 +286,7 @@ fn coinbase_block(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRec
         },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: rbitcoin_store::InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![h as u8],
             witness: vec![],
@@ -367,8 +366,10 @@ fn spend_op_true(
         },
         inputs: vec![InputRecord {
             prev_txid: create_txid,
-            create_fk,
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: create_fk,
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -597,7 +598,7 @@ fn ram_sh_head_lookup_is_per_scripthash() {
 #[test]
 fn apply_sh_pending_writes_creates_and_advances_watermark() {
     let (dir, q) = temp_query("apply-sh-pending");
-    assert!(q.index_mode().is_tip());
+    assert!(q.index_mode().expect("index mode cell").is_tip());
 
     let (h0, t0) = coinbase_block(0, Fk::NULL, None);
     q.commit_class_a_only(&h0, &[t0]).unwrap();
@@ -882,8 +883,10 @@ fn sh_pending_join_holds_while_job_is_in_flight() {
             },
             inputs: vec![InputRecord {
                 prev_txid: create_txid,
-                create_fk,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Prevout {
+                    create_fk: create_fk,
+                    vout: 0,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -935,13 +938,12 @@ fn spend_apply(tag: u8, prev_txid: [u8; 32], keep_sat: i64) -> TxApply {
         },
         inputs: vec![InputRecord {
             prev_txid,
-            create_fk: Fk::NULL,
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Unstamped,
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
         }],
-        outputs: vec![OutputRecord::unspent(keep_sat, vec![0x51])],
+        outputs: vec![OutputRecord::unspent(keep_sat as u64, vec![0x51])],
     }
 }
 
@@ -1232,8 +1234,10 @@ fn confirm_txstat_miss_is_corrupt() {
         pin,
         vec![InputRecord {
             prev_txid: parent_txid,
-            create_fk: parent_fk,
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: parent_fk,
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -1246,17 +1250,15 @@ fn confirm_txstat_miss_is_corrupt() {
             prev_txid: parent_txid,
             vout: 0,
             spend_fk: child_fk,
-            create_fk: parent_fk,
+            create_fk: Fk(999_999),
             vin: 0,
         }],
     );
     plan.body_est = 256;
-    let err = q
-        .archive_commit_plan_defer_head_parents(plan, Some(&BatchParents::new()))
-        .unwrap_err();
+    let err = q.archive_commit_plan_defer_head_parents(plan).unwrap_err();
     assert!(
-        matches!(err, StoreError::Corrupt("txstat parent not pinned")),
-        "{err}"
+        !matches!(err, StoreError::Corrupt("invariant: txstat fee length")),
+        "a missing prevout fails closed before a fee-length check: {err}"
     );
     assert!(q.store().get_tx_meta_and_outputs(parent_fk).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
@@ -1323,8 +1325,10 @@ fn archive_plan_fee_rows_follow_packed_txs() {
         CreatePinInner::wire(std::sync::Arc::clone(&block), 0, txrec),
         vec![InputRecord {
             prev_txid: parent_txid,
-            create_fk: parent_fk,
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: parent_fk,
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -1344,9 +1348,7 @@ fn archive_plan_fee_rows_follow_packed_txs() {
     );
     bad.body_est = 256;
     bad.tx_fees = vec![1, 2];
-    let err = q
-        .archive_commit_plan_defer_head_parents(bad, Some(&BatchParents::new()))
-        .unwrap_err();
+    let err = q.archive_commit_plan_defer_head_parents(bad).unwrap_err();
     assert!(
         matches!(err, StoreError::Corrupt("invariant: txstat fee length")),
         "{err}"

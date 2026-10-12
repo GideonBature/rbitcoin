@@ -47,6 +47,23 @@ pub(crate) enum SigVersion {
     TapScript,
 }
 
+/// ECDSA CHECKSIG / CHECKMULTISIG. TapScript is routed before this path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreTapscript {
+    Base,
+    WitnessV0,
+}
+
+impl PreTapscript {
+    fn from_sig_version(version: SigVersion) -> Option<Self> {
+        match version {
+            SigVersion::Base => Some(Self::Base),
+            SigVersion::WitnessV0 => Some(Self::WitnessV0),
+            SigVersion::TapScript => None,
+        }
+    }
+}
+
 /// BIP342 OP_SUCCESSx opcode numbers (decimal).
 ///
 /// If any of these appears in a **tapscript** during decoding, the script is
@@ -849,20 +866,20 @@ pub(crate) fn eval_script(
                     }
                     0xae => {
                         // BIP342: CHECKMULTISIG disabled in tapscript (hard fail).
-                        if ctx.sig_version == SigVersion::TapScript {
+                        let Some(pre) = PreTapscript::from_sig_version(ctx.sig_version) else {
                             return Err(ConsensusError::Script(
                                 "CHECKMULTISIG disabled in tapscript".into(),
                             ));
-                        }
-                        op_checkmultisig(stack, altstack.len(), ctx, false, &mut op_count)?;
+                        };
+                        op_checkmultisig(stack, altstack.len(), ctx, false, &mut op_count, pre)?;
                     }
                     0xaf => {
-                        if ctx.sig_version == SigVersion::TapScript {
+                        let Some(pre) = PreTapscript::from_sig_version(ctx.sig_version) else {
                             return Err(ConsensusError::Script(
                                 "CHECKMULTISIGVERIFY disabled in tapscript".into(),
                             ));
-                        }
-                        op_checkmultisig(stack, altstack.len(), ctx, true, &mut op_count)?;
+                        };
+                        op_checkmultisig(stack, altstack.len(), ctx, true, &mut op_count, pre)?;
                     }
                     0xb1 => {
                         // BIP65: pre-activation is NOP.
@@ -964,10 +981,10 @@ fn op_checksig(
 ) -> Result<(), ConsensusError> {
     let pubkey = pop(stack)?;
     let sig = pop(stack)?;
-    if ctx.sig_version == SigVersion::TapScript {
+    let Some(pre) = PreTapscript::from_sig_version(ctx.sig_version) else {
         return op_checksig_tapscript(stack, alt_len, &sig, &pubkey, ctx, verify);
-    }
-    let ok = checksig_legacy(&sig, &pubkey, ctx)?;
+    };
+    let ok = checksig_legacy(&sig, &pubkey, ctx, pre)?;
     if verify {
         if !ok {
             return Err(ConsensusError::Script("CHECKSIGVERIFY".into()));
@@ -1083,6 +1100,7 @@ fn op_checkmultisig(
     ctx: &EvalContext<'_>,
     verify: bool,
     op_count: &mut usize,
+    ver: PreTapscript,
 ) -> Result<(), ConsensusError> {
     // Pop order matches Core: n, n keys (top=last), m, m sigs (top=last), dummy.
     let n = scriptnum_decode(&pop(stack)?, ctx.minimal_data)?;
@@ -1110,13 +1128,13 @@ fn op_checkmultisig(
     let dummy = pop(stack)?;
     // BIP147: required for Witness v0; Base only when SCRIPT_VERIFY_NULLDUMMY.
     // Independent of CSV (Core treats the flags separately).
-    if !dummy.is_empty() && (ctx.sig_version == SigVersion::WitnessV0 || ctx.null_dummy) {
+    if !dummy.is_empty() && (ver == PreTapscript::WitnessV0 || ctx.null_dummy) {
         return Err(ConsensusError::Script("NULLDUMMY".into()));
     }
 
     // Core Base: FindAndDelete **all** sigs from scriptCode before the loop.
     let original = script_code_bytes(ctx);
-    let script_code: Cow<'_, [u8]> = if ctx.sig_version == SigVersion::Base {
+    let script_code: Cow<'_, [u8]> = if ver == PreTapscript::Base {
         let mut sc = original.to_vec();
         for sig in &sigs {
             sc = find_and_delete(&sc, sig);
@@ -1129,7 +1147,7 @@ fn op_checkmultisig(
         Cow::Borrowed(original)
     };
 
-    let f_success = checkmultisig_pairs(&sigs, &pubkeys, ctx, &script_code)?;
+    let f_success = checkmultisig_pairs(&sigs, &pubkeys, ctx, &script_code, ver)?;
 
     if !f_success && ctx.nullfail && sigs.iter().any(|s| !s.is_empty()) {
         return Err(ConsensusError::Script("NULLFAIL".into()));
@@ -1150,6 +1168,7 @@ fn checkmultisig_pairs(
     pubkeys: &[Vec<u8>],
     ctx: &EvalContext<'_>,
     script_code: &[u8],
+    ver: PreTapscript,
 ) -> Result<bool, ConsensusError> {
     // Core: start at last-pushed sig/key (index 0 after pop-order storage).
     // Advance key always; advance sig only on match. Encoding checks run only
@@ -1160,7 +1179,7 @@ fn checkmultisig_pairs(
     let mut isig = 0usize;
     let mut ikey = 0usize;
     while f_success && n_sigs > 0 {
-        let f_ok = ecdsa_sig_matches(&sigs[isig], &pubkeys[ikey], ctx, script_code)?;
+        let f_ok = ecdsa_sig_matches(&sigs[isig], &pubkeys[ikey], ctx, script_code, ver)?;
         if f_ok {
             isig += 1;
             n_sigs -= 1;
@@ -1320,10 +1339,11 @@ fn checksig_legacy(
     sig: &[u8],
     pubkey: &[u8],
     ctx: &EvalContext<'_>,
+    ver: PreTapscript,
 ) -> Result<bool, ConsensusError> {
     let base = script_code_bytes(ctx);
     let deleted: Vec<u8>;
-    let script_code: &[u8] = if ctx.sig_version == SigVersion::Base {
+    let script_code: &[u8] = if ver == PreTapscript::Base {
         deleted = find_and_delete(base, sig);
         if ctx.const_scriptcode && deleted.as_slice() != base {
             return Err(ConsensusError::Script("SIG_FINDANDDELETE".into()));
@@ -1332,7 +1352,7 @@ fn checksig_legacy(
     } else {
         base
     };
-    let ok = ecdsa_sig_matches(sig, pubkey, ctx, script_code)?;
+    let ok = ecdsa_sig_matches(sig, pubkey, ctx, script_code, ver)?;
     if !ok && ctx.nullfail && !sig.is_empty() {
         return Err(ConsensusError::Script("NULLFAIL".into()));
     }
@@ -1350,8 +1370,9 @@ fn ecdsa_sig_matches(
     pubkey: &[u8],
     ctx: &EvalContext<'_>,
     script_code: &[u8],
+    ver: PreTapscript,
 ) -> Result<bool, ConsensusError> {
-    checksig_legacy_encodings(sig, pubkey, ctx)?;
+    checksig_legacy_encodings(sig, pubkey, ctx, ver)?;
     if sig.is_empty() {
         return Ok(false);
     }
@@ -1363,7 +1384,7 @@ fn ecdsa_sig_matches(
     let Ok(pk) = crypto::parse_pubkey(pubkey) else {
         return Ok(false);
     };
-    let Ok(sighash) = sighash_for_script(ctx, sighash_ty, script_code) else {
+    let Ok(sighash) = sighash_for_script(ctx, sighash_ty, script_code, ver) else {
         return Ok(false);
     };
     Ok(crypto::verify_ecdsa(sighash, &ecdsa_sig, &pk))
@@ -1375,6 +1396,7 @@ fn checksig_legacy_encodings(
     sig: &[u8],
     pubkey: &[u8],
     ctx: &EvalContext<'_>,
+    ver: PreTapscript,
 ) -> Result<(), ConsensusError> {
     if !sig.is_empty() {
         check_signature_encoding(sig, ctx)?;
@@ -1383,7 +1405,7 @@ fn checksig_legacy_encodings(
         return Err(ConsensusError::Script("PUBKEYTYPE".into()));
     }
     if ctx.witness_pubkeytype
-        && ctx.sig_version == SigVersion::WitnessV0
+        && ver == PreTapscript::WitnessV0
         && !crypto::is_compressed_pubkey(pubkey)
     {
         return Err(ConsensusError::Script("WITNESS_PUBKEYTYPE".into()));
@@ -1447,10 +1469,11 @@ fn sighash_for_script(
     ctx: &EvalContext<'_>,
     ty_raw: u32,
     script_bytes: &[u8],
+    ver: PreTapscript,
 ) -> Result<[u8; 32], ConsensusError> {
     let script_code = Script::from_bytes(script_bytes);
-    match ctx.sig_version {
-        SigVersion::Base => {
+    match ver {
+        PreTapscript::Base => {
             // Raw hashtype 0 is not SIGHASH_ALL=1.
             let stripped = strip_op_codeseparator(script_bytes);
             let script_code = Script::from_bytes(&stripped);
@@ -1461,7 +1484,7 @@ fn sighash_for_script(
                 .map_err(|_| ConsensusError::Script("legacy sighash".into()))?;
             Ok(h.to_byte_array())
         }
-        SigVersion::WitnessV0 => crypto::bip143_p2wsh_signature_hash(
+        PreTapscript::WitnessV0 => crypto::bip143_p2wsh_signature_hash(
             ctx.tx,
             ctx.input_index,
             script_code,
@@ -1469,7 +1492,6 @@ fn sighash_for_script(
             ty_raw,
             ctx.pre.as_ref(),
         ),
-        SigVersion::TapScript => unreachable!(),
     }
 }
 

@@ -19,6 +19,20 @@ enum RestFmt {
     Json,
 }
 
+/// Body encoding after JSON has already returned.
+enum RestWire {
+    Bin,
+    Hex,
+}
+
+fn rest_wire(fmt: RestFmt) -> Option<RestWire> {
+    match fmt {
+        RestFmt::Bin => Some(RestWire::Bin),
+        RestFmt::Hex => Some(RestWire::Hex),
+        RestFmt::Json => None,
+    }
+}
+
 pub(crate) struct RestReply {
     pub status: axum::http::StatusCode,
     pub content_type: &'static str,
@@ -208,10 +222,10 @@ fn block(
     verbosity: u32,
 ) -> Result<RestReply, RestReply> {
     let parsed = parse_hash(hash)?;
-    if fmt == RestFmt::Json {
+    let Some(wire) = rest_wire(fmt) else {
         let params = RpcParams::positional(vec![json!(hash), json!(verbosity)]);
         return Ok(json_body(getblock(ctx, &params)?));
-    }
+    };
     let height = ctx
         .query
         .height_of_hash(&parsed)
@@ -238,10 +252,9 @@ fn block(
             "block encode",
         )
     })?;
-    match fmt {
-        RestFmt::Bin => Ok(bin_body(raw)),
-        RestFmt::Hex => Ok(hex_body(&hex_encode(&raw))),
-        RestFmt::Json => unreachable!(),
+    match wire {
+        RestWire::Bin => Ok(bin_body(raw)),
+        RestWire::Hex => Ok(hex_body(&hex_encode(&raw))),
     }
 }
 
@@ -252,13 +265,13 @@ fn tx(ctx: &RpcContext, fmt: RestFmt, txid: &str) -> Result<RestReply, RestReply
             &format!("{txid} not found"),
         ));
     }
-    if fmt == RestFmt::Json {
+    let Some(wire) = rest_wire(fmt) else {
         let params = RpcParams::positional(vec![json!(txid), json!(true)]);
         return Ok(json_body(map_tx_missing(
             txid,
             getrawtransaction(ctx, &params),
         )?));
-    }
+    };
     let params = RpcParams::positional(vec![json!(txid), json!(false)]);
     let hex = map_tx_missing(txid, getrawtransaction(ctx, &params))?;
     let hex = hex.as_str().ok_or_else(|| {
@@ -269,10 +282,9 @@ fn tx(ctx: &RpcContext, fmt: RestFmt, txid: &str) -> Result<RestReply, RestReply
     })?;
     let raw = hex_decode(hex)
         .map_err(|_| err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tx hex"))?;
-    match fmt {
-        RestFmt::Bin => Ok(bin_body(raw)),
-        RestFmt::Hex => Ok(hex_body(hex)),
-        RestFmt::Json => unreachable!(),
+    match wire {
+        RestWire::Bin => Ok(bin_body(raw)),
+        RestWire::Hex => Ok(hex_body(hex)),
     }
 }
 

@@ -359,6 +359,10 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
         ),
     ] {
         let heights = RunCreateHeight::Spans(Vec::new());
+        let parents = BatchParents::new();
+        let abs_jobs = parents
+            .spend_abs_jobs(std::iter::empty::<(Fk, u32, Fk, u32)>())
+            .expect("no spend edges");
         let err = structural_validate_spends(
             q,
             &dup,
@@ -367,12 +371,12 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
             &[],
             0,
             &mut OutPointSet::default(),
-            &BatchParents::new(),
+            &parents,
             &mut U32Map::default(),
             &heights,
             &crate::block::ClassAWave::default(),
             &mut crate::block::StructuralScratch::default(),
-            None,
+            &abs_jobs,
         )
         .expect_err("an unspent overwrite must trip BIP30");
         let msg = format!("{err}");
@@ -423,7 +427,7 @@ fn plant_coinbase_with_outputs(
     let outs = first
         .output
         .iter()
-        .map(|o| OutputRecord::unspent(o.value.to_sat() as i64, o.script_pubkey.to_bytes()))
+        .map(|o| OutputRecord::unspent(o.value.to_sat() as u64, o.script_pubkey.to_bytes()))
         .collect();
     let fk = q
         .store()
@@ -467,24 +471,29 @@ fn bip30_message_at_mainnet_above_bip34(
     block: &Block,
 ) -> Result<(), ConsensusError> {
     use crate::block::{structural_validate_spends, RunCreateHeight};
+    use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, OutPointSet, U32Map};
     let main = Box::leak(Box::new(ChainParams::mainnet()));
     let ctx = ValidationContext::at(main, Height(main.btc.bip34_height + 1), Milestone::NONE);
     let heights = RunCreateHeight::Spans(Vec::new());
+    let parents = BatchParents::new();
+    let abs_jobs = parents
+        .spend_abs_jobs(std::iter::empty::<(Fk, u32, Fk, u32)>())
+        .expect("no spend edges");
     structural_validate_spends(
         q,
         block,
         &ctx,
-        Some(&[rbitcoin_primitives::Fk(2)]),
+        Some(&[Fk(2)]),
         &[],
         0,
         &mut OutPointSet::default(),
-        &BatchParents::new(),
+        &parents,
         &mut U32Map::default(),
         &heights,
         &crate::block::ClassAWave::default(),
         &mut crate::block::StructuralScratch::default(),
-        None,
+        &abs_jobs,
     )
     .map(|_| ())
 }
@@ -1874,8 +1883,10 @@ fn plant_confirmed_spend(
     };
     let input = InputRecord {
         prev_txid: create_txid,
-        create_fk,
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: create_fk,
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -1926,6 +1937,15 @@ fn bip30_ignores_unspendable_outputs() {
     let check = |q: &rbitcoin_query::Query| {
         let mut mtp_cache = U32Map::default();
         mtp_cache.insert(9, 0);
+        let parents = BatchParents::new();
+        let abs_jobs = parents
+            .spend_abs_jobs(std::iter::empty::<(
+                rbitcoin_primitives::Fk,
+                u32,
+                rbitcoin_primitives::Fk,
+                u32,
+            )>())
+            .expect("no spend edges");
         structural_validate_spends(
             q,
             &dup,
@@ -1934,12 +1954,12 @@ fn bip30_ignores_unspendable_outputs() {
             &[],
             0,
             &mut OutPointSet::default(),
-            &BatchParents::new(),
+            &parents,
             &mut mtp_cache,
             &RunCreateHeight::Spans(Vec::new()),
             &crate::block::ClassAWave::default(),
             &mut crate::block::StructuralScratch::default(),
-            None,
+            &abs_jobs,
         )
         .err()
         .map(|e| format!("{e}"))
@@ -2471,41 +2491,6 @@ fn already_archived_schema13_pin_identity_tip_follow() {
             || format!("{err}").contains("prevout"),
         "got {err}"
     );
-
-    // Structural without denserels/abs is invariant — not soft PrevoutSpent recovery.
-    {
-        use super::{structural_validate_spends, RunCreateHeight};
-        use rbitcoin_primitives::Fk;
-        use rbitcoin_query::{BatchParents, OutPointSet, U32Map};
-        let c2_fk = q.tx_fk_by_txid(c2_txid.as_byte_array()).unwrap().unwrap();
-        let spends = vec![(c2_txid.to_byte_array(), 0u32, Fk(9_000_001), c2_fk, 0)];
-        let parents = BatchParents::new();
-        let ctx = ValidationContext::at(Box::leak(Box::new(params.clone())), Height(h_n1), ms);
-        let mut pending = OutPointSet::default();
-        let mut mtp = U32Map::default();
-        let heights = RunCreateHeight::Spans(Vec::new());
-        let err = structural_validate_spends(
-            &q,
-            &b_n1,
-            &ctx,
-            Some(&[Fk::NULL, Fk(9_000_001)]),
-            &spends,
-            0,
-            &mut pending,
-            &parents,
-            &mut mtp,
-            &heights,
-            &crate::block::ClassAWave::default(),
-            &mut crate::block::StructuralScratch::default(),
-            None,
-        )
-        .expect_err("missing denserels abs must hard-fail");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("invariant") && msg.contains("denserels"),
-            "expected denserels invariant, got {err}"
-        );
-    }
 
     let _ = std::fs::remove_dir_all(&path);
 }

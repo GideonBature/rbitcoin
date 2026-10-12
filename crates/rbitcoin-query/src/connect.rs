@@ -171,18 +171,18 @@ impl Query {
                     if inp.is_coinbase() {
                         continue;
                     }
-                    let create_fk = if inp.create_fk.is_null() {
+                    let create_fk = if inp.create_fk().is_null() {
                         self.store
                             .get_fk_by_txid_tip(&inp.prev_txid)?
                             .unwrap_or(Fk::NULL)
                     } else {
-                        inp.create_fk
+                        inp.create_fk()
                     };
                     if create_fk.is_null() {
                         continue;
                     }
                     let (off, len) = self.store.tx_spent_range(create_fk)?;
-                    let abs = rbitcoin_store::spent_abs(off, inp.prev_index);
+                    let abs = rbitcoin_store::spent_abs(off, inp.prev_index());
                     if abs.saturating_add(rbitcoin_store::OutputRecord::SPENT_SLOT_LEN as u64)
                         > off.saturating_add(len)
                     {
@@ -190,7 +190,7 @@ impl Query {
                             "invariant: confirm_block spend slot OOB",
                         ));
                     }
-                    abs_edges.push((abs, create_fk, inp.prev_index, spend_fk, vin as u32));
+                    abs_edges.push((abs, create_fk, inp.prev_index(), spend_fk, vin as u32));
                 }
             }
         }

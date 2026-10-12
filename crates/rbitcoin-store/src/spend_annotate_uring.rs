@@ -718,8 +718,7 @@ mod tests {
         };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: crate::InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![0x01],
             witness: vec![],

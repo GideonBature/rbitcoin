@@ -234,7 +234,7 @@ fn taproot_outs_from_records(outputs: &[OutputRecord]) -> Vec<TaprootOut> {
         }
         let mut xonly = [0u8; 32];
         xonly.copy_from_slice(&o.script[2..34]);
-        let value = u64::try_from(o.value).unwrap_or(0);
+        let value = o.value;
         out.push(TaprootOut {
             vout: i as u32,
             xonly,
@@ -255,12 +255,12 @@ fn build_tx_and_prevouts(
     let mut txins = Vec::with_capacity(inputs.len());
     for inp in inputs {
         let (prev_txid, prev_script, prev_value) = if inp.is_coinbase() {
-            ([0u8; 32], Vec::new(), 0i64)
+            ([0u8; 32], Vec::new(), 0u64)
         } else {
             const MISSING: &str = "invariant: sp_tweaks spent parent missing";
-            let (tid, outs) = parent(inp.create_fk).ok_or(StoreError::Corrupt(MISSING))?;
+            let (tid, outs) = parent(inp.create_fk()).ok_or(StoreError::Corrupt(MISSING))?;
             let o = outs
-                .get(inp.prev_index as usize)
+                .get(inp.prev_index() as usize)
                 .ok_or(StoreError::Corrupt(MISSING))?;
             (tid, o.script.clone(), o.value)
         };
@@ -268,13 +268,13 @@ fn build_tx_and_prevouts(
         txins.push(bitcoin::TxIn {
             previous_output: OutPoint {
                 txid: bitcoin::Txid::from_byte_array(prev_txid),
-                vout: inp.prev_index,
+                vout: inp.prev_index(),
             },
             script_sig: bitcoin::ScriptBuf::from_bytes(inp.script_sig.clone()),
             sequence: bitcoin::Sequence::from_consensus(inp.sequence),
             witness: Witness::from_slice(&wit_refs),
         });
-        let value = bitcoin::Amount::from_sat(u64::try_from(prev_value).unwrap_or(0));
+        let value = bitcoin::Amount::from_sat(prev_value);
         prevouts.push(TxOut {
             value,
             script_pubkey: bitcoin::ScriptBuf::from_bytes(prev_script),
@@ -282,7 +282,7 @@ fn build_tx_and_prevouts(
     }
     let mut txouts = Vec::with_capacity(outputs.len());
     for o in outputs {
-        let value = bitcoin::Amount::from_sat(u64::try_from(o.value).unwrap_or(0));
+        let value = bitcoin::Amount::from_sat(o.value);
         txouts.push(TxOut {
             value,
             script_pubkey: bitcoin::ScriptBuf::from_bytes(o.script.clone()),
@@ -591,31 +591,32 @@ mod tests {
         not_prog[1] = 0x15;
         assert!(!is_p2sh_p2wpkh_redeem(push(&not_prog).as_script()));
 
-        let neg = OutputRecord::unspent(-5, {
+        let zero = OutputRecord::unspent(0, {
             let mut s = vec![0x51, 0x20];
             s.extend(std::iter::repeat_n(0xab, 32));
             s
         });
-        let outs = taproot_outs_from_records(std::slice::from_ref(&neg));
-        assert_eq!(outs.len(), 1);
-        assert_eq!(outs[0].value, 0);
-        let zero = OutputRecord::unspent(0, neg.script.clone());
-        assert_eq!(taproot_outs_from_records(&[zero])[0].value, 0);
+        assert_eq!(
+            taproot_outs_from_records(std::slice::from_ref(&zero))[0].value,
+            0
+        );
 
-        let parent_outs = [OutputRecord::unspent(-7, vec![0x51])];
+        let parent_outs = [OutputRecord::unspent(7, vec![0x51])];
         let inp = InputRecord {
             prev_txid: [2u8; 32],
-            create_fk: Fk(1),
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 0,
+            },
             sequence: 0,
             script_sig: Vec::new(),
             witness: Vec::new(),
         };
-        let (tx, prevouts) = build_tx_and_prevouts(&[inp], std::slice::from_ref(&neg), &|_| {
+        let (tx, prevouts) = build_tx_and_prevouts(&[inp], std::slice::from_ref(&zero), &|_| {
             Some(([9u8; 32], parent_outs.as_slice()))
         })
         .unwrap();
-        assert_eq!(prevouts[0].value.to_sat(), 0);
+        assert_eq!(prevouts[0].value.to_sat(), 7);
         assert_eq!(tx.output[0].value.to_sat(), 0);
 
         let sk = SecretKey::from_slice(&[3u8; 32]).unwrap();
@@ -891,8 +892,10 @@ mod tests {
                 },
                 inputs: vec![InputRecord {
                     prev_txid: genesis_txid,
-                    create_fk,
-                    prev_index: 0,
+                    parent: rbitcoin_store::InputParent::Prevout {
+                        create_fk: create_fk,
+                        vout: 0,
+                    },
                     sequence: u32::MAX,
                     script_sig: vec![],
                     witness: vec![vec![0u8; 64], ser.to_vec()],
@@ -1038,8 +1041,10 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: prev.0,
-                create_fk: prev.1,
-                prev_index: prev.2,
+                parent: rbitcoin_store::InputParent::Prevout {
+                    create_fk: prev.1,
+                    vout: prev.2,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness,

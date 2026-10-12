@@ -75,9 +75,7 @@ pub fn encode_packed_live(
         encode_vin(&mut out, inp, aux);
     }
     for o in &tx.output {
-        let v =
-            i64::try_from(o.value.to_sat()).map_err(|_| MempoolError::Corrupt("txout amount"))?;
-        OutputRecord::encode_unspent_into(v, o.script_pubkey.as_bytes(), &mut out);
+        OutputRecord::encode_unspent_into(o.value.to_sat(), o.script_pubkey.as_bytes(), &mut out);
     }
     Ok(out)
 }
@@ -132,11 +130,7 @@ fn decode_packed(buf: &[u8], has_sigops: bool) -> Result<PackedLive, MempoolErro
         let (rec, n) = OutputRecord::decode_at(&buf[off..])
             .map_err(|_| MempoolError::Corrupt("packed vout"))?;
         off += n;
-        let value = if rec.value < 0 {
-            Amount::ZERO
-        } else {
-            Amount::from_sat(rec.value as u64)
-        };
+        let value = Amount::from_sat(rec.value);
         output.push(TxOut {
             value,
             script_pubkey: ScriptBuf::from_bytes(rec.script),

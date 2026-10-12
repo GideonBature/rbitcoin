@@ -82,16 +82,16 @@ fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConsensusErr
         .input
         .iter()
         .map(|inp| {
-            let is_cb = inp.previous_output.is_null();
+            let parent = if inp.previous_output.is_null() {
+                rbitcoin_store::InputParent::Coinbase
+            } else {
+                rbitcoin_store::InputParent::Unlinked {
+                    vout: inp.previous_output.vout,
+                }
+            };
             InputRecord {
                 prev_txid: inp.previous_output.txid.to_byte_array(),
-                // Archive resolve fills create_fk before pack; coinbase stays NULL.
-                create_fk: Fk::NULL,
-                prev_index: if is_cb {
-                    u32::MAX
-                } else {
-                    inp.previous_output.vout
-                },
+                parent,
                 sequence: inp.sequence.to_consensus_u32(),
                 script_sig: inp.script_sig.to_bytes(),
                 witness: inp.witness.to_vec(),
@@ -102,7 +102,7 @@ fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConsensusErr
     let outputs: Vec<OutputRecord> = tx
         .output
         .iter()
-        .map(|o| OutputRecord::unspent(o.value.to_sat() as i64, o.script_pubkey.to_bytes()))
+        .map(|o| OutputRecord::unspent(o.value.to_sat(), o.script_pubkey.to_bytes()))
         .collect();
 
     Ok(TxApply {
@@ -244,7 +244,7 @@ mod tests {
             }],
         };
         let apply = tx_to_apply(&non_cb, non_cb.compute_txid().to_byte_array()).unwrap();
-        assert_eq!(apply.inputs[0].prev_index, 3);
+        assert_eq!(apply.inputs[0].prev_index(), 3);
     }
 
     /// Write encode must bind each stamped spend edge to the wire prevout it
@@ -278,7 +278,7 @@ mod tests {
         let ok =
             rbitcoin_query::input_records_from_wire(&tx, Fk(9), &[edge([1u8; 32], 3)]).unwrap();
         assert_eq!(ok[0].prev_txid, [1u8; 32]);
-        assert_eq!(ok[0].prev_index, 3);
+        assert_eq!(ok[0].prev_index(), 3);
         for bad in [edge([2u8; 32], 3), edge([1u8; 32], 4)] {
             let err = rbitcoin_query::input_records_from_wire(&tx, Fk(9), &[bad])
                 .expect_err("mismatched edge must not encode");

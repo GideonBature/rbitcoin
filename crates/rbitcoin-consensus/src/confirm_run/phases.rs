@@ -290,7 +290,7 @@ pub(super) fn structural_run(
             &index,
             class_a_wave,
             &mut reuse.scratch,
-            Some(&abs_jobs[i]),
+            &abs_jobs[i],
         )?;
         tot.spent_ns = tot.spent_ns.saturating_add(ph.spent_ns);
         tot.spent_abs_ns = tot.spent_abs_ns.saturating_add(ph.spent_abs_ns);

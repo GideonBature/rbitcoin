@@ -91,19 +91,16 @@ fn apply_archive_plan(
     }
     let t_take = Instant::now();
     let planned_fks = plan.planned_fks.clone();
-    let packed_pins: Vec<rbitcoin_query::CreatePin> =
-        if plan.batch_pin.len() == plan.planned_fks.len() {
-            std::mem::take(&mut plan.batch_pin)
-        } else {
-            plan.packed
-                .iter()
-                .map(|(pin, _)| std::sync::Arc::clone(pin))
-                .collect()
-        };
+    if plan.batch_pin.len() != plan.planned_fks.len() {
+        return Err(ConsensusError::Store(StoreError::Corrupt(
+            "invariant: batch_pin length",
+        )));
+    }
+    let packed_pins: Vec<rbitcoin_query::CreatePin> = std::mem::take(&mut plan.batch_pin);
     ns.plan_take_ns = t_take.elapsed().as_nanos() as u64;
     let t_ca = Instant::now();
     let (committed, loc) = query
-        .archive_commit_plan_defer_head_parents(plan, Some(&batch.batch_parents))
+        .archive_commit_plan_defer_head_parents(plan)
         .map_err(ConsensusError::from)?;
     ns.class_a_ns = t_ca.elapsed().as_nanos() as u64;
     if !committed {
@@ -111,7 +108,7 @@ fn apply_archive_plan(
     }
     let pack_hi = batch.prepared.last().map(|p| p.height.0).unwrap_or(0);
     query.note_write_create_loc(&planned_fks, &loc, pack_hi);
-    if query.index_mode().is_tip() {
+    if query.index_mode()?.is_tip() {
         let t_map = Instant::now();
         ns.pins.reserve(planned_fks.len());
         for (fk, pin) in planned_fks.iter().zip(packed_pins.iter()) {
@@ -536,17 +533,16 @@ fn annotate_slots_from_connected_hash(
             continue;
         }
         for (inp_i, inp) in ins.into_iter().enumerate() {
-            if inp.is_coinbase() || inp.create_fk.is_null() {
+            let rbitcoin_store::InputParent::Prevout { create_fk, vout } = inp.parent else {
                 return Err(ConsensusError::Store(StoreError::Corrupt(
                     "invariant: non-coinbase input edge",
                 )));
-            }
-            let create_fk = inp.create_fk;
+            };
             let (off, len) = query
                 .store()
                 .tx_spent_range(create_fk)
                 .map_err(ConsensusError::from)?;
-            let abs = rbitcoin_store::spent_abs(off, inp.prev_index);
+            let abs = rbitcoin_store::spent_abs(off, vout);
             if abs.saturating_add(rbitcoin_store::OutputRecord::SPENT_SLOT_LEN as u64)
                 > off.saturating_add(len)
             {
@@ -557,7 +553,7 @@ fn annotate_slots_from_connected_hash(
             let (multi, field, field_vin) = query
                 .store()
                 .txs
-                .get_output_spender_meta(create_fk, inp.prev_index)
+                .get_output_spender_meta(create_fk, vout)
                 .map_err(ConsensusError::from)?;
             let flags = if multi {
                 rbitcoin_store::output_flags::MULTI_SPENDER
@@ -565,7 +561,7 @@ fn annotate_slots_from_connected_hash(
                 0
             };
             slots.push(
-                (abs, create_fk, inp.prev_index, spend_fk, inp_i as u32),
+                (abs, create_fk, vout, spend_fk, inp_i as u32),
                 (field, flags, field_vin),
             );
         }

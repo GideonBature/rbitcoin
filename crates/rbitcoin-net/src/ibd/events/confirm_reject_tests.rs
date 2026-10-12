@@ -191,6 +191,47 @@ fn confirm_reject_class_matches_substring_table() {
     );
 }
 
+/// All-zero is not a sentinel ignore. With no hub the typed class applies,
+/// the same as any other hash.
+#[test]
+fn zero_hash_confirm_reject_follows_its_class() {
+    let mut st = IbdWorkState::new(Vec::new(), None, Some(4));
+    let zero = BlockHash::all_zeros();
+    apply_confirm_reject(
+        &mut st,
+        5,
+        zero,
+        "consensus: prevout already spent on best chain",
+        None,
+        None,
+    );
+    assert!(st.body.is_rejected(&zero));
+    assert!(st.reorg.invalid.contains(zero.to_byte_array()));
+}
+
+/// A consensus class against a hash with no header row is an engine fault.
+/// It is not blacklisted.
+#[test]
+fn missing_header_consensus_reject_is_not_blacklisted() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("missing-header-reject");
+    hub.ensure_genesis().unwrap();
+    let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+    let hash = h(0x11);
+    apply_confirm_reject(
+        &mut st,
+        1,
+        hash,
+        "consensus: prevout already spent on best chain",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    assert!(!st.body.is_rejected(&hash));
+    assert!(!st.reorg.invalid.contains(hash.to_byte_array()));
+    assert!(st.engine_fault_seen.contains(&hash));
+    assert!(st.halt.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `body.rejected ⊆ consensus-invalid set` — Cascade / SoftWire / EngineFault
 /// / Cancelled never blacklist.
 #[test]
@@ -1317,7 +1358,12 @@ fn ibd_bad_prev_fork() {
             parent: RejectParent::default(),
         },
     );
-    assert!(st.body.is_rejected(&h(12)));
+    assert!(
+        !st.body.is_rejected(&h(12)),
+        "a hash with no header row is an engine fault, not a blacklist"
+    );
+    assert!(st.engine_fault_seen.contains(&h(12)));
+    assert!(!st.reorg.invalid.contains(h(12).to_byte_array()));
     assert!(last.elapsed() < Duration::from_secs(1));
 
     for b in &a {
@@ -1357,20 +1403,9 @@ fn ibd_bad_prev_fork() {
         assert!(!st.body.is_rejected(&h(9)));
     }
 
-    // Blacklist or not: zero hash ignored; script failure and a spent
-    // prevout are permanent; store invariants are engine faults (halt on the
-    // second); fk mismatch requeues; bad wire and a retarget miss re-get.
-    let mut st = fresh();
-    let zero = BlockHash::all_zeros();
-    apply_confirm_reject(
-        &mut st,
-        t + 1,
-        zero,
-        "consensus: prevout already spent on best chain",
-        None,
-        None,
-    );
-    assert!(!st.body.is_rejected(&zero));
+    // Blacklist or not: script failure and a spent prevout are permanent;
+    // store invariants are engine faults (halt on the second); fk mismatch
+    // requeues; bad wire and a retarget miss re-get.
     let on_path = |n: u8| {
         let mut st = fresh();
         st.body.mark_archived(h(n));
@@ -1879,7 +1914,7 @@ impl WireRig {
         ));
         assert_eq!(hub.tip_hash(), Some(pad.tip));
         assert_eq!(hub.tip_height(), Some(pad.t));
-        assert!(hub.query.index_mode().is_direct());
+        assert!(hub.query.index_mode().expect("index mode cell").is_direct());
         Self::over(dir, hub, peers, (pad.tip, pad.tip_time, pad.cbs.clone()))
     }
 
@@ -2218,8 +2253,18 @@ fn wire_pad_copy_keeps_the_other_tip() {
     assert!(a.t >= 102);
     assert_eq!(a.tip, b.tip);
     assert_eq!(a.cbs, b.cbs);
-    assert!(a.hub.query.index_mode().is_direct());
-    assert!(b.hub.query.index_mode().is_direct());
+    assert!(a
+        .hub
+        .query
+        .index_mode()
+        .expect("index mode cell")
+        .is_direct());
+    assert!(b
+        .hub
+        .query
+        .index_mode()
+        .expect("index mode cell")
+        .is_direct());
     let block = rbitcoin_consensus::mine_regtest_paying(
         a.tip,
         a.tip_time + 600,

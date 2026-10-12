@@ -227,7 +227,7 @@ impl Query {
             input.push(TxIn {
                 previous_output: OutPoint {
                     txid: bitcoin::Txid::from_byte_array(prev_txid),
-                    vout: inp.prev_index,
+                    vout: inp.prev_index(),
                 },
                 script_sig: ScriptBuf::from_bytes(inp.script_sig),
                 sequence: Sequence::from_consensus(inp.sequence),
@@ -268,7 +268,7 @@ impl Query {
             if inp.is_coinbase() || inp.prev_txid != [0u8; 32] {
                 continue;
             }
-            let Some(id) = inp.create_fk.get() else {
+            let Some(id) = inp.create_fk().get() else {
                 return Err(StoreError::Corrupt(
                     "input missing create_fk for wire rebuild",
                 ));
@@ -310,7 +310,7 @@ impl Query {
             if inp.prev_txid != [0u8; 32] {
                 continue;
             }
-            let Some(id) = inp.create_fk.get() else {
+            let Some(id) = inp.create_fk().get() else {
                 return Err(StoreError::Corrupt(
                     "input missing create_fk for wire rebuild",
                 ));
@@ -538,7 +538,7 @@ impl Query {
         for &fk in fks.iter().skip(1) {
             let (_, outs) = self.store.get_tx_meta_and_outputs(fk)?;
             for o in outs {
-                sum = sum.saturating_add(o.value);
+                sum = sum.saturating_add(o.value as i64);
             }
         }
         Ok(sum)
@@ -596,10 +596,7 @@ fn txstat_in_sum_from_block(
                 .tx_fk_by_txid(&tid)?
                 .ok_or(StoreError::Corrupt("invariant: stamp missing prev tx"))?;
             let o = query.tx_output_at_fk(pfk, vout)?;
-            if o.value < 0 {
-                return Err(StoreError::Corrupt("txstat prevout negative"));
-            }
-            o.value as u64
+            o.value
         };
         sum = sum
             .checked_add(val)
@@ -638,7 +635,7 @@ fn encode_class_a_tx(
     let _ = VarInt(ins.len() as u64).consensus_encode(&mut *out);
     for inp in ins {
         out.extend_from_slice(&inp.prev_txid);
-        let _ = inp.prev_index.consensus_encode(&mut *out);
+        let _ = inp.prev_index().consensus_encode(&mut *out);
         let _ = VarInt(inp.script_sig.len() as u64).consensus_encode(&mut *out);
         out.extend_from_slice(&inp.script_sig);
         let _ = inp.sequence.consensus_encode(&mut *out);

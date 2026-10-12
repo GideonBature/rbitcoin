@@ -24,7 +24,7 @@
 
 use crate::address_head::{AddressHead, HeadLayout, HEAD_LOAD_START, MAINNET_BITS};
 use crate::error::StoreError;
-use crate::fuse8_filter::{fuse_key_from_mixed, open_file, FuseFileOpen, SealedFuse8};
+use crate::fuse8_filter::{fuse_key_from_mixed, open_file, SealedFuse8};
 use crate::tx_head_mphf::TxHeadMphf;
 use rbitcoin_primitives::{Fk, SCHEMA_VERSION, STORE_MAGIC};
 use std::path::{Path, PathBuf};
@@ -133,9 +133,7 @@ impl SegmentedTxHead {
                 if !fp.exists() {
                     return Err(StoreError::Corrupt("tx.head sealed segment missing fuse8"));
                 }
-                match open_file(&fp)? {
-                    FuseFileOpen::Ready(f) => Some(f),
-                }
+                Some(open_file(&fp)?)
             } else {
                 None
             };
@@ -430,23 +428,10 @@ impl SegmentedTxHead {
 /// Sealed segments are retired one at a time by the resolve machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeadProbeWave {
-    /// Open + all sealed.
+    /// Unsealed OAs, then every sealed segment (newest first).
     All,
-    /// All unsealed OAs (insert tail + in-flight seal), newest first.
+    /// Unsealed OAs only (insert tail + in-flight seal), newest first.
     Open,
-}
-
-impl HeadProbeWave {
-    #[inline]
-    fn includes_open(self) -> bool {
-        matches!(self, HeadProbeWave::All | HeadProbeWave::Open)
-    }
-
-    /// `age` is unused: every sealed segment is included only on [`Self::All`].
-    #[inline]
-    fn includes_sealed_age(self, _age: u32) -> bool {
-        matches!(self, HeadProbeWave::All)
-    }
 }
 
 impl SegmentedTxHead {
@@ -486,10 +471,10 @@ impl SegmentedTxHead {
         if segs.is_empty() {
             return Ok(out);
         }
-        if wave.includes_open() {
-            self.probe_unsealed_wave(mixed, active, ctx, &mut out)?;
+        self.probe_unsealed_wave(mixed, active, ctx, &mut out)?;
+        if matches!(wave, HeadProbeWave::All) {
+            self.probe_sealed_wave(mixed, active, ctx, &mut out)?;
         }
-        self.probe_sealed_wave(mixed, wave, active, ctx, &mut out)?;
         Ok(out)
     }
 
@@ -558,19 +543,13 @@ impl SegmentedTxHead {
     fn probe_sealed_wave(
         &self,
         mixed: &[[u8; 32]],
-        wave: HeadProbeWave,
         active: Option<&[bool]>,
         ctx: &mut crate::IoCtx<'_>,
         out: &mut [Vec<Fk>],
     ) -> Result<(), StoreError> {
         let segs = self.segments_snapshot();
-        let n_segs = segs.len();
-        for si in (0..n_segs).rev() {
+        for si in (0..segs.len()).rev() {
             if !segs[si].sealed {
-                continue;
-            }
-            let age = crate::head_resolve_stats::sealed_age_from_index(si, n_segs);
-            if !wave.includes_sealed_age(age) {
                 continue;
             }
             self.fill_sealed_segment(&segs, si, mixed, active, ctx, out)?;

@@ -263,7 +263,7 @@ impl Sample {
 
 /// Sealed age from tip for segment index `si` in a vec of `n_segs` (last = tip).
 ///
-/// Used by the two-wave probe split and winner-age stats.
+/// Winner-age stats only. Probe waves do not filter sealed segments by age.
 #[inline]
 pub fn sealed_age_from_index(si: usize, n_segs: usize) -> u32 {
     n_segs.saturating_sub(1).saturating_sub(si) as u32

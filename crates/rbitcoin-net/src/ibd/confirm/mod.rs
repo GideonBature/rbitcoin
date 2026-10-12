@@ -105,23 +105,13 @@ impl LoadAheadState {
         last_height: u32,
         last_hash: [u8; 32],
     ) {
-        if plan.batch_pin.len() == plan.planned_fks.len() {
-            self.in_flight.note_pins(
-                plan.planned_fks
-                    .iter()
-                    .zip(plan.batch_pin.iter())
-                    .map(|(fk, pin)| (*fk, pin)),
-                Some(last_height),
-            );
-        } else {
-            self.in_flight.note_pins(
-                plan.packed
-                    .iter()
-                    .zip(plan.planned_fks.iter())
-                    .map(|((pin, _), fk)| (*fk, pin)),
-                Some(last_height),
-            );
-        }
+        self.in_flight.note_pins(
+            plan.planned_fks
+                .iter()
+                .zip(plan.batch_pin.iter())
+                .map(|(fk, pin)| (*fk, pin)),
+            Some(last_height),
+        );
         if let Some(last) = plan.planned_fks.last().and_then(|f| f.get()) {
             self.next_tx_start = last.saturating_add(1).max(1);
         }
@@ -164,11 +154,8 @@ impl LoadAheadState {
 ///
 /// **Sole intake:** peer/rehydrate enqueues wire into the **body queue**, then
 /// notes height/hash here. Lookup/load reload wire from the body queue — the feed
-/// does **not** retain `Block`s. Class A alone is never enough (no hash-only
+/// stores hashes only. Class A alone is never enough (no hash-only
 /// confirm). Tip-follow reorgs use peer wire via `ChainHub::accept_block`.
-///
-/// Optional wire slots remain for rare in-process requeue; production requeues
-/// strip wire so RAM stays in the body queue + pipeline stage batches only.
 ///
 /// **In-flight tracking:** once lookup claims a contiguous run, those heights sit
 /// in `inflight` until write finishes (or re-queue). `note` will not re-insert
@@ -185,8 +172,8 @@ pub(crate) struct ConfirmFeed {
 }
 
 pub(crate) struct ConfirmFeedInner {
-    /// height → (hash, optional wire — normally `None`; body queue holds payloads)
-    pub(crate) ready: std::collections::BTreeMap<u32, (BlockHash, Option<bitcoin::Block>)>,
+    /// height → hash. Wire lives in the body queue.
+    pub(crate) ready: std::collections::BTreeMap<u32, BlockHash>,
     /// Claimed by load; not yet written or released. Offer must not re-note.
     pub(crate) inflight: std::collections::HashSet<u32>,
     /// Height → lookup epoch when load claimed it (survives [`Self::clear`]).
@@ -245,26 +232,16 @@ impl ConfirmFeed {
 
     /// Note readiness (wire lives in the body queue — denserels reloads it).
     pub(crate) fn note(&self, height: u32, hash: BlockHash) {
-        self.note_wire(height, hash, None);
+        self.note_wire(height, hash);
     }
 
-    /// Note readiness; optional wire is only for tests / rare in-process paths.
-    /// Production peer path uses [`Self::note`] (wire lives in the body queue).
-    pub(crate) fn note_wire(&self, height: u32, hash: BlockHash, block: Option<bitcoin::Block>) {
+    /// Note readiness. The feed stores the hash only.
+    pub(crate) fn note_wire(&self, height: u32, hash: BlockHash) {
         let mut g = self.inner.lock().unwrap();
         if g.inflight.contains(&height) {
             return;
         }
-        match g.ready.get_mut(&height) {
-            Some(e) => {
-                if e.1.is_none() && block.is_some() {
-                    e.1 = block;
-                }
-            }
-            None => {
-                g.ready.insert(height, (hash, block));
-            }
-        }
+        g.ready.entry(height).or_insert(hash);
         self.cv.notify_one();
     }
 
@@ -272,25 +249,15 @@ impl ConfirmFeed {
         self.cv.notify_all();
     }
 
-    /// Return heights to the ready map (optionally with wire bodies).
-    pub(crate) fn requeue_wire(&self, batch: &[(u32, BlockHash, Option<bitcoin::Block>)]) {
+    /// Return heights to the ready map. Hashes only; wire stays in the body queue.
+    pub(crate) fn requeue_wire(&self, batch: &[(u32, BlockHash)]) {
         if batch.is_empty() {
             return;
         }
         let mut g = self.inner.lock().unwrap();
-        for &(h, hash, ref block) in batch {
+        for &(h, hash) in batch {
             g.inflight.remove(&h);
-            let b = block.clone();
-            match g.ready.get_mut(&h) {
-                Some(e) => {
-                    if e.1.is_none() {
-                        e.1 = b;
-                    }
-                }
-                None => {
-                    g.ready.insert(h, (hash, b));
-                }
-            }
+            g.ready.entry(h).or_insert(hash);
         }
         self.cv.notify_one();
     }
@@ -443,10 +410,10 @@ impl ConfirmRejectClass {
         matches!(self, Self::SoftWire)
     }
 
-    /// Consensus verdict is only trusted when the connect ran against the
-    /// intended parent (`tip == header.prev`). Otherwise this is a cascade.
-    ///
-    /// `parent` is already resolved. This does not read the header store.
+    /// Consensus verdict is trusted only when the connect ran against the tip
+    /// (`tip == header.prev`). A stored parent that is not the tip, or a
+    /// lookup error, is a cascade. A missing header row is an engine fault:
+    /// `hash: None` with `unreadable: false`.
     pub(crate) fn trust_consensus(self, parent: RejectParent, tip: Option<BlockHash>) -> Self {
         if self != Self::ConsensusInvalid {
             return self;
@@ -457,7 +424,7 @@ impl ConfirmRejectClass {
         match parent.hash {
             Some(prev) if tip == Some(prev) => Self::ConsensusInvalid,
             Some(_) => Self::Cascade,
-            None => Self::ConsensusInvalid,
+            None => Self::EngineFault,
         }
     }
 
@@ -665,7 +632,7 @@ pub(crate) fn lookup_ready_hash(feed: &ConfirmFeed, height: u32) -> Option<Block
     feed.inner
         .lock()
         .ok()
-        .and_then(|g| g.ready.get(&height).map(|(h, _)| *h))
+        .and_then(|g| g.ready.get(&height).copied())
 }
 
 const LOOKUP_FAULT_HALT_AFTER: u32 = 8;
@@ -722,7 +689,13 @@ impl RejectParent {
                 hash: Some(hash),
                 unreadable: false,
             },
-            Ok(None) | Err(_) => Self {
+            // No header row. Distinct from a store error so the reject is an
+            // engine fault, not a cascade and not a blacklist.
+            Ok(None) => Self {
+                hash: None,
+                unreadable: false,
+            },
+            Err(_) => Self {
                 hash: None,
                 unreadable: true,
             },
@@ -2196,10 +2169,8 @@ pub(crate) fn spawn_confirm_engine(
                 }
                 let expect_h = batch[0].0;
                 if feed_load.stopped() || hub_load.query.confirm_cancelled() {
-                    let req: Vec<(u32, BlockHash, Option<bitcoin::Block>)> = batch
-                        .iter()
-                        .map(|(h, ha, w)| (*h, *ha, Some((*w.block).clone())))
-                        .collect();
+                    let req: Vec<(u32, BlockHash)> =
+                        batch.iter().map(|(h, ha, _)| (*h, *ha)).collect();
                     feed_load.requeue_wire(&req);
                     drop(mat_tx);
                     rbitcoin_consensus::unpark_script_publisher();

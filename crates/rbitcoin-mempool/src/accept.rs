@@ -37,7 +37,7 @@ pub struct AcceptStageUs {
 #[derive(Debug, Clone)]
 pub struct Coin {
     pub txout: TxOut,
-    /// Class C create height; `0` if unknown (BIP68 fail-closed when needed).
+    /// Class C create height. `0` is the genesis coinbase only.
     pub create_height: u32,
     /// MTP of the block *before* the create block (BIP68 time locks). `0` if unknown.
     pub create_mtp: u32,
@@ -303,13 +303,9 @@ pub fn check_mempool_structural(
         let mut prev_mtps = Vec::with_capacity(tx.input.len());
         for (i, inp) in tx.input.iter().enumerate() {
             let seq = inp.sequence.to_consensus_u32();
-            let lock_enabled = seq & (1u32 << 31) == 0;
+            let _lock_enabled = seq & (1u32 << 31) == 0;
             match chain_coins.get(i).and_then(|c| c.as_ref()) {
                 Some(c) => {
-                    // Unknown create height with an active relative lock → fail closed.
-                    if lock_enabled && c.create_height == 0 && !c.is_coinbase {
-                        return Err(AcceptError::NonBip68Final);
-                    }
                     prev_heights.push(c.create_height);
                     prev_mtps.push(c.create_mtp);
                 }
@@ -2211,7 +2207,8 @@ mod tests {
     fn coin(txout: TxOut) -> Coin {
         Coin {
             txout,
-            create_height: 0,
+            // Height 0 is the genesis coinbase. A resolved non-coinbase is later.
+            create_height: 1,
             create_mtp: 0,
             is_coinbase: false,
             create_fk: None,

@@ -77,13 +77,12 @@ fn sh_history_caps() {
     spend.outputs.truncate(1);
     spend.tx.txid[30] = 0x5e;
     spend.inputs = vec![InputRecord {
-        prev_txid: cb_txids[0],
-        create_fk: create0,
-        prev_index: 0,
-        sequence: u32::MAX,
-        script_sig: vec![],
-        witness: vec![],
-    }];
+    prev_txid: cb_txids[0],
+    parent: rbitcoin_store::InputParent::Prevout { create_fk: create0, vout: 0 },
+    sequence: u32::MAX,
+    script_sig: vec![],
+    witness: vec![],
+}];
     let spend_txid = spend.tx.txid;
     q.commit_class_a_only(&h5, &[cb5, spend]).unwrap();
     q.confirm_block(Height(5), &h5.hash).unwrap();
