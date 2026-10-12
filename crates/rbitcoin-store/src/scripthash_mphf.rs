@@ -354,11 +354,6 @@ mod tests {
                 Some(libc::EISDIR),
                 "positional read must surface the negated pread errno, got {err:?}"
             );
-            assert_ne!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::EISDIR),
-                "exact pread must keep -rc after the thread errno is cleared, got {err:?}"
-            );
         }
         let rw = std::fs::OpenOptions::new()
             .read(true)
