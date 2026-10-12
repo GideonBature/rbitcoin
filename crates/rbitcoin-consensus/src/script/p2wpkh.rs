@@ -16,7 +16,8 @@ pub(crate) fn verify(
 ) -> Result<(), ConsensusError> {
     let spk = job.prevout_script(input_index)?;
     debug_assert!(spk.len() == 22 && spk[0] == 0x00 && spk[1] == 0x14);
-    let keyhash = &spk[2..22];
+    let mut keyhash = [0u8; 20];
+    keyhash.copy_from_slice(&spk[2..22]);
 
     let input = &tx.input[input_index];
     if input.witness.len() != 2 {
@@ -33,28 +34,7 @@ pub(crate) fn verify(
     if sig_raw.is_empty() || pubkey_raw.is_empty() {
         return Err(ConsensusError::Script("p2wpkh empty witness item".into()));
     }
-    check_element_sizes(sig_raw, pubkey_raw)?;
-
-    let pk_hash = crypto::hash160(pubkey_raw);
-    if pk_hash.as_slice() != keyhash {
-        return Err(ConsensusError::Script("p2wpkh pubkey hash".into()));
-    }
-
-    if job.witness_pubkeytype && !crypto::is_compressed_pubkey(pubkey_raw) {
-        return Err(ConsensusError::Script("WITNESS_PUBKEYTYPE".into()));
-    }
-    let (sig, sighash_ty) = crypto::parse_der_sig(sig_raw, job.bip66_active)?;
-    let pubkey = crypto::parse_pubkey(pubkey_raw)?;
-
-    let amount = job.prevout_amount(input_index)?;
-    let spk_script = bitcoin::script::Script::from_bytes(job.prevout_script(input_index)?);
-    let sighash =
-        crypto::bip143_p2wpkh_signature_hash(tx, input_index, spk_script, amount, sighash_ty, pre)?;
-    if crypto::verify_ecdsa(sighash, &sig, &pubkey) {
-        Ok(())
-    } else {
-        Err(ConsensusError::Script("p2wpkh ecdsa".into()))
-    }
+    verify_with_keyhash(job, input_index, tx, &keyhash, spk, pre)
 }
 
 /// Nested P2SH-P2WPKH: `witness_program` is the 22-byte redeem (not outer P2SH spk).
