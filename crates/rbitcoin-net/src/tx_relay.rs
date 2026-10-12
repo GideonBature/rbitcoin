@@ -4256,6 +4256,17 @@ mod tests {
         std::env::temp_dir().join(format!("rbitcoin-txrelay-{n}-{seq}"))
     }
 
+    #[test]
+    fn default_cluster_limits_are_the_mempool_caps() {
+        assert_eq!(
+            MempoolHub::default_cluster_limits(),
+            (
+                rbitcoin_mempool::MAX_CLUSTER_COUNT as u32,
+                rbitcoin_mempool::MAX_CLUSTER_VSIZE,
+            )
+        );
+    }
+
     /// `estimatesmartfee` / Electrum `blockchain.estimatefee` forward this rate.
     /// Target 2 is the depth-2 curve point, not the 1-block horizon.
     #[test]
