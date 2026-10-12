@@ -1406,40 +1406,6 @@ fn getmempoolentry_vsize_ceils_weight() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
-struct TestMiner(Arc<rbitcoin_net::ChainHub>);
-
-impl RpcRegtest for TestMiner {
-    fn generate_to_script(
-        &self,
-        nblocks: u32,
-        script_pubkey: ScriptBuf,
-        extra_txs: Vec<Transaction>,
-    ) -> Result<Vec<BlockHash>, String> {
-        self.0
-            .generate_to_script(nblocks, script_pubkey, extra_txs)
-            .map_err(|e| e.to_string())
-    }
-
-    fn assemble_block_to_script(
-        &self,
-        script_pubkey: ScriptBuf,
-        extra_txs: Vec<Transaction>,
-    ) -> Result<Block, String> {
-        self.0
-            .assemble_block_to_script(script_pubkey, extra_txs)
-            .map_err(|e| e.to_string())
-    }
-
-    fn submit_block(&self, block: Block) -> SubmitBlockOutcome {
-        crate::submit_received_block(&self.0, block)
-    }
-
-    fn set_mock_time(&self, timestamp: i64) -> Result<(), String> {
-        self.0.clock.set_mock(timestamp);
-        Ok(())
-    }
-}
-
 fn ctx_regtest_hub() -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     ctx_regtest_hub_with_weight(300_000_000)
 }
@@ -1540,7 +1506,7 @@ fn regtest_ctx(
             &[] as &[&str],
         )
         .unwrap(),
-        regtest: Some(Arc::new(TestMiner(Arc::clone(&hub)))),
+        regtest: Some(Arc::new(HubRegtest(Arc::clone(&hub)))),
         peers: None,
         chain: Some(Arc::clone(&hub)),
         addrman: None,
