@@ -31,7 +31,9 @@ pub(crate) fn is_anyone_can_spend(script: &Script) -> bool {
 /// Returns `(version, program)` where version is 0 for OP_0 and 1..=16 for OP_1..OP_16.
 pub(crate) fn witness_program(script: &Script) -> Option<(u8, &[u8])> {
     let b = script.as_bytes();
-    if b.len() < 4 || b.len() > 42 {
+    // `push_len` is at most 40, so `b.len() == 2 + push_len` already rejects
+    // a script longer than 42 bytes.
+    if b.len() < 4 {
         return None;
     }
     let version = match b[0] {
@@ -149,5 +151,18 @@ mod tests {
             Some((0, 20))
         );
         assert!(witness_program(ScriptBuf::from_bytes(vec![0x51]).as_script()).is_none());
+
+        // BIP141 maximum program is 40 bytes (script length 42). One byte past
+        // that is not a witness program.
+        let mut v40 = vec![0x00u8, 40];
+        v40.extend_from_slice(&[0xabu8; 40]);
+        assert_eq!(
+            witness_program(ScriptBuf::from_bytes(v40).as_script()).map(|(v, p)| (v, p.len())),
+            Some((0, 40))
+        );
+        let mut too_long = vec![0x00u8, 40];
+        too_long.extend_from_slice(&[0xabu8; 40]);
+        too_long.push(0x00);
+        assert!(witness_program(ScriptBuf::from_bytes(too_long).as_script()).is_none());
     }
 }

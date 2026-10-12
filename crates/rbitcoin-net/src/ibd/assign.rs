@@ -1011,6 +1011,20 @@ const TIP_HOLE_FIFO_MIN_HOLD: Duration = Duration::from_secs(5);
 /// owner's drain time before a FIFO-blocked owner is dropped for it.
 const TIP_HOLE_FIFO_FASTER: u128 = 2;
 
+fn tip_hole_free_peer(
+    s: &PeerSlot,
+    req: &state::InflightReq,
+    hash: &BlockHash,
+    per_peer: usize,
+    estimate: u64,
+) -> bool {
+    // A dead slot's measured rate is also zero, so it must not be a candidate.
+    s.alive
+        && !req.holds(s.id)
+        && !s.in_flight.contains(hash)
+        && peer_has_block_room(s.in_flight.len(), per_peer, estimate)
+}
+
 /// Drop an owner whose peer FIFO is not on this hash when it has held the hash
 /// for [`TIP_HOLE_FIFO_MIN_HOLD`] and a free peer would start it at least
 /// [`TIP_HOLE_FIFO_FASTER`]× sooner by `(queue+1)/bps`.
@@ -1026,12 +1040,7 @@ fn fifo_blocked_owner_to_drop(
     }
     let (free_q, free_bps) = slots
         .iter()
-        .filter(|s| {
-            s.alive
-                && !req.holds(s.id)
-                && !s.in_flight.contains(hash)
-                && peer_has_block_room(s.in_flight.len(), per_peer, estimate)
-        })
+        .filter(|s| tip_hole_free_peer(s, req, hash, per_peer, estimate))
         .map(|s| (s.in_flight.len(), peer_bps(slots, s.id)))
         .min_by(|&(qa, ba), &(qb, bb)| tip_hole_drain_cmp(qa, ba, qb, bb))?;
     let now = Instant::now();
@@ -1707,6 +1716,17 @@ pub(in crate::ibd) mod tests {
             "queueing getdata is not the stall clock"
         );
         assert_eq!(st.slots[0].getdata_wire.unwritten(), 1);
+        let mut one = 1usize;
+        let mut issued_one = 0u64;
+        assert!(issue_one(&mut st, 0, h(31), &mut one, &mut issued_one));
+        assert_eq!(one, 0, "a new hash spends the one free room");
+        st.slots.push(dummy_slot(1));
+        let mut again = 1usize;
+        assert!(issue_one(&mut st, 1, h(31), &mut again, &mut issued_one));
+        assert_eq!(
+            again, 1,
+            "a second peer on an in-flight hash does not spend unique room"
+        );
         st.slots[0].getdata_wire.wrote(1, 9_000);
         assert!(!super::super::peer_io::getdata_on_wire_stalled(
             &st.slots[0],
@@ -1848,6 +1868,15 @@ pub(in crate::ibd) mod tests {
         );
 
         st.block_lens.clear();
+        for len in [100u32, 200, 300, 400, 500, 600, 700, 8_000] {
+            note_block_len(&mut st, len as usize);
+        }
+        assert_eq!(
+            block_len_estimate(&st),
+            500,
+            "once samples differ the estimate is the median"
+        );
+        st.block_lens.clear();
         for _ in 0..8 {
             note_block_len(&mut st, 1024);
         }
@@ -1929,6 +1958,10 @@ pub(in crate::ibd) mod tests {
             owners(&st, path_lo),
             4,
             "a quarter of the confirm window, with gaps, is a tip hole"
+        );
+        assert!(
+            stats.assign_issued.load(Ordering::Relaxed) > 0,
+            "tip-hole assign increments the issued counter"
         );
         assert!(
             !st.inflight.contains_key(&h(path_lo.saturating_add(2))),
@@ -2438,6 +2471,49 @@ pub(in crate::ibd) mod tests {
 
         tip_gap_frontier_and_holes(&hub);
 
+        let hash = h(0x71);
+        let mut req = state::InflightReq::new(0);
+        req.asked_at
+            .insert(0, Instant::now() - Duration::from_secs(6));
+        req.add_peer(1);
+        req.retire_peer(1);
+        let mut owner = dummy_slot(0);
+        let mut holds = dummy_slot(1);
+        seed_ewma(&mut owner, 1_000_000);
+        seed_ewma(&mut holds, 10_000_000);
+        owner.in_flight.insert(h(0x70));
+        owner.in_flight.insert(hash);
+        assert!(
+            fifo_blocked_owner_to_drop(&req, &hash, &[owner, holds], 64, 1024).is_none(),
+            "a peer that already holds the hash is not a free replacement"
+        );
+        let mut owner = dummy_slot(0);
+        let mut capped = dummy_slot(2);
+        seed_ewma(&mut owner, 1_000_000);
+        seed_ewma(&mut capped, 10_000_000);
+        owner.in_flight.insert(h(0x70));
+        owner.in_flight.insert(hash);
+        for n in 0..16u32 {
+            capped.in_flight.insert(h(0x200 + n));
+        }
+        assert!(
+            fifo_blocked_owner_to_drop(&req, &hash, &[owner, capped], 64, 1024 * 1024).is_none(),
+            "a peer at the byte cap is not a free replacement"
+        );
+        // No samples yet, so this owner's rate is zero, the same figure a dead
+        // slot reports. The other live peer already holds the hash.
+        let mut unsampled = dummy_slot(0);
+        let holds_alive = dummy_slot(1);
+        let mut dead = dummy_slot(2);
+        dead.alive = false;
+        unsampled.in_flight.insert(h(0x70));
+        unsampled.in_flight.insert(hash);
+        assert!(
+            fifo_blocked_owner_to_drop(&req, &hash, &[unsampled, holds_alive, dead], 64, 1024)
+                .is_none(),
+            "a dead slot is not a free replacement for an unsampled owner"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2752,14 +2828,21 @@ pub(in crate::ibd) mod tests {
             .unwrap();
         assert!(!hub.query.block_queue_has_hash(&need.to_byte_array()));
         st.reorg.register_explore([need, mid], None);
-        st.body.mark_missing(need);
+        st.body.mark_pending(need);
         st.body.mark_missing(mid);
         assert_eq!(
             st.reorg.need_getdata().into_iter().collect::<HashSet<_>>(),
             HashSet::from([need, mid])
         );
-        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
+        // Direct reorg issue. A full assign also covers this height as a tip
+        // hole, which would fetch it even if the pending conjunct were wrong.
+        let issued = assign_reorg_need(&mut st, &hub, &cfg, &[0]);
+        assert!(issued >= 2, "both reorg hashes are issued, issued={issued}");
         assert!(st.inflight.contains_key(&need) && st.inflight.contains_key(&mid));
+        assert!(
+            !st.body.is_pending(&need),
+            "pending reorg need with no body-queue row is fetched"
+        );
 
         // The first densify hash goes to the fastest peer. A 2×-median peer
         // gets the full cap, the others half.
@@ -2852,6 +2935,20 @@ pub(in crate::ibd) mod tests {
             "no faster peer"
         );
         st.slots[1].alive = true;
+        // `seed_ewma` blends into the previous sample. Both start cold so the
+        // stored rates are equal; a second seed on peer 1 alone would be faster.
+        st.slots[0].rate = Default::default();
+        st.slots[1].rate = Default::default();
+        seed_ewma(&mut st.slots[0], 1_000_000);
+        seed_ewma(&mut st.slots[1], 1_000_000);
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
+        assert_eq!(
+            st.inflight[&hung].peers,
+            HashSet::from([0]),
+            "an equal-bps peer does not steal"
+        );
+        st.slots[1].rate = Default::default();
+        seed_ewma(&mut st.slots[1], 2_000_000);
         st.slots[0].rate.note_rx(ibd_mono_ms().max(1));
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert_eq!(st.inflight[&hung].peers, HashSet::from([0]), "live rx");
@@ -2916,6 +3013,14 @@ pub(in crate::ibd) mod tests {
             r.peers
         );
         assert_eq!(getdata_asks(&mut wire, hung), vec![1, 1, 0]);
+
+        let mut live_and_retired = state::InflightReq::new(0);
+        live_and_retired.add_peer(2);
+        live_and_retired.retire_peer(2);
+        assert!(
+            !inflight_needs_racer(&live_and_retired),
+            "a live holder plus a retired holder is not a racer"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

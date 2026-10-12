@@ -54,9 +54,7 @@ fn parse_two_pushes(script: &Script) -> Result<(Vec<u8>, Vec<u8>), ConsensusErro
                 return Err(ConsensusError::Script("p2pkh scriptSig".into()));
             }
             Instruction::PushBytes(b) => items.push(b.as_bytes().to_vec()),
-            Instruction::Op(op) if op.to_u8() >= 0x51 && op.to_u8() <= 0x60 => {
-                return Err(ConsensusError::Script("p2pkh scriptSig op".into()));
-            }
+            // OP_1..=OP_16 and every other opcode are the same shape error.
             Instruction::Op(_) => {
                 return Err(ConsensusError::Script(
                     "p2pkh scriptSig unexpected op".into(),

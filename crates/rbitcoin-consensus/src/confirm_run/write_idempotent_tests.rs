@@ -1227,6 +1227,52 @@ fn fill_same_batch_abs_from_append_loc_ram() {
     );
 
     ensure_spend_abs_layouts(&bp, &prepared).expect("same-batch abs after RAM fill");
+    assert_eq!(
+        bp.get_parent_coinbase(fks[0]),
+        None,
+        "a 1-input coinbase parent is not stamped not-coinbase"
+    );
+
+    let mut multi_tx = rec_tx(0x44, 1);
+    multi_tx.input_count = 2;
+    let multi_pin = rbitcoin_query::CreatePinInner::records(
+        multi_tx,
+        vec![OutputRecord::unspent(1, vec![0x51])],
+    );
+    let multi_fk = Fk(50);
+    let multi_loc = rbitcoin_store::CreateLocPair {
+        txout: (10, 8),
+        spent: (20, 8),
+        n_out: 1,
+    };
+    let multi_prepared = [Prepared {
+        height: Height(1),
+        header_fk: Fk(1),
+        tx_fks: vec![multi_fk],
+        jobs: vec![],
+        spends: vec![([0x44u8; 32], 0, Fk(51), multi_fk, 0)],
+        fees: 0,
+        check_scripts: false,
+        time: 1,
+        bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
+        hash: [9u8; 32],
+        prev_mtp: 0,
+    }];
+    let mut bp_multi = BatchParents::new();
+    fill_planned_create_layout_after_commit(
+        &q,
+        &mut bp_multi,
+        &[multi_fk],
+        &[multi_loc],
+        &[multi_pin],
+        &multi_prepared,
+    )
+    .expect("multi-input parent fill");
+    assert_eq!(
+        bp_multi.get_parent_coinbase(multi_fk),
+        Some(false),
+        "a multi-input parent is not a coinbase"
+    );
 
     q.set_lookup_started_hi(Some(4));
     q.note_write_create_loc(&fks, &loc, 1);
@@ -1256,6 +1302,26 @@ fn fill_same_batch_abs_from_append_loc_ram() {
 
     fill_planned_create_layout_after_commit(&q, &mut bp_later, &[], &[], &[], &later)
         .expect("just-written fill from write loc RAM");
+    let mut bp_kept = BatchParents::new();
+    bp_kept.insert_create_pin(
+        fks[0],
+        std::sync::Arc::clone(&parent_pin),
+        vec![0],
+        None,
+        None,
+        Vec::new(),
+    );
+    // Shorter than one spent slot: the range is stamped, but vout 0 is still
+    // absent, so the fill still visits this parent. A wider replacement would
+    // publish the just-written loc.
+    bp_kept.set_spent_range_only(fks[0], (9, 1));
+    fill_planned_create_layout_after_commit(&q, &mut bp_kept, &[], &[], &[], &later)
+        .expect("filled pin keeps its spent range");
+    assert_eq!(
+        bp_kept.get_spender_abs(fks[0], 0),
+        None,
+        "an already-stamped spent range is not overwritten"
+    );
     assert!(bp_later.has_abs_layout(fks[0]));
     assert_eq!(
         bp_later.get_spender_abs(fks[0], 0),
