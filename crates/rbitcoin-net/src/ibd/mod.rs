@@ -62,7 +62,7 @@ use progress::{
 };
 use published::spawn_header_thread;
 use state::IbdWorkState;
-use state::{enqueue_header_cmd, flush_header_backlog, HeaderCmd};
+use state::{enqueue_header_cmd, HeaderCmd};
 use status::LoopStats;
 
 use crate::chain::ChainHub;
@@ -483,7 +483,6 @@ pub async fn ibd_cancellable(
         let pending_redial = {
             let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
             let st = &mut *st_guard;
-            flush_header_backlog(st);
             let tip_before_confirm = hub.tip_height();
             apply_confirm_events(
                 st,

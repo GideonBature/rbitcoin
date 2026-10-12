@@ -398,8 +398,6 @@ pub struct Query {
     sh_runs_published: AtomicUsize,
     /// Process-owned sizes last published by the confirm thread.
     owned_sizes_published: arc_swap::ArcSwap<ProcessOwnedSizes>,
-    /// Header-path rows last published by the header thread.
-    header_rows_published: AtomicU64,
     /// Held from the tip-height check through `flush_class_c_tip` / disconnect
     /// flush. Rewind tries it and retries; it does not disconnect mid-flush.
     tip_commit: Mutex<()>,
@@ -548,7 +546,6 @@ impl Query {
             published_tip: arc_swap::ArcSwapOption::empty(),
             sh_runs_published: AtomicUsize::new(0),
             owned_sizes_published: arc_swap::ArcSwap::from_pointee(ProcessOwnedSizes::default()),
-            header_rows_published: AtomicU64::new(0),
             tip_commit: Mutex::new(()),
             confirm_stats: Arc::new(ConfirmStats::default()),
             uring_recover_tip: AtomicU32::new(u32::MAX),
@@ -1970,16 +1967,6 @@ impl Query {
 
     pub fn published_owned_sizes(&self) -> ProcessOwnedSizes {
         **self.owned_sizes_published.load()
-    }
-
-    /// Header thread: row count of the path it just published.
-    pub fn publish_header_rows(&self, rows: u64) {
-        self.header_rows_published
-            .store(rows, AtomicOrdering::Relaxed);
-    }
-
-    pub fn published_header_rows(&self) -> u64 {
-        self.header_rows_published.load(AtomicOrdering::Relaxed)
     }
 
     /// Durable `tx.head` occupied slots (for backfill heuristics / logs).

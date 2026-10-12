@@ -33,7 +33,7 @@ pub(crate) fn load_resume_entries(
 
 pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
     if super::state::defer_header_store() {
-        st.defer_resume = true;
+        super::state::note_store_follow(super::state::FOLLOW_RESUME);
         return;
     }
     let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();

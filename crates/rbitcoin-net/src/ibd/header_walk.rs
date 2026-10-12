@@ -344,7 +344,7 @@ fn ensure_origin(st: &mut IbdWorkState, hub: &ChainHub) {
         return;
     }
     if super::state::defer_header_store() {
-        st.defer_origin = true;
+        super::state::note_store_follow(super::state::FOLLOW_ORIGIN);
         return;
     }
     let input = origin_input(st, hub);
@@ -2093,7 +2093,7 @@ pub(crate) fn send_getheaders(
     // the queue. An empty reply before any walk must be able to finish.
     if walk_ahead_of_queue(st, hub) {
         if super::state::defer_header_store() {
-            st.defer_reseed = true;
+            super::state::note_store_follow(super::state::FOLLOW_RESEED);
         } else {
             super::path::reseed_ordered_from_path(st, hub);
         }

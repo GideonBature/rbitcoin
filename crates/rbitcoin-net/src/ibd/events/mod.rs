@@ -38,8 +38,6 @@ struct PreparedBatch {
 thread_local! {
     static PREPARED_BATCH: RefCell<Option<PreparedBatch>> = const { RefCell::new(None) };
     static APPLY_INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Header thread already ran `ensure_headers_batch` (including a short prefix).
-    static HEADER_STORE_PREPARED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn set_prepared_batch(fks: Vec<rbitcoin_primitives::Fk>, work: Option<bitcoin::Work>) {
@@ -54,10 +52,6 @@ pub(crate) fn clear_prepared_batch() {
 
 pub(crate) fn set_apply_inline(inline: bool) {
     APPLY_INLINE.with(|slot| slot.set(inline));
-}
-
-pub(crate) fn set_header_store_prepared(on: bool) {
-    HEADER_STORE_PREPARED.with(|slot| slot.set(on));
 }
 
 /// Persist `headers` before the coordination lock. A short acceptance is the
@@ -159,7 +153,7 @@ pub(crate) fn drain_ready_peer_and_body_events(
     let ctrl_t0 = Instant::now();
     let mut ctrl_n = 0u64;
     while ctrl_n < CTRL_DRAIN_EVENT_BUDGET && ctrl_t0.elapsed() < CTRL_DRAIN_TIME_BUDGET {
-        if st.header_backlog.len() >= super::state::HEADER_CMD_BOUND {
+        if st.header_cmd.as_ref().is_some_and(|tx| tx.capacity() == 0) {
             break;
         }
         match ctrl_rx.try_recv() {
@@ -330,23 +324,11 @@ fn accepted_headers(
     hub: &ChainHub,
     headers: &[bitcoin::block::Header],
 ) -> Vec<(bitcoin::block::Header, rbitcoin_primitives::Fk)> {
-    if HEADER_STORE_PREPARED.with(|slot| slot.get()) {
-        let fks = PREPARED_BATCH.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .map(|prepared| prepared.fks.clone())
-                .unwrap_or_default()
-        });
+    if let Some(fks) =
+        PREPARED_BATCH.with(|slot| slot.borrow().as_ref().map(|prepared| prepared.fks.clone()))
+    {
         let n = fks.len().min(headers.len());
         return headers.iter().copied().zip(fks).take(n).collect();
-    }
-    if let Some(fks) = PREPARED_BATCH.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .filter(|prepared| prepared.fks.len() == headers.len())
-            .map(|prepared| prepared.fks.clone())
-    }) {
-        return headers.iter().copied().zip(fks).collect();
     }
     let mut accepted: Vec<_> = headers
         .iter()

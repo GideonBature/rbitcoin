@@ -8,14 +8,17 @@ use super::{
 
 #[test]
 fn missing_reject_parent_is_not_consensus_invalid() {
-    let class = ConfirmRejectClass::ConsensusInvalid.trust_consensus(
-        RejectParent {
-            hash: None,
-            unreadable: true,
-        },
-        None,
-    );
+    use bitcoin::hashes::Hash;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("missing-reject-parent");
+    hub.ensure_genesis().unwrap();
+    let hash = bitcoin::BlockHash::from_byte_array([0x9e; 32]);
+    let parent = RejectParent::from_lookup(&hub, hash);
+    assert!(parent.hash.is_none());
+    assert!(parent.unreadable);
+    let class = ConfirmRejectClass::ConsensusInvalid.trust_consensus(parent, hub.tip_hash());
     assert_eq!(class, ConfirmRejectClass::Cascade);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

@@ -361,24 +361,15 @@ pub fn consider_disconnected_heavier(
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
     if super::state::defer_header_store() {
-        st.defer_rewind = true;
+        super::state::note_store_follow(super::state::FOLLOW_REWIND);
         return Ok(false);
     }
-    for h in connecting_search_candidates(st, hub)? {
-        if st.reorg.invalid.contains(h.to_byte_array()) {
-            continue;
-        }
-        if let Some(path) = connecting_hashes_heavier_disconnected(hub, h)? {
-            if path
-                .iter()
-                .any(|p| st.reorg.invalid.contains(p.to_byte_array()))
-            {
-                continue;
-            }
-            return apply_header_rewind(st, hub, &path);
-        }
-    }
-    Ok(false)
+    let cands = connecting_search_candidates(st, hub)?;
+    let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
+        return Ok(false);
+    };
+    apply_header_rewind(st, hub, &path)
 }
 
 /// Header tips on known competing forks that do not contain an invalid hash.
@@ -482,10 +473,22 @@ pub(crate) fn maybe_rewind_to_best_work(
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
     if super::state::defer_header_store() {
-        st.defer_rewind = true;
+        super::state::note_store_follow(super::state::FOLLOW_REWIND);
         return Ok(false);
     }
-    let mut seen = std::collections::HashSet::new();
+    let cands = rewind_candidate_hashes(st, hub)?;
+    let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
+        return Ok(false);
+    };
+    apply_header_rewind(st, hub, &path)
+}
+
+fn rewind_candidate_hashes(
+    st: &super::state::IbdWorkState,
+    hub: &ChainHub,
+) -> Result<Vec<BlockHash>, NetError> {
+    let mut seen = HashSet::new();
     let mut cands = Vec::new();
     for t in st.reorg.explore_tips() {
         if seen.insert(*t) {
@@ -497,21 +500,26 @@ pub(crate) fn maybe_rewind_to_best_work(
             cands.push(h);
         }
     }
+    Ok(cands)
+}
+
+fn select_heavier_path(
+    hub: &ChainHub,
+    cands: &[BlockHash],
+    invalid: &HashSet<[u8; 32]>,
+) -> Result<Option<Vec<BlockHash>>, NetError> {
     for cand in cands {
-        if st.reorg.invalid.contains(cand.to_byte_array()) {
+        if invalid.contains(&cand.to_byte_array()) {
             continue;
         }
-        if let Some(path) = connecting_hashes_heavier_disconnected(hub, cand)? {
-            if path
-                .iter()
-                .any(|h| st.reorg.invalid.contains(h.to_byte_array()))
-            {
+        if let Some(path) = connecting_hashes_heavier_disconnected(hub, *cand)? {
+            if path.iter().any(|h| invalid.contains(&h.to_byte_array())) {
                 continue;
             }
-            return apply_header_rewind(st, hub, &path);
+            return Ok(Some(path));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Disconnect to the path's LCA and re-point height slots at `path`
@@ -634,38 +642,13 @@ pub(crate) fn rewind_off_coord_lock(
     shared: &std::sync::Mutex<super::state::IbdWorkState>,
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
-    let snap = {
+    let (cands, invalid) = {
         let st = shared.lock().unwrap_or_else(|err| err.into_inner());
-        let mut seen = std::collections::HashSet::new();
-        let mut cands = Vec::new();
-        for t in st.reorg.explore_tips() {
-            if seen.insert(*t) {
-                cands.push(*t);
-            }
-        }
-        for h in connecting_search_candidates(&st, hub)? {
-            if seen.insert(h) {
-                cands.push(h);
-            }
-        }
-        let invalid: std::collections::HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
+        let cands = rewind_candidate_hashes(&st, hub)?;
+        let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
         (cands, invalid)
     };
-    let (cands, invalid) = snap;
-    let mut path = None;
-    for cand in cands {
-        if invalid.contains(&cand.to_byte_array()) {
-            continue;
-        }
-        if let Some(found) = connecting_hashes_heavier_disconnected(hub, cand)? {
-            if found.iter().any(|h| invalid.contains(&h.to_byte_array())) {
-                continue;
-            }
-            path = Some(found);
-            break;
-        }
-    }
-    let Some(path) = path else {
+    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
         return Ok(false);
     };
     let Some(prep) = prepare_header_rewind(hub, &path)? else {
@@ -871,7 +854,9 @@ mod tests {
         st.note_path_prev(w3.block_hash(), w2.block_hash());
         st.record_height(w4.block_hash(), 4);
         st.max_ordered_height = 4;
-        assert!(consider_disconnected_heavier(&mut st, &hub).unwrap());
+        let shared = std::sync::Mutex::new(st);
+        assert!(rewind_off_coord_lock(&shared, &hub).unwrap());
+        let st = shared.into_inner().unwrap_or_else(|err| err.into_inner());
         assert_eq!(
             hub.tip_height(),
             Some(0),

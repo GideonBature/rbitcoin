@@ -185,9 +185,6 @@ pub(crate) struct ProgressPublished {
     pub tip: Option<u32>,
     pub txs: u64,
     pub sh_runs: usize,
-    /// Last header-thread queue depth. The status line uses the live deque.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub header_rows: u64,
     pub owned: rbitcoin_query::ProcessOwnedSizes,
 }
 
@@ -196,7 +193,6 @@ pub(crate) fn read_progress_published(query: &rbitcoin_query::Query) -> Progress
         tip: query.published_tip().map(|p| p.height),
         txs: query.tx_body_count(),
         sh_runs: query.published_scripthash_run_count(),
-        header_rows: query.published_header_rows(),
         owned: query.published_owned_sizes(),
     }
 }
@@ -676,7 +672,6 @@ mod tests {
         hub.query.publish_confirmed_tip(0, gen.to_byte_array());
         rbitcoin_query::reset_progress_snapshot_counts();
         hub.query.publish_progress_snapshots();
-        hub.query.publish_header_rows(4);
         let (sh_calls, owned_calls) = rbitcoin_query::progress_snapshot_counts();
         assert!(sh_calls >= 1 && owned_calls >= 1);
         let sh = hub.query.published_scripthash_run_count();
@@ -686,7 +681,6 @@ mod tests {
         assert_eq!(view.tip, Some(0));
         assert_eq!(view.txs, hub.query.tx_body_count());
         assert_eq!(view.sh_runs, sh);
-        assert_eq!(view.header_rows, 4);
         assert_eq!(view.owned.h2h_keys, h2h);
         assert_eq!(rbitcoin_query::progress_snapshot_counts(), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
