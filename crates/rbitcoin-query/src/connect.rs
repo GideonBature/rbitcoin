@@ -88,10 +88,7 @@ impl Query {
         if self.extend_height_index(&seq, height, expected, false) {
             // Same counter the catch-up walk records, so a span publish is
             // still an incremental extend and not a silent index update.
-            crate::note_confirm(
-                &self.confirm_stats().height_index_delta_n,
-                seq.len() as u64,
-            );
+            crate::note_confirm(&self.confirm_stats().height_index_delta_n, seq.len() as u64);
         }
     }
 
