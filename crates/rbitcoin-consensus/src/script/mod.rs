@@ -323,7 +323,9 @@ pub(crate) mod crypto {
         if strict_der && !is_valid_signature_encoding(sig_raw) {
             return Err(ConsensusError::Script("der sig".into()));
         }
-        let (&sighash_byte, der) = sig_raw.split_last().expect("empty sig returned above");
+        let (&sighash_byte, der) = sig_raw
+            .split_last()
+            .ok_or_else(|| ConsensusError::Script("der sig".into()))?;
         let sighash_ty = u32::from(sighash_byte);
         let sig = ecdsa::Signature::from_der_lax(der)
             .map_err(|_| ConsensusError::Script("der sig".into()))?;
