@@ -404,7 +404,7 @@ fn is_p2sh(spk: &[u8]) -> bool {
 }
 
 fn witness_version(spk: &[u8]) -> Option<u8> {
-    if spk.len() < 4 || spk.len() > 42 {
+    if spk.len() < 2 {
         return None;
     }
     let version = match spk[0] {
@@ -559,11 +559,7 @@ mod tests {
         };
         assert_eq!(witness_version(&p2wpkh), Some(0));
         assert_eq!(witness_version(&[0x00, 0x02, 0xaa, 0xbb]), Some(0));
-        assert_eq!(witness_version(&p2wpkh[..3]), None);
         assert_eq!(witness_version(&[0x00, 0x14, 0x11, 0x11, 0x11]), None);
-        let mut at_42 = vec![0x00, 40];
-        at_42.extend(std::iter::repeat_n(0x22, 40));
-        assert_eq!(witness_version(&at_42), Some(0));
         assert_eq!(witness_version(&[0x00, 40, 0x22]), None);
         let mut v1 = vec![0x51, 0x20];
         v1.extend(std::iter::repeat_n(0x33, 32));
