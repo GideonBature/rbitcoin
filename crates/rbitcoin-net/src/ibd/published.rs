@@ -67,6 +67,7 @@ pub(crate) fn apply_published_and_stall(
 
 fn publish_new_rows(
     published: &ArcSwap<Vec<HeaderPathRow>>,
+    header_fks: &super::peer_io::HeaderFkBus,
     st: &IbdWorkState,
     before: &HashSet<BlockHash>,
 ) {
@@ -99,6 +100,13 @@ fn publish_new_rows(
         next.extend(rows.iter().copied());
         Arc::new(next)
     });
+    header_fks.rcu(|cur| {
+        let mut next = (**cur).clone();
+        for row in &rows {
+            next.insert(row.hash, row.fk);
+        }
+        Arc::new(next)
+    });
 }
 
 pub(crate) fn spawn_header_thread(
@@ -106,6 +114,7 @@ pub(crate) fn spawn_header_thread(
     hub: Arc<ChainHub>,
     mut rx: UnboundedReceiver<HeaderCmd>,
     published: Arc<ArcSwap<Vec<HeaderPathRow>>>,
+    header_fks: super::peer_io::HeaderFkBus,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         while let Some(cmd) = rx.blocking_recv() {
@@ -121,7 +130,7 @@ pub(crate) fn spawn_header_thread(
                         let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
                         let before: HashSet<BlockHash> = st.ordered.iter().copied().collect();
                         apply_headers_event(&mut st, hub.as_ref(), peer, headers);
-                        publish_new_rows(&published, &st, &before);
+                        publish_new_rows(&published, &header_fks, &st, &before);
                     }
                     set_apply_inline(false);
                     clear_prepared_batch();
@@ -155,7 +164,7 @@ pub(crate) fn spawn_header_thread(
                     let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
                     let before: HashSet<BlockHash> = st.ordered.iter().copied().collect();
                     install_resumed_path(&mut st, hub.as_ref(), &path);
-                    publish_new_rows(&published, &st, &before);
+                    publish_new_rows(&published, &header_fks, &st, &before);
                 }
             }
         }

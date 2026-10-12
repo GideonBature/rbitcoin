@@ -1335,6 +1335,8 @@ mod tests {
         let sinks = PeerEventSinks {
             body: body_tx,
             ctrl: ctrl_tx,
+
+            header_fks: super::super::peer_io::empty_header_fk_bus(),
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

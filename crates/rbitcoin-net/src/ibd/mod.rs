@@ -55,7 +55,7 @@ use exit::{
     all_peers_dead_action, best_chain_remainder, empty_path_header_fan, header_lag_behind_peers,
     ibd_caught_up, path_drained, should_unlatch_headers_done, AllPeersDead,
 };
-use peer_io::{sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
+use peer_io::{empty_header_fk_bus, sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
 use progress::{
     claim_ready, format_progress_line, ibd_pct, work_chain_progress, ProgressLineInput,
     TipRateTracker,
@@ -290,9 +290,11 @@ pub async fn ibd_cancellable(
     // Body events must not wait behind Headers (single-FIFO waste).
     let (body_tx, mut body_rx) = mpsc::unbounded_channel::<PeerEvent>();
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<PeerEvent>();
+    let header_fks = empty_header_fk_bus();
     let sinks = PeerEventSinks {
         body: body_tx,
         ctrl: ctrl_tx,
+        header_fks: Arc::clone(&header_fks),
     };
 
     // Nested `ibd-net` runtime panicked on SIGINT (`Cannot drop a runtime in an
@@ -466,6 +468,7 @@ pub async fn ibd_cancellable(
         Arc::clone(&hub),
         header_rx,
         Arc::clone(&published),
+        header_fks,
     );
     let _ = header_tx.send(HeaderCmd::Reseed);
     let _ = header_tx.send(HeaderCmd::Ask);

@@ -1,6 +1,6 @@
 //! Tests for super:: events helpers (peeled from events.rs).
 
-use super::super::confirm::ConfirmRejectClass;
+use super::super::confirm::{ConfirmRejectClass, RejectParent};
 use super::super::state::IbdWorkState;
 use super::apply_confirm_reject as apply_confirm_reject_class;
 use bitcoin::hashes::Hash;
@@ -21,6 +21,9 @@ fn apply_confirm_reject(
     query: Option<&Query>,
     hub: Option<&crate::chain::ChainHub>,
 ) {
+    let parent = hub
+        .map(|h| RejectParent::from_lookup(h, hash))
+        .unwrap_or_default();
     apply_confirm_reject_class(
         st,
         height,
@@ -32,6 +35,7 @@ fn apply_confirm_reject(
         1,
         None,
         None,
+        parent,
     );
 }
 
@@ -543,6 +547,8 @@ fn apply_peer_event_body_and_control_surface() {
             peer: 1,
             hash: h(9),
             payload: vec![0u8; 80],
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -572,6 +578,8 @@ fn apply_peer_event_body_and_control_surface() {
             peer: 1,
             hash: class_a_hash,
             payload,
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -878,6 +886,8 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             peer: 1,
             hash: h1,
             payload: ser(&b1),
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -894,6 +904,8 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             peer: 1,
             hash: h1,
             payload: ser(&b1),
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -917,6 +929,8 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             peer: 1,
             hash: h2,
             payload: ser(&b2),
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -943,6 +957,8 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             peer: 1,
             hash: far_hash,
             payload: ser(&far),
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -1229,6 +1245,8 @@ fn ibd_bad_prev_fork() {
             peer: 2,
             hash: a1,
             payload: junk,
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -1253,6 +1271,8 @@ fn ibd_bad_prev_fork() {
                 peer: 1,
                 hash: a1,
                 payload: serialize(&a[0]),
+
+                header_fk: None,
             },
             &write_next,
             &mut book,
@@ -1293,6 +1313,8 @@ fn ibd_bad_prev_fork() {
             err: "consensus: script verification failed: script false".into(),
             batch_len: 1,
             sender: None,
+
+            parent: RejectParent::default(),
         },
     );
     assert!(st.body.is_rejected(&h(12)));
@@ -1322,6 +1344,7 @@ fn ibd_bad_prev_fork() {
         8,
         None,
         None,
+        RejectParent::default(),
     );
     assert!(!st.body.is_rejected(&h(7)));
     assert!(!st.reorg.invalid.contains(h(7).to_byte_array()));
@@ -1415,6 +1438,7 @@ fn ibd_bad_prev_fork() {
         8,
         Some(&feed),
         None,
+        RejectParent::default(),
     );
     assert_eq!(feed.isolate_until(), u32::MAX);
     assert_eq!(hub.query.lookup_taken_hi(), Some(t + 2));
@@ -1597,6 +1621,8 @@ fn ibd_bad_prev_fork() {
             peer: 0,
             hash: w1,
             payload: serialize(&w[0]),
+
+            header_fk: None,
         },
         &write_next,
         &mut book,
@@ -1999,6 +2025,8 @@ impl WireRig {
                 peer,
                 hash: body.block_hash(),
                 payload: bitcoin::consensus::serialize(body),
+
+                header_fk: None,
             },
             &self.write_next,
             &mut self.book,
@@ -2304,6 +2332,7 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
         1,
         None,
         Some(5),
+        RejectParent::default(),
     );
     assert!(rig.st.body.is_missing(&next), "re-get");
     assert!(rig.st.slots[4].alive, "retarget miss keeps the sender");
@@ -2708,7 +2737,17 @@ fn isolated_soft_reject_does_not_count_toward_cascade_halt() {
             (ConfirmRejectClass::SoftWire, 1),
         ] {
             apply_confirm_reject_class(
-                &mut st, 1, hash, class, err, None, None, batch_len, None, None,
+                &mut st,
+                1,
+                hash,
+                class,
+                err,
+                None,
+                None,
+                batch_len,
+                None,
+                None,
+                RejectParent::default(),
             );
         }
     }
@@ -3088,6 +3127,8 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
             peer: 1,
             hash,
             payload: wire,
+
+            header_fk: None,
         },
         &AtomicU32::new(1),
         &mut AddrMan::new(),
@@ -3116,6 +3157,7 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
                 err,
                 batch_len,
                 sender: _,
+                parent: _,
             }) => break (height, hash, class, err, batch_len),
             Ok(ConfirmEvent::Accepted { .. }) => panic!("a block with an empty tx connected"),
             Err(RecvTimeoutError::Timeout) => {
@@ -3142,6 +3184,8 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
         err,
         batch_len,
         sender: None,
+
+        parent: RejectParent::default(),
     })
     .unwrap();
     drop(tx);
@@ -3575,6 +3619,7 @@ fn ibd_refused_body_is_asked_again() {
                 peer,
                 hash,
                 payload,
+                header_fk: None,
             },
             &AtomicU32::new(1),
             &mut book,
@@ -3612,6 +3657,8 @@ fn ibd_refused_body_is_asked_again() {
         err: "body queue wire does not decode".into(),
         batch_len: 1,
         sender: None,
+
+        parent: RejectParent::default(),
     })
     .unwrap();
     drop(tx);
@@ -3631,5 +3678,184 @@ fn ibd_refused_body_is_asked_again() {
         "soft-rejected body is asked again"
     );
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A requested body and a confirm reject apply from facts already on the event.
+#[test]
+fn coord_loop_body_and_reject_do_not_read_headers() {
+    use super::super::peer_io::{PeerEvent, PeerSlot};
+    use super::apply_peer_event;
+    use crate::chain::{ensure_header_fk_count, reset_ensure_header_fk_count};
+    use crate::seeds::AddrMan;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::consensus::Encodable;
+    use bitcoin::hashes::Hash;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, Block, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
+    };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::AtomicU32;
+    use tokio::sync::mpsc;
+
+    fn dummy_slot(id: usize) -> PeerSlot {
+        let (cmd_tx, _rx) = mpsc::unbounded_channel();
+        let task = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .spawn(async {});
+        PeerSlot {
+            id,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 18444),
+            net: crate::NetAddr::from_socket(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                18444,
+            )),
+            cmd_tx,
+            in_flight: std::collections::HashSet::new(),
+            requested: super::super::peer_io::solicit_track().0,
+            solicited_bytes: super::super::peer_io::solicit_track().1,
+            solicited_ms: super::super::peer_io::solicit_track().2,
+            getdata_wire: super::super::peer_io::GetdataWire::new(),
+            peer_height: 5,
+            connected_ms: 1,
+            first_data_ms: 0,
+            bytes_rx_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            rate: Default::default(),
+            alive: true,
+            task,
+        }
+    }
+
+    fn coinbase(height: u32) -> Transaction {
+        let mut ss = rbitcoin_consensus::bip34_height_script(height);
+        while ss.len() < 2 {
+            ss.push(0x00);
+        }
+        Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(ss),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    }
+    fn shell(prev: BlockHash, height: u32, n: u32) -> Block {
+        let header = Header {
+            version: Version::from_consensus(4),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+            time: 1_300_000_000 + n,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: n,
+        };
+        let mut b = Block {
+            header,
+            txdata: vec![coinbase(height)],
+        };
+        b.header.merkle_root = b.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+        b
+    }
+    fn ser(b: &Block) -> Vec<u8> {
+        let mut v = Vec::new();
+        b.consensus_encode(&mut v).unwrap();
+        v
+    }
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-loop-facts");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let b1 = shell(gen, 1, 1);
+    let h1 = b1.block_hash();
+    reset_ensure_header_fk_count();
+    super::super::reorg::reset_parent_hash_of_count();
+    let fk = hub.ensure_header_fk(&b1.header).unwrap();
+    let _ = super::super::reorg::parent_hash_of(&hub, h1);
+    assert!(ensure_header_fk_count() >= 1);
+    assert!(super::super::reorg::parent_hash_of_count() >= 1);
+    reset_ensure_header_fk_count();
+    super::super::reorg::reset_parent_hash_of_count();
+
+    let mut st = IbdWorkState::new(vec![dummy_slot(1)], Some(gen), Some(0));
+    let write_next = AtomicU32::new(1);
+    let mut book = AddrMan::new();
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1);
+    st.record_height(h1, 1);
+    st.inflight
+        .insert(h1, super::super::state::InflightReq::new(1));
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 1,
+            hash: h1,
+            payload: ser(&b1),
+            header_fk: Some(fk),
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert!(st.body.is_pending(&h1), "fk on the event is stored");
+    assert!(hub.query.block_queue_has_height(1));
+
+    let absent = h(0x22);
+    st.record_height(absent, 2);
+    st.inflight
+        .insert(absent, super::super::state::InflightReq::new(1));
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 1,
+            hash: absent,
+            payload: ser(&b1),
+            header_fk: None,
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert!(st.body.is_missing(&absent));
+    assert!(!st.body.is_pending(&absent));
+    assert!(!hub.query.block_queue_has_height(2));
+
+    let rejected = h(0x44);
+    apply_confirm_reject_class(
+        &mut st,
+        1,
+        rejected,
+        ConfirmRejectClass::ConsensusInvalid,
+        "consensus: script verification failed: script false",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+        1,
+        None,
+        None,
+        RejectParent {
+            hash: Some(h(0x99)),
+            unreadable: false,
+        },
+    );
+    assert!(
+        !st.body.is_rejected(&rejected),
+        "a parent that is not the tip is a cascade"
+    );
+    assert_eq!(ensure_header_fk_count(), 0);
+    assert_eq!(super::super::reorg::parent_hash_of_count(), 0);
     let _ = std::fs::remove_dir_all(dir);
 }

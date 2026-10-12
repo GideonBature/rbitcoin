@@ -1199,6 +1199,7 @@ fn emit_confirm_reject_isolates_batched_consensus_and_requests_single() {
         "script failed".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(
@@ -1227,6 +1228,7 @@ fn emit_confirm_reject_isolates_batched_consensus_and_requests_single() {
         "script failed".into(),
         1,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(
@@ -1254,6 +1256,7 @@ fn emit_confirm_reject_isolates_batched_consensus_and_requests_single() {
         "io_uring leftover cqe".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(
@@ -1279,6 +1282,7 @@ fn isolate_clears_only_after_original_batch_last_height() {
         "script failed".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(feed.isolate_until(), 107);
@@ -1311,6 +1315,7 @@ fn isolate_clears_only_after_original_batch_last_height() {
         "script failed".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(feed_n1.isolate_until(), 107);
@@ -1323,6 +1328,7 @@ fn isolate_clears_only_after_original_batch_last_height() {
         "script failed".into(),
         1,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(

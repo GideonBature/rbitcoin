@@ -166,10 +166,23 @@ fn header_hashes_to_best_ancestor_n(
     Ok(rev)
 }
 
+static PARENT_HASH_OF_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_parent_hash_of_count() {
+    PARENT_HASH_OF_N.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn parent_hash_of_count() -> u64 {
+    PARENT_HASH_OF_N.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn parent_hash_of(
     hub: &ChainHub,
     hash: BlockHash,
 ) -> Result<Option<BlockHash>, NetError> {
+    PARENT_HASH_OF_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let Some((_, rec)) = hub
         .query
         .get_header_by_hash(&hash.to_byte_array())
@@ -824,6 +837,7 @@ mod tests {
             1,
             None,
             None,
+            super::super::confirm::RejectParent::default(),
         );
         assert_eq!(hub.tip_height(), Some(1), "unknown prev must not rewind");
         assert!(!st.headers_done, "soft reget clears the header latch");

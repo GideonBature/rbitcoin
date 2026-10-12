@@ -57,6 +57,8 @@ pub(crate) enum PeerEvent {
         hash: BlockHash,
         /// Consensus-serialized block (frame payload).
         payload: Vec<u8>,
+        /// Header fk already resolved. Absent means the loop does not store.
+        header_fk: Option<rbitcoin_primitives::Fk>,
     },
     /// Framed as `block` but unusable (e.g. truncated header) — re-request.
     BlockDecodeFailed {
@@ -85,6 +87,15 @@ pub(crate) enum PeerEvent {
     },
 }
 
+pub(crate) type HeaderFkBus =
+    Arc<arc_swap::ArcSwap<std::collections::HashMap<BlockHash, rbitcoin_primitives::Fk>>>;
+
+pub(crate) fn empty_header_fk_bus() -> HeaderFkBus {
+    Arc::new(arc_swap::ArcSwap::from_pointee(
+        std::collections::HashMap::new(),
+    ))
+}
+
 /// Dual fan-out so body delivery is never stuck behind header floods on one FIFO.
 ///
 /// - **body**: `BlockFramed` / fail / `NotFound` / `Dead` — drain first
@@ -93,6 +104,7 @@ pub(crate) enum PeerEvent {
 pub(crate) struct PeerEventSinks {
     pub body: mpsc::UnboundedSender<PeerEvent>,
     pub ctrl: mpsc::UnboundedSender<PeerEvent>,
+    pub header_fks: HeaderFkBus,
 }
 
 impl PeerEventSinks {
@@ -533,10 +545,12 @@ impl IbdReadCtx {
                     &hash,
                     n,
                 ) {
+                    let header_fk = self.sinks.header_fks.load().get(&hash).copied();
                     self.sinks.send_body(PeerEvent::BlockFramed {
                         peer: self.id,
                         hash,
                         payload: frame.payload,
+                        header_fk,
                     });
                     false
                 } else {
@@ -1150,6 +1164,8 @@ mod tests {
             sinks: PeerEventSinks {
                 body: body_tx,
                 ctrl: ctrl_tx,
+
+                header_fks: empty_header_fk_bus(),
             },
             requested: Arc::new(Mutex::new(HashSet::new())),
             solicited_bytes: Arc::new(AtomicU64::new(0)),
@@ -1234,6 +1250,8 @@ mod tests {
                 peer,
                 hash: got,
                 payload,
+
+                header_fk: _,
             } => {
                 assert_eq!(peer, 3);
                 assert_eq!(got, hash);
@@ -1411,6 +1429,8 @@ mod tests {
             PeerEventSinks {
                 body: body_tx,
                 ctrl: ctrl_tx,
+
+                header_fks: empty_header_fk_bus(),
             },
             body_rx,
             ctrl_rx,
@@ -1523,6 +1543,8 @@ mod tests {
         let sinks = PeerEventSinks {
             body: body_tx,
             ctrl: ctrl_tx,
+
+            header_fks: empty_header_fk_bus(),
         };
         sinks.send_body(PeerEvent::Dead {
             peer: 1,

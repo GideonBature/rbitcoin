@@ -445,18 +445,19 @@ impl ConfirmRejectClass {
 
     /// Consensus verdict is only trusted when the connect ran against the
     /// intended parent (`tip == header.prev`). Otherwise this is a cascade.
-    pub(crate) fn trust_consensus(self, hub: &ChainHub, hash: BlockHash) -> Self {
+    ///
+    /// `parent` is already resolved. This does not read the header store.
+    pub(crate) fn trust_consensus(self, parent: RejectParent, tip: Option<BlockHash>) -> Self {
         if self != Self::ConsensusInvalid {
             return self;
         }
-        match super::reorg::parent_hash_of(hub, hash) {
-            Ok(Some(prev)) if hub.tip_hash() == Some(prev) => Self::ConsensusInvalid,
-            Ok(Some(_)) => Self::Cascade,
-            // Unknown header: tests use dummy hashes; production bodies have a
-            // header row. Keep the typed consensus class.
-            Ok(None) => Self::ConsensusInvalid,
-            // Store / IO looking up the parent is not a block rule.
-            Err(_) => Self::Cascade,
+        if parent.unreadable {
+            return Self::Cascade;
+        }
+        match parent.hash {
+            Some(prev) if tip == Some(prev) => Self::ConsensusInvalid,
+            Some(_) => Self::Cascade,
+            None => Self::ConsensusInvalid,
         }
     }
 
@@ -614,7 +615,10 @@ fn load_reject_class(
     wave: &[OfferBack<'_>],
 ) -> ConfirmRejectClass {
     match wave {
-        [(_, hash, _, _)] => class.trust_consensus(hub, *hash),
+        [(_, hash, _, _)] => {
+            let parent = RejectParent::from_lookup(hub, *hash);
+            class.trust_consensus(parent, hub.tip_hash())
+        }
         _ => class,
     }
 }
@@ -704,6 +708,28 @@ pub(crate) fn take_lookup_wave_faults() -> u64 {
     LOOKUP_WAVE_FAULTS.swap(0, Ordering::Relaxed)
 }
 
+/// Parent hash already resolved for a confirm reject.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RejectParent {
+    pub hash: Option<BlockHash>,
+    pub unreadable: bool,
+}
+
+impl RejectParent {
+    pub(crate) fn from_lookup(hub: &ChainHub, hash: BlockHash) -> Self {
+        match super::reorg::parent_hash_of(hub, hash) {
+            Ok(hash) => Self {
+                hash,
+                unreadable: false,
+            },
+            Err(_) => Self {
+                hash: None,
+                unreadable: true,
+            },
+        }
+    }
+}
+
 pub(crate) enum ConfirmEvent {
     /// Tip advanced; hash is the confirmed block.
     Accepted { hash: BlockHash },
@@ -720,6 +746,7 @@ pub(crate) enum ConfirmEvent {
         /// the confirm thread held. IBD's own record may by now name the
         /// sender of a replacement copy.
         sender: Option<usize>,
+        parent: RejectParent,
     },
 }
 
@@ -733,6 +760,7 @@ fn emit_confirm_reject(
     err: String,
     batch_len: usize,
     sender: Option<usize>,
+    parent: RejectParent,
 ) -> Result<(), std::sync::mpsc::SendError<ConfirmEvent>> {
     let class = class.isolate_if_batched(batch_len);
     if class == ConfirmRejectClass::Cascade && batch_len > 1 {
@@ -746,6 +774,7 @@ fn emit_confirm_reject(
         err,
         batch_len,
         sender,
+        parent,
     })
 }
 
@@ -1895,6 +1924,7 @@ pub(crate) fn spawn_confirm_engine(
                             msg,
                             heights_hashes.len(),
                             None,
+                            RejectParent::from_lookup(&hub_wb, hash),
                         );
                     }
                 }
@@ -2021,6 +2051,7 @@ pub(crate) fn spawn_confirm_engine(
                         msg,
                         meta.heights_hashes.len(),
                         None,
+                        RejectParent::from_lookup(&hub_sc, hash),
                     );
                     true
                 },
@@ -2290,6 +2321,7 @@ pub(crate) fn spawn_confirm_engine(
                             log_msg,
                             wire_batch.len(),
                             sender,
+                            RejectParent::from_lookup(&hub_load, first_hash),
                         );
                         std::thread::sleep(Duration::from_millis(50));
                         continue;
@@ -2457,6 +2489,7 @@ pub(crate) fn spawn_confirm_engine(
                             msg,
                             heights_hashes.len(),
                             sender,
+                            RejectParent::from_lookup(&hub_load, first_hash),
                         )
                         .is_err()
                         {
@@ -2578,6 +2611,10 @@ pub(crate) fn spawn_confirm_engine(
                                     "body queue wire does not decode".into(),
                                     1,
                                     None,
+                                    RejectParent::from_lookup(
+                                        &hub,
+                                        BlockHash::from_byte_array(hash),
+                                    ),
                                 )
                                 .is_err()
                                 {
@@ -2687,6 +2724,7 @@ pub(crate) fn spawn_confirm_engine(
                                                     e.to_string(),
                                                     1,
                                                     None,
+                                                    RejectParent::from_lookup(&hub, hash),
                                                 );
                                             }
                                             None => {

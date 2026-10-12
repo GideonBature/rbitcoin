@@ -74,6 +74,7 @@ pub(crate) fn disconnect_all_peers(st: &mut IbdWorkState) {
 }
 
 /// First 80 bytes of a consensus-serialized block → header (no full block decode).
+#[cfg(test)]
 fn decode_block_header_prefix(payload: &[u8]) -> Option<bitcoin::block::Header> {
     use bitcoin::consensus::Decodable;
     if payload.len() < 80 {
@@ -455,14 +456,18 @@ pub(crate) fn apply_peer_event(
             peer,
             hash,
             payload,
+            header_fk,
         } => apply_block_framed(
             st,
             hub,
             archive_write_next,
             confirm_feed,
-            peer,
-            hash,
-            payload,
+            FramedBody {
+                peer,
+                hash,
+                payload,
+                header_fk,
+            },
         ),
         PeerEvent::BlockDecodeFailed { peer, hash } => apply_block_decode_failed(st, peer, hash),
         PeerEvent::NotFound { peer, hashes } => apply_notfound(st, peer, hashes),
@@ -589,15 +594,26 @@ fn apply_headers_reply(
     }
 }
 
+pub(crate) struct FramedBody {
+    pub peer: usize,
+    pub hash: BlockHash,
+    pub payload: Vec<u8>,
+    pub header_fk: Option<rbitcoin_primitives::Fk>,
+}
+
 fn apply_block_framed(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     archive_write_next: &AtomicU32,
     confirm_feed: Option<&super::confirm::ConfirmFeed>,
-    peer: usize,
-    hash: BlockHash,
-    payload: Vec<u8>,
+    body: FramedBody,
 ) {
+    let FramedBody {
+        peer,
+        hash,
+        payload,
+        header_fk,
+    } = body;
     let wire_bytes = payload.len();
     // Unsolicited wire is not a body we asked for. Drop it before any copy
     // and before it can move this peer's progress clock.
@@ -611,27 +627,14 @@ fn apply_block_framed(
     if st.body.is_rejected(&hash) || hub.has_block(&hash) {
         return;
     }
-    let header_fk = if let Some(&fk) = st.header_fks.get(&hash) {
+    let header_fk = if let Some(fk) = header_fk {
+        st.header_fks.insert(hash, fk);
+        fk
+    } else if let Some(&fk) = st.header_fks.get(&hash) {
         fk
     } else {
-        let header = match decode_block_header_prefix(&payload) {
-            Some(h) => h,
-            None => {
-                st.body.mark_missing(hash);
-                return;
-            }
-        };
-        match hub.ensure_header_fk(&header) {
-            Ok(fk) => {
-                st.header_fks.insert(hash, fk);
-                fk
-            }
-            Err(e) => {
-                warn!("ibd: ensure_header {hash}: {e}");
-                st.body.mark_missing(hash);
-                return;
-            }
-        }
+        st.body.mark_missing(hash);
+        return;
     };
     let tip_h = hub.tip_height().unwrap_or(0);
     let Some(height) = st.hash_height.get(&hash).copied() else {
@@ -827,6 +830,7 @@ pub(crate) fn apply_confirm_events(
                 err,
                 batch_len,
                 sender,
+                parent,
             } => {
                 apply_confirm_reject(
                     st,
@@ -839,6 +843,7 @@ pub(crate) fn apply_confirm_events(
                     batch_len,
                     feed,
                     sender,
+                    parent,
                 );
             }
         }
@@ -863,6 +868,7 @@ pub(crate) fn apply_confirm_reject(
     batch_len: usize,
     feed: Option<&super::confirm::ConfirmFeed>,
     sender: Option<usize>,
+    parent: super::confirm::RejectParent,
 ) {
     // Never blacklist the all-zero sentinel (write used to emit this on
     // mis-attributed rejects).
@@ -875,7 +881,7 @@ pub(crate) fn apply_confirm_reject(
     let sent = class;
     let class = if class == ConfirmRejectClass::ConsensusInvalid {
         if let Some(h) = hub {
-            class.trust_consensus(h, hash)
+            class.trust_consensus(parent, h.tip_hash())
         } else {
             class
         }

@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 static ENSURE_HEADERS_BATCH_N: AtomicU64 = AtomicU64::new(0);
+static ENSURE_HEADER_FK_N: AtomicU64 = AtomicU64::new(0);
 static HEADER_OF_N: AtomicU64 = AtomicU64::new(0);
 static CHAIN_WORK_N: AtomicU64 = AtomicU64::new(0);
 
@@ -32,6 +33,16 @@ pub(crate) fn reset_header_store_counts() {
     ENSURE_HEADERS_BATCH_N.store(0, Ordering::Relaxed);
     HEADER_OF_N.store(0, Ordering::Relaxed);
     CHAIN_WORK_N.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_ensure_header_fk_count() {
+    ENSURE_HEADER_FK_N.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn ensure_header_fk_count() -> u64 {
+    ENSURE_HEADER_FK_N.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -1291,6 +1302,7 @@ impl ChainHub {
     /// exist. Never write `prev_fk = NULL` for a missing parent (that created
     /// millions of orphan rows and false resume edges on mainnet).
     pub fn ensure_header_fk(&self, header: &Header) -> Result<Fk, NetError> {
+        ENSURE_HEADER_FK_N.fetch_add(1, Ordering::Relaxed);
         let prev_fk = self.header_sync_prev_fk(header, &HashMap::new())?;
         let rec = header_to_record(prev_fk, header, header.block_hash().to_byte_array());
         let fk = self.query.ensure_header(&rec).map_err(NetError::store)?;

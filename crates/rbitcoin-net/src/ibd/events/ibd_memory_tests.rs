@@ -109,7 +109,18 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
     st.header_fks.insert(hash, rbitcoin_primitives::Fk(1));
     let before = hub.query.block_queue_stats().1;
     let write_next = AtomicU32::new(0);
-    apply_block_framed(&mut st, &hub, &write_next, None, 0, hash, payload.clone());
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        super::FramedBody {
+            peer: 0,
+            hash,
+            payload: payload.clone(),
+            header_fk: None,
+        },
+    );
     assert_eq!(
         hub.query.block_queue_stats().1,
         before,
@@ -118,7 +129,18 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
 
     st.inflight
         .insert(hash, super::super::state::InflightReq::new(0));
-    apply_block_framed(&mut st, &hub, &write_next, None, 0, hash, payload);
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        super::FramedBody {
+            peer: 0,
+            hash,
+            payload,
+            header_fk: None,
+        },
+    );
     assert!(
         hub.query.block_queue_stats().1 > before,
         "a requested body is still queued"
@@ -126,7 +148,18 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
     let queued = hub.query.block_queue_stats().1;
     st.inflight
         .insert(hash, super::super::state::InflightReq::new(0));
-    apply_block_framed(&mut st, &hub, &write_next, None, 0, hash, serialize(&block));
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        super::FramedBody {
+            peer: 0,
+            hash,
+            payload: serialize(&block),
+            header_fk: None,
+        },
+    );
     assert_eq!(
         hub.query.block_queue_stats().1,
         queued,
