@@ -166,23 +166,25 @@ fn header_hashes_to_best_ancestor_n(
     Ok(rev)
 }
 
-static PARENT_HASH_OF_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static PARENT_HASH_OF_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_parent_hash_of_count() {
-    PARENT_HASH_OF_N.store(0, std::sync::atomic::Ordering::Relaxed);
+    PARENT_HASH_OF_N.with(|c| c.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn parent_hash_of_count() -> u64 {
-    PARENT_HASH_OF_N.load(std::sync::atomic::Ordering::Relaxed)
+    PARENT_HASH_OF_N.with(|c| c.get())
 }
 
 pub(crate) fn parent_hash_of(
     hub: &ChainHub,
     hash: BlockHash,
 ) -> Result<Option<BlockHash>, NetError> {
-    PARENT_HASH_OF_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PARENT_HASH_OF_N.with(|c| c.set(c.get().saturating_add(1)));
     let Some((_, rec)) = hub
         .query
         .get_header_by_hash(&hash.to_byte_array())

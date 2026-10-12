@@ -1,6 +1,7 @@
 //! Header navigation, locators, height lookup, confirmed-read pin.
 
 use super::*;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
@@ -55,17 +56,18 @@ fn note_header_io_under_index_lock() {
     }
 }
 
-/// Header-store lookups in this process. Tests pin that a below-floor ignore
-/// does not walk parents. Relaxed: the count is not a synchronization edge.
-static HEADER_LOOKUP_N: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static HEADER_LOOKUP_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
+/// Header-store lookups on this thread.
 #[doc(hidden)]
 pub fn header_lookup_count() -> u64 {
-    HEADER_LOOKUP_N.load(Ordering::Relaxed)
+    HEADER_LOOKUP_N.with(|c| c.get())
 }
 
 pub(crate) fn note_header_lookup() {
-    HEADER_LOOKUP_N.fetch_add(1, Ordering::Relaxed);
+    HEADER_LOOKUP_N.with(|c| c.set(c.get().saturating_add(1)));
 }
 
 /// Published best-chain prefix a confirmed-tx read was built against.

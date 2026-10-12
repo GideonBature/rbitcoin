@@ -23,34 +23,36 @@ use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
-static ENSURE_HEADERS_BATCH_N: AtomicU64 = AtomicU64::new(0);
-static ENSURE_HEADER_FK_N: AtomicU64 = AtomicU64::new(0);
-static HEADER_OF_N: AtomicU64 = AtomicU64::new(0);
-static CHAIN_WORK_N: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static ENSURE_HEADERS_BATCH_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static ENSURE_HEADER_FK_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static HEADER_OF_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CHAIN_WORK_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_header_store_counts() {
-    ENSURE_HEADERS_BATCH_N.store(0, Ordering::Relaxed);
-    HEADER_OF_N.store(0, Ordering::Relaxed);
-    CHAIN_WORK_N.store(0, Ordering::Relaxed);
+    ENSURE_HEADERS_BATCH_N.with(|c| c.set(0));
+    HEADER_OF_N.with(|c| c.set(0));
+    CHAIN_WORK_N.with(|c| c.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn reset_ensure_header_fk_count() {
-    ENSURE_HEADER_FK_N.store(0, Ordering::Relaxed);
+    ENSURE_HEADER_FK_N.with(|c| c.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn ensure_header_fk_count() -> u64 {
-    ENSURE_HEADER_FK_N.load(Ordering::Relaxed)
+    ENSURE_HEADER_FK_N.with(|c| c.get())
 }
 
 #[cfg(test)]
 pub(crate) fn header_store_counts() -> (u64, u64, u64) {
     (
-        ENSURE_HEADERS_BATCH_N.load(Ordering::Relaxed),
-        HEADER_OF_N.load(Ordering::Relaxed),
-        CHAIN_WORK_N.load(Ordering::Relaxed),
+        ENSURE_HEADERS_BATCH_N.with(|c| c.get()),
+        HEADER_OF_N.with(|c| c.get()),
+        CHAIN_WORK_N.with(|c| c.get()),
     )
 }
 use std::sync::Arc;
@@ -1208,7 +1210,7 @@ impl ChainHub {
 
     /// Header for a connected, held, archived, or header-only hash.
     pub(crate) fn header_of(&self, hash: &BlockHash) -> Option<bitcoin::block::Header> {
-        HEADER_OF_N.fetch_add(1, Ordering::Relaxed);
+        HEADER_OF_N.with(|c| c.set(c.get().saturating_add(1)));
         if let Some(b) = self.load_side_body(hash) {
             return Some(b.header);
         }
@@ -1302,7 +1304,7 @@ impl ChainHub {
     /// exist. Never write `prev_fk = NULL` for a missing parent (that created
     /// millions of orphan rows and false resume edges on mainnet).
     pub fn ensure_header_fk(&self, header: &Header) -> Result<Fk, NetError> {
-        ENSURE_HEADER_FK_N.fetch_add(1, Ordering::Relaxed);
+        ENSURE_HEADER_FK_N.with(|c| c.set(c.get().saturating_add(1)));
         let prev_fk = self.header_sync_prev_fk(header, &HashMap::new())?;
         let rec = header_to_record(prev_fk, header, header.block_hash().to_byte_array());
         let fk = self.query.ensure_header(&rec).map_err(NetError::store)?;
@@ -1315,7 +1317,7 @@ impl ChainHub {
     /// Fail closed: missing parent is the same error as [`Self::ensure_header_fk`].
     /// Output fks align with `headers`.
     pub fn ensure_headers_batch(&self, headers: &[Header]) -> Result<Vec<Fk>, NetError> {
-        ENSURE_HEADERS_BATCH_N.fetch_add(1, Ordering::Relaxed);
+        ENSURE_HEADERS_BATCH_N.with(|c| c.set(c.get().saturating_add(1)));
         if headers.is_empty() {
             return Ok(Vec::new());
         }
@@ -3169,7 +3171,7 @@ impl ChainHub {
 
     /// Total chain work from genesis through tip (best effort from headers).
     pub fn chain_work(&self) -> Result<Work, NetError> {
-        CHAIN_WORK_N.fetch_add(1, Ordering::Relaxed);
+        CHAIN_WORK_N.with(|c| c.set(c.get().saturating_add(1)));
         self.work_from_fork_to_tip(None)
     }
 

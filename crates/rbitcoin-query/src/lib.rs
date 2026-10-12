@@ -60,14 +60,16 @@ use std::sync::atomic::{
     AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering as AtomicOrdering,
 };
 
-static RESUME_WORK_PATH_N: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static RESUME_WORK_PATH_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 pub fn resume_work_path_count() -> u64 {
-    RESUME_WORK_PATH_N.load(AtomicOrdering::Relaxed)
+    RESUME_WORK_PATH_N.with(|c| c.get())
 }
 
 pub fn reset_resume_work_path_count() {
-    RESUME_WORK_PATH_N.store(0, AtomicOrdering::Relaxed);
+    RESUME_WORK_PATH_N.with(|c| c.set(0));
 }
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -100,26 +102,28 @@ pub enum UringRecover {
     Exhausted,
 }
 
-static SCRIPTHASH_RUN_COUNT_N: AtomicU64 = AtomicU64::new(0);
-static OWNED_SIZE_SNAPSHOT_N: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static SCRIPTHASH_RUN_COUNT_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static OWNED_SIZE_SNAPSHOT_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 fn note_scripthash_run_count_call() {
-    SCRIPTHASH_RUN_COUNT_N.fetch_add(1, AtomicOrdering::Relaxed);
+    SCRIPTHASH_RUN_COUNT_N.with(|c| c.set(c.get().saturating_add(1)));
 }
 
 fn note_owned_size_snapshot_call() {
-    OWNED_SIZE_SNAPSHOT_N.fetch_add(1, AtomicOrdering::Relaxed);
+    OWNED_SIZE_SNAPSHOT_N.with(|c| c.set(c.get().saturating_add(1)));
 }
 
 pub fn reset_progress_snapshot_counts() {
-    SCRIPTHASH_RUN_COUNT_N.store(0, AtomicOrdering::Relaxed);
-    OWNED_SIZE_SNAPSHOT_N.store(0, AtomicOrdering::Relaxed);
+    SCRIPTHASH_RUN_COUNT_N.with(|c| c.set(0));
+    OWNED_SIZE_SNAPSHOT_N.with(|c| c.set(0));
 }
 
 pub fn progress_snapshot_counts() -> (u64, u64) {
     (
-        SCRIPTHASH_RUN_COUNT_N.load(AtomicOrdering::Relaxed),
-        OWNED_SIZE_SNAPSHOT_N.load(AtomicOrdering::Relaxed),
+        SCRIPTHASH_RUN_COUNT_N.with(|c| c.get()),
+        OWNED_SIZE_SNAPSHOT_N.with(|c| c.get()),
     )
 }
 
@@ -2290,7 +2294,7 @@ impl Query {
         max: usize,
         exclude: &[[u8; 32]],
     ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
-        RESUME_WORK_PATH_N.fetch_add(1, AtomicOrdering::Relaxed);
+        RESUME_WORK_PATH_N.with(|c| c.set(c.get().saturating_add(1)));
         self.resume_work_path_limited(
             tip_hash,
             tip_height,
