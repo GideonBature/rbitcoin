@@ -55,6 +55,14 @@ impl Query {
     pub fn publish_confirmed_tip(&self, height: u32, hash: [u8; 32]) {
         self.published_tip
             .store(Some(std::sync::Arc::new(PublishedTip { height, hash })));
+        let expected = self.with_height_index(|index| index.tip);
+        let advances = match expected {
+            None => height == 0,
+            Some(prev) => height == prev.saturating_add(1),
+        };
+        if advances {
+            let _ = self.extend_height_index(&[(hash, height)], height, expected, false);
+        }
     }
 
     pub fn clear_published_tip(&self) {

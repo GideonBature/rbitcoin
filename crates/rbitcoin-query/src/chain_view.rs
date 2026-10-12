@@ -3,6 +3,58 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    static HEIGHT_INDEX_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+static INDEX_IO_UNDER_LOCK: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_index_io_under_lock() {
+    INDEX_IO_UNDER_LOCK.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn index_io_under_lock() -> u64 {
+    INDEX_IO_UNDER_LOCK.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+struct IndexLockFlag;
+
+#[cfg(test)]
+impl IndexLockFlag {
+    fn enter() -> Self {
+        HEIGHT_INDEX_LOCK_HELD.with(|held| held.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for IndexLockFlag {
+    fn drop(&mut self) {
+        HEIGHT_INDEX_LOCK_HELD.with(|held| held.set(false));
+    }
+}
+
+enum HeightIndexPlan {
+    Current,
+    Shrink { prev: u32 },
+    Extend { prev: Option<u32> },
+}
+
+#[cfg(test)]
+fn note_header_io_under_index_lock() {
+    if HEIGHT_INDEX_LOCK_HELD.with(|held| held.get()) {
+        INDEX_IO_UNDER_LOCK.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Header-store lookups in this process. Tests pin that a below-floor ignore
 /// does not walk parents. Relaxed: the count is not a synchronization edge.
 static HEADER_LOOKUP_N: AtomicU64 = AtomicU64::new(0);
@@ -166,6 +218,8 @@ impl Query {
         height: Height,
     ) -> Result<Option<(Fk, HeaderRecord)>, QueryError> {
         note_header_lookup();
+        #[cfg(test)]
+        note_header_io_under_index_lock();
         match self.store.confirmed.get(height)? {
             None => Ok(None),
             Some(fk) => Ok(Some((fk, self.store.get_header(fk)?))),
@@ -184,28 +238,14 @@ impl Query {
         let Some(tip) = self.tip_height() else {
             return Ok(None);
         };
-        if let Some((_, rec)) = self.header_at_height(tip)? {
-            if &rec.hash == hash {
-                return Ok(Some(tip));
-            }
-            if tip.0 > 0 {
-                if let Some((_, prec)) = self.header_at_height(Height(tip.0 - 1))? {
-                    if &prec.hash == hash {
-                        return Ok(Some(Height(tip.0 - 1)));
-                    }
-                }
-            }
+        if let Some(indexed) = self.indexed_height(hash, tip.0) {
+            return Ok(indexed);
         }
-        // Cheap archive miss before ensuring/using the map.
         if self.get_header_by_hash(hash)?.is_none() {
             return Ok(None);
         }
         self.ensure_height_by_hash_index(tip)?;
-        let g = self
-            .height_by_hash
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        Ok(g.map.get(hash).copied().map(Height))
+        Ok(self.with_height_index(|index| index.map.get(hash).copied().map(Height)))
     }
 
     /// Active-chain height of a hash already loaded from the header archive.
@@ -217,11 +257,7 @@ impl Query {
             return Ok(None);
         };
         self.ensure_height_by_hash_index(tip)?;
-        let g = self
-            .height_by_hash
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        Ok(g.map.get(hash).copied().map(Height))
+        Ok(self.with_height_index(|index| index.map.get(hash).copied().map(Height)))
     }
 
     /// Ensure height index matches `tip`.
@@ -238,64 +274,127 @@ impl Query {
     }
 
     fn ensure_height_by_hash_index_once(&self, tip: Height) -> Result<Option<Height>, QueryError> {
-        let mut g = self
+        let plan = self.with_height_index(|index| {
+            if index.tip == Some(tip.0) {
+                HeightIndexPlan::Current
+            } else if let Some(prev) = index.tip {
+                if tip.0 < prev {
+                    HeightIndexPlan::Shrink { prev }
+                } else {
+                    HeightIndexPlan::Extend { prev: Some(prev) }
+                }
+            } else {
+                HeightIndexPlan::Extend { prev: None }
+            }
+        });
+        match plan {
+            HeightIndexPlan::Current => Ok(None),
+            HeightIndexPlan::Shrink { prev } => {
+                if self.shrink_height_index(tip.0, prev) {
+                    Ok(None)
+                } else {
+                    Ok(self.tip_height())
+                }
+            }
+            HeightIndexPlan::Extend { prev } => self.extend_index_from_headers(tip, prev),
+        }
+    }
+
+    fn extend_index_from_headers(
+        &self,
+        tip: Height,
+        prev: Option<u32>,
+    ) -> Result<Option<Height>, QueryError> {
+        let start = prev.map(|height| height.saturating_add(1)).unwrap_or(0);
+        let mut rows = Vec::with_capacity((tip.0 - start) as usize + 1);
+        for height in start..=tip.0 {
+            let Some((_, rec)) = self.header_at_height(Height(height))? else {
+                return self.stale_or_missing(height);
+            };
+            rows.push((rec.hash, height));
+        }
+        if self.extend_height_index(&rows, tip.0, prev, prev.is_none()) {
+            if prev.is_none() {
+                crate::note_confirm(&self.confirm_stats().height_index_full_n, 1);
+                crate::note_confirm(
+                    &self.confirm_stats().height_index_full_headers,
+                    rows.len() as u64,
+                );
+            } else {
+                crate::note_confirm(
+                    &self.confirm_stats().height_index_delta_n,
+                    rows.len() as u64,
+                );
+            }
+            Ok(None)
+        } else {
+            Ok(self.tip_height())
+        }
+    }
+
+    fn indexed_height(&self, hash: &[u8; 32], tip: u32) -> Option<Option<Height>> {
+        self.with_height_index(|index| {
+            if index.tip == Some(tip) {
+                Some(index.map.get(hash).copied().map(Height))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn with_height_index<R>(&self, f: impl FnOnce(&mut HeightByHashIndex) -> R) -> R {
+        #[cfg(test)]
+        let _held = IndexLockFlag::enter();
+        let mut index = self
             .height_by_hash
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if g.tip == Some(tip.0) {
-            return Ok(None);
-        }
-        if let Some(prev_tip) = g.tip {
-            if tip.0 > prev_tip {
-                let mut adds = Vec::with_capacity((tip.0 - prev_tip) as usize);
-                for h in prev_tip.saturating_add(1)..=tip.0 {
-                    let Some((_, rec)) = self.header_at_height(Height(h))? else {
-                        drop(g);
-                        return self.stale_or_missing(h);
-                    };
-                    adds.push((rec.hash, h));
-                }
-                crate::note_confirm(
-                    &self.confirm_stats().height_index_delta_n,
-                    adds.len() as u64,
-                );
-                for (hash, h) in adds {
-                    g.map.insert(hash, h);
-                }
-                g.tip = Some(tip.0);
-                return Ok(None);
+            .unwrap_or_else(|poison| poison.into_inner());
+        f(&mut index)
+    }
+
+    pub(crate) fn extend_height_index(
+        &self,
+        rows: &[([u8; 32], u32)],
+        new_tip: u32,
+        expected: Option<u32>,
+        clear: bool,
+    ) -> bool {
+        self.with_height_index(|index| {
+            if index.tip == Some(new_tip) {
+                return true;
             }
-            if tip.0 < prev_tip {
-                let before = g.map.len() as u64;
-                g.map.retain(|_, h| *h <= tip.0);
-                crate::note_confirm(
-                    &self.confirm_stats().height_index_delta_n,
-                    before.saturating_sub(g.map.len() as u64),
-                );
-                g.tip = Some(tip.0);
-                return Ok(None);
+            if index.tip != expected {
+                return false;
             }
-        }
-        let mut adds = Vec::with_capacity((tip.0 as usize).saturating_add(1));
-        for h in 0..=tip.0 {
-            let Some((_, rec)) = self.header_at_height(Height(h))? else {
-                drop(g);
-                return self.stale_or_missing(h);
-            };
-            adds.push((rec.hash, h));
-        }
-        g.map.clear();
-        g.map.reserve(adds.len());
-        crate::note_confirm(&self.confirm_stats().height_index_full_n, 1);
-        crate::note_confirm(
-            &self.confirm_stats().height_index_full_headers,
-            adds.len() as u64,
-        );
-        for (hash, h) in adds {
-            g.map.insert(hash, h);
-        }
-        g.tip = Some(tip.0);
-        Ok(None)
+            if clear {
+                index.map.clear();
+            }
+            index.map.reserve(rows.len());
+            for (hash, height) in rows {
+                index.map.insert(*hash, *height);
+            }
+            index.tip = Some(new_tip);
+            true
+        })
+    }
+
+    fn shrink_height_index(&self, new_tip: u32, expected: u32) -> bool {
+        self.with_height_index(|index| {
+            if index.tip == Some(new_tip) {
+                return true;
+            }
+            if index.tip != Some(expected) {
+                return false;
+            }
+            let before = index.map.len() as u64;
+            index.map.retain(|_, height| *height <= new_tip);
+            crate::note_confirm(
+                &self.confirm_stats().height_index_delta_n,
+                before.saturating_sub(index.map.len() as u64),
+            );
+            index.tip = Some(new_tip);
+            true
+        })
     }
 
     fn stale_or_missing(&self, missing: u32) -> Result<Option<Height>, QueryError> {
@@ -311,14 +410,21 @@ impl Query {
         }
     }
 
+    /// Leave `0..=through` indexed and a gap above it (tests).
+    #[cfg(test)]
+    pub(crate) fn leave_height_index_gap_for_test(&self, through: u32) {
+        self.with_height_index(|index| {
+            index.map.retain(|_, height| *height <= through);
+            index.tip = Some(through);
+        });
+    }
+
     /// Drop height index (tests / multi-height reorg / offline confirmed rewrite).
     pub fn invalidate_height_by_hash_index(&self) {
-        let mut g = self
-            .height_by_hash
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        g.tip = None;
-        g.map.clear();
+        self.with_height_index(|index| {
+            index.tip = None;
+            index.map.clear();
+        });
     }
 
     /// Wire header for a confirmed height (resolves prev hash from archive).
