@@ -103,8 +103,8 @@ pub use params::{
 pub use policy::PolicyResult;
 pub use regtest_pad::{
     grind_regtest_pow, mine_empty_regtest, mine_op_true_signet_paying, mine_regtest_paying,
-    mine_regtest_paying_at, pad_empty_from, prepare_regtest_candidate, regtest_coinbase,
-    REGTEST_BLOCK_SPACING, REGTEST_POW_BITS,
+    pad_empty_from, prepare_regtest_candidate, regtest_coinbase, REGTEST_BLOCK_SPACING,
+    REGTEST_POW_BITS,
 };
 pub use signet::{
     default_signet_challenge, signet_challenge_transactions, signet_magic,

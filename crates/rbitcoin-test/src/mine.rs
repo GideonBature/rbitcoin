@@ -113,7 +113,7 @@ pub fn mine_regtest_block(
 ///
 /// Always pays a fixed 50 BTC `OP_TRUE` coinbase and does not add a BIP141
 /// commitment. Callers that want the halving subsidy or a witness commitment
-/// use [`rbitcoin_consensus::mine_regtest_paying_at`].
+/// use [`rbitcoin_consensus::mine_regtest_paying`].
 pub fn mine_regtest_block_at(
     prev_hash: BlockHash,
     time: u32,
@@ -183,7 +183,7 @@ mod tests {
     }
 
     /// The test helper always pays 50 BTC and never adds a BIP141 commitment.
-    /// Subsidy halving and witness commitment belong to `mine_regtest_paying_at`.
+    /// Subsidy halving and witness commitment belong to `mine_regtest_paying`.
     #[test]
     fn mine_regtest_block_keeps_fixed_coinbase_and_skips_witness_commitment() {
         let g = regtest_genesis();
