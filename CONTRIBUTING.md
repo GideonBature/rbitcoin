@@ -223,7 +223,8 @@ engineering.
 10. **Control flow is a type problem.** Early return; session state is a
     struct, not a dozen `mut` parameters; dispatch is a catalog of named
     handlers; boolean products become enums or methods; compose (has-a)
-    instead of a 30-field god struct; one owner per algorithm. Do not split
+    instead of a 30-field god struct; one owner per algorithm. A replacement
+    deletes the old branch in the same change (code-shape rule 9). Do not split
     Core-faithful opcode loops or io_uring machines to beat a line count.
     Full rules, extract policy, and clippy allows:
     [`docs/code-shape.md`](./docs/code-shape.md). Named 0.6.0 extracts
