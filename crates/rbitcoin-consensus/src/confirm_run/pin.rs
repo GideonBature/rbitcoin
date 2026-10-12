@@ -154,9 +154,7 @@ fn fill_pins(
         plan_by_id.insert(*id, pin);
     }
     let recent_outs_ns = t_recent.elapsed().as_nanos() as u64;
-    if recent_outs_ns > 0 {
-        rbitcoin_query::note_confirm(&stats.pin_recent_outs_ns, recent_outs_ns);
-    }
+    rbitcoin_query::note_confirm(&stats.pin_recent_outs_ns, recent_outs_ns);
     plan_by_id
 }
 
@@ -281,16 +279,11 @@ fn denserels_by_stamped_range(
         .get_outs_by_range_batch(&range_jobs)
         .map_err(ConsensusError::from)?;
     let rng_ns = body_ns.saturating_add(dec_ns);
-    if rng_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().cold_io_ns, rng_ns);
-        rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_ns, rng_ns);
-    }
-    if body_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_body_ns, body_ns);
-    }
-    if dec_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_decode_ns, dec_ns);
-    }
+    // Zero adds are a no-op inside `note_confirm`.
+    rbitcoin_query::note_confirm(&query.confirm_stats().cold_io_ns, rng_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_ns, rng_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_body_ns, body_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_decode_ns, dec_ns);
     rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_n, n_range);
     rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_extend_n, extend_n);
     rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_body_sqe_n, body_sqe_n);
@@ -533,4 +526,123 @@ pub(super) fn ensure_spend_abs_layouts(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rbitcoin_primitives::Fk;
+    use rbitcoin_query::{ArchiveWritePlan, CreatePin, ParentIdent, SpendEdge, U64Map};
+    use rbitcoin_store::{OutputRecord, TxRecord};
+
+    fn pin_with(txid: [u8; 32], inputs: u32) -> CreatePin {
+        rbitcoin_query::CreatePinInner::records(
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: inputs,
+                output_start_fk: Fk::NULL,
+                output_count: 1,
+            },
+            vec![OutputRecord::unspent(50, vec![0x51])],
+        )
+    }
+
+    #[test]
+    fn equal_pin_lens_use_batch_pin_not_packed() {
+        let batch = pin_with([0x11; 32], 1);
+        let packed = pin_with([0x22; 32], 1);
+        let mut plan = ArchiveWritePlan::empty();
+        plan.planned_fks = vec![Fk(1)];
+        plan.batch_pin = vec![batch];
+        plan.packed = vec![(packed, Vec::new())];
+        plan.edges.insert(
+            7,
+            vec![SpendEdge {
+                prev_txid: [1u8; 32],
+                vout: 0,
+                spend_fk: Fk(7),
+                create_fk: Fk(9),
+                vin: 0,
+            }],
+        );
+        let spent = spend_edges_from_plan(&plan, &mut ParentPinStamp::default()).unwrap();
+        let got = spent.batch_pin_by_id.get(&1).expect("fk 1");
+        assert_eq!(got.tx().txid, [0x11; 32]);
+    }
+
+    #[test]
+    fn plan_pin_coinbase_flag_follows_input_count() {
+        let one = pin_with([0x31; 32], 1);
+        let two = pin_with([0x32; 32], 2);
+        let mut parents = rbitcoin_query::BatchParents::new();
+        parents.insert_owned(
+            Fk(1),
+            one.tx().clone(),
+            vec![(0, OutputRecord::unspent(50, vec![0x51]))],
+            vec![0],
+            None,
+            None,
+            Vec::new(),
+        );
+        let mut by_id: U64Map<CreatePin> = U64Map::default();
+        by_id.insert(1, one);
+        let mut vouts: U64Map<Vec<u32>> = U64Map::default();
+        vouts.insert(1, vec![0]);
+        let mut still = U64Map::default();
+        apply_plan_pins(
+            &vouts,
+            &by_id,
+            &ParentPinStamp::default(),
+            &mut parents,
+            &mut still,
+        );
+        assert_eq!(parents.get_parent_coinbase(Fk(1)), None);
+
+        let mut stamp = ParentPinStamp::default();
+        stamp
+            .idents
+            .insert(1, ParentIdent::with_body([0x31; 32], (4, 8)));
+        apply_plan_pins(&vouts, &by_id, &stamp, &mut parents, &mut still);
+        assert_eq!(
+            parents.get_body_range(Fk(1)),
+            Some((4, 8)),
+            "a one-input pin still publishes a body range"
+        );
+
+        let mut fresh = rbitcoin_query::BatchParents::new();
+        let mut by_two: U64Map<CreatePin> = U64Map::default();
+        by_two.insert(2, two);
+        let mut need: U64Map<Vec<u32>> = U64Map::default();
+        need.insert(2, vec![0]);
+        let mut still = U64Map::default();
+        apply_plan_pins(
+            &need,
+            &by_two,
+            &ParentPinStamp::default(),
+            &mut fresh,
+            &mut still,
+        );
+        assert_eq!(fresh.get_parent_coinbase(Fk(2)), Some(false));
+
+        let mut empty_need: U64Map<Vec<u32>> = U64Map::default();
+        empty_need.insert(3, Vec::new());
+        let mut by_empty: U64Map<CreatePin> = U64Map::default();
+        by_empty.insert(3, pin_with([0x33; 32], 1));
+        let mut dest = rbitcoin_query::BatchParents::new();
+        let mut still = U64Map::default();
+        apply_plan_pins(
+            &empty_need,
+            &by_empty,
+            &ParentPinStamp::default(),
+            &mut dest,
+            &mut still,
+        );
+        assert!(
+            dest.get_parent_tx(Fk(3)).is_some(),
+            "an empty need list is not already covered"
+        );
+    }
 }

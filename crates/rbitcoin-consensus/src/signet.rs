@@ -545,6 +545,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)] // one parser, many length boundaries
     fn compact_size_and_solution_parse_errors() {
         use rbitcoin_primitives::read_compact_size_from;
         assert_eq!(read_compact_size_from(&mut (&[0u8][..])).unwrap(), 0);

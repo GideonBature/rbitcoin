@@ -23,6 +23,33 @@ fn tx_head_drain_thread_is_named_and_reused() {
 }
 
 #[test]
+fn head_drain_drop_waits_for_the_worker() {
+    use super::submit_head_drain;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+
+    let (go_tx, go_rx) = mpsc::channel();
+    let handle = submit_head_drain(move || {
+        let _ = go_rx.recv();
+        Ok(1)
+    });
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(handle);
+        let _ = done_tx.send(());
+    });
+    match done_rx.recv_timeout(Duration::from_millis(400)) {
+        Err(RecvTimeoutError::Timeout) => {}
+        Ok(()) => panic!("drop returned before the worker finished"),
+        Err(e) => panic!("drop waiter disconnected: {e}"),
+    }
+    go_tx.send(()).unwrap();
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("drop finishes once the worker does");
+}
+
+#[test]
 fn head_insert_join_restore_empty_ok() {
     use super::submit_head_insert;
     let (_d, q) = tmp_query();
@@ -3052,6 +3079,7 @@ fn direct_write_skips_create_pin_map_idx_without_recent() {
 
 /// One-shot load and stamp+load_from_plan must produce the same batch.
 #[test]
+#[allow(clippy::cognitive_complexity)] // one-shot and stamp-then-load share one fixture
 fn one_shot_load_matches_stamp_then_load_from_plan() {
     use super::{
         confirm_wire_load_from_plan, confirm_wire_load_phase, confirm_wire_lookup_stamp,
@@ -3137,6 +3165,10 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
     assert_eq!(pa.per_header_ranges, pb.per_header_ranges);
     assert_eq!(pa.edges.len(), pb.edges.len());
     assert_eq!(pa.packed.len(), pb.packed.len());
+    assert!(!pa.packed.is_empty());
+    assert_eq!(pa.tx_fees.len(), pa.packed.len());
+    assert_eq!(pb.tx_fees.len(), pb.packed.len());
+    assert_eq!(pa.tx_fees, pb.tx_fees);
     assert_eq!(pa.index_tx, pb.index_tx);
     let _ = std::fs::remove_dir_all(&path_a);
     let _ = std::fs::remove_dir_all(&path_b);

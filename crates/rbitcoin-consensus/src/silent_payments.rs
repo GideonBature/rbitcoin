@@ -615,7 +615,7 @@ mod tests {
             script_sig: Vec::new(),
             witness: Vec::new(),
         };
-        let (tx, prevouts) = build_tx_and_prevouts(&[inp], &[neg.clone()], &|_| {
+        let (tx, prevouts) = build_tx_and_prevouts(&[inp], std::slice::from_ref(&neg), &|_| {
             Some(([9u8; 32], parent_outs.as_slice()))
         })
         .unwrap();
