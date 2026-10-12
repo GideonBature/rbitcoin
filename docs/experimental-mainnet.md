@@ -4,7 +4,8 @@
 not a soak-certified badge. **Not** 1.0. **Not** a Bitcoin Core or Fulcrum
 replacement. Default mainnet milestone is block 840000
 (`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`): script/sig
-checks skip only on that header path once chain work meets the minimum.
+checks skip only on that header path once it contains that hash and the
+block is the path hash at its height.
 Signet’s default milestone is 0 (every script).
 Schema can still refuse a named index wipe ([`SCHEMA.md`](../SCHEMA.md)).
 Design overview: [`architecture.md`](./architecture.md).

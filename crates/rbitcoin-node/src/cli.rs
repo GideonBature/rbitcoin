@@ -1054,14 +1054,16 @@ mod tests {
         let block = [0x22u8; 32];
         let other_chain = |h: u32| (h == 100).then_some(block).or(Some([0x33; 32]));
         assert!(!m.skips_scripts_at(100));
-        assert!(!m.skips_scripts(100, &block, other_chain, Some([0xff; 32])));
+        assert!(!m.skips_scripts(100, &block, other_chain));
         let anchored = |h: u32| match h {
             100 => Some(block),
             2_500_000 => Some(anchor.hash.to_byte_array()),
             _ => None,
         };
-        assert!(!m.skips_scripts(100, &block, anchored, Some(below)));
-        assert!(m.skips_scripts(100, &block, anchored, Some(min_work)));
+        assert!(
+            m.skips_scripts(100, &block, anchored),
+            "the anchor hash is enough; chain work below the floor still skips"
+        );
 
         // Explicit `--milestone HEIGHT` stays height-only.
         let explicit = ready_config(["rbitcoin-node", "--network", "testnet", "--milestone", "10"]);

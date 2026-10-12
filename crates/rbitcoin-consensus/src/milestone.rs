@@ -8,8 +8,9 @@ use bitcoin::hashes::Hash;
 /// A height-only milestone (`anchor: None`) is the explicit `--milestone HEIGHT`
 /// speed switch. The mainnet and testnet3 defaults also carry
 /// [`MilestoneAnchor`]: skip only when this block and the anchor hash are the
-/// header-path occupants at their heights and best-header work meets
-/// `min_work_be`. Lookups are the caller's; this type does not walk ancestors.
+/// header-path occupants at their heights. The anchor hash is the commitment
+/// to those ancestors; chain work does not have to meet `min_work_be` first.
+/// Lookups are the caller's; this type does not walk ancestors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MilestoneAnchor {
     pub hash: bitcoin::BlockHash,
@@ -44,14 +45,14 @@ impl Milestone {
 
     /// Script skip for `block` at `height`.
     ///
-    /// `header_at` and `best_work_be` are O(1) views of the header path (or
-    /// the confirmed chain). A missing lookup does not skip.
+    /// `header_at` is an O(1) view of the header path (or the confirmed
+    /// chain). A missing lookup does not skip. Once both hashes are present,
+    /// work below the anchor floor still skips.
     pub fn skips_scripts(
         self,
         height: u32,
         block: &[u8; 32],
         header_at: impl Fn(u32) -> Option<[u8; 32]>,
-        best_work_be: Option<[u8; 32]>,
     ) -> bool {
         if self.height == 0 || height > self.height {
             return false;
@@ -62,13 +63,7 @@ impl Milestone {
         if header_at(height).as_ref() != Some(block) {
             return false;
         }
-        if header_at(self.height).as_ref() != Some(anchor.hash.as_byte_array()) {
-            return false;
-        }
-        match best_work_be {
-            Some(w) => w >= anchor.min_work_be,
-            None => false,
-        }
+        header_at(self.height).as_ref() == Some(anchor.hash.as_byte_array())
     }
 }
 
@@ -80,12 +75,7 @@ pub(crate) fn skips_on_query(
     block: &[u8; 32],
 ) -> bool {
     let t = std::time::Instant::now();
-    let skip = milestone.skips_scripts(
-        height,
-        block,
-        |h| query.milestone_header_at(h),
-        query.milestone_best_work_be(),
-    );
+    let skip = milestone.skips_scripts(height, block, |h| query.milestone_header_at(h));
     rbitcoin_query::note_confirm(
         &query.confirm_stats().milestone_gate_ns,
         t.elapsed().as_nanos() as u64,
@@ -128,8 +118,8 @@ mod tests {
         assert_eq!(Milestone::default(), Milestone::NONE);
         assert!(!Milestone::NONE.skips_scripts_at(0));
         assert!(!Milestone::NONE.skips_scripts_at(1_000_000));
-        assert!(!Milestone::NONE.skips_scripts(0, &[0; 32], |_| None, None));
-        assert!(!Milestone::NONE.skips_scripts(1, &[0; 32], |_| None, None));
+        assert!(!Milestone::NONE.skips_scripts(0, &[0; 32], |_| None));
+        assert!(!Milestone::NONE.skips_scripts(1, &[0; 32], |_| None));
     }
 
     #[test]
@@ -138,7 +128,7 @@ mod tests {
         assert!(m.skips_scripts_at(1));
         assert!(m.skips_scripts_at(100));
         assert!(!m.skips_scripts_at(101));
-        assert!(m.skips_scripts(50, &[9; 32], |_| None, None));
+        assert!(m.skips_scripts(50, &[9; 32], |_| None));
     }
 
     #[test]
@@ -153,37 +143,23 @@ mod tests {
 
         let mut headers = std::collections::HashMap::new();
         headers.insert(50u32, fork);
-        let low = {
-            let mut w = [0u8; 32];
-            w[1] = 0x01;
-            w
-        };
-        let enough = {
-            let mut w = [0u8; 32];
-            w[1] = 0x10;
-            w
-        };
-        assert!(!m.skips_scripts(50, &fork, |h| headers.get(&h).copied(), Some(enough)));
+        assert!(!m.skips_scripts(50, &fork, |h| headers.get(&h).copied()));
         headers.insert(100, anchor_hash);
         headers.insert(50, honest);
         assert!(
-            !m.skips_scripts(50, &fork, |h| headers.get(&h).copied(), Some(enough)),
+            !m.skips_scripts(50, &fork, |h| headers.get(&h).copied()),
             "a different hash at the same height is not the anchor's ancestor"
         );
-        assert!(!m.skips_scripts(50, &honest, |h| headers.get(&h).copied(), Some(low)));
-        assert!(!m.skips_scripts(50, &honest, |h| headers.get(&h).copied(), None));
-        assert!(m.skips_scripts(50, &honest, |h| headers.get(&h).copied(), Some(enough)));
         assert!(
-            m.skips_scripts(
-                100,
-                &anchor_hash,
-                |h| headers.get(&h).copied(),
-                Some(enough)
-            ),
+            m.skips_scripts(50, &honest, |h| headers.get(&h).copied()),
+            "the milestone hash commits to this ancestor before chain work meets the floor"
+        );
+        assert!(
+            m.skips_scripts(100, &anchor_hash, |h| headers.get(&h).copied()),
             "the anchor block itself is buried"
         );
         let above = [0x44u8; 32];
         headers.insert(101, above);
-        assert!(!m.skips_scripts(101, &above, |h| headers.get(&h).copied(), Some(enough)));
+        assert!(!m.skips_scripts(101, &above, |h| headers.get(&h).copied()));
     }
 }

@@ -3967,12 +3967,8 @@ mod tests {
     }
 
     fn skips(hub: &ChainHub, height: u32, hash: &[u8; 32]) -> bool {
-        hub.milestone.skips_scripts(
-            height,
-            hash,
-            |h| hub.query.milestone_header_at(h),
-            hub.query.milestone_best_work_be(),
-        )
+        hub.milestone
+            .skips_scripts(height, hash, |h| hub.query.milestone_header_at(h))
     }
 
     fn fill_to_cap(st: &mut IbdWorkState) {
