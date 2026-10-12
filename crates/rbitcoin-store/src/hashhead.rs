@@ -149,14 +149,6 @@ impl HeadScale {
             HeadScale::Mainnet => 1 << 25,
         }
     }
-
-    /// Unique-key hint when `RBITCOIN_SH_UNIQUE_HINT` is unset.
-    pub fn sh_unique_hint(self) -> u64 {
-        match self {
-            HeadScale::Tiny => 4_096,
-            HeadScale::Mainnet => 2_000_000_000,
-        }
-    }
 }
 
 /// Effective initial slots for `header.head` (scale + optional env override).

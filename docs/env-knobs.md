@@ -29,7 +29,6 @@ for signet/mainnet sync. **Not** CLI.
 | `RBITCOIN_TX_HEAD_REBUILD_SEAL_BITS` | 25 | Wipe/empty-head MPHF range `2^bits` (26 wider; clamp 6..=26) |
 | `RBITCOIN_TX_HEAD_REBUILD_WORKERS` | min(n-cpu, free-RAM/1 GiB) | Wipe/empty-head MPHF parallelism (`1` = serial). Unset = auto. **Not** the SH extract 1.5 GiB cap |
 | `RBITCOIN_HEAD_SLOTS_HEADER` | scale default | Header hash-head initial slots (power of two) |
-| `RBITCOIN_SH_UNIQUE_HINT` | off | SH unique-hint probe |
 | `RBITCOIN_SH_FORCE_REBUILD` | off | Sticky SH rebuild (also in OPERATOR) |
 | `RBITCOIN_SH_MERGE_WORKERS` | min(n-cpu, max(1, free-RAM/1.5 GiB)) | SH extract (collect, merge, BDZ, fuse, pass 2, pack). `1` = serial. Unset = auto (see [`ibd-memory.md`](./ibd-memory.md)) |
 | `RBITCOIN_P2P_MAX_INBOUND` | 125 | Only if `--max-inbound` / conf omitted |
@@ -42,6 +41,7 @@ for signet/mainnet sync. **Not** CLI.
 | Former env | Production default |
 |------------|--------------------|
 | Confirm `loadq` / `scriptq` / `writeq` | 14 / 4 / 14 (`ready=` is not a cap) |
+| `RBITCOIN_SH_UNIQUE_HINT` | ignored; cold open-address pre-size is gone |
 | `RBITCOIN_CONFIRM_BATCH_INPUTS` | 8000 soft inputs/pack |
 | Per-path IO (`PIN_IO`, `HEAD_RESOLVE_IO`, `SPEND_META`, `SPEND_ANN`, `CLASS_C_IO`) | Follow **`RBITCOIN_IO` only** (strings deleted) |
 | `RBITCOIN_FD_APPEND` | Never read (deleted) |
