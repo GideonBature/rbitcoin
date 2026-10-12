@@ -232,12 +232,9 @@ fn taproot_outs_from_records(outputs: &[OutputRecord]) -> Vec<TaprootOut> {
         if !is_p2tr(&o.script) {
             continue;
         }
-        if o.script.len() < 34 {
-            continue;
-        }
         let mut xonly = [0u8; 32];
         xonly.copy_from_slice(&o.script[2..34]);
-        let value = if o.value < 0 { 0 } else { o.value as u64 };
+        let value = u64::try_from(o.value).unwrap_or(0);
         out.push(TaprootOut {
             vout: i as u32,
             xonly,
@@ -277,11 +274,7 @@ fn build_tx_and_prevouts(
             sequence: bitcoin::Sequence::from_consensus(inp.sequence),
             witness: Witness::from_slice(&wit_refs),
         });
-        let value = if prev_value < 0 {
-            bitcoin::Amount::ZERO
-        } else {
-            bitcoin::Amount::from_sat(prev_value as u64)
-        };
+        let value = bitcoin::Amount::from_sat(u64::try_from(prev_value).unwrap_or(0));
         prevouts.push(TxOut {
             value,
             script_pubkey: bitcoin::ScriptBuf::from_bytes(prev_script),
@@ -289,11 +282,7 @@ fn build_tx_and_prevouts(
     }
     let mut txouts = Vec::with_capacity(outputs.len());
     for o in outputs {
-        let value = if o.value < 0 {
-            bitcoin::Amount::ZERO
-        } else {
-            bitcoin::Amount::from_sat(o.value as u64)
-        };
+        let value = bitcoin::Amount::from_sat(u64::try_from(o.value).unwrap_or(0));
         txouts.push(TxOut {
             value,
             script_pubkey: bitcoin::ScriptBuf::from_bytes(o.script.clone()),
@@ -313,10 +302,7 @@ fn build_tx_and_prevouts(
 fn input_hash_mul_a(tx: &Transaction, a: &PublicKey) -> Option<[u8; 33]> {
     let mut smallest = outpoint_bytes(&tx.input[0].previous_output);
     for vin in tx.input.iter().skip(1) {
-        let b = outpoint_bytes(&vin.previous_output);
-        if b < smallest {
-            smallest = b;
-        }
+        smallest = smallest.min(outpoint_bytes(&vin.previous_output));
     }
     let ser_a = a.serialize();
     let mut msg = [0u8; 36 + 33];
@@ -564,6 +550,95 @@ mod tests {
     use rbitcoin_store::{HeaderRecord, TxRecord};
     use serde_json::Value;
     use std::str::FromStr;
+    #[test]
+    fn classifier_edges() {
+        let p2wpkh = {
+            let mut v = vec![0x00, 0x14];
+            v.extend(std::iter::repeat_n(0x11, 20));
+            v
+        };
+        assert_eq!(witness_version(&p2wpkh), Some(0));
+        assert_eq!(witness_version(&[0x00, 0x02, 0xaa, 0xbb]), Some(0));
+        assert_eq!(witness_version(&p2wpkh[..3]), None);
+        assert_eq!(witness_version(&[0x00, 0x14, 0x11, 0x11, 0x11]), None);
+        let mut at_42 = vec![0x00, 40];
+        at_42.extend(std::iter::repeat_n(0x22, 40));
+        assert_eq!(witness_version(&at_42), Some(0));
+        assert_eq!(witness_version(&[0x00, 40, 0x22]), None);
+        let mut v1 = vec![0x51, 0x20];
+        v1.extend(std::iter::repeat_n(0x33, 32));
+        assert_eq!(witness_version(&v1), Some(1));
+        let mut v2 = vec![0x52, 0x20];
+        v2.extend(std::iter::repeat_n(0x33, 32));
+        assert_eq!(witness_version(&v2), Some(2));
+
+        let mut short_cb = vec![0x01];
+        short_cb.extend(std::iter::repeat_n(0x44, 31));
+        let short = Witness::from_slice(&[vec![0x51], short_cb]);
+        assert!(!nums_h_script_path(&short));
+        let mut nums = vec![0xc0];
+        nums.extend_from_slice(&NUMS_H);
+        let path = Witness::from_slice(&[vec![0x51], nums]);
+        assert!(nums_h_script_path(&path));
+
+        let push = |payload: &[u8]| {
+            let mut s = vec![payload.len() as u8];
+            s.extend_from_slice(payload);
+            ScriptBuf::from_bytes(s)
+        };
+        assert!(is_p2sh_p2wpkh_redeem(push(&p2wpkh).as_script()));
+        let mut not_ver = p2wpkh.clone();
+        not_ver[0] = 0x01;
+        assert!(!is_p2sh_p2wpkh_redeem(push(&not_ver).as_script()));
+        assert!(!is_p2sh_p2wpkh_redeem(push(&[0x51; 22]).as_script()));
+        let mut not_prog = p2wpkh.clone();
+        not_prog[1] = 0x15;
+        assert!(!is_p2sh_p2wpkh_redeem(push(&not_prog).as_script()));
+
+        let neg = OutputRecord::unspent(-5, {
+            let mut s = vec![0x51, 0x20];
+            s.extend(std::iter::repeat_n(0xab, 32));
+            s
+        });
+        let outs = taproot_outs_from_records(std::slice::from_ref(&neg));
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].value, 0);
+        let zero = OutputRecord::unspent(0, neg.script.clone());
+        assert_eq!(taproot_outs_from_records(&[zero])[0].value, 0);
+
+        let parent_outs = [OutputRecord::unspent(-7, vec![0x51])];
+        let inp = InputRecord {
+            prev_txid: [2u8; 32],
+            create_fk: Fk(1),
+            prev_index: 0,
+            sequence: 0,
+            script_sig: Vec::new(),
+            witness: Vec::new(),
+        };
+        let (tx, prevouts) = build_tx_and_prevouts(&[inp], &[neg.clone()], &|_| {
+            Some(([9u8; 32], parent_outs.as_slice()))
+        })
+        .unwrap();
+        assert_eq!(prevouts[0].value.to_sat(), 0);
+        assert_eq!(tx.output[0].value.to_sat(), 0);
+
+        let sk = SecretKey::from_slice(&[3u8; 32]).unwrap();
+        let pk = PublicKey::from_secret_key(secp(), &sk);
+        let mut tx = tx;
+        tx.input.push(TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0u8; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        });
+        let hashed = input_hash_mul_a(&tx, &pk);
+        tx.input.swap(0, 1);
+        assert_eq!(input_hash_mul_a(&tx, &pk), hashed);
+    }
+
     #[test]
     fn taproot_matches_scan_rejects_invalid_tweak() {
         let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
