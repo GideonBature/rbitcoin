@@ -301,9 +301,7 @@ pub fn check_mempool_structural(
     if rbitcoin_consensus::bip68_active_for_tx(tx) {
         let mut prev_heights = Vec::with_capacity(tx.input.len());
         let mut prev_mtps = Vec::with_capacity(tx.input.len());
-        for (i, inp) in tx.input.iter().enumerate() {
-            let seq = inp.sequence.to_consensus_u32();
-            let _lock_enabled = seq & (1u32 << 31) == 0;
+        for i in 0..tx.input.len() {
             match chain_coins.get(i).and_then(|c| c.as_ref()) {
                 Some(c) => {
                     prev_heights.push(c.create_height);
