@@ -1519,3 +1519,60 @@ fn bad_pow_cmpct_on_tip(hub: &crate::chain::ChainHub) -> bitcoin::bip152::Header
     }
     hsi
 }
+
+/// A connecting batch under the floor is ignored without reading parent headers.
+#[tokio::test]
+async fn below_floor_headers_do_not_walk_parents() {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("below-floor");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let peers = crate::peers::PeerHub::new();
+    let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("below-floor-src");
+    src.ensure_genesis().unwrap();
+    src.generate_to_script(3, op_true(), vec![]).unwrap();
+    hub.set_minimum_chain_work(Some(work_floor(0xff)));
+    assert!(!hub.meets_minimum_chain_work());
+    let hdrs: Vec<_> = (1..=3u32).map(|h| header_at(&src, h)).collect();
+    let peer = live_peer(&peers, 18601, 41, false);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    // Warm the tip-work prefix so the floor check itself is not the lookup.
+    let _ = hub.meets_minimum_chain_work();
+    let before = rbitcoin_query::header_lookup_count();
+    push(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        NetworkMessage::Headers(hdrs.clone()),
+    )
+    .await;
+    let looked = rbitcoin_query::header_lookup_count().saturating_sub(before);
+    assert_eq!(
+        looked, 0,
+        "below-floor ignore must not read parent headers, looked={looked}"
+    );
+    assert!(
+        asked_blocks(&mut out_rx).is_empty(),
+        "below-floor headers are not fetched"
+    );
+    assert_eq!(side_tips(&hub), 0, "below-floor headers are not stored");
+    peers.set_noban(true);
+    let noban = live_peer(&peers, 18602, 42, false);
+    let mut follow_nb = PeerFollowState::new();
+    push(
+        &hub,
+        &out_tx,
+        &mut follow_nb,
+        Some(noban.as_ref()),
+        NetworkMessage::Headers(hdrs),
+    )
+    .await;
+    assert!(
+        side_tips(&hub) > 0,
+        "a noban peer still persists a below-floor chain"
+    );
+    peers.set_noban(false);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(src_dir);
+}

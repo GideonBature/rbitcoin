@@ -1,6 +1,20 @@
 //! Header navigation, locators, height lookup, confirmed-read pin.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Header-store lookups in this process. Tests pin that a below-floor ignore
+/// does not walk parents. Relaxed: the count is not a synchronization edge.
+static HEADER_LOOKUP_N: AtomicU64 = AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn header_lookup_count() -> u64 {
+    HEADER_LOOKUP_N.load(Ordering::Relaxed)
+}
+
+pub(crate) fn note_header_lookup() {
+    HEADER_LOOKUP_N.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Published best-chain prefix a confirmed-tx read was built against.
 ///
@@ -151,6 +165,7 @@ impl Query {
         &self,
         height: Height,
     ) -> Result<Option<(Fk, HeaderRecord)>, QueryError> {
+        note_header_lookup();
         match self.store.confirmed.get(height)? {
             None => Ok(None),
             Some(fk) => Ok(Some((fk, self.store.get_header(fk)?))),
