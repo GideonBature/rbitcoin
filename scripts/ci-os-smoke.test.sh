@@ -24,6 +24,8 @@ assert_ok "dry-run lists seal publish remap" \
   grep -q "segmented_head::tests::insert_roll_seal_lookup_roundtrip" <<<"$out"
 assert_ok "dry-run lists mapped SH BDZ3 occ" \
   grep -q "bdz::tests::compact_packed_fd_is_bdz3_and_matches_ram" <<<"$out"
+assert_ok "dry-run lists the exact pread errno pin" \
+  grep -q "pread_file_exact_reports_the_pread_errno" <<<"$out"
 assert_ok "dry-run lists query connect-chain confirm" \
   grep -q "chain_view_pin_asof_reorg" <<<"$out"
 assert_ok "dry-run lists query SH-cap confirm" \
