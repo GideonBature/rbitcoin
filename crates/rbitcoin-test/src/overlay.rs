@@ -1,6 +1,5 @@
 //! Helpers for the labeled overlay-functional journeys (real private meshes).
 
-use bitcoin::hashes::{sha256, Hash};
 use rbitcoin_node::NodeConfig;
 use rbitcoin_primitives::Network;
 use serde_json::Value;
@@ -264,31 +263,12 @@ pub async fn wait_peer_network(rpc: SocketAddr, net: &str, inbound: bool, wall: 
 }
 
 /// I2P b32 hostname from a SAM `DESTINATION=` / `{datadir}/i2p/p2p.priv` blob.
-/// SESSION STATUS returns the private dest; hash is of the public Identity prefix.
+///
+/// Same host `NetAddr::host_str` reports for that destination.
 pub fn i2p_b32_from_dest(dest: &str) -> String {
-    let raw = rbitcoin_net::decode_i2p_b64(dest.trim()).unwrap_or_else(|e| panic!("{e}"));
-    let public = rbitcoin_net::i2p_public_destination(&raw).unwrap_or_else(|e| panic!("{e}"));
-    let digest = sha256::Hash::hash(public);
-    format!("{}.b32.i2p", encode_b32_nopad(digest.as_byte_array()))
-}
-
-fn encode_b32_nopad(data: &[u8]) -> String {
-    const ALPH: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut out = String::new();
-    let mut acc = 0u32;
-    let mut n = 0;
-    for &b in data {
-        acc = (acc << 8) | u32::from(b);
-        n += 8;
-        while n >= 5 {
-            n -= 5;
-            out.push(ALPH[((acc >> n) & 31) as usize] as char);
-        }
-    }
-    if n > 0 {
-        out.push(ALPH[((acc << (5 - n)) & 31) as usize] as char);
-    }
-    out
+    rbitcoin_net::i2p_addr_from_sam_b64(dest)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .host_str()
 }
 
 pub async fn socks_http_get(proxy: SocketAddr, host: &str, port: u16, path: &str) -> (u16, String) {
@@ -360,7 +340,6 @@ pub async fn wait_file(path: &Path, wall: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::hashes::{sha256, Hash};
 
     #[tokio::test]
     #[should_panic(expected = "rpc getblockcount json:")]
@@ -388,26 +367,16 @@ mod tests {
     #[test]
     #[should_panic(expected = "i2p destination too short")]
     fn i2p_b32_rejects_a_short_destination() {
-        let _ = i2p_b32_from_dest(&rbitcoin_net::i2p_b64_encode(&[1, 2, 3]));
+        let _ = i2p_b32_from_dest("AQID");
     }
 
     #[test]
-    fn i2p_b32_hashes_identity_prefix() {
-        let mut ident = vec![7u8; 387];
-        ident[384] = 0;
-        ident[385] = 0;
-        ident[386] = 0;
-        let mut privd = ident.clone();
-        privd.extend_from_slice(&[9u8; 80]);
-        let a = i2p_b32_from_dest(&rbitcoin_net::i2p_b64_encode(&ident));
-        let b = i2p_b32_from_dest(&rbitcoin_net::i2p_b64_encode(&privd));
-        assert_eq!(a, b, "private dest must hash the Identity prefix");
-        let full = format!(
-            "{}.b32.i2p",
-            encode_b32_nopad(sha256::Hash::hash(&privd).as_byte_array())
-        );
-        assert_ne!(a, full);
-        assert!(a.ends_with(".b32.i2p"), "{a}");
-        assert_eq!(a.len(), 52 + ".b32.i2p".len(), "{a}");
+    fn i2p_b32_matches_the_address_host() {
+        // Same 387-byte identity and private suffix as `i2p_addr_hashes_public_destination_only`.
+        let ident = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAAAA";
+        let privd = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAAAACQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
+        let host = "cxroqjd4tx5c5ufkracpqnx4hjjsgdj4uwhagtifp6yo5ed3hjlq.b32.i2p";
+        assert_eq!(i2p_b32_from_dest(ident), host);
+        assert_eq!(i2p_b32_from_dest(privd), host);
     }
 }

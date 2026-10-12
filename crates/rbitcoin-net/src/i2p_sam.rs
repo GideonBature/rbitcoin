@@ -371,7 +371,7 @@ fn session_create_line(session_id: &str, dest_arg: &str) -> String {
 
 // Public Destination is 387 bytes plus the cert length at bytes 385–386.
 // The trailing private key is not part of the BIP155 hash.
-fn i2p_addr_from_sam_b64(dest_b64: &str) -> Result<crate::NetAddr, NetError> {
+pub fn i2p_addr_from_sam_b64(dest_b64: &str) -> Result<crate::NetAddr, NetError> {
     let raw = decode_i2p_b64(dest_b64.trim())?;
     let public = i2p_public_destination(&raw)?;
     let digest = sha256::Hash::hash(public);
@@ -381,7 +381,7 @@ fn i2p_addr_from_sam_b64(dest_b64: &str) -> Result<crate::NetAddr, NetError> {
     })
 }
 
-pub fn i2p_public_destination(raw: &[u8]) -> Result<&[u8], NetError> {
+fn i2p_public_destination(raw: &[u8]) -> Result<&[u8], NetError> {
     const DEST_LEN_BASE: usize = 387;
     const CERT_LEN_POS: usize = 385;
     if raw.len() < CERT_LEN_POS + 2 {
@@ -401,7 +401,7 @@ pub fn i2p_public_destination(raw: &[u8]) -> Result<&[u8], NetError> {
     Ok(&raw[..dest_len])
 }
 
-pub fn decode_i2p_b64(s: &str) -> Result<Vec<u8>, NetError> {
+fn decode_i2p_b64(s: &str) -> Result<Vec<u8>, NetError> {
     let mut bytes = Vec::with_capacity(s.len() * 3 / 4);
     let mut acc = 0u32;
     let mut n = 0u32;
@@ -432,7 +432,8 @@ pub fn decode_i2p_b64(s: &str) -> Result<Vec<u8>, NetError> {
 }
 
 /// I2P destination alphabet (`A–Z`, `a–z`, `0–9`, `-`, `~`). No padding.
-pub fn i2p_b64_encode(raw: &[u8]) -> String {
+#[cfg(test)]
+fn i2p_b64_encode(raw: &[u8]) -> String {
     const ALPH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
     let mut out = String::new();
     let mut i = 0;
