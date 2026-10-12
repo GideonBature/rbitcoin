@@ -5,3 +5,4 @@ Fixed
 - **Header batches are persisted off the IBD coordination loop.** That loop copies finished header rows and still disconnects a stalled peer on the same pass.
 - **A requested body and a confirm reject carry the header facts the coordination loop needs.** That loop does not look up a header fk or a reject parent. A body with no fk is not stored.
 - **The IBD progress tick reads published counters.** Tip, tx count, scripthash runs, and process-owned sizes come from values other threads already published. The tick does not list the scripthash directory or lock the height index.
+- **A tip hole in front of later queued bodies is requested.** The densify cursor rewinds to the first height that is not claim-ready. A holder whose peer is gone does not count as covering that height.
