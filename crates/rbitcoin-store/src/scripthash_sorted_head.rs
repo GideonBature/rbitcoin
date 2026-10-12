@@ -225,41 +225,13 @@ fn pread_file(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize
 }
 
 fn pread_file_exact(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-    let h = IoHandle::from_file(file);
-    let mut done = 0usize;
-    while done < buf.len() {
-        let n = h.pread(offset + done as u64, &mut buf[done..]);
-        if n < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "pread short",
-            ));
-        }
-        done += n as usize;
-    }
-    Ok(())
+    crate::file::handle_pread_all(file, std::path::Path::new("scripthash"), offset, buf)
+        .map_err(StoreError::into_io)
 }
 
 fn pwrite_file(file: &File, offset: u64, buf: &[u8]) -> std::io::Result<()> {
-    let h = IoHandle::from_file(file);
-    let mut done = 0usize;
-    while done < buf.len() {
-        let n = h.pwrite(offset + done as u64, &buf[done..]);
-        if n < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "pwrite returned 0",
-            ));
-        }
-        done += n as usize;
-    }
-    Ok(())
+    crate::file::handle_pwrite_all(file, std::path::Path::new("scripthash"), offset, buf)
+        .map_err(StoreError::into_io)
 }
 
 fn fuse_key16(key: &ShHeadKey) -> u64 {

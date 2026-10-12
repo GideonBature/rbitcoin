@@ -45,6 +45,14 @@ impl StoreError {
         }
     }
 
+    /// `io` error carried by [`StoreError::Io`], or `other` for a non-IO variant.
+    pub(crate) fn into_io(self) -> io::Error {
+        match self {
+            StoreError::Io { source, .. } => source,
+            other => io::Error::other(other.to_string()),
+        }
+    }
+
     /// Ring in-flight cap — not on-disk corruption. Do not WARN as `corrupt record`.
     pub fn is_io_backpressure(&self) -> bool {
         matches!(self, StoreError::BudgetFull(m) if m.contains("SQ"))

@@ -189,7 +189,7 @@ fn encode_leading_header(kind: TableKind, logical: u64) -> [u8; FILE_HEADER_LEN]
 
 /// Complete positional write. Safe on Windows `FILE_FLAG_OVERLAPPED` handles
 /// (std `Write` / `WriteFile` with a NULL `OVERLAPPED` is os error 87).
-fn handle_pwrite_all(
+pub(crate) fn handle_pwrite_all(
     file: &File,
     path: &Path,
     offset: u64,
@@ -203,6 +203,9 @@ fn handle_pwrite_all(
     while done < bytes.len() {
         let rc = handle.pwrite(offset + done as u64, &bytes[done..]);
         if rc < 0 {
+            // `rc` is already the negated errno. Drop the thread error so a
+            // later `last_os_error` is not this write.
+            clear_thread_os_error();
             return Err(StoreError::io(path, std::io::Error::from_raw_os_error(-rc)));
         }
         if rc == 0 {
@@ -216,9 +219,36 @@ fn handle_pwrite_all(
     Ok(())
 }
 
+/// `IoHandle` copies errno into its negated return and leaves the thread
+/// error set. Completion keeps `-rc` and then clears that thread error.
+fn clear_thread_os_error() {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    unsafe {
+        *libc::__error() = 0;
+    }
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn SetLastError(code: u32);
+        }
+        SetLastError(0);
+    }
+}
+
 /// Complete positional read. Safe on Windows `FILE_FLAG_OVERLAPPED` handles
 /// (std `Read` / `ReadFile` with a NULL `OVERLAPPED` is os error 87).
-fn handle_pread_all(
+pub(crate) fn handle_pread_all(
     file: &File,
     path: &Path,
     offset: u64,
@@ -232,6 +262,9 @@ fn handle_pread_all(
     while done < buf.len() {
         let rc = handle.pread(offset + done as u64, &mut buf[done..]);
         if rc < 0 {
+            // `rc` is already the negated errno. Drop the thread error so a
+            // later `last_os_error` is not this read.
+            clear_thread_os_error();
             return Err(StoreError::io(path, std::io::Error::from_raw_os_error(-rc)));
         }
         if rc == 0 {
