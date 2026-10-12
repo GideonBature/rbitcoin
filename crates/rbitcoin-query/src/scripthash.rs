@@ -1106,8 +1106,32 @@ impl Query {
         slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<FilteredHistory<ScriptHashHistoryItem>, QueryError> {
+        self.scripthash_filtered_slot_in(
+            scripthash,
+            filter,
+            slot,
+            view,
+            Self::scripthash_history_filtered_in,
+            history_items_from_joined,
+        )
+    }
+
+    fn scripthash_filtered_slot_in<T>(
+        &self,
+        scripthash: &[u8; 32],
+        filter: &HistoryFilter,
+        slot: &mut Option<Arc<ShJoinSlot>>,
+        view: &ChainView,
+        limited: impl Fn(
+            &Self,
+            &[u8; 32],
+            &HistoryFilter,
+            &ChainView,
+        ) -> Result<FilteredHistory<T>, QueryError>,
+        project: impl Fn(&[ShJoinedOut], &HistoryFilter) -> FilteredHistory<T>,
+    ) -> Result<FilteredHistory<T>, QueryError> {
         if self.page_without_full_slot(scripthash, filter, slot, view)? {
-            return self.scripthash_history_filtered_in(scripthash, filter, view);
+            return limited(self, scripthash, filter, view);
         }
         self.ensure_sh_join_slot_in(scripthash, slot, view)?;
         let recs = &mut Arc::make_mut(
@@ -1116,7 +1140,7 @@ impl Query {
         )
         .joined;
         self.enrich_joined(recs, ShJoinNeed::HISTORY)?;
-        Ok(history_items_from_joined(recs, filter))
+        Ok(project(recs, filter))
     }
 
     pub fn scripthash_history_summary_filtered_in(
@@ -1142,17 +1166,14 @@ impl Query {
         slot: &mut Option<Arc<ShJoinSlot>>,
         view: &ChainView,
     ) -> Result<FilteredHistory<ScriptHashTxSummary>, QueryError> {
-        if self.page_without_full_slot(scripthash, filter, slot, view)? {
-            return self.scripthash_history_summary_filtered_in(scripthash, filter, view);
-        }
-        self.ensure_sh_join_slot_in(scripthash, slot, view)?;
-        let recs = &mut Arc::make_mut(
-            slot.as_mut()
-                .ok_or(StoreError::Corrupt("invariant: SH join slot missing"))?,
+        self.scripthash_filtered_slot_in(
+            scripthash,
+            filter,
+            slot,
+            view,
+            Self::scripthash_history_summary_filtered_in,
+            summaries_from_joined,
         )
-        .joined;
-        self.enrich_joined(recs, ShJoinNeed::HISTORY)?;
-        Ok(summaries_from_joined(recs, filter))
     }
 
     /// Confirmed txs in `height` that create or spend a posting-list out for `scripthash`.
