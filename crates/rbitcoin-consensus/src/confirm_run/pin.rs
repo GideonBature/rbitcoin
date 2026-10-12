@@ -152,6 +152,16 @@ fn fill_pins(
     plan_by_id
 }
 
+/// Schema 25 leaves `input_count` at 0, which stays unknown. More than one
+/// input is not a coinbase.
+fn coinbase_flag(input_count: u32) -> Option<bool> {
+    if input_count > 1 {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn apply_plan_pins(
     parent_vouts: &U64Map<Vec<u32>>,
     plan_by_id: &U64Map<CreatePin>,
@@ -165,11 +175,7 @@ fn apply_plan_pins(
         if !need.is_empty() && batch_parents.pin_covered(fk, need) {
             if let Some(pin) = plan_by_id.get(id) {
                 let tx = pin.tx();
-                let cb = if tx.input_count > 1 {
-                    Some(false)
-                } else {
-                    None
-                };
+                let cb = coinbase_flag(tx.input_count);
                 let plan_range = parent_pin.body_range(*id);
                 if cb.is_some() || plan_range.is_some() {
                     batch_parents.refresh_pin_meta(fk, cb, plan_range, Vec::new());
@@ -183,11 +189,7 @@ fn apply_plan_pins(
                 still_need.insert(*id, need.clone());
                 continue;
             }
-            let cb = if pin.tx().input_count > 1 {
-                Some(false)
-            } else {
-                None
-            };
+            let cb = coinbase_flag(pin.tx().input_count);
             let plan_range = parent_pin.body_range(*id);
             batch_parents.insert_create_pin(
                 fk,
@@ -310,18 +312,13 @@ fn denserels_by_stamped_range(
         // Schema 25 meta leaves input_count at 0. That stays "unknown":
         // coinbase_fk_at_heights still runs, and a pread of input.loc per
         // parent would sit on this range-load loop.
-        let cb = if tx.input_count > 1 {
-            Some(false)
-        } else {
-            None
-        };
+        let cb = coinbase_flag(tx.input_count);
         batch_parents.insert_owned(fk, tx, live, need, cb, Some(range), sparse);
         still_need.remove(&id);
     }
     let range_fill_ns = t_range_fill.elapsed().as_nanos() as u64;
-    if range_fill_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().pin_range_fill_ns, range_fill_ns);
-    }
+    // `note_confirm` ignores a zero add, so a `> 0` gate is the same call.
+    rbitcoin_query::note_confirm(&query.confirm_stats().pin_range_fill_ns, range_fill_ns);
     Ok((n_range, rng_ns))
 }
 
@@ -384,9 +381,7 @@ pub(super) fn pin_for_wire_batch<'a>(
 
     let mut batch_parents = rbitcoin_query::BatchParents::with_capacity(parent_vouts.len());
     let thin_ns = t_thin.elapsed().as_nanos() as u64;
-    if thin_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().thin_ns, thin_ns);
-    }
+    rbitcoin_query::note_confirm(&query.confirm_stats().thin_ns, thin_ns);
     let mut still_need: U64Map<Vec<u32>> = U64Map::default();
 
     let t_plan = Instant::now();
@@ -432,20 +427,12 @@ pub(super) fn pin_for_wire_batch<'a>(
     let contract_ns = t_contract.elapsed().as_nanos() as u64;
 
     let n_unique = parent_vouts.len() as u64;
-    if n_unique > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().parent_unique, n_unique);
-        rbitcoin_query::note_confirm(&query.confirm_stats().utxo_parents, n_unique);
-    }
-    if n_plan_pin > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().pin_plan, n_plan_pin);
-        rbitcoin_query::note_confirm(&query.confirm_stats().pin_cache_body, n_plan_pin);
-    }
-    if plan_pin_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().plan_pin_ns, plan_pin_ns);
-    }
-    if contract_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().pin_contract_ns, contract_ns);
-    }
+    rbitcoin_query::note_confirm(&query.confirm_stats().parent_unique, n_unique);
+    rbitcoin_query::note_confirm(&query.confirm_stats().utxo_parents, n_unique);
+    rbitcoin_query::note_confirm(&query.confirm_stats().pin_plan, n_plan_pin);
+    rbitcoin_query::note_confirm(&query.confirm_stats().pin_cache_body, n_plan_pin);
+    rbitcoin_query::note_confirm(&query.confirm_stats().plan_pin_ns, plan_pin_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().pin_contract_ns, contract_ns);
     query.confirm_stats().note_last_pin(
         plan_pin_ns,
         cold_range_batch_ns,
@@ -454,15 +441,11 @@ pub(super) fn pin_for_wire_batch<'a>(
         n_range_new,
     );
     let pin_ns = t_pin.elapsed().as_nanos() as u64;
-    if pin_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().parent_pin_ns, pin_ns);
-        rbitcoin_query::note_confirm(&query.confirm_stats().pin_body_ns, pin_ns);
-        rbitcoin_query::note_confirm(&query.confirm_stats().load_win_ns, pin_ns);
-    }
+    rbitcoin_query::note_confirm(&query.confirm_stats().parent_pin_ns, pin_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().pin_body_ns, pin_ns);
+    rbitcoin_query::note_confirm(&query.confirm_stats().load_win_ns, pin_ns);
     let n_blks = metas.len() as u64;
-    if n_blks > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().load_blocks, n_blks);
-    }
+    rbitcoin_query::note_confirm(&query.confirm_stats().load_blocks, n_blks);
 
     Ok((batch_parents, spend_edges))
 }
