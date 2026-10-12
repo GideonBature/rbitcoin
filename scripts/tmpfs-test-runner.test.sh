@@ -10,18 +10,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN="$ROOT/scripts/tmpfs-test-runner.sh"
 PASS=0
 FAIL=0
+source "$ROOT/scripts/contract-assert.sh"
 
-assert_ok() {
-  local name="$1"
-  shift
-  if "$@"; then
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  else
-    echo "not ok - $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rbtc-tmpfs-runner-test.XXXXXX")"
 trap 'rm -rf -- "$WORK"' EXIT

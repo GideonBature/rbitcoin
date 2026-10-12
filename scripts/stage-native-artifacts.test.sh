@@ -6,30 +6,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE="$ROOT/scripts/stage-native-artifacts.sh"
 PASS=0
 FAIL=0
+source "$ROOT/scripts/contract-assert.sh"
+assert_fail() { assert_fail_quiet "$@"; }
 
-assert_ok() {
-  local name="$1"
-  shift
-  if "$@"; then
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  else
-    echo "not ok - $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
-assert_fail() {
-  local name="$1"
-  shift
-  if "$@" >/dev/null 2>&1; then
-    echo "not ok - $name (expected failure)"
-    FAIL=$((FAIL + 1))
-  else
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  fi
-}
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rbitcoin-stage-native.XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
