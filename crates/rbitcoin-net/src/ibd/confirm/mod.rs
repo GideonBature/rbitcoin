@@ -1207,78 +1207,107 @@ impl ConfirmQueueDepths {
 
     fn note_script_send(&self, blocks: usize, wire_bytes: usize, parents: usize) {
         Self::note_batch_depth_send(&self.load_to_scripts, &self.script_hwm);
-        // Saturating: concurrent note_script_send under parallel load can race past
-        // usize::MAX on wire_bytes/parents counters in debug overflow checks.
-        self.script_blocks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(blocks))
-            })
-            .ok();
-        self.script_wire_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(wire_bytes))
-            })
-            .ok();
-        self.script_parents
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(parents))
-            })
-            .ok();
+        Self::add_stage(
+            &self.script_blocks,
+            &self.script_wire_bytes,
+            &self.script_parents,
+            blocks,
+            wire_bytes,
+            parents,
+        );
     }
     fn note_script_recv(&self, blocks: usize, wire_bytes: usize, parents: usize) {
         Self::note_batch_depth_recv(&self.load_to_scripts);
-        self.script_blocks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(blocks))
-            })
-            .ok();
-        self.script_wire_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(wire_bytes))
-            })
-            .ok();
-        self.script_parents
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(parents))
-            })
-            .ok();
+        Self::sub_stage(
+            &self.script_blocks,
+            &self.script_wire_bytes,
+            &self.script_parents,
+            blocks,
+            wire_bytes,
+            parents,
+        );
     }
 
     fn note_write_send(&self, blocks: usize, wire_bytes: usize, parents: usize) {
         Self::note_batch_depth_send(&self.scripts_to_write, &self.write_hwm);
-        self.write_blocks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(blocks))
-            })
-            .ok();
-        self.write_wire_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(wire_bytes))
-            })
-            .ok();
-        self.write_parents
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_add(parents))
-            })
-            .ok();
+        Self::add_stage(
+            &self.write_blocks,
+            &self.write_wire_bytes,
+            &self.write_parents,
+            blocks,
+            wire_bytes,
+            parents,
+        );
     }
     fn note_write_recv(&self, blocks: usize, wire_bytes: usize, parents: usize) {
         Self::note_batch_depth_recv(&self.scripts_to_write);
-        self.write_blocks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(blocks))
-            })
-            .ok();
-        self.write_wire_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(wire_bytes))
-            })
-            .ok();
-        self.write_parents
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(parents))
-            })
-            .ok();
+        Self::sub_stage(
+            &self.write_blocks,
+            &self.write_wire_bytes,
+            &self.write_parents,
+            blocks,
+            wire_bytes,
+            parents,
+        );
+    }
+
+    // Saturating: concurrent sends under parallel load can race past
+    // usize::MAX on wire_bytes/parents counters in debug overflow checks.
+    fn add_stage(
+        blocks: &AtomicUsize,
+        wire_bytes: &AtomicUsize,
+        parents: &AtomicUsize,
+        n_blocks: usize,
+        n_wire: usize,
+        n_parents: usize,
+    ) {
+        Self::update_stage(
+            blocks,
+            wire_bytes,
+            parents,
+            n_blocks,
+            n_wire,
+            n_parents,
+            usize::saturating_add,
+        );
+    }
+
+    fn sub_stage(
+        blocks: &AtomicUsize,
+        wire_bytes: &AtomicUsize,
+        parents: &AtomicUsize,
+        n_blocks: usize,
+        n_wire: usize,
+        n_parents: usize,
+    ) {
+        Self::update_stage(
+            blocks,
+            wire_bytes,
+            parents,
+            n_blocks,
+            n_wire,
+            n_parents,
+            usize::saturating_sub,
+        );
+    }
+
+    fn update_stage(
+        blocks: &AtomicUsize,
+        wire_bytes: &AtomicUsize,
+        parents: &AtomicUsize,
+        n_blocks: usize,
+        n_wire: usize,
+        n_parents: usize,
+        op: fn(usize, usize) -> usize,
+    ) {
+        for (slot, n) in [
+            (blocks, n_blocks),
+            (wire_bytes, n_wire),
+            (parents, n_parents),
+        ] {
+            slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(op(cur, n)))
+                .ok();
+        }
     }
 }
 
