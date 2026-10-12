@@ -11,7 +11,7 @@ fn stored_batch(
     st: &mut IbdWorkState,
     hub: &crate::chain::ChainHub,
     peer: usize,
-    headers: Vec<Header>,
+    headers: Vec<bitcoin::block::Header>,
 ) -> usize {
     let known: Vec<_> = headers
         .iter()
