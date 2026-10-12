@@ -133,22 +133,6 @@ pub mod confirm_phase_stats {
     }
 
     #[inline]
-    pub fn tl_note_cold_why_null_fk() {
-        TL_COLD_WHY.with(|c| {
-            let (a, b, c2, d) = c.get();
-            c.set((a + 1, b, c2, d));
-        });
-        TL_COLD_N.with(|c| c.set(c.get() + 1));
-    }
-    #[inline]
-    pub fn tl_note_cold_why_not_pin() {
-        TL_COLD_WHY.with(|c| {
-            let (a, b, c2, d) = c.get();
-            c.set((a, b + 1, c2, d));
-        });
-        TL_COLD_N.with(|c| c.set(c.get() + 1));
-    }
-    #[inline]
     pub fn tl_note_cold_why_txid_mismatch() {
         TL_COLD_WHY.with(|c| {
             let (a, b, c2, d) = c.get();

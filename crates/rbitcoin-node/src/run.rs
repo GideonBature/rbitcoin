@@ -3042,10 +3042,10 @@ mod tests {
         let dir = scratch_dir("tip-gate");
         let q = Query::open_or_create_tiny(&dir).unwrap();
         let bump = q.store().scripthash.alloc_bump();
-        q.store()
-            .scripthash
-            .publish_sorted_shard(0, &[], 0, bump)
-            .unwrap();
+        let session = q.store().scripthash.pack_shard_session(0).unwrap();
+        let pack = session.finish_pack().unwrap();
+        assert_eq!(pack.bump, bump);
+        q.store().scripthash.publish_packed_shard(0, pack).unwrap();
         assert!(q.store().scripthash.has_durable_index());
         assert!(q.sh_use_writebehind());
         assert!(

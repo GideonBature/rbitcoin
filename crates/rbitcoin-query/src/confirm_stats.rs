@@ -310,19 +310,6 @@ confirm_window! {
 }
 
 impl ConfirmWindow {
-    pub fn prep_phases_sum_ns(&self) -> u64 {
-        self.arch_prep_struct_ns
-            .saturating_add(self.arch_prep_filter_ns)
-            .saturating_add(self.arch_prep_assign_ns)
-            .saturating_add(self.arch_prep_collect_ns)
-            .saturating_add(self.arch_prep_inflight_ns)
-            .saturating_add(self.arch_prep_head_ns)
-            .saturating_add(self.arch_prep_stamp_ns)
-            .saturating_add(self.arch_prep_finish_ns)
-            .saturating_add(self.arch_prep_publish_ns)
-            .saturating_add(self.arch_prep_qwait_ns)
-    }
-
     pub fn write_phases_sum_ns(&self) -> u64 {
         self.arch_write_reserve_ns
             .saturating_add(self.arch_write_body_ns)
@@ -339,19 +326,6 @@ impl ConfirmWindow {
 }
 
 impl ConfirmStats {
-    #[inline]
-    pub fn add_load_ns(&self, ns: u64) {
-        add(&self.load_ns, ns);
-    }
-    #[inline]
-    pub fn add_script_ns(&self, ns: u64) {
-        add(&self.script_ns, ns);
-    }
-    #[inline]
-    pub fn add_class_a_ns(&self, ns: u64) {
-        add(&self.class_a_ns, ns);
-    }
-
     #[inline]
     pub fn add_sh_part(&self, part: &AtomicU64, ns: u64) {
         if ns == 0 {
@@ -491,23 +465,6 @@ impl ConfirmStats {
         add(&self.arch_prep_finish_ns, finish_ns);
     }
 
-    pub fn note_prep_batch(
-        &self,
-        total_ns: u64,
-        struct_ns: u64,
-        filter_ns: u64,
-        publish_ns: u64,
-        qwait_ns: u64,
-        blocks: u64,
-    ) {
-        add(&self.arch_prep_total_ns, total_ns);
-        add(&self.arch_prep_struct_ns, struct_ns);
-        add(&self.arch_prep_filter_ns, filter_ns);
-        add(&self.arch_prep_publish_ns, publish_ns);
-        add(&self.arch_prep_qwait_ns, qwait_ns);
-        add(&self.arch_prep_blocks, blocks);
-    }
-
     #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
     pub fn note_write_commit(
         &self,
@@ -530,11 +487,6 @@ impl ConfirmStats {
 
     pub fn note_write_txstat(&self, ns: u64) {
         add(&self.arch_write_txstat_ns, ns);
-    }
-
-    pub fn note_write_flush(&self, ns: u64) {
-        add(&self.arch_write_flush_ns, ns);
-        add(&self.arch_write_total_ns, ns);
     }
 
     fn miss_on_code(on: Option<&str>) -> u64 {
@@ -611,30 +563,6 @@ impl ConfirmStats {
         add(&self.stamp_struct_walk_ns, walk_ns);
     }
 
-    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
-    pub fn note_lookup(
-        &self,
-        blocks: u64,
-        parents: u64,
-        already: u64,
-        cold: u64,
-        unresolved: u64,
-        total_ns: u64,
-        collect_ns: u64,
-        head_ns: u64,
-        cold_io_ns: u64,
-    ) {
-        add(&self.lookup_blocks, blocks);
-        add(&self.lookup_parents, parents);
-        add(&self.lookup_already, already);
-        add(&self.lookup_cold, cold);
-        add(&self.lookup_unresolved, unresolved);
-        add(&self.lookup_total_ns, total_ns);
-        add(&self.lookup_collect_ns, collect_ns);
-        add(&self.lookup_head_ns, head_ns);
-        add(&self.lookup_cold_io_ns, cold_io_ns);
-    }
-
     pub fn note_wave_decode(
         &self,
         decode_ns: u64,
@@ -648,22 +576,6 @@ impl ConfirmStats {
         add(&self.lookup_collect_ns, collect_ns);
         add(&self.lookup_wave_head_ns, head_ns);
         add(&self.lookup_wave_spent_ns, spent_ns);
-    }
-
-    pub fn sample_tip_sh(&self) -> TipShSnap {
-        TipShSnap {
-            collect_ns: self.sh_collect_ns.swap(0, Ordering::Relaxed),
-            sort_ns: self.sh_sort_ns.swap(0, Ordering::Relaxed),
-            seed_ns: self.sh_seed_ns.swap(0, Ordering::Relaxed),
-            body_ns: self.sh_body_ns.swap(0, Ordering::Relaxed),
-            head_ns: self.sh_head_ns.swap(0, Ordering::Relaxed),
-            sync_ns: self.sh_sync_ns.swap(0, Ordering::Relaxed),
-            pin: self.sh_collect_pin.swap(0, Ordering::Relaxed),
-            cold: self.sh_collect_cold.swap(0, Ordering::Relaxed),
-            creates: self.sh_create_n.swap(0, Ordering::Relaxed),
-            unique: self.sh_unique_n.swap(0, Ordering::Relaxed),
-            written: self.sh_written_n.swap(0, Ordering::Relaxed),
-        }
     }
 }
 
@@ -745,20 +657,6 @@ pub struct TipShSnap {
     pub creates: u64,
     pub unique: u64,
     pub written: u64,
-}
-
-impl TipShSnap {
-    pub fn append_ns(&self) -> u64 {
-        self.sort_ns
-            .saturating_add(self.seed_ns)
-            .saturating_add(self.body_ns)
-            .saturating_add(self.head_ns)
-            .saturating_add(self.sync_ns)
-    }
-
-    pub fn total_sh_ns(&self) -> u64 {
-        self.collect_ns.saturating_add(self.append_ns())
-    }
 }
 
 #[cfg(test)]

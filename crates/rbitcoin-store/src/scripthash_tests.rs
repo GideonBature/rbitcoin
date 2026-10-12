@@ -20,6 +20,31 @@ fn tmp() -> crate::testutil::TempDir {
     crate::testutil::TempDir::labeled("sh").expect("temp dir")
 }
 
+fn push_chain(session: &mut ScriptHashBulkSession<'_>, key: [u8; 32], entries: &[Fk]) {
+    let mut fks: Vec<u64> = entries
+        .iter()
+        .filter(|fk| !fk.is_null())
+        .map(|fk| fk.0)
+        .collect();
+    fks.sort_unstable();
+    fks.dedup();
+    for fk in fks {
+        session.push_sorted_fk(key, Fk(fk)).unwrap();
+    }
+    session.finish_key().unwrap();
+}
+
+fn seal_session(
+    t: &ScriptHashTable,
+    shard: usize,
+    session: ScriptHashBulkSession<'_>,
+) -> (u64, u64) {
+    let pack = session.finish_pack().unwrap();
+    let out = (pack.creates, pack.keys);
+    t.publish_packed_shard(shard, pack).unwrap();
+    out
+}
+
 fn assert_no_l0_ovf_leftover(dir: &std::path::Path) {
     let ovf = dir.join("scripthash.ovf");
     for ent in std::fs::read_dir(&ovf).unwrap().flatten() {
@@ -129,10 +154,12 @@ fn sh_bodies_are_split() {
         let k2 = sh_prefix_key(2, 0);
         let ents: Vec<Fk> = (1..=8).map(Fk).collect();
         {
-            let mut s = t.bulk_session(16).unwrap();
-            s.put_chain(k0, &ents).unwrap();
-            s.put_chain(k2, &ents).unwrap();
-            s.finish().unwrap();
+            let mut s = t.pack_shard_session(0).unwrap();
+            push_chain(&mut s, k0, &ents);
+            seal_session(&t, 0, s);
+            let mut s = t.pack_shard_session(2).unwrap();
+            push_chain(&mut s, k2, &ents);
+            seal_session(&t, 2, s);
         }
         let payload0 = payload_start(FILE_HEADER_LEN);
         assert!(
@@ -598,9 +625,9 @@ fn append_after_zero_live_count_keeps_sealed_home() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x7e]);
-    let mut session = t.bulk_session(1).unwrap();
-    session.put_chain(sh, &[Fk(1)]).unwrap();
-    let _ = session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &[Fk(1)]);
+    seal_session(&t, 0, session);
     assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::Main));
     t.test_zero_live_count_keep_head().unwrap();
     assert_eq!(t.entry_count(), 0);
@@ -1023,12 +1050,12 @@ fn cold_install_sorted_main_and_global_ingest() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh_main = script_hash(&[0x10]);
     let sh_new = script_hash(&[0x99]);
-    let mut session = t.bulk_session(16).unwrap();
-    session.put_chain(sh_main, &[Fk(1), Fk(2)]).unwrap();
-    session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh_main, &[Fk(1), Fk(2)]);
+    seal_session(&t, 0, session);
     assert!(
         t.has_sorted_main(),
-        "bulk must emit a sealed sorted main shard"
+        "pack must emit a sealed sorted main shard"
     );
     let head_p = dir.join("scripthash.head");
     let shard_p = if head_p.is_dir() {
@@ -1038,7 +1065,7 @@ fn cold_install_sorted_main_and_global_ingest() {
     };
     assert!(
         MphfHead::exists(&shard_p),
-        "bulk must emit mphf+val for shard 00"
+        "pack must emit mphf+val for shard 00"
     );
     let mut idx = shard_p.as_os_str().to_os_string();
     idx.push(".idx");
@@ -1076,9 +1103,9 @@ fn reopen_after_ingest_seal_and_unlink_homes() {
         let dir = tmp();
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let sh_main = script_hash(&[0x10]);
-        let mut session = t.bulk_session(8).unwrap();
-        session.put_chain(sh_main, &[Fk(1)]).unwrap();
-        session.finish().unwrap();
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh_main, &[Fk(1)]);
+        seal_session(&t, 0, session);
 
         let mut first_new = [0u8; 32];
         for i in 0..210u32 {
@@ -1122,9 +1149,9 @@ fn compact_merges_two_sealed_global_ovf_files() {
         let dir = tmp();
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let sh_main = script_hash(&[0x10]);
-        let mut session = t.bulk_session(8).unwrap();
-        session.put_chain(sh_main, &[Fk(1)]).unwrap();
-        session.finish().unwrap();
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh_main, &[Fk(1)]);
+        seal_session(&t, 0, session);
 
         let mut first_new = [0u8; 32];
         let mut second_new = [0u8; 32];
@@ -1203,15 +1230,15 @@ fn compact_merges_two_sealed_global_ovf_files() {
 fn bulk_session_packs_exact_class_from_count() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    let mut session = t.bulk_session(16).unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
     let cases: &[(u8, u32)] = &[(0x01, 1), (0x02, 2), (0x06, 6), (0x14, 20), (0x60, 600)];
     for &(tag, n) in cases {
         let mut sh = [0u8; 32];
         sh[0] = tag;
         let ents: Vec<_> = (1..=u64::from(n)).map(Fk).collect();
-        session.put_chain(sh, &ents).unwrap();
+        push_chain(&mut session, sh, &ents);
     }
-    let (creates, keys, _, _) = session.finish().unwrap();
+    let (creates, keys) = seal_session(&t, 0, session);
     assert_eq!(keys, 5);
     assert_eq!(creates, 1 + 2 + 6 + 20 + 600);
 
@@ -1268,7 +1295,7 @@ fn bulk_session_packs_exact_class_from_count() {
 fn bulk_session_put_chain_roundtrip() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    let mut session = t.bulk_session(100).unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
     // Many distinct keys, mix of inline and slab.
     for i in 0..50u32 {
         let mut sh = [0u8; 32];
@@ -1278,9 +1305,9 @@ fn bulk_session_put_chain_roundtrip() {
         let ents: Vec<_> = (0..n)
             .map(|j| Fk(u64::from(i) * 100 + u64::from(j) + 1))
             .collect();
-        session.put_chain(sh, &ents).unwrap();
+        push_chain(&mut session, sh, &ents);
     }
-    let (creates, keys, _, _) = session.finish().unwrap();
+    let (creates, keys) = seal_session(&t, 0, session);
     assert_eq!(keys, 50);
     assert_eq!(creates, t.entry_count());
     assert!(creates > 50);
@@ -1308,7 +1335,7 @@ fn bulk_session_stream_megakey_caps_buf_at_page() {
     let n = SH_PAGE_STREAM_MAX + 10;
     let mut sh = [0u8; 32];
     sh[0] = 0x42;
-    let mut session = t.bulk_session(1).unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
     let mut peak = 0usize;
     for i in 1..=n as u64 {
         session.push_sorted_fk(sh, Fk(i)).unwrap();
@@ -1321,7 +1348,7 @@ fn bulk_session_stream_megakey_caps_buf_at_page() {
     }
     session.finish_key().unwrap();
     assert!(peak <= SH_PAGE_STREAM_MAX, "peak buf={peak}");
-    let (creates, keys, _, _) = session.finish().unwrap();
+    let (creates, keys) = seal_session(&t, 0, session);
     assert_eq!(keys, 1);
     assert_eq!(creates, n as u64);
     assert_eq!(t.entries(&sh).unwrap().len(), n);
@@ -1632,13 +1659,13 @@ fn bulk_session_stream_small_key_still_slab() {
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut sh = [0u8; 32];
     sh[0] = 0x07;
-    let mut session = t.bulk_session(1).unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
     for i in 1..=8u64 {
         session.push_sorted_fk(sh, Fk(i)).unwrap();
         assert_eq!(session.buffered_fks(), i as usize);
     }
     session.finish_key().unwrap();
-    let _ = session.finish().unwrap();
+    seal_session(&t, 0, session);
     match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Slab { .. } => {}
         other => panic!("expected slab, got {other:?}"),
@@ -1657,9 +1684,9 @@ fn bulk_session_extent_last_page_splits_when_ver2_header_eats_stream() {
     let mut sh = [0u8; 32];
     sh[0] = 0x11;
     let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
-    let mut session = t.bulk_session(1).unwrap();
-    session.put_chain(sh, &ents).unwrap();
-    let (creates, keys, _, _) = session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    let (creates, keys) = seal_session(&t, 0, session);
     assert_eq!(keys, 1);
     assert_eq!(creates, n as u64);
     assert_eq!(t.entries(&sh).unwrap().len(), n);
@@ -1691,9 +1718,9 @@ fn bulk_session_streamed_last_remainder_fits_ver2() {
     let mut sh = [0u8; 32];
     sh[0] = 0x12;
     let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
-    let mut session = t.bulk_session(1).unwrap();
-    session.put_chain(sh, &ents).unwrap();
-    let (creates, keys, _, _) = session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    let (creates, keys) = seal_session(&t, 0, session);
     assert_eq!(keys, 1);
     assert_eq!(creates, n as u64);
     assert_eq!(t.entries(&sh).unwrap().len(), n);
@@ -1727,10 +1754,10 @@ fn bulk_session_megakey_page_chain_contiguous_once() {
     sh_next[0] = 0x10;
     sh_next[1] = 0xef;
     let next_ents = vec![Fk(1), Fk(2)];
-    let mut session = t.bulk_session(2).unwrap();
-    session.put_chain(sh, &ents).unwrap();
-    session.put_chain(sh_next, &next_ents).unwrap();
-    let (creates, keys, _, _) = session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    push_chain(&mut session, sh_next, &next_ents);
+    let (creates, keys) = seal_session(&t, 0, session);
     assert_eq!(keys, 2);
     assert_eq!(creates, n as u64 + 2);
     let got = t.entries(&sh).unwrap();
@@ -1816,10 +1843,10 @@ fn extent_append_links_tail_when_bump_moved() {
     let mut sh_gap = [0u8; 32];
     sh_gap[0] = 0x21;
     sh_gap[1] = 0xab;
-    let mut session = t.bulk_session(2).unwrap();
-    session.put_chain(sh, &ents).unwrap();
-    session.put_chain(sh_gap, &[Fk(1), Fk(2)]).unwrap();
-    let _ = session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    push_chain(&mut session, sh_gap, &[Fk(1), Fk(2)]);
+    seal_session(&t, 0, session);
     let (base, last0, n0) = extent_meta(&t, &sh);
     assert_eq!(n0, 2);
     put_create(&t, rec(sh, n as u64 + 1, 0));
@@ -1852,9 +1879,9 @@ fn extent_append_glued_bumps_extent_n() {
     let mut sh = [0u8; 32];
     sh[0] = 0x22;
     let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
-    let mut session = t.bulk_session(1).unwrap();
-    session.put_chain(sh, &ents).unwrap();
-    let _ = session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
     let (base, _, n0) = extent_meta(&t, &sh);
     assert_eq!(n0, 2);
     put_create(&t, rec(sh, n as u64 + 1, 0));
@@ -1866,167 +1893,22 @@ fn extent_append_glued_bumps_extent_n() {
 }
 
 #[test]
-fn bulk_session_put_sorted_creates_dedups() {
-    let dir = tmp();
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    let sh = script_hash(&[0x99]);
-    let recs = vec![
-        rec(sh, 1, 0),
-        rec(sh, 1, 0), // dup
-        rec(sh, 2, 0),
-        rec(sh, 3, 0),
-    ];
-    let mut session = t.bulk_session(1).unwrap();
-    let n = session.put_sorted_creates(&recs).unwrap();
-    let _ = session.finish().unwrap();
-    assert_eq!(n, 3);
-    assert_eq!(t.entries(&sh).unwrap().len(), 3);
-    assert_eq!(t.entry_count(), 3);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn reinit_clears_head_when_live_count_already_zero() {
     // Crash mid-finish: heads durable, alloc live_count still 0.
-    // bulk_session must not hard-error; reinit then cold load.
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut sh = [0u8; 32];
     sh[0] = 0x7e;
-    let mut session = t.bulk_session(1).unwrap();
-    session.put_chain(sh, &[Fk(42)]).unwrap();
-    let _ = session.finish().unwrap();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &[Fk(42)]);
+    seal_session(&t, 0, session);
     assert!(!t.head_is_empty());
     t.test_zero_live_count_keep_head().unwrap();
     assert_eq!(t.entry_count(), 0);
     assert!(!t.head_is_empty());
-    // Old bug: only reinit when entry_count>0 → bulk_session fails here.
-    assert!(t.bulk_session(1).is_err());
     t.reinit_empty_for_cold_materialize().unwrap();
     assert!(t.head_is_empty());
     assert_eq!(t.entry_count(), 0);
-    let mut session = t.bulk_session(2).unwrap();
-    session.put_chain(sh, &[Fk(1)]).unwrap();
-    let (n, _, _, _) = session.finish().unwrap();
-    assert_eq!(n, 1);
-    assert_eq!(t.entries(&sh).unwrap()[0].1.create_tx_fk, Fk(1));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn bulk_session_flushes_head_on_prefix_shard_boundary() {
-    // Live OA image stays off-disk until shard boundary / finish.
-    let dir = tmp();
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    const N: u32 = 80_000;
-    // Unique 16 B head prefixes (head truncates full 32 B to 16 B).
-    let key = |i: u32| {
-        let mut sh = [0u8; 32];
-        sh[0..4].copy_from_slice(&i.to_le_bytes());
-        sh[4] = (i >> 8) as u8; // spread across shard byte for multi-shard
-        sh
-    };
-    let mut session = t.bulk_session(u64::from(N)).unwrap();
-    assert!(t.head_value(&key(0)).unwrap().is_none());
-    for i in 0..N {
-        let sh = key(i);
-        session.put_chain(sh, &[Fk(u64::from(i) + 1)]).unwrap();
-        // Active shard not yet installed: this key is only in the live image.
-        if i == 70_000 {
-            assert!(
-                t.head_value(&sh).unwrap().is_none(),
-                "active-shard heads must not land until shard boundary"
-            );
-        }
-    }
-    let peak = session.peak_table_bytes;
-    let (creates, keys, _, _) = session.finish().unwrap();
-    assert_eq!(creates, u64::from(N));
-    assert_eq!(keys, u64::from(N));
-    assert_eq!(t.entry_count(), u64::from(N));
-    // Peak is packed recs (32 B/key), not a 2 GiB OA slot table.
-    assert_eq!(peak, (N as usize) * 24);
-    // Spot-check a few keys survive live install.
-    for i in [0u32, 1, 65_535, 70_000, N - 1] {
-        let ents = t.entries(&key(i)).unwrap();
-        assert_eq!(ents.len(), 1, "i={i}");
-        assert_eq!(ents[0].1.create_tx_fk, Fk(u64::from(i) + 1));
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn cold_progress_and_resume_skips_complete_shards() {
-    // 4-way head: fill shard 0, abandon, resume from progress, fill rest.
-    {
-        let dir = tmp();
-        let t = four_shard_dir_table(&dir);
-        assert_eq!(t.head_shard_count(), 4);
-
-        // Keys: shard = full[0] >> 6 for n=4 (top 2 bits).
-        let key = |shard: u8, i: u8| {
-            let mut k = [0u8; 32];
-            k[0] = shard << 6 | (i & 0x3f);
-            k
-        };
-        let mut session = t.bulk_session(64).unwrap();
-        for i in 0..8u8 {
-            session
-                .put_chain(key(0, i), &[Fk(u64::from(i) + 1)])
-                .unwrap();
-        }
-        // Cross into shard 1 so shard 0 is installed + checkpointed.
-        session.put_chain(key(1, 0), &[Fk(100)]).unwrap();
-        assert!(ColdProgress::load(&dir).unwrap().is_some());
-        let p = ColdProgress::load(&dir).unwrap().unwrap();
-        assert_eq!(p.next_shard, 1);
-        session.abandon_incomplete();
-
-        // Resume: skip shard 0 keys, fill 1..3.
-        let p = ColdProgress::load(&dir).unwrap().unwrap();
-        t.prepare_cold_resume(&p).unwrap();
-        let mut session = t.bulk_session_resume(64, &p).unwrap();
-        // Re-deliver shard 0 keys (must be ignored).
-        for i in 0..8u8 {
-            session
-                .put_chain(key(0, i), &[Fk(u64::from(i) + 1)])
-                .unwrap();
-        }
-        for shard in 1u8..4 {
-            for i in 0..4u8 {
-                session
-                    .put_chain(key(shard, i), &[Fk(u64::from(shard) * 100 + u64::from(i))])
-                    .unwrap();
-            }
-        }
-        let (creates, keys, _, _) = session.finish().unwrap();
-        assert!(ColdProgress::load(&dir).unwrap().is_none());
-        // Shard0 kept (8). Resume fills shards 1..3 × 4 keys (the mid-shard1 key was abandoned).
-        assert_eq!(keys, 8 + 12);
-        assert_eq!(creates, 8 + 12);
-        assert_eq!(t.entries(&key(0, 0)).unwrap().len(), 1);
-        assert_eq!(t.entries(&key(3, 3)).unwrap().len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[test]
-fn live_session_does_not_size_from_create_count() {
-    // Regression: bulk_session(total_recs) used to allocate create-count-sized
-    // OA images. unique_hint=1000 must not allocate a multi-GiB table.
-    let dir = tmp();
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    let mut session = t.bulk_session(1_000).unwrap();
-    let mut sh = [0u8; 32];
-    sh[0] = 1;
-    session.put_chain(sh, &[Fk(1)]).unwrap();
-    let peak = session.peak_table_bytes;
-    let _ = session.finish().unwrap();
-    assert_eq!(peak, 24, "one streamed rec is 24 B, not an OA image");
-    assert!(
-        peak < 16 * 1024 * 1024,
-        "peak {peak} looks like create-count sizing"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3207,20 +3089,4 @@ fn pack_one_shard_unlinks_only_its_postings() {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-#[test]
-fn publish_sorted_shard_seals_dedup_and_grows_bump() {
-    let dir = tmp();
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    t.publish_sorted_shard(0, &[], 0, t.alloc_bump()).unwrap();
-    let mut k_a = [0u8; crate::scripthash_layout::SH_HEAD_KEY_LEN];
-    k_a[0] = 0x10;
-    let mut k_b = [0u8; crate::scripthash_layout::SH_HEAD_KEY_LEN];
-    k_b[0] = 0x20;
-    let bump = t.alloc_bump().saturating_add(64);
-    t.publish_sorted_shard(0, &[(k_a, 8), (k_b, 16), (k_a, 24)], 2, bump)
-        .unwrap();
-    assert_eq!(t.alloc_bump(), bump);
-    let _ = std::fs::remove_dir_all(&dir);
 }

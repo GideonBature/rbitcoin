@@ -13,7 +13,6 @@
 
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-use crate::hashhead::HeadScale;
 use crate::scripthash_layout::{
     head_key_from_full, pack8_bytes, unpack8_bytes, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN,
     SH_HEAD_SLOT_SIZE, SH_HEAD_VALUE_LEN,
@@ -35,31 +34,6 @@ const SLOTS_PER_CHUNK: u64 = 128;
 const CHUNK_CACHE_MAX: usize = 256;
 
 pub(crate) const SH_HEAD_FULL: &str = "invariant: scripthash head full";
-
-/// Default unique-key hint for cold live OA pre-size (mainnet ~2e9).
-///
-/// Override with `RBITCOIN_SH_UNIQUE_HINT`. Tiny/test scale uses a small default
-/// so unit tests do not allocate multi-GiB tables.
-pub fn sh_unique_hint_default(scale: HeadScale) -> u64 {
-    if let Ok(s) = std::env::var("RBITCOIN_SH_UNIQUE_HINT") {
-        if let Ok(n) = s.parse::<u64>() {
-            return n.max(1);
-        }
-    }
-    scale.sh_unique_hint()
-}
-
-/// Per-shard key capacity from a global unique hint (25% skew margin).
-#[inline]
-pub fn sh_per_shard_key_budget(unique_hint: u64, n_shards: usize) -> u64 {
-    let n = n_shards.max(1) as u64;
-    unique_hint
-        .max(1)
-        .div_ceil(n)
-        .saturating_mul(5)
-        .div_ceil(4)
-        .max(1)
-}
 
 /// Shard index from the **high bits** of `scripthash[0]` (power-of-two `n_shards`).
 ///
