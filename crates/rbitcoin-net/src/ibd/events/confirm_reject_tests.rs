@@ -3229,8 +3229,7 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
         err,
         batch_len,
         sender: None,
-
-        parent: RejectParent::default(),
+        parent: RejectParent::from_lookup(&hub, hash),
     })
     .unwrap();
     drop(tx);

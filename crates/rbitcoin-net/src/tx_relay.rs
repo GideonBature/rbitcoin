@@ -5201,7 +5201,7 @@ mod tests {
 
     /// A Class C coinbase read that errors is not "not a coinbase". The
     /// genesis coinbase is unspent; forcing that read to fail must make the
-    /// prevout unavailable, while `Ok(false)` still returns the coin.
+    /// prevout unavailable. `Ok(false)` on height 0 is not a non-coinbase coin.
     #[test]
     fn coinbase_table_error_makes_the_prevout_unavailable() {
         use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
@@ -5224,13 +5224,10 @@ mod tests {
             "a failed Class C coinbase read must not admit the coin"
         );
         provider.coinbase_read.store(1, Ordering::Relaxed);
-        match provider.chain_prevout(&op) {
-            ChainPrevout::Unspent(coin) => {
-                assert!(!coin.is_coinbase, "Ok(false) stays not a coinbase");
-            }
-            ChainPrevout::KnownUnavailable => panic!("Ok(false) must still return the coin"),
-            ChainPrevout::Unknown => panic!("genesis coinbase is a known create"),
-        }
+        assert!(
+            matches!(provider.chain_prevout(&op), ChainPrevout::KnownUnavailable),
+            "height 0 is the genesis coinbase; a false Class C flag does not admit a non-coinbase coin"
+        );
         provider.coinbase_read.store(0, Ordering::Relaxed);
         match provider.chain_prevout(&op) {
             ChainPrevout::Unspent(coin) => assert!(coin.is_coinbase, "genesis is the coinbase"),

@@ -1381,7 +1381,8 @@ fn archive_plan_fee_rows_follow_packed_txs() {
     let mut bare = aligned(9);
     bare.tx_fees.clear();
     partial.append(bare);
-    assert!(partial.tx_fees.is_empty());
+    assert_eq!(partial.tx_fees, vec![7]);
+    assert_ne!(partial.tx_fees.len(), partial.packed.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
