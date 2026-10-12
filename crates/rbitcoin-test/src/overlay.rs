@@ -135,33 +135,13 @@ pub async fn spawn_node(cfg: NodeConfig, rpc: SocketAddr) -> NodeProc {
 }
 
 pub async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
-    jsonrpc_try(addr, method, params)
-        .await
-        .unwrap_or_else(|e| panic!("{e}"))
+    crate::jsonrpc::jsonrpc(addr, method, params).await
 }
 
 async fn jsonrpc_try(addr: SocketAddr, method: &str, params: Value) -> Result<Value, String> {
-    let body = serde_json::json!({"jsonrpc":"1.0","id":"test","method":method,"params":params})
-        .to_string();
-    let req = format!(
-        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {RPC_BEARER}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let mut stream = TcpStream::connect(addr)
+    crate::jsonrpc::try_jsonrpc(addr, method, params)
         .await
-        .map_err(|e| format!("rpc connect: {e}"))?;
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| format!("rpc write: {e}"))?;
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("rpc read: {e}"))?;
-    let text = String::from_utf8_lossy(&buf);
-    let json_body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-    serde_json::from_str(json_body).map_err(|e| format!("rpc {method} json: {e} body={json_body}"))
+        .map_err(|e| format!("rpc connect: {e}"))
 }
 
 pub async fn wait_jsonrpc(
@@ -381,6 +361,23 @@ pub async fn wait_file(path: &Path, wall: Duration) -> String {
 mod tests {
     use super::*;
     use bitcoin::hashes::{sha256, Hash};
+
+    #[tokio::test]
+    #[should_panic(expected = "rpc getblockcount json:")]
+    async fn jsonrpc_try_panics_when_the_body_is_not_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 2048];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope";
+            tokio::io::AsyncWriteExt::write_all(&mut sock, resp)
+                .await
+                .unwrap();
+        });
+        let _ = jsonrpc_try(addr, "getblockcount", serde_json::json!([])).await;
+    }
 
     #[test]
     #[should_panic(expected = "i2p destination base64 contains")]
