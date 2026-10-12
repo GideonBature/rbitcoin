@@ -1011,13 +1011,6 @@ const TIP_HOLE_FIFO_MIN_HOLD: Duration = Duration::from_secs(5);
 /// owner's drain time before a FIFO-blocked owner is dropped for it.
 const TIP_HOLE_FIFO_FASTER: u128 = 2;
 
-/// A dead slot's rate is zero, so it cannot beat the owner's drain time.
-/// `alive && rest` matches `rest` for every reachable rate.
-#[mutants::skip]
-fn tip_hole_slot_alive(alive: bool, rest: bool) -> bool {
-    alive && rest
-}
-
 fn tip_hole_free_peer(
     s: &PeerSlot,
     req: &state::InflightReq,
@@ -1025,10 +1018,11 @@ fn tip_hole_free_peer(
     per_peer: usize,
     estimate: u64,
 ) -> bool {
-    let rest = !req.holds(s.id)
+    // A dead slot's measured rate is also zero, so it must not be a candidate.
+    s.alive
+        && !req.holds(s.id)
         && !s.in_flight.contains(hash)
-        && peer_has_block_room(s.in_flight.len(), per_peer, estimate);
-    tip_hole_slot_alive(s.alive, rest)
+        && peer_has_block_room(s.in_flight.len(), per_peer, estimate)
 }
 
 /// Drop an owner whose peer FIFO is not on this hash when it has held the hash
@@ -2505,6 +2499,19 @@ pub(in crate::ibd) mod tests {
         assert!(
             fifo_blocked_owner_to_drop(&req, &hash, &[owner, capped], 64, 1024 * 1024).is_none(),
             "a peer at the byte cap is not a free replacement"
+        );
+        // No samples yet, so this owner's rate is zero, the same figure a dead
+        // slot reports. The other live peer already holds the hash.
+        let mut unsampled = dummy_slot(0);
+        let holds_alive = dummy_slot(1);
+        let mut dead = dummy_slot(2);
+        dead.alive = false;
+        unsampled.in_flight.insert(h(0x70));
+        unsampled.in_flight.insert(hash);
+        assert!(
+            fifo_blocked_owner_to_drop(&req, &hash, &[unsampled, holds_alive, dead], 64, 1024)
+                .is_none(),
+            "a dead slot is not a free replacement for an unsampled owner"
         );
 
         let _ = std::fs::remove_dir_all(dir);

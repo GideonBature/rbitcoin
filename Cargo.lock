@@ -988,7 +988,6 @@ dependencies = [
  "bitcoin",
  "getrandom 0.4.3",
  "libc",
- "mutants",
  "rbitcoin-consensus",
  "rbitcoin-log",
  "rbitcoin-mempool",
