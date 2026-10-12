@@ -191,7 +191,20 @@ pub(crate) struct IbdWorkState {
     pub(crate) perms: Option<std::sync::Arc<crate::peers::PeerHub>>,
     /// Confirm engine feed: assign does not demote a body load still holds.
     pub(crate) confirm_feed: Option<std::sync::Arc<super::confirm::ConfirmFeed>>,
+    /// Set while a header thread owns store IO. Peer reads only enqueue.
+    pub(crate) header_cmd: Option<HeaderCmdTx>,
 }
+
+pub(crate) enum HeaderCmd {
+    Batch {
+        peer: usize,
+        headers: Vec<bitcoin::block::Header>,
+    },
+    Ask,
+    Reseed,
+}
+
+pub(crate) type HeaderCmdTx = tokio::sync::mpsc::UnboundedSender<HeaderCmd>;
 
 impl IbdWorkState {
     pub(crate) fn new(
@@ -254,6 +267,7 @@ impl IbdWorkState {
             header_walk: super::header_walk::HeaderWalk::default(),
             perms: None,
             confirm_feed: None,
+            header_cmd: None,
         }
     }
 

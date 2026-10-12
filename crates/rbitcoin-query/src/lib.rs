@@ -57,6 +57,16 @@ use rbitcoin_store::{
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+
+static RESUME_WORK_PATH_N: AtomicU64 = AtomicU64::new(0);
+
+pub fn resume_work_path_count() -> u64 {
+    RESUME_WORK_PATH_N.load(AtomicOrdering::Relaxed)
+}
+
+pub fn reset_resume_work_path_count() {
+    RESUME_WORK_PATH_N.store(0, AtomicOrdering::Relaxed);
+}
 use std::sync::{Arc, Condvar, Mutex};
 
 pub use confirm_stats::{
@@ -2219,6 +2229,7 @@ impl Query {
         max: usize,
         exclude: &[[u8; 32]],
     ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
+        RESUME_WORK_PATH_N.fetch_add(1, AtomicOrdering::Relaxed);
         self.resume_work_path_limited(
             tip_hash,
             tip_height,

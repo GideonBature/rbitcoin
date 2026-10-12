@@ -198,53 +198,125 @@ impl HeaderWalk {
     }
 }
 
-fn ensure_origin(st: &mut IbdWorkState, hub: &ChainHub) {
-    if st.header_walk.origin {
-        return;
-    }
-    let mut height = hub.tip_height().unwrap_or(0);
-    let mut hash = hub.tip_hash();
-    let mut work = hub
-        .chain_work()
-        .unwrap_or_else(|_| Work::from_be_bytes([0u8; 32]));
-    // An empty queue starts at the confirmed tip. Indexed heights above it
-    // are not on the download path. A non-empty queue still walks the index
-    // up to its tail, including when that tail has no height of its own.
+pub(crate) struct OriginInput {
+    pub already: bool,
+    pub height: u32,
+    pub hash: Option<BlockHash>,
+    pub ordered_empty: bool,
+    pub queue_tail: Option<u32>,
+    pub next_hashes: Vec<(u32, BlockHash)>,
+    pub milestone_height: u32,
+    pub milestone_hash: Option<BlockHash>,
+    pub milestone_prev: BlockHash,
+    pub milestone_header: Option<Header>,
+}
+
+pub(crate) struct OriginLoaded {
+    pub height: u32,
+    pub hash: Option<BlockHash>,
+    pub work: Work,
+    pub milestone_hash: Option<BlockHash>,
+    pub milestone_prev: BlockHash,
+    pub milestone_header: Option<Header>,
+    pub tip_header: Option<Header>,
+}
+
+pub(crate) fn origin_input(st: &IbdWorkState, hub: &ChainHub) -> OriginInput {
+    let height = hub.tip_height().unwrap_or(0);
     let queue_tail = st
         .ordered
         .back()
         .and_then(|h| st.hash_height.get(h).copied());
+    let mut next_hashes = Vec::new();
     if !st.ordered.is_empty() {
-        while let Some(next_h) = height.checked_add(1) {
-            if queue_tail.is_some_and(|tail| next_h > tail) {
-                break;
-            }
+        let mut next_h = height.saturating_add(1);
+        while queue_tail.is_none_or(|tail| next_h <= tail) {
             let Some(next) = st.height_to_hash.get(&next_h).copied() else {
                 break;
             };
-            let Some(hdr) = hub.header_of(&next) else {
+            next_hashes.push((next_h, next));
+            next_h = next_h.saturating_add(1);
+        }
+    }
+    OriginInput {
+        already: st.header_walk.origin,
+        height,
+        hash: hub.tip_hash(),
+        ordered_empty: st.ordered.is_empty(),
+        queue_tail,
+        next_hashes,
+        milestone_height: hub.milestone.height,
+        milestone_hash: st.header_walk.tip.milestone_hash,
+        milestone_prev: st.header_walk.tip.milestone_prev,
+        milestone_header: st.header_walk.tip.milestone_header,
+    }
+}
+
+/// Header-store reads for the walk origin. No `IbdWorkState` borrow.
+pub(crate) fn load_origin(hub: &ChainHub, input: &OriginInput) -> OriginLoaded {
+    let mut height = input.height;
+    let mut hash = input.hash;
+    let mut work = hub
+        .chain_work()
+        .unwrap_or_else(|_| Work::from_be_bytes([0u8; 32]));
+    let mut milestone_hash = input.milestone_hash;
+    let mut milestone_prev = input.milestone_prev;
+    let mut milestone_header = input.milestone_header;
+    if !input.ordered_empty {
+        for (next_h, next) in &input.next_hashes {
+            if input.queue_tail.is_some_and(|tail| *next_h > tail) {
+                break;
+            }
+            let Some(hdr) = hub.header_of(next) else {
                 break;
             };
             if hash.is_some_and(|h| hdr.prev_blockhash != h) {
                 break;
             }
             work = work + hdr.work();
-            if hub.milestone.height == next_h {
-                let mut latch = st.header_walk.tip.clone();
-                latch.height = next_h;
-                latch.hash = Some(next);
+            if input.milestone_height == *next_h {
+                let mut latch = WalkTip {
+                    height: *next_h,
+                    hash: Some(*next),
+                    milestone_hash,
+                    milestone_prev,
+                    milestone_header,
+                    ..WalkTip::default()
+                };
                 remember_milestone(&mut latch, hub, hdr.prev_blockhash, &hdr);
-                st.header_walk.tip.milestone_hash = latch.milestone_hash;
-                st.header_walk.tip.milestone_prev = latch.milestone_prev;
-                st.header_walk.tip.milestone_header = latch.milestone_header;
+                milestone_hash = latch.milestone_hash;
+                milestone_prev = latch.milestone_prev;
+                milestone_header = latch.milestone_header;
             }
-            height = next_h;
-            hash = Some(next);
+            height = *next_h;
+            hash = Some(*next);
         }
     }
-    let milestone_hash = st.header_walk.tip.milestone_hash;
-    let milestone_prev = st.header_walk.tip.milestone_prev;
-    let milestone_header = st.header_walk.tip.milestone_header;
+    let tip_header = hash.and_then(|h| hub.header_of(&h));
+    OriginLoaded {
+        height,
+        hash,
+        work,
+        milestone_hash,
+        milestone_prev,
+        milestone_header,
+        tip_header,
+    }
+}
+
+pub(crate) fn install_origin(st: &mut IbdWorkState, hub: &ChainHub, loaded: OriginLoaded) {
+    if st.header_walk.origin {
+        return;
+    }
+    let OriginLoaded {
+        height,
+        hash,
+        work,
+        milestone_hash,
+        milestone_prev,
+        milestone_header,
+        tip_header,
+    } = loaded;
     st.header_walk.tip = WalkTip {
         hash,
         height,
@@ -258,15 +330,22 @@ fn ensure_origin(st: &mut IbdWorkState, hub: &ChainHub) {
     st.header_walk.base_height = height;
     st.header_walk.base_work = work.to_be_bytes();
     st.header_walk.origin = true;
-    if let Some(h) = hash.and_then(|h| hub.header_of(&h)) {
+    if let Some(h) = tip_header {
         seed_tip_times(st, hub, h);
         note_period_snap(&mut st.header_walk.tip.diff, hub, h, height);
         note_full_diff_snap(&mut st.header_walk.tip.diff, hub, &h, height);
     }
     st.header_walk.base_diff = st.header_walk.tip.diff;
-    // The confirmed tip is already validated. A restart has no new
-    // checkpoint yet; this base still meets the floor when its work does.
     publish_work(st, hub);
+}
+
+fn ensure_origin(st: &mut IbdWorkState, hub: &ChainHub) {
+    if st.header_walk.origin {
+        return;
+    }
+    let input = origin_input(st, hub);
+    let loaded = load_origin(hub, &input);
+    install_origin(st, hub, loaded);
 }
 
 fn below_floor(hub: &ChainHub, work: &[u8; 32]) -> bool {

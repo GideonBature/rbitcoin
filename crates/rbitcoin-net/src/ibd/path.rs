@@ -8,39 +8,56 @@ use bitcoin::BlockHash;
 use rbitcoin_log::{info, warn};
 use std::time::Instant;
 
+pub(crate) fn load_resume_entries(
+    hub: &ChainHub,
+    exclude: &[[u8; 32]],
+) -> Vec<rbitcoin_query::ResumeWorkEntry> {
+    let Some(tip_hash) = hub.tip_hash() else {
+        return Vec::new();
+    };
+    let tip_h = hub.tip_height().unwrap_or(0);
+    info!("ibd: resume seed walk start tip={tip_h} max_ordered={MAX_ORDERED_HEADERS}");
+    match hub.query.resume_work_path_after_tip_excluding(
+        tip_hash.to_byte_array(),
+        tip_h,
+        MAX_ORDERED_HEADERS,
+        exclude,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("ibd: resume seed from store failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
 pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
+    let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let path = load_resume_entries(hub, &exclude);
+    install_resumed_path(st, hub, &path);
+}
+
+pub(crate) fn install_resumed_path(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    path: &[rbitcoin_query::ResumeWorkEntry],
+) {
     let Some(tip_hash) = hub.tip_hash() else {
         return;
     };
     let tip_h = hub.tip_height().unwrap_or(0);
     let t0 = Instant::now();
-    // Operator breadcrumb: crash between "peers ready" and this line is in
-    // resume_work_path (header graph walk), not getdata assign.
-    info!("ibd: resume seed walk start tip={tip_h} max_ordered={MAX_ORDERED_HEADERS}");
-    let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
-    let path = match hub.query.resume_work_path_after_tip_excluding(
-        tip_hash.to_byte_array(),
-        tip_h,
-        MAX_ORDERED_HEADERS,
-        &exclude,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("ibd: resume seed from store failed: {e}");
-            return;
-        }
-    };
+    if path.is_empty() {
+        return;
+    }
     info!(
         "ibd: resume seed graph n={} (store walk {:?})",
         path.len(),
         t0.elapsed()
     );
-    if path.is_empty() {
-        return;
-    }
     let mut explore_is_sibling_fork = false;
     let mut explore_need = Vec::new();
-    for e in &path {
+    for e in path {
         let hash = BlockHash::from_byte_array(e.hash);
         if st.reorg.invalid.contains(e.hash) {
             break;
@@ -88,7 +105,7 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
     let mut ready_prefix_to = tip_h;
     let mut ready_prefix = true;
     let tip = hub.tip_height().zip(hub.tip_hash());
-    for e in &path {
+    for e in path {
         if st.reorg.invalid.contains(e.hash) {
             break;
         }

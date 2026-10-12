@@ -23,11 +23,36 @@ use crate::seeds::AddrMan;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use rbitcoin_log::{info, trace, warn};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+struct PreparedBatch {
+    fks: Vec<rbitcoin_primitives::Fk>,
+    work: Option<bitcoin::Work>,
+}
+
+thread_local! {
+    static PREPARED_BATCH: RefCell<Option<PreparedBatch>> = const { RefCell::new(None) };
+    static APPLY_INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn set_prepared_batch(fks: Vec<rbitcoin_primitives::Fk>, work: Option<bitcoin::Work>) {
+    PREPARED_BATCH.with(|slot| {
+        *slot.borrow_mut() = Some(PreparedBatch { fks, work });
+    });
+}
+
+pub(crate) fn clear_prepared_batch() {
+    PREPARED_BATCH.with(|slot| *slot.borrow_mut() = None);
+}
+
+pub(crate) fn set_apply_inline(inline: bool) {
+    APPLY_INLINE.with(|slot| slot.set(inline));
+}
 
 /// Immediately stop getdata and disconnect every peer (SIGINT / IBD exit).
 pub(crate) fn disconnect_all_peers(st: &mut IbdWorkState) {
@@ -280,6 +305,14 @@ fn accepted_headers(
     hub: &ChainHub,
     headers: &[bitcoin::block::Header],
 ) -> Vec<(bitcoin::block::Header, rbitcoin_primitives::Fk)> {
+    if let Some(fks) = PREPARED_BATCH.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|prepared| prepared.fks.len() == headers.len())
+            .map(|prepared| prepared.fks.clone())
+    }) {
+        return headers.iter().copied().zip(fks).collect();
+    }
     let mut accepted: Vec<_> = headers
         .iter()
         .map_while(|h| st.header_fks.get(&h.block_hash()).map(|fk| (*h, *fk)))
@@ -315,7 +348,12 @@ fn on_headers_batch(
             }
             if st.is_on_path(&hash, h) {
                 let base = if hub.tip_hash() == Some(prev) {
-                    hub.chain_work().ok()
+                    let prepared = PREPARED_BATCH.with(|slot| slot.borrow().is_some());
+                    if prepared {
+                        PREPARED_BATCH.with(|slot| slot.borrow().as_ref().and_then(|p| p.work))
+                    } else {
+                        hub.chain_work().ok()
+                    }
                 } else {
                     None
                 };
@@ -440,12 +478,18 @@ pub(crate) fn apply_peer_event(
     }
 }
 
-fn apply_headers_event(
+pub(crate) fn apply_headers_event(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
 ) {
+    if !APPLY_INLINE.with(|slot| slot.get()) {
+        if let Some(tx) = st.header_cmd.clone() {
+            let _ = tx.send(super::state::HeaderCmd::Batch { peer, headers });
+            return;
+        }
+    }
     let tip_before = super::header_walk::candidate_tip(st);
     let work_before = super::header_walk::candidate_work(st);
     let queued_before = st.ordered.len();

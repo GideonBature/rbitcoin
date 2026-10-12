@@ -417,6 +417,19 @@ pub(crate) fn request_headers_from(
     Ok(s.cmd_tx.send(PeerCmd::GetHeaders { locator }).is_ok())
 }
 
+thread_local! {
+    static WARM_LOCATOR: std::cell::RefCell<Option<Vec<BlockHash>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn set_warm_locator(locator: Option<Vec<BlockHash>>) {
+    WARM_LOCATOR.with(|slot| *slot.borrow_mut() = locator);
+}
+
+fn warm_locator() -> Option<Vec<BlockHash>> {
+    WARM_LOCATOR.with(|slot| slot.borrow().clone())
+}
+
 /// Locator for IBD getheaders: prefer the **work-path tip** (highest ordered /
 /// archived hash) ahead of the confirmed store tip.
 ///
@@ -442,10 +455,13 @@ pub(crate) fn ibd_header_locator(
             locator.push(t);
         }
     }
-    let rest = hub
-        .query
-        .locator_hashes()
-        .map_err(|e| NetError::Consensus(e.to_string()))?;
+    let rest = if let Some(warm) = warm_locator() {
+        warm
+    } else {
+        hub.query
+            .locator_hashes()
+            .map_err(|e| NetError::Consensus(e.to_string()))?
+    };
     for h in rest {
         if !locator.contains(&h) {
             locator.push(h);

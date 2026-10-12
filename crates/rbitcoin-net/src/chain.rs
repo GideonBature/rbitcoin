@@ -22,6 +22,26 @@ use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+
+static ENSURE_HEADERS_BATCH_N: AtomicU64 = AtomicU64::new(0);
+static HEADER_OF_N: AtomicU64 = AtomicU64::new(0);
+static CHAIN_WORK_N: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_header_store_counts() {
+    ENSURE_HEADERS_BATCH_N.store(0, Ordering::Relaxed);
+    HEADER_OF_N.store(0, Ordering::Relaxed);
+    CHAIN_WORK_N.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn header_store_counts() -> (u64, u64, u64) {
+    (
+        ENSURE_HEADERS_BATCH_N.load(Ordering::Relaxed),
+        HEADER_OF_N.load(Ordering::Relaxed),
+        CHAIN_WORK_N.load(Ordering::Relaxed),
+    )
+}
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::{broadcast, Notify};
@@ -1177,6 +1197,7 @@ impl ChainHub {
 
     /// Header for a connected, held, archived, or header-only hash.
     pub(crate) fn header_of(&self, hash: &BlockHash) -> Option<bitcoin::block::Header> {
+        HEADER_OF_N.fetch_add(1, Ordering::Relaxed);
         if let Some(b) = self.load_side_body(hash) {
             return Some(b.header);
         }
@@ -1282,6 +1303,7 @@ impl ChainHub {
     /// Fail closed: missing parent is the same error as [`Self::ensure_header_fk`].
     /// Output fks align with `headers`.
     pub fn ensure_headers_batch(&self, headers: &[Header]) -> Result<Vec<Fk>, NetError> {
+        ENSURE_HEADERS_BATCH_N.fetch_add(1, Ordering::Relaxed);
         if headers.is_empty() {
             return Ok(Vec::new());
         }
@@ -3135,6 +3157,7 @@ impl ChainHub {
 
     /// Total chain work from genesis through tip (best effort from headers).
     pub fn chain_work(&self) -> Result<Work, NetError> {
+        CHAIN_WORK_N.fetch_add(1, Ordering::Relaxed);
         self.work_from_fork_to_tip(None)
     }
 
