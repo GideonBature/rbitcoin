@@ -22,11 +22,7 @@ pub fn tiny_query_labeled(label: &str) -> (TempDir, Query) {
     (dir, q)
 }
 
-/// Synthetic header shared by tweak tests.
-///
-/// Version 1, time `h + 1`, bits `0x207fffff`, nonce `h`. Merkle bytes 0..4
-/// are the height. `marker` is merkle byte 5. A missing parent hashes as the
-/// merkle root itself.
+/// Synthetic header shared by tweak tests. `marker` is the merkle byte those tests key on.
 pub fn header_with_merkle_marker(
     h: u32,
     prev_fk: Fk,
