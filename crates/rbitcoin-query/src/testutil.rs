@@ -22,6 +22,37 @@ pub fn tiny_query_labeled(label: &str) -> (TempDir, Query) {
     (dir, q)
 }
 
+/// Synthetic header shared by tweak tests.
+///
+/// Version 1, time `h + 1`, bits `0x207fffff`, nonce `h`. Merkle bytes 0..4
+/// are the height. `marker` is merkle byte 5. A missing parent hashes as the
+/// merkle root itself.
+pub fn header_with_merkle_marker(
+    h: u32,
+    prev_fk: Fk,
+    prev_hash: Option<[u8; 32]>,
+    marker: u8,
+) -> HeaderRecord {
+    let mut merkle = [0u8; 32];
+    merkle[0..4].copy_from_slice(&h.to_le_bytes());
+    merkle[5] = marker;
+    let hash = match prev_hash {
+        None => merkle,
+        Some(ph) => rbitcoin_store::block_header_hash(1, &ph, &merkle, h + 1, 0x207f_ffff, h),
+    };
+    HeaderRecord {
+        prev_fk,
+        version: 1,
+        timestamp: h + 1,
+        bits: 0x207f_ffff,
+        nonce: h,
+        merkle_root: merkle,
+        hash,
+        size: 0,
+        weight: 0,
+    }
+}
+
 pub fn tx_apply_to_tx(ta: &TxApply) -> bitcoin::Transaction {
     bitcoin::Transaction {
         version: bitcoin::transaction::Version(ta.tx.version),
