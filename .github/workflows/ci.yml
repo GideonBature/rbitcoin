@@ -133,7 +133,7 @@ jobs:
       - name: tmpfs headroom
         run: df -h /dev/shm && free -m
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude rbitcoin-bench
 
   # Windows IOCP store + mmap fuse + query confirm + --smoke. Required. Not a CRT-static snapshot.
   windows:

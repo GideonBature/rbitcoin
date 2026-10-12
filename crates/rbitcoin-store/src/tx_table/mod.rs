@@ -1784,7 +1784,6 @@ impl TxTable {
         spenders: &crate::spender_table::SpenderTable,
         abs_edges: &[(u64, Fk, u32, Fk, u32)],
     ) -> Result<Vec<(Fk, u32, Fk, u32)>, StoreError> {
-        const META_LEN: u64 = OutputRecord::SPENT_SLOT_LEN as u64;
         if abs_edges.is_empty() {
             return Ok(Vec::new());
         }
@@ -1805,7 +1804,20 @@ impl TxTable {
                 }
             }
         }
+        self.put_spend_batch_by_abs_meta_pwrite(spenders, abs_edges)
+    }
 
+    /// Serial `pwrite` RMW for [`Self::put_spend_batch_by_abs_meta`].
+    ///
+    /// Same slot bytes and cold list as the uring helper. An empty batch is
+    /// an empty cold list. Out-of-range offsets and failed reads or writes
+    /// are returned cold and do not change the slot.
+    fn put_spend_batch_by_abs_meta_pwrite(
+        &self,
+        spenders: &crate::spender_table::SpenderTable,
+        abs_edges: &[(u64, Fk, u32, Fk, u32)],
+    ) -> Result<Vec<(Fk, u32, Fk, u32)>, StoreError> {
+        const META_LEN: u64 = OutputRecord::SPENT_SLOT_LEN as u64;
         let body_pub = self.spent.body_published_len();
         let mut cold: Vec<(Fk, u32, Fk, u32)> = Vec::new();
         for &(abs, create_fk, vout, spend_fk, spend_vin) in abs_edges {

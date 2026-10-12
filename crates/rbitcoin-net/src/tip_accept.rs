@@ -273,8 +273,9 @@ mod tests {
             done_tx.send(()).ok();
         });
         thread::sleep(Duration::from_millis(20));
-        assert!(
-            done_rx.try_recv().is_err(),
+        assert_eq!(
+            done_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty),
             "wait_current_job must not return while the snapshotted job is running"
         );
         release1_tx.send(()).unwrap();
@@ -363,8 +364,9 @@ mod tests {
             1u8
         })
         .await;
-        assert!(
-            progressed.is_ok(),
+        assert_eq!(
+            progressed,
+            Ok(1),
             "JoinOnDrop must not park the tokio worker"
         );
         drop(_wake);

@@ -2270,6 +2270,88 @@ fn put_spends_on_create_at_batch_patches_all_vouts() {
 }
 
 #[test]
+fn pwrite_spend_batch_records_sole_multi_and_cold() {
+    let dir = tempfile_dir("pwrite-spend");
+    let t = create_tiny(&dir);
+    let spenders = crate::spender_table::SpenderTable::create(&dir).unwrap();
+    let empty = t
+        .put_spend_batch_by_abs_meta_pwrite(&spenders, &[])
+        .unwrap();
+    assert!(empty.is_empty());
+
+    let tx = TxRecord {
+        txid: [0xee; 32],
+        version: 1,
+        locktime: 0,
+        input_start_fk: Fk::NULL,
+        input_count: 1,
+        output_start_fk: Fk::NULL,
+        output_count: 1,
+    };
+    let inputs = vec![InputRecord {
+        prev_txid: [0u8; 32],
+        create_fk: Fk::NULL,
+        prev_index: u32::MAX,
+        sequence: u32::MAX,
+        script_sig: vec![0x01],
+        witness: vec![],
+    }];
+    let outputs = vec![OutputRecord::unspent(1, vec![0x51])];
+    let fks = t
+        .put_full_batch_indexed(&[(tx, inputs, outputs)], false)
+        .unwrap();
+    let create = fks[0];
+    let (off, len) = t.spent_range(create).unwrap();
+    let abs = spent_abs(off, 0);
+    let s1 = Fk(10);
+    let sole = [(abs, create, 0u32, s1, 3u32)];
+    assert!(t
+        .put_spend_batch_by_abs_meta_pwrite(&spenders, &sole)
+        .unwrap()
+        .is_empty());
+    let (multi, field, vin) = t.get_output_spender_meta_at(off, len, 0).unwrap();
+    assert!(!multi && field == s1 && vin == 3);
+    assert_eq!(spenders.count(), 0);
+
+    assert!(t
+        .put_spend_batch_by_abs_meta_pwrite(&spenders, &sole)
+        .unwrap()
+        .is_empty());
+    let (multi, field, vin) = t.get_output_spender_meta_at(off, len, 0).unwrap();
+    assert!(!multi && field == s1 && vin == 3);
+    assert_eq!(spenders.count(), 0);
+
+    let s2 = Fk(20);
+    let second = [(abs, create, 0u32, s2, 1u32)];
+    assert!(t
+        .put_spend_batch_by_abs_meta_pwrite(&spenders, &second)
+        .unwrap()
+        .is_empty());
+    let (multi, head, vin) = t.get_output_spender_meta_at(off, len, 0).unwrap();
+    assert!(multi && vin == 0);
+    let (tx2, vin2, next) = spenders.get(head).unwrap();
+    assert_eq!((tx2, vin2), (s2, 1));
+    let (tx1, vin1, end) = spenders.get(next).unwrap();
+    assert_eq!((tx1, vin1, end), (s1, 3, Fk::NULL));
+    assert_eq!(spenders.count(), 2);
+
+    let past = t.spent.body_published_len();
+    let cold_edge = (create, 0u32, Fk(30), 0u32);
+    assert_eq!(
+        t.put_spend_batch_by_abs_meta_pwrite(
+            &spenders,
+            &[(past, cold_edge.0, cold_edge.1, cold_edge.2, cold_edge.3)]
+        )
+        .unwrap(),
+        vec![cold_edge]
+    );
+    let (multi_after, head_after, vin_after) = t.get_output_spender_meta_at(off, len, 0).unwrap();
+    assert_eq!((multi_after, head_after, vin_after), (multi, head, vin));
+    assert_eq!(spenders.count(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn input_witness_roundtrip() {
     let rec = InputRecord {
         prev_txid: [1u8; 32],

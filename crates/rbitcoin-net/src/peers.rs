@@ -1360,7 +1360,7 @@ pub struct PeerInfo {
     pub best_known: Option<BlockHash>,
 }
 
-#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
+#[allow(clippy::type_complexity)] // session table: live peers, manual hosts, dials
 /// Thread-safe session table + addnode remembered addrs.
 pub struct PeerHub {
     next_id: AtomicU64,
