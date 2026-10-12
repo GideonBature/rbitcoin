@@ -22,9 +22,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-/// TCP RPC Bearer matching `{datadir}/rpc.token` written by the tests.
-const RPC_BEARER: &str = "Bearer pass";
-
 fn ephemeral_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -399,13 +396,7 @@ async fn pin_internal_block_txs_and_outspends(esplora_addr: SocketAddr, block_ha
 }
 
 async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
-    let body = json!({"jsonrpc":"1.0","id":"test","method":method,"params":params}).to_string();
-    let req = format!(
-        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {RPC_BEARER}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let (_st, text) = http_exchange(addr, &req).await;
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("rpc {method} json: {e} body={text}"))
+    rbitcoin_test::jsonrpc::jsonrpc(addr, method, params).await
 }
 
 /// A9: `waitforblockheight` timeout=0 while behind returns the live tip.

@@ -170,7 +170,6 @@ pub fn mine_regtest_paying(
     script_pubkey: ScriptBuf,
     extra_txs: Vec<Transaction>,
 ) -> Block {
-    let bits = CompactTarget::from_consensus(REGTEST_POW_BITS);
     // Post-BIP65 (regtest height 1) requires nVersion ≥ 4. Core generate uses
     // VERSIONBITS_TOP_BITS; 4 is the buried minimum and enough for dersig/cltv.
     let header = Header {
@@ -178,7 +177,7 @@ pub fn mine_regtest_paying(
         prev_blockhash: prev,
         merkle_root: TxMerkleNode::from_byte_array([0u8; 32]),
         time,
-        bits,
+        bits: CompactTarget::from_consensus(REGTEST_POW_BITS),
         nonce: 0,
     };
     let mut txdata = Vec::with_capacity(1 + extra_txs.len());
@@ -259,6 +258,15 @@ fn coinbase_paying_params(
     script_pubkey: ScriptBuf,
     params: &ChainParams,
 ) -> Transaction {
+    regtest_coinbase(
+        height,
+        Amount::from_sat(block_subsidy(height, params) as u64),
+        script_pubkey,
+    )
+}
+
+/// BIP34 coinbase (scriptSig padded to at least 2 bytes) paying `value` to `script_pubkey`.
+pub fn regtest_coinbase(height: u32, value: Amount, script_pubkey: ScriptBuf) -> Transaction {
     let mut ss = if height == 0 {
         vec![0x00]
     } else {
@@ -277,7 +285,7 @@ fn coinbase_paying_params(
             witness: Witness::new(),
         }],
         output: vec![TxOut {
-            value: Amount::from_sat(block_subsidy(height, params) as u64),
+            value,
             script_pubkey,
         }],
     }

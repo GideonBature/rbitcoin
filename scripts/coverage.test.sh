@@ -8,18 +8,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 COV="$ROOT/scripts/coverage.sh"
 PASS=0
 FAIL=0
+source "$ROOT/scripts/contract-assert.sh"
 
-assert_ok() {
-  local name="$1"
-  shift
-  if "$@"; then
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  else
-    echo "not ok - $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 IGNORE="$(sed -n "s/^IGNORE='\\(.*\\)'/\\1/p" "$COV")"
 if [ "${#IGNORE}" -eq 0 ]; then

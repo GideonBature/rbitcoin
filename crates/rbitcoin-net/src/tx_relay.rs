@@ -2462,27 +2462,40 @@ impl MempoolHub {
 
     /// Lazy singleflight refresh when dirty or older than [`FEE_SNAPSHOT_MAX_AGE`].
     fn maybe_refresh_fee_snapshot(&self) {
-        let now = Instant::now();
         let snap = self.fee_snapshot.load_full();
-        let stale = now
-            .checked_duration_since(snap.computed_at)
+        // Always refresh when never populated with real data and dirty (first admit path).
+        self.singleflight_if_stale(
+            snap.computed_at,
+            self.fee_dirty.load(Ordering::Acquire),
+            &self.fee_refreshing,
+            Self::refresh_fee_snapshot,
+        );
+    }
+
+    /// Stale-or-dirty gate shared by the fee and tx snapshots. The refresh body stays with the caller.
+    fn singleflight_if_stale(
+        &self,
+        computed_at: Instant,
+        dirty: bool,
+        refreshing: &AtomicBool,
+        refresh: fn(&Self),
+    ) {
+        let stale = Instant::now()
+            .checked_duration_since(computed_at)
             .map(|d| d >= FEE_SNAPSHOT_MAX_AGE)
             .unwrap_or(true);
-        let dirty = self.fee_dirty.load(Ordering::Acquire);
-        // Always refresh when never populated with real data and dirty (first admit path).
         if !dirty && !stale {
             return;
         }
-        if self
-            .fee_refreshing
+        if refreshing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             // Another thread is refreshing; callers use the previous Arc.
             return;
         }
-        self.refresh_fee_snapshot();
-        self.fee_refreshing.store(false, Ordering::Release);
+        refresh(self);
+        refreshing.store(false, Ordering::Release);
     }
 
     /// One graph linearize under short read lock, then pure math off-lock → publish.
@@ -2557,25 +2570,13 @@ impl MempoolHub {
 
     /// Lazy singleflight rebuild of the live-tx snapshot.
     fn maybe_refresh_tx_snapshot(&self) {
-        let now = Instant::now();
         let snap = self.tx_snapshot.load_full();
-        let stale = now
-            .checked_duration_since(snap.computed_at)
-            .map(|d| d >= FEE_SNAPSHOT_MAX_AGE)
-            .unwrap_or(true);
-        let dirty = self.tx_snap_dirty.load(Ordering::Acquire);
-        if !dirty && !stale {
-            return;
-        }
-        if self
-            .tx_snap_refreshing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        self.refresh_tx_snapshot();
-        self.tx_snap_refreshing.store(false, Ordering::Release);
+        self.singleflight_if_stale(
+            snap.computed_at,
+            self.tx_snap_dirty.load(Ordering::Acquire),
+            &self.tx_snap_refreshing,
+            Self::refresh_tx_snapshot,
+        );
     }
 
     fn refresh_tx_snapshot(&self) {
@@ -6733,17 +6734,7 @@ mod tests {
     }
 
     fn copy_store_tree(src: &std::path::Path, dst: &std::path::Path) {
-        for ent in std::fs::read_dir(src).expect("read store") {
-            let ent = ent.expect("store entry");
-            let to = dst.join(ent.file_name());
-            let ty = ent.file_type().expect("file type");
-            if ty.is_dir() {
-                std::fs::create_dir_all(&to).unwrap();
-                copy_store_tree(&ent.path(), &to);
-            } else {
-                std::fs::copy(ent.path(), to).unwrap();
-            }
-        }
+        rbitcoin_store::testutil::copy_store_tree(src, dst);
     }
 
     #[test]

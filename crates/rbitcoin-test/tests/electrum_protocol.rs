@@ -83,17 +83,7 @@ fn open_electrum_maturity(dir: &TempDir) -> (Query, bitcoin::BlockHash, u32, Vec
 }
 
 fn copy_store(src: &std::path::Path, dst: &std::path::Path) {
-    for ent in std::fs::read_dir(src).expect("read store") {
-        let ent = ent.expect("store entry");
-        let to = dst.join(ent.file_name());
-        let ty = ent.file_type().expect("file type");
-        if ty.is_dir() {
-            std::fs::create_dir_all(&to).unwrap();
-            copy_store(&ent.path(), &to);
-        } else {
-            std::fs::copy(ent.path(), to).unwrap();
-        }
-    }
+    rbitcoin_store::testutil::copy_store_tree(src, dst);
 }
 
 async fn pin_wallet_protocol_1_6(stream: &mut TcpStream) {

@@ -48,17 +48,7 @@ async fn start_node_inbound(dir: &TempDir, max_inbound: usize) -> P2PNode {
 }
 
 fn copy_store_tree(src: &std::path::Path, dst: &std::path::Path) {
-    for ent in std::fs::read_dir(src).expect("read store") {
-        let ent = ent.expect("store entry");
-        let to = dst.join(ent.file_name());
-        let ty = ent.file_type().expect("file type");
-        if ty.is_dir() {
-            std::fs::create_dir_all(&to).unwrap();
-            copy_store_tree(&ent.path(), &to);
-        } else {
-            std::fs::copy(ent.path(), &to).unwrap();
-        }
-    }
+    rbitcoin_store::testutil::copy_store_tree(src, dst);
 }
 
 fn tip_hash_of(q: &Query) -> BlockHash {
@@ -200,8 +190,6 @@ fn llvm_cov_wall(default_secs: u64, llvm_secs: u64) -> Duration {
     }
 }
 
-const RPC_BEARER: &str = "Bearer pass"; // `{datadir}/rpc.token` written by the tests
-
 fn ephemeral_addr() -> SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -232,22 +220,7 @@ async fn wait_listeners(addrs: &[SocketAddr]) {
 }
 
 async fn jsonrpc(addr: SocketAddr, method: &str, params: serde_json::Value) -> serde_json::Value {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-    let body = serde_json::json!({"jsonrpc":"1.0","id":"test","method":method,"params":params})
-        .to_string();
-    let req = format!(
-        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {RPC_BEARER}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let mut stream = TcpStream::connect(addr).await.expect("rpc connect");
-    stream.write_all(req.as_bytes()).await.unwrap();
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await.unwrap();
-    let text = String::from_utf8_lossy(&buf);
-    let json_body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-    serde_json::from_str(json_body)
-        .unwrap_or_else(|e| panic!("rpc {method} json: {e} body={json_body}"))
+    rbitcoin_test::jsonrpc::jsonrpc(addr, method, params).await
 }
 
 async fn electrum_rpc(

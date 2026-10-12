@@ -23,10 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-
-const RPC_BEARER: &str = "Bearer pass";
 
 fn llvm_cov_wall(default_secs: u64, llvm_secs: u64) -> Duration {
     if std::env::var_os("CARGO_LLVM_COV").is_some() {
@@ -175,26 +173,12 @@ fn spawn_run_p2p(cfg: NodeConfig) -> tokio::task::JoinHandle<Result<(), rbitcoin
 }
 
 async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
-    try_jsonrpc(addr, method, params)
-        .await
-        .unwrap_or_else(|e| panic!("rpc {method} connect: {e}"))
+    rbitcoin_test::jsonrpc::jsonrpc(addr, method, params).await
 }
 
 /// `Err` only when the TCP connect fails, so a poll can retry it.
 async fn try_jsonrpc(addr: SocketAddr, method: &str, params: Value) -> std::io::Result<Value> {
-    let body = json!({"jsonrpc":"1.0","id":"test","method":method,"params":params}).to_string();
-    let req = format!(
-        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {RPC_BEARER}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let mut stream = TcpStream::connect(addr).await?;
-    stream.write_all(req.as_bytes()).await.unwrap();
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await.unwrap();
-    let text = String::from_utf8_lossy(&buf);
-    let json_body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-    Ok(serde_json::from_str(json_body)
-        .unwrap_or_else(|e| panic!("rpc {method} json: {e} body={json_body}")))
+    rbitcoin_test::jsonrpc::try_jsonrpc(addr, method, params).await
 }
 
 async fn history_txids(electrum: SocketAddr, script: &[u8]) -> BTreeSet<String> {

@@ -1,15 +1,7 @@
 //! Shared Core script-language assembler and hex decode (unit-test only).
 
 pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    let h = s.trim();
-    if !h.len().is_multiple_of(2) {
-        return Err(format!("odd hex len {}", h.len()));
-    }
-    let mut out = Vec::with_capacity(h.len() / 2);
-    for i in (0..h.len()).step_by(2) {
-        out.push(u8::from_str_radix(&h[i..i + 2], 16).map_err(|e| e.to_string())?);
-    }
-    Ok(out)
+    rbitcoin_primitives::hex_decode(s.trim()).map_err(|e| e.to_string())
 }
 
 /// Assemble Core script string ("1 2 ADD", "0x4c 0x01 0x07", "'Az'") to bytes.
@@ -335,4 +327,17 @@ fn opcode_byte(name: &str) -> Option<u8> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_hex;
+
+    #[test]
+    fn decode_hex_strips_0x_and_names_odd_length() {
+        assert_eq!(decode_hex("0x0a").unwrap(), vec![0x0a]);
+        assert_eq!(decode_hex("0Xff").unwrap(), vec![0xff]);
+        assert_eq!(decode_hex("abc").unwrap_err(), "odd hex length");
+        assert_eq!(decode_hex("zz").unwrap_err(), "invalid hex digit");
+    }
 }

@@ -8,18 +8,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN="$ROOT/scripts/ci-os-smoke.sh"
 PASS=0
 FAIL=0
+source "$ROOT/scripts/contract-assert.sh"
 
-assert_ok() {
-  local name="$1"
-  shift
-  if "$@"; then
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  else
-    echo "not ok - $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 out="$(CI_OS_SMOKE_DRY_RUN=1 "$RUN")"
 assert_ok "dry-run names store platform + query confirm + node --smoke" \
@@ -34,6 +24,8 @@ assert_ok "dry-run lists seal publish remap" \
   grep -q "segmented_head::tests::insert_roll_seal_lookup_roundtrip" <<<"$out"
 assert_ok "dry-run lists mapped SH BDZ3 occ" \
   grep -q "bdz::tests::compact_packed_fd_is_bdz3_and_matches_ram" <<<"$out"
+assert_ok "dry-run lists the exact pread errno pin" \
+  grep -q "pread_file_exact_reports_the_pread_errno" <<<"$out"
 assert_ok "dry-run lists query connect-chain confirm" \
   grep -q "chain_view_pin_asof_reorg" <<<"$out"
 assert_ok "dry-run lists query SH-cap confirm" \

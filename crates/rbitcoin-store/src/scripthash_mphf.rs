@@ -6,7 +6,6 @@
 
 use crate::bdz::BdzMphf;
 use crate::error::StoreError;
-use crate::io_handle::IoHandle;
 use crate::scripthash_layout::{pack8, unpack8, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -305,41 +304,13 @@ fn rewrite_val_windows(
 }
 
 fn pread_file_exact(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-    let h = IoHandle::from_file(file);
-    let mut done = 0usize;
-    while done < buf.len() {
-        let n = h.pread(offset + done as u64, &mut buf[done..]);
-        if n < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "pread short",
-            ));
-        }
-        done += n as usize;
-    }
-    Ok(())
+    crate::file::handle_pread_all(file, std::path::Path::new("scripthash"), offset, buf)
+        .map_err(StoreError::into_io)
 }
 
 fn pwrite_file(file: &File, offset: u64, buf: &[u8]) -> std::io::Result<()> {
-    let h = IoHandle::from_file(file);
-    let mut done = 0usize;
-    while done < buf.len() {
-        let n = h.pwrite(offset + done as u64, &buf[done..]);
-        if n < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "pwrite returned 0",
-            ));
-        }
-        done += n as usize;
-    }
-    Ok(())
+    crate::file::handle_pwrite_all(file, std::path::Path::new("scripthash"), offset, buf)
+        .map_err(StoreError::into_io)
 }
 
 #[cfg(test)]
@@ -366,6 +337,36 @@ mod tests {
         k[0] = tag;
         k[1] = tag.wrapping_add(1);
         k
+    }
+
+    #[test]
+    fn pread_file_exact_reports_the_pread_errno() {
+        let dir = tmp();
+        // A directory fd reports EISDIR. Windows `File::open` of a directory
+        // fails before pread, so this half stays on unix.
+        #[cfg(unix)]
+        {
+            let file = std::fs::File::open(&dir).unwrap();
+            let mut buf = [0u8; 4];
+            let err = pread_file_exact(&file, 0, &mut buf).unwrap_err();
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::EISDIR),
+                "positional read must surface the negated pread errno, got {err:?}"
+            );
+        }
+        let rw = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dir.join("empty"))
+            .unwrap();
+        let mut short = [0u8; 4];
+        let short_err = pread_file_exact(&rw, 0, &mut short).unwrap_err();
+        assert_eq!(short_err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(short_err.to_string().contains("pread short"), "{short_err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

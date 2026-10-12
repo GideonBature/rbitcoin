@@ -15,21 +15,15 @@ static ORACLE_DOWN_STREAK: AtomicU64 = AtomicU64::new(0);
 const MAX_ORACLE_DOWN_STREAK: u64 = 20;
 
 fn harness_failure(what: &str) -> ! {
-    eprintln!("=== CHAIN-REVIEW FUZZ HARNESS FAILURE ===");
-    eprintln!("{what}");
-    eprintln!(
-        "comparisons_before_failure={}",
-        COMPARISONS.load(Ordering::Relaxed)
-    );
-    std::process::exit(2);
+    rbitcoin_fuzz::harness_failure(
+        "CHAIN-REVIEW FUZZ HARNESS FAILURE",
+        Some(COMPARISONS.load(Ordering::Relaxed)),
+        what,
+    )
 }
 
 fn note_comparison() {
-    ORACLE_DOWN_STREAK.store(0, Ordering::Relaxed);
-    let n = COMPARISONS.fetch_add(1, Ordering::Relaxed) + 1;
-    if n == 1 || n.is_multiple_of(100) {
-        eprintln!("chain-review: comparisons={n}");
-    }
+    rbitcoin_fuzz::note_comparison(Some(&ORACLE_DOWN_STREAK), &COMPARISONS, 1, "chain-review");
 }
 
 fn core() -> &'static CoreChild {

@@ -6,8 +6,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{
-    Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
-    Witness,
+    Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxMerkleNode,
+    TxOut, Witness,
 };
 
 /// BIP34 height encoding in coinbase scriptSig (Core `CScript << height`).
@@ -16,31 +16,7 @@ pub fn bip34_script(height: u32) -> ScriptBuf {
 }
 
 pub fn coinbase_tx(height: u32, value: Amount) -> Transaction {
-    // Consensus: coinbase scriptSig length must be in 2..=100.
-    let mut ss = if height == 0 {
-        vec![0x00]
-    } else {
-        rbitcoin_consensus::bip34_height_script(height)
-    };
-    while ss.len() < 2 {
-        ss.push(0x00);
-    }
-    let script_sig = ScriptBuf::from_bytes(ss);
-    Transaction {
-        version: TxVersion::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig,
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value,
-            // OP_TRUE — anyone can spend (tests skip consensus script for this)
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    }
+    rbitcoin_consensus::regtest_coinbase(height, value, ScriptBuf::from_bytes(vec![0x51]))
 }
 
 /// Simple P2WPKH-like anyone-can-spend spend of a previous OP_TRUE output is not needed;
@@ -134,36 +110,34 @@ pub fn mine_regtest_block(
 }
 
 /// Mine a regtest block at an explicit `nBits` and timestamp.
+///
+/// Always pays a fixed 50 BTC `OP_TRUE` coinbase and does not add a BIP141
+/// commitment. Callers that want the halving subsidy or a witness commitment
+/// use [`rbitcoin_consensus::mine_regtest_paying`].
 pub fn mine_regtest_block_at(
     prev_hash: BlockHash,
     time: u32,
     height: u32,
     bits: CompactTarget,
-    mut extra_txs: Vec<Transaction>,
+    extra_txs: Vec<Transaction>,
 ) -> Block {
     let mut txdata = vec![coinbase_tx(height, Amount::from_sat(50_0000_0000))];
-    txdata.append(&mut extra_txs);
-
-    let header = Header {
-        version: Version::from_consensus(4),
-        prev_blockhash: prev_hash,
-        merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-        time,
-        bits,
-        nonce: 0,
+    txdata.extend(extra_txs);
+    let mut block = Block {
+        header: Header {
+            version: Version::from_consensus(4),
+            prev_blockhash: prev_hash,
+            merkle_root: TxMerkleNode::from_byte_array([0u8; 32]),
+            time,
+            bits,
+            nonce: 0,
+        },
+        txdata,
     };
-    let mut block = Block { header, txdata };
     block.header.merkle_root = block
         .compute_merkle_root()
         .expect("non-empty block has merkle root");
-
-    let target = Target::from_compact(bits);
-    for nonce in 0..u32::MAX {
-        block.header.nonce = nonce;
-        if block.header.validate_pow(target).is_ok() {
-            break;
-        }
-    }
+    rbitcoin_consensus::grind_regtest_pow(&mut block.header);
     block
 }
 
@@ -174,6 +148,7 @@ pub fn regtest_genesis() -> Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Target;
 
     #[test]
     fn bip34_and_coinbase_height_zero_and_pow() {
@@ -205,5 +180,28 @@ mod tests {
         assert_eq!(many.input.len(), 2);
         let single = spend_anyone_can_spend(prev, 0, Amount::from_sat(1));
         assert_eq!(single.input.len(), 1);
+    }
+
+    /// The test helper always pays 50 BTC and never adds a BIP141 commitment.
+    /// Subsidy halving and witness commitment belong to `mine_regtest_paying`.
+    #[test]
+    fn mine_regtest_block_keeps_fixed_coinbase_and_skips_witness_commitment() {
+        let g = regtest_genesis();
+        let halved = mine_regtest_block(g.block_hash(), g.header.time + 1, 150, vec![]);
+        assert_eq!(halved.txdata[0].output.len(), 1);
+        assert_eq!(
+            halved.txdata[0].output[0].value,
+            Amount::from_sat(50_0000_0000)
+        );
+
+        let mut extra =
+            spend_anyone_can_spend(halved.txdata[0].compute_txid(), 0, Amount::from_sat(1));
+        extra.input[0].witness = Witness::from_slice(&[&[0x01]]);
+        let with_witness = mine_regtest_block(g.block_hash(), g.header.time + 2, 1, vec![extra]);
+        assert_eq!(with_witness.txdata.len(), 2);
+        assert_eq!(with_witness.txdata[0].output.len(), 1);
+        assert!(with_witness.txdata[0].input[0].witness.is_empty());
+        let target = Target::from_compact(with_witness.header.bits);
+        assert!(with_witness.header.validate_pow(target).is_ok());
     }
 }

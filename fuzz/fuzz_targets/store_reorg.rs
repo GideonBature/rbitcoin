@@ -1,7 +1,7 @@
 #![no_main]
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 
 use libfuzzer_sys::fuzz_target;
@@ -20,16 +20,11 @@ static STATE: Mutex<Option<Base>> = Mutex::new(None);
 static COMPARISONS: AtomicU64 = AtomicU64::new(0);
 
 fn harness_failure(what: &str) -> ! {
-    eprintln!("=== STORE-REORG FUZZ HARNESS FAILURE ===");
-    eprintln!("{what}");
-    std::process::exit(2);
+    rbitcoin_fuzz::harness_failure("STORE-REORG FUZZ HARNESS FAILURE", None, what)
 }
 
 fn note_comparison(k: u32) {
-    let n = COMPARISONS.fetch_add(k as u64, Ordering::Relaxed) + k as u64;
-    if n == 1 || n.is_multiple_of(100) {
-        eprintln!("store-reorg: comparisons={n}");
-    }
+    rbitcoin_fuzz::note_comparison(None, &COMPARISONS, u64::from(k), "store-reorg");
 }
 
 fn open_base() -> Base {

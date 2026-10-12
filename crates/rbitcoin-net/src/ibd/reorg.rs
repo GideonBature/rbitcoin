@@ -570,66 +570,14 @@ pub(crate) fn apply_header_rewind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::absolute::LockTime;
-    use bitcoin::block::{Header, Version};
-    use bitcoin::script::ScriptBuf;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{
-        Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
-    };
+    use bitcoin::{CompactTarget, Target};
 
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
         crate::chain::tiny_regtest_hub_labeled("ibd-reorg")
     }
 
-    fn coinbase(height: u32) -> Transaction {
-        let mut ss = if height == 0 {
-            vec![0x00]
-        } else {
-            rbitcoin_consensus::bip34_height_script(height)
-        };
-        while ss.len() < 2 {
-            ss.push(0x00);
-        }
-        Transaction {
-            version: TxVersion::ONE,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint::null(),
-                script_sig: ScriptBuf::from_bytes(ss),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(50_0000_0000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            }],
-        }
-    }
-
     fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
-        let header = Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: prev,
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-            time,
-            bits,
-            nonce: 0,
-        };
-        let mut block = Block {
-            header,
-            txdata: vec![coinbase(height)],
-        };
-        block.header.merkle_root = block.compute_merkle_root().unwrap();
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            block.header.nonce = nonce;
-            if block.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        block
+        rbitcoin_consensus::mine_empty_regtest(prev, time, height)
     }
 
     #[test]

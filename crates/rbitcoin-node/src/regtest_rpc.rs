@@ -1,51 +1,17 @@
 //! Regtest generate / `submitblock`: mine locally; `submitblock` uses the
 //! same [`ChainHub::accept_received_block`] path as P2P `block` messages.
 
-use bitcoin::{Block, BlockHash, ScriptBuf, Transaction};
-use rbitcoin_net::ChainHub;
-use rbitcoin_rpc::{submit_received_block, RpcRegtest, SubmitBlockOutcome};
-use std::sync::Arc;
-
-/// Node-side [`RpcRegtest`] wrapping the live P2P confirm path.
-pub struct HubRegtest(pub Arc<ChainHub>);
-
-impl RpcRegtest for HubRegtest {
-    fn generate_to_script(
-        &self,
-        nblocks: u32,
-        script_pubkey: ScriptBuf,
-        extra_txs: Vec<Transaction>,
-    ) -> Result<Vec<BlockHash>, String> {
-        self.0
-            .generate_to_script(nblocks, script_pubkey, extra_txs)
-            .map_err(|e| e.to_string())
-    }
-
-    fn assemble_block_to_script(
-        &self,
-        script_pubkey: ScriptBuf,
-        extra_txs: Vec<Transaction>,
-    ) -> Result<Block, String> {
-        self.0
-            .assemble_block_to_script(script_pubkey, extra_txs)
-            .map_err(|e| e.to_string())
-    }
-
-    fn submit_block(&self, block: Block) -> SubmitBlockOutcome {
-        submit_received_block(&self.0, block)
-    }
-
-    fn set_mock_time(&self, timestamp: i64) -> Result<(), String> {
-        self.0.clock.set_mock(timestamp);
-        Ok(())
-    }
-}
+pub use rbitcoin_rpc::HubRegtest;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::ScriptBuf;
     use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_net::ChainHub;
     use rbitcoin_query::Query;
+    use rbitcoin_rpc::RpcRegtest;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

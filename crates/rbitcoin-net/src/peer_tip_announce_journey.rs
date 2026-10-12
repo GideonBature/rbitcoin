@@ -39,17 +39,7 @@ fn tip_announce_pad() -> &'static TipAnnouncePad {
 }
 
 fn copy_store_tree(src: &std::path::Path, dst: &std::path::Path) {
-    for ent in std::fs::read_dir(src).expect("read store") {
-        let ent = ent.expect("store entry");
-        let to = dst.join(ent.file_name());
-        let ty = ent.file_type().expect("file type");
-        if ty.is_dir() {
-            std::fs::create_dir_all(&to).unwrap();
-            copy_store_tree(&ent.path(), &to);
-        } else {
-            std::fs::copy(ent.path(), &to).unwrap();
-        }
-    }
+    rbitcoin_store::testutil::copy_store_tree(src, dst);
 }
 
 fn open_tip_announce_hub(

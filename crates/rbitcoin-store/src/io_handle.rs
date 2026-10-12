@@ -192,6 +192,9 @@ fn win_xfer(handle: isize, offset: u64, ptr: *mut u8, len: usize, write: bool) -
         fn GetLastError() -> u32;
     }
     const ERROR_IO_PENDING: u32 = 997;
+    // A read at EOF returns 38 even on a synchronous handle. std `read_at`
+    // turns that into `Ok(0)`. Callers treat `rc == 0` as a short read.
+    const ERROR_HANDLE_EOF: u32 = 38;
     POSITIONAL_XFER_EVENT.with(|event| {
         let event = event.0;
         if event.is_null() {
@@ -221,11 +224,18 @@ fn win_xfer(handle: isize, offset: u64, ptr: *mut u8, len: usize, write: bool) -
         };
         if ok == 0 {
             let err = unsafe { GetLastError() };
-            if err != ERROR_IO_PENDING {
+            if err == ERROR_IO_PENDING {
+                if unsafe { GetOverlappedResult(h, ovp, &mut got, 1) } == 0 {
+                    let err = unsafe { GetLastError() };
+                    if !write && err == ERROR_HANDLE_EOF {
+                        return 0;
+                    }
+                    return -(err as i32);
+                }
+            } else if !write && err == ERROR_HANDLE_EOF {
+                return 0;
+            } else {
                 return -(err as i32);
-            }
-            if unsafe { GetOverlappedResult(h, ovp, &mut got, 1) } == 0 {
-                return -(unsafe { GetLastError() } as i32);
             }
         }
         got as i32

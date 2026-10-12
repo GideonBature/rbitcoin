@@ -189,7 +189,7 @@ fn encode_leading_header(kind: TableKind, logical: u64) -> [u8; FILE_HEADER_LEN]
 
 /// Complete positional write. Safe on Windows `FILE_FLAG_OVERLAPPED` handles
 /// (std `Write` / `WriteFile` with a NULL `OVERLAPPED` is os error 87).
-fn handle_pwrite_all(
+pub(crate) fn handle_pwrite_all(
     file: &File,
     path: &Path,
     offset: u64,
@@ -218,7 +218,7 @@ fn handle_pwrite_all(
 
 /// Complete positional read. Safe on Windows `FILE_FLAG_OVERLAPPED` handles
 /// (std `Read` / `ReadFile` with a NULL `OVERLAPPED` is os error 87).
-fn handle_pread_all(
+pub(crate) fn handle_pread_all(
     file: &File,
     path: &Path,
     offset: u64,

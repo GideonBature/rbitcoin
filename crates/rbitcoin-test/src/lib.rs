@@ -3,6 +3,7 @@
 //! Prefer writing scenarios in `tests/` that exercise public crate APIs.
 
 pub mod chain_fixture;
+pub mod jsonrpc;
 pub mod mine;
 #[cfg(feature = "overlay")]
 pub mod overlay;

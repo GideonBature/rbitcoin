@@ -1,6 +1,5 @@
 //! Helpers for the labeled overlay-functional journeys (real private meshes).
 
-use bitcoin::hashes::{sha256, Hash};
 use rbitcoin_node::NodeConfig;
 use rbitcoin_primitives::Network;
 use serde_json::Value;
@@ -135,33 +134,13 @@ pub async fn spawn_node(cfg: NodeConfig, rpc: SocketAddr) -> NodeProc {
 }
 
 pub async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
-    jsonrpc_try(addr, method, params)
-        .await
-        .unwrap_or_else(|e| panic!("{e}"))
+    crate::jsonrpc::jsonrpc(addr, method, params).await
 }
 
 async fn jsonrpc_try(addr: SocketAddr, method: &str, params: Value) -> Result<Value, String> {
-    let body = serde_json::json!({"jsonrpc":"1.0","id":"test","method":method,"params":params})
-        .to_string();
-    let req = format!(
-        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {RPC_BEARER}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let mut stream = TcpStream::connect(addr)
+    crate::jsonrpc::try_jsonrpc(addr, method, params)
         .await
-        .map_err(|e| format!("rpc connect: {e}"))?;
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| format!("rpc write: {e}"))?;
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("rpc read: {e}"))?;
-    let text = String::from_utf8_lossy(&buf);
-    let json_body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-    serde_json::from_str(json_body).map_err(|e| format!("rpc {method} json: {e} body={json_body}"))
+        .map_err(|e| format!("rpc connect: {e}"))
 }
 
 pub async fn wait_jsonrpc(
@@ -284,69 +263,12 @@ pub async fn wait_peer_network(rpc: SocketAddr, net: &str, inbound: bool, wall: 
 }
 
 /// I2P b32 hostname from a SAM `DESTINATION=` / `{datadir}/i2p/p2p.priv` blob.
-/// SESSION STATUS returns the private dest; hash is of the public Identity prefix.
+///
+/// Same host `NetAddr::host_str` reports for that destination.
 pub fn i2p_b32_from_dest(dest: &str) -> String {
-    let raw = decode_i2p_b64(dest.trim());
-    let digest = sha256::Hash::hash(i2p_public_ident(&raw));
-    format!("{}.b32.i2p", encode_b32_nopad(digest.as_byte_array()))
-}
-
-fn i2p_public_ident(raw: &[u8]) -> &[u8] {
-    if raw.len() < 387 {
-        return raw;
-    }
-    let cert_len = u16::from_be_bytes([raw[385], raw[386]]) as usize;
-    let ident_len = 387usize.saturating_add(cert_len);
-    if ident_len <= raw.len() {
-        &raw[..ident_len]
-    } else {
-        raw
-    }
-}
-
-fn decode_i2p_b64(s: &str) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let mut acc = 0u32;
-    let mut n = 0;
-    for c in s.chars() {
-        let v = match c {
-            'A'..='Z' => c as u32 - 'A' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 26,
-            '0'..='9' => c as u32 - '0' as u32 + 52,
-            '-' => 62,
-            '~' => 63,
-            '+' => 62,
-            '/' => 63,
-            '=' => break,
-            _ => continue,
-        };
-        acc = (acc << 6) | v;
-        n += 6;
-        if n >= 8 {
-            n -= 8;
-            bytes.push((acc >> n) as u8);
-        }
-    }
-    bytes
-}
-
-fn encode_b32_nopad(data: &[u8]) -> String {
-    const ALPH: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut out = String::new();
-    let mut acc = 0u32;
-    let mut n = 0;
-    for &b in data {
-        acc = (acc << 8) | u32::from(b);
-        n += 8;
-        while n >= 5 {
-            n -= 5;
-            out.push(ALPH[((acc >> n) & 31) as usize] as char);
-        }
-    }
-    if n > 0 {
-        out.push(ALPH[((acc << (5 - n)) & 31) as usize] as char);
-    }
-    out
+    rbitcoin_net::i2p_addr_from_sam_b64(dest)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .host_str()
 }
 
 pub async fn socks_http_get(proxy: SocketAddr, host: &str, port: u16, path: &str) -> (u16, String) {
@@ -418,46 +340,43 @@ pub async fn wait_file(path: &Path, wall: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::hashes::{sha256, Hash};
 
-    fn i2p_b64_encode(raw: &[u8]) -> String {
-        const ALPH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
-        let mut out = String::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let b0 = raw[i];
-            let b1 = if i + 1 < raw.len() { raw[i + 1] } else { 0 };
-            let b2 = if i + 2 < raw.len() { raw[i + 2] } else { 0 };
-            out.push(ALPH[(b0 >> 2) as usize] as char);
-            out.push(ALPH[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
-            if i + 1 < raw.len() {
-                out.push(ALPH[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
-            }
-            if i + 2 < raw.len() {
-                out.push(ALPH[(b2 & 63) as usize] as char);
-            }
-            i += 3;
-        }
-        out
+    #[tokio::test]
+    #[should_panic(expected = "rpc getblockcount json:")]
+    async fn jsonrpc_try_panics_when_the_body_is_not_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 2048];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope";
+            tokio::io::AsyncWriteExt::write_all(&mut sock, resp)
+                .await
+                .unwrap();
+        });
+        let _ = jsonrpc_try(addr, "getblockcount", serde_json::json!([])).await;
     }
 
     #[test]
-    fn i2p_b32_hashes_identity_prefix() {
-        let mut ident = vec![7u8; 387];
-        ident[384] = 0;
-        ident[385] = 0;
-        ident[386] = 0;
-        let mut privd = ident.clone();
-        privd.extend_from_slice(&[9u8; 80]);
-        let a = i2p_b32_from_dest(&i2p_b64_encode(&ident));
-        let b = i2p_b32_from_dest(&i2p_b64_encode(&privd));
-        assert_eq!(a, b, "private dest must hash the Identity prefix");
-        let full = format!(
-            "{}.b32.i2p",
-            encode_b32_nopad(sha256::Hash::hash(&privd).as_byte_array())
-        );
-        assert_ne!(a, full);
-        assert!(a.ends_with(".b32.i2p"), "{a}");
-        assert_eq!(a.len(), 52 + ".b32.i2p".len(), "{a}");
+    #[should_panic(expected = "i2p destination base64 contains")]
+    fn i2p_b32_rejects_unknown_base64() {
+        let _ = i2p_b32_from_dest("!!!");
+    }
+
+    #[test]
+    #[should_panic(expected = "i2p destination too short")]
+    fn i2p_b32_rejects_a_short_destination() {
+        let _ = i2p_b32_from_dest("AQID");
+    }
+
+    #[test]
+    fn i2p_b32_matches_the_address_host() {
+        // Same 387-byte identity and private suffix as `i2p_addr_hashes_public_destination_only`.
+        let ident = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAAAA";
+        let privd = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAAAACQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
+        let host = "cxroqjd4tx5c5ufkracpqnx4hjjsgdj4uwhagtifp6yo5ed3hjlq.b32.i2p";
+        assert_eq!(i2p_b32_from_dest(ident), host);
+        assert_eq!(i2p_b32_from_dest(privd), host);
     }
 }

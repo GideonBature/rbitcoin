@@ -11,6 +11,7 @@ REL="$ROOT/scripts/release.sh"
 NOTES="$ROOT/scripts/release-notes.sh"
 PASS=0
 FAIL=0
+source "$ROOT/scripts/contract-assert.sh"
 export GIT_AUTHOR_NAME=rbitcoin-release-test
 export GIT_AUTHOR_EMAIL=test@example.invalid
 export GIT_COMMITTER_NAME=rbitcoin-release-test
@@ -19,17 +20,6 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rbitcoin-release-flow.XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
-assert_ok() {
-  local name="$1"
-  shift
-  if "$@"; then
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  else
-    echo "not ok - $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 assert_fail_msg() {
   local name="$1"

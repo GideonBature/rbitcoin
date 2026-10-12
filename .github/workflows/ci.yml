@@ -67,6 +67,8 @@ jobs:
           tool: cargo-deny@0.20.2
       - name: cargo deny check
         run: cargo deny check
+      - name: contract-assert self-test
+        run: ./scripts/contract-assert.test.sh
       - name: stage-musl-artifacts self-test
         run: ./scripts/stage-musl-artifacts.test.sh
       - name: stage-native-artifacts self-test

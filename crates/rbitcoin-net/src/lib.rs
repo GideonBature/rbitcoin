@@ -41,7 +41,7 @@ pub use compact::{
 pub use ephemeral::spawn_isolated_broadcast_loop;
 pub use error::NetError;
 pub use eviction::{select_inbound_eviction, InboundEvictCandidate};
-pub use i2p_sam::I2pSam;
+pub use i2p_sam::{i2p_addr_from_sam_b64, I2pSam};
 pub use ibd::{
     connect_timeout_for, read_platform_rss, rehydrate_block_queue_residue, tip_perf_json,
     IbdConfig, ProcessRss, TipPerfLog, DEFAULT_BLOCKS_IN_TRANSIT_PER_PEER, DEFAULT_IBD_WINDOW,

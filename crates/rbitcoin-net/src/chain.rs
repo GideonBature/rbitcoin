@@ -3826,7 +3826,7 @@ mod tests {
     use super::*;
     use crate::most_work::sum_work;
     use bitcoin::absolute::LockTime;
-    use bitcoin::block::{Header, Version};
+    use bitcoin::block::Version;
     use bitcoin::hashes::Hash;
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
@@ -4091,28 +4091,11 @@ mod tests {
     }
 
     fn coinbase(height: u32) -> Transaction {
-        let mut ss = if height == 0 {
-            vec![0x00]
-        } else {
-            rbitcoin_consensus::bip34_height_script(height)
-        };
-        while ss.len() < 2 {
-            ss.push(0x00);
-        }
-        Transaction {
-            version: TxVersion::ONE,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint::null(),
-                script_sig: ScriptBuf::from_bytes(ss),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(50_0000_0000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            }],
-        }
+        rbitcoin_consensus::regtest_coinbase(
+            height,
+            Amount::from_sat(50_0000_0000),
+            ScriptBuf::from_bytes(vec![0x51]),
+        )
     }
 
     #[test]
@@ -4128,28 +4111,7 @@ mod tests {
     }
 
     fn mine(prev: BlockHash, time: u32, height: u32) -> Block {
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
-        let header = Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: prev,
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-            time,
-            bits,
-            nonce: 0,
-        };
-        let mut block = Block {
-            header,
-            txdata: vec![coinbase(height)],
-        };
-        block.header.merkle_root = block.compute_merkle_root().unwrap();
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            block.header.nonce = nonce;
-            if block.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        block
+        rbitcoin_consensus::mine_empty_regtest(prev, time, height)
     }
 
     fn mine_distinct(prev: BlockHash, time: u32, height: u32, avoid: &[BlockHash]) -> Block {
@@ -5653,27 +5615,7 @@ mod tests {
 
     /// Mine a coinbase-only block with optional extra txs (for invalid mid-branch).
     fn mine_with_extra(prev: BlockHash, time: u32, height: u32, extra: Vec<Transaction>) -> Block {
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
-        let header = Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: prev,
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-            time,
-            bits,
-            nonce: 0,
-        };
-        let mut txdata = vec![coinbase(height)];
-        txdata.extend(extra);
-        let mut block = Block { header, txdata };
-        block.header.merkle_root = block.compute_merkle_root().unwrap();
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            block.header.nonce = nonce;
-            if block.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        block
+        mine_regtest_paying(prev, time, height, ScriptBuf::from_bytes(vec![0x51]), extra)
     }
 
     /// Journey: deep most-work reorg (≥16), weaker ignored, mid-branch invalid

@@ -4,17 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PASS=0
 FAIL=0
-assert_ok() {
-  local name="$1"
-  shift
-  if "$@"; then
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  else
-    echo "not ok - $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
+source "$ROOT/scripts/contract-assert.sh"
 
 out="$("$ROOT/scripts/lightning/run-cln.sh")"
 assert_ok "run-cln skips without lightningd or is quiet" \

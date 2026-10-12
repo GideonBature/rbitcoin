@@ -488,15 +488,7 @@ pub fn subscribe(
 }
 
 fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {
-    params
-        .as_array()
-        .and_then(|a| a.get(idx))
-        .and_then(|v| {
-            v.as_u64()
-                .and_then(|n| u32::try_from(n).ok())
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-        })
-        .ok_or_else(|| format!("param {idx} expected number"))
+    crate::server::param_u32(params, idx)
 }
 
 fn param_bool(params: &Value, idx: usize) -> Option<bool> {

@@ -177,6 +177,41 @@ pub trait RpcRegtest: Send + Sync {
     fn set_mock_time(&self, timestamp: i64) -> Result<(), String>;
 }
 
+/// [`RpcRegtest`] over the live [`rbitcoin_net::ChainHub`] confirm path.
+pub struct HubRegtest(pub Arc<rbitcoin_net::ChainHub>);
+
+impl RpcRegtest for HubRegtest {
+    fn generate_to_script(
+        &self,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+    ) -> Result<Vec<BlockHash>, String> {
+        self.0
+            .generate_to_script(nblocks, script_pubkey, extra_txs)
+            .map_err(|e| e.to_string())
+    }
+
+    fn assemble_block_to_script(
+        &self,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+    ) -> Result<Block, String> {
+        self.0
+            .assemble_block_to_script(script_pubkey, extra_txs)
+            .map_err(|e| e.to_string())
+    }
+
+    fn submit_block(&self, block: Block) -> SubmitBlockOutcome {
+        submit_received_block(&self.0, block)
+    }
+
+    fn set_mock_time(&self, timestamp: i64) -> Result<(), String> {
+        self.0.clock.set_mock(timestamp);
+        Ok(())
+    }
+}
+
 impl RpcContext {
     pub fn uptime_secs(&self) -> u64 {
         self.start.elapsed().as_secs()

@@ -5,14 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use rbitcoin_consensus::Milestone;
 use rbitcoin_fuzz::{
-    check_diff_env, compare_fork_one, diff_regtest_params, mine_diff_pad, mine_diff_stem,
-    submit_pad_to_oracle, CompareOne, DiffPad, DIFF_MATURE_PAD_HEIGHT,
+    compare_fork_one, mine_diff_pad, mine_diff_stem, submit_pad_to_oracle, CompareOne, CoreChild,
+    DiffPad, DIFF_MATURE_PAD_HEIGHT,
 };
-use rbitcoin_query::Query;
-
-use rbitcoin_fuzz::{spawn_bitcoind, tmp_dir, CoreChild};
 
 struct Base {
     hub: rbitcoin_net::ChainHub,
@@ -27,44 +23,29 @@ static ORACLE_DOWN_STREAK: AtomicU64 = AtomicU64::new(0);
 const MAX_ORACLE_DOWN_STREAK: u64 = 20;
 
 fn harness_failure(what: &str) -> ! {
-    eprintln!("=== BLOCK-FORK-DIFFERENTIAL FUZZ HARNESS FAILURE ===");
-    eprintln!("{what}");
-    eprintln!(
-        "comparisons_before_failure={}",
-        COMPARISONS.load(Ordering::Relaxed)
-    );
-    std::process::exit(2);
+    rbitcoin_fuzz::harness_failure(
+        "BLOCK-FORK-DIFFERENTIAL FUZZ HARNESS FAILURE",
+        Some(COMPARISONS.load(Ordering::Relaxed)),
+        what,
+    )
 }
 
 fn note_comparison() {
-    ORACLE_DOWN_STREAK.store(0, Ordering::Relaxed);
-    let n = COMPARISONS.fetch_add(1, Ordering::Relaxed) + 1;
-    if n == 1 || n.is_multiple_of(100) {
-        eprintln!("block-fork-differential: comparisons={n}");
-    }
+    rbitcoin_fuzz::note_comparison(
+        Some(&ORACLE_DOWN_STREAK),
+        &COMPARISONS,
+        1,
+        "block-fork-differential",
+    );
 }
 
 fn base() -> &'static Base {
     BASE.get_or_init(|| {
-        let io = std::env::var("RBITCOIN_IO").ok();
-        if let Err(e) = check_diff_env(None, io.as_deref()) {
-            harness_failure(e);
-        }
-        let bin = std::env::var("RBITCOIN_CORE_BITCOIND").unwrap_or_default();
-        if bin.is_empty() {
-            harness_failure("RBITCOIN_CORE_BITCOIND unset");
-        }
-        let store = tmp_dir("rbtc-fork-diff-store");
-        let core_dir = tmp_dir("rbtc-fork-diff-core");
-        let q = Query::open_or_create_tiny(store.join("store")).unwrap_or_else(|e| {
-            harness_failure(&format!("query open: {e}"));
-        });
-        let params = diff_regtest_params();
-        let hub = rbitcoin_net::ChainHub::new(q, params, Milestone::NONE);
-        hub.ensure_genesis()
-            .unwrap_or_else(|e| harness_failure(&format!("genesis: {e}")));
-        let core = spawn_bitcoind(std::path::Path::new(&bin), &core_dir)
-            .unwrap_or_else(|e| harness_failure(&e));
+        let (hub, core, store) = rbitcoin_fuzz::open_diff_hub(
+            "rbtc-fork-diff-store",
+            "rbtc-fork-diff-core",
+            harness_failure,
+        );
         let pad =
             mine_diff_pad(&hub, DIFF_MATURE_PAD_HEIGHT).unwrap_or_else(|e| harness_failure(e));
         let pad = mine_diff_stem(&hub, pad).unwrap_or_else(|e| harness_failure(e));

@@ -6,18 +6,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PY="$ROOT/scripts/core-functional/create_cache.py"
 PASS=0
 FAIL=0
+source "$ROOT/scripts/contract-assert.sh"
+assert_ok() { assert_ok_quiet "$@"; }
 
-assert_ok() {
-  local name="$1"
-  shift
-  if "$@" >/dev/null 2>&1; then
-    echo "ok - $name"
-    PASS=$((PASS + 1))
-  else
-    echo "not ok - $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rbitcoin-cf-cache.XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }

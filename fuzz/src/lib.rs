@@ -477,6 +477,63 @@ pub fn bitcoind_rpc_args(datadir: &Path, rpcport: u16, p2pport: u16, cookie: &Pa
     ]
 }
 
+/// Shared differential-harness exit. `comparisons` is printed when the target counts them.
+pub fn harness_failure(banner: &str, comparisons: Option<u64>, what: &str) -> ! {
+    eprintln!("=== {banner} ===");
+    eprintln!("{what}");
+    if let Some(n) = comparisons {
+        eprintln!("comparisons_before_failure={n}");
+    }
+    std::process::exit(2);
+}
+
+/// Reset `streak` when present, add to the comparison counter, and print every 100.
+pub fn note_comparison(
+    streak: Option<&std::sync::atomic::AtomicU64>,
+    comparisons: &std::sync::atomic::AtomicU64,
+    add: u64,
+    label: &str,
+) {
+    use std::sync::atomic::Ordering;
+    if let Some(streak) = streak {
+        streak.store(0, Ordering::Relaxed);
+    }
+    let n = comparisons.fetch_add(add, Ordering::Relaxed) + add;
+    if n == 1 || n.is_multiple_of(100) {
+        eprintln!("{label}: comparisons={n}");
+    }
+}
+
+/// Regtest hub plus a spawned Core for the eight block/script/mempool differentials.
+pub fn open_diff_hub(
+    store_prefix: &str,
+    core_prefix: &str,
+    fail: fn(&str) -> !,
+) -> (rbitcoin_net::ChainHub, CoreChild, PathBuf) {
+    let io = std::env::var("RBITCOIN_IO").ok();
+    if let Err(e) = check_diff_env(None, io.as_deref()) {
+        fail(e);
+    }
+    let bin = std::env::var("RBITCOIN_CORE_BITCOIND").unwrap_or_default();
+    if bin.is_empty() {
+        fail("RBITCOIN_CORE_BITCOIND unset");
+    }
+    let store = tmp_dir(store_prefix);
+    let core_dir = tmp_dir(core_prefix);
+    let q = rbitcoin_query::Query::open_or_create_tiny(store.join("store")).unwrap_or_else(|e| {
+        fail(&format!("query open: {e}"));
+    });
+    let hub = rbitcoin_net::ChainHub::new(
+        q,
+        diff_regtest_params(),
+        rbitcoin_consensus::Milestone::NONE,
+    );
+    hub.ensure_genesis()
+        .unwrap_or_else(|e| fail(&format!("genesis: {e}")));
+    let core = spawn_bitcoind(Path::new(&bin), &core_dir).unwrap_or_else(|e| fail(&e));
+    (hub, core, store)
+}
+
 pub fn spawn_bitcoind(bin: &Path, datadir: &Path) -> Result<CoreChild, String> {
     spawn_bitcoind_extra(bin, datadir, &[])
 }
@@ -515,6 +572,19 @@ fn free_port() -> Result<u16, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_comparison_resets_the_streak_and_adds() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let streak = AtomicU64::new(4);
+        let n = AtomicU64::new(0);
+        note_comparison(Some(&streak), &n, 1, "unit");
+        assert_eq!(streak.load(Ordering::Relaxed), 0);
+        assert_eq!(n.load(Ordering::Relaxed), 1);
+        note_comparison(None, &n, 3, "unit");
+        assert_eq!(streak.load(Ordering::Relaxed), 0);
+        assert_eq!(n.load(Ordering::Relaxed), 4);
+    }
 
     #[test]
     fn p2p_args_listen_v2_bind_whitelist() {

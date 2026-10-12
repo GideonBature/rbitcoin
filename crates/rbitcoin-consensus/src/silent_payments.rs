@@ -829,24 +829,7 @@ mod tests {
     }
 
     fn header(h: u32, prev_fk: Fk, prev_hash: Option<[u8; 32]>) -> HeaderRecord {
-        let mut merkle = [0u8; 32];
-        merkle[0..4].copy_from_slice(&h.to_le_bytes());
-        merkle[5] = 0xec;
-        let hash = match prev_hash {
-            None => merkle,
-            Some(ph) => rbitcoin_store::block_header_hash(1, &ph, &merkle, h + 1, 0x207f_ffff, h),
-        };
-        HeaderRecord {
-            prev_fk,
-            version: 1,
-            timestamp: h + 1,
-            bits: 0x207f_ffff,
-            nonce: h,
-            merkle_root: merkle,
-            hash,
-            size: 0,
-            weight: 0,
-        }
+        rbitcoin_query::testutil::header_with_merkle_marker(h, prev_fk, prev_hash, 0xec)
     }
 
     #[test]
