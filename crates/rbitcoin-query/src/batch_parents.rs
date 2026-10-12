@@ -914,18 +914,6 @@ impl BatchParents {
         lay.spent_range.is_some()
     }
 
-    pub fn fks_missing_layout(&self) -> Vec<Fk> {
-        self.pins
-            .iter()
-            .filter(|(_, e)| {
-                let lay = e.load_layout();
-                lay.spent_range.is_none()
-                    && (lay.body_range.is_none() || lay.spender_rels.is_empty())
-            })
-            .map(|(&id, _)| Fk(id))
-            .collect()
-    }
-
     #[inline]
     pub fn contains(&self, fk: Fk) -> bool {
         fk.get().is_some_and(|id| self.pins.contains_key(&id))

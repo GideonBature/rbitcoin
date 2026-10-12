@@ -382,13 +382,6 @@ pub fn add_miss_peeks(n: u64) {
     }
 }
 
-#[inline]
-pub fn add_pending_hit(n: u64) {
-    if n > 0 {
-        PENDING_HITS.fetch_add(n, Ordering::Relaxed);
-    }
-}
-
 pub fn sample_and_reset() -> Sample {
     let mut age_hit = [0u64; AGE_CAP];
     for (i, slot) in AGE_HIT.iter().enumerate() {

@@ -327,13 +327,6 @@ impl AddrMan {
         self.asmap.as_deref()
     }
 
-    /// Populate from DNS seeds and fixed seed hosts.
-    pub fn with_seeds(network: Network) -> Self {
-        let mut a = Self::new();
-        a.inject(resolve_all_seeds(network));
-        a
-    }
-
     pub fn inject(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
         for a in addrs {
             self.add(a);
@@ -844,11 +837,6 @@ impl AddrMan {
     /// Best up-to-`max` outbound candidates (ranked).
     pub fn take_outbound(&self, max: usize) -> Vec<SocketAddr> {
         self.take_dial_candidates(max, &HashSet::new(), &[])
-    }
-
-    pub fn take_outbound_occupied(&self, max: usize, occupied: &[SocketAddr]) -> Vec<SocketAddr> {
-        let exclude: HashSet<SocketAddr> = occupied.iter().copied().collect();
-        self.take_dial_candidates(max, &exclude, occupied)
     }
 
     /// Snapshot of all entries (for tests / diagnostics).

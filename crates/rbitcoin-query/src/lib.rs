@@ -675,11 +675,6 @@ impl Query {
         Ok(())
     }
 
-    #[inline]
-    pub fn prune_ibd_mode(&self) -> bool {
-        self.prune_seqsigwit() && self.ibd_mode()
-    }
-
     pub fn set_prune_seqsigwit(&self, on: bool) -> Result<(), QueryError> {
         let was_on = self.prune_seqsigwit();
         if on && self.sptweaks_enabled() {
@@ -1541,16 +1536,6 @@ impl Query {
         self.block_queue_pressure.load(AtomicOrdering::Relaxed)
     }
 
-    /// Soft confirm-window count for logs / assign: `(window_n, free_mib)`.
-    ///
-    /// `window_n` = blocks confirm takes in [`BQ_SOFT_CONFIRM_SECS`] at rate.
-    /// `free_mib` = free-byte floor in MiB (second log field when useful).
-    pub fn block_queue_soft_targets(rate_blocks_per_s: Option<f64>) -> (u32, u32) {
-        let win = soft_confirm_window_n(rate_blocks_per_s);
-        let free_mib = (BQ_SOFT_FREE_BYTES / (1024 * 1024)) as u32;
-        (win, free_mib)
-    }
-
     /// Enqueue a raw block payload in the process-local RAM queue.
     ///
     /// **Always accepts** decodable peer wire. Soft densify / assign-stop only
@@ -1862,16 +1847,6 @@ impl Query {
 
     pub fn block_queue_promoted_count(&self) -> usize {
         self.block_queue.lock().unwrap().promoted_count()
-    }
-
-    pub fn block_queue_mark_resolve_complete_wave(
-        &self,
-        heights: &[u32],
-    ) -> Result<usize, QueryError> {
-        self.block_queue
-            .lock()
-            .unwrap()
-            .mark_resolve_complete_wave(heights)
     }
 
     /// Cheap process-owned cache sizes for the IBD `ibd: sizes` line.

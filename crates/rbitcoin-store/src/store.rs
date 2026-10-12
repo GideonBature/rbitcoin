@@ -63,23 +63,8 @@ impl StoreLayout {
         }
     }
 
-    pub fn with_cold(dir: impl Into<PathBuf>, cold_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            dir: dir.into(),
-            cold_dir: Some(cold_dir.into()),
-            head_scale: HeadScale::Mainnet,
-            tx_head_rebuild_seal_bits: None,
-            tx_head_rebuild_workers: None,
-        }
-    }
-
     pub fn with_cold_dir(mut self, cold_dir: impl Into<PathBuf>) -> Self {
         self.cold_dir = Some(cold_dir.into());
-        self
-    }
-
-    pub fn with_head_scale(mut self, scale: HeadScale) -> Self {
-        self.head_scale = scale;
         self
     }
 
@@ -926,23 +911,6 @@ impl Store {
             .put_full_batch_from_pins(items, index, spent_overlay)
     }
 
-    pub fn put_tx_full_batch_from_pins_with_txstat<P: crate::tx_table::PackedCreate>(
-        &self,
-        items: &[(P, Vec<crate::InputRecord>)],
-        index: bool,
-        spent_overlay: &[Vec<(u32, Fk, u32)>],
-        txstat: &[crate::txstat::TxStatRow],
-        header_ranges: &[(Fk, Fk, u32)],
-    ) -> Result<(Vec<Fk>, Vec<crate::create_loc::CreateLocPair>), StoreError> {
-        self.txs.put_full_batch_from_pins_with_txstat(
-            items,
-            index,
-            spent_overlay,
-            txstat,
-            header_ranges,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)] // same wave as append_stems_one_wave
     /// Class A append. `input_edges[i]` is one [`crate::InputEdge`] per vin.
     /// `encode_in` writes `seqsigwit` for that row.
@@ -1187,14 +1155,6 @@ impl Store {
             .into_iter()
             .map(|p| p.map(|x| x.spent))
             .collect())
-    }
-
-    /// True when every spent slot in `ranges` is unspent or its spender's
-    /// height is below `edge`. A multi-spender overflow is not below: the
-    /// caller must keep scanning.
-    pub fn spent_ranges_below(&self, ranges: &[(u64, u64)], edge: i64) -> Result<bool, StoreError> {
-        let opts: Vec<Option<(u64, u64)>> = ranges.iter().copied().map(Some).collect();
-        Ok(self.spent_ranges_reach(&opts, edge)?.iter().all(|hot| !hot))
     }
 
     /// One flag per range. True when a slot is a multi-spender or a single

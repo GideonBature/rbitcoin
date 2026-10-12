@@ -2847,10 +2847,6 @@ impl TxTable {
     pub fn rebuild_seal_bits(&self) -> u32 {
         self.rebuild_seal_bits
     }
-
-    pub fn rebuild_seal_keys(&self) -> u64 {
-        1u64 << self.rebuild_seal_bits()
-    }
 }
 
 /// Class A cuts for a cold MPHF rebuild (`2^bits` keys, last range short).
@@ -2964,10 +2960,6 @@ impl TxTable {
         self.head.slots()
     }
 
-    pub fn head_entry_bytes(&self) -> u8 {
-        self.head.entry_bytes()
-    }
-
     pub fn head_segment_count(&self) -> usize {
         self.head.segment_count()
     }
@@ -3008,14 +3000,6 @@ impl TxTable {
 
     pub fn pending_head_is_full(&self) -> bool {
         self.pending_head.len() >= PENDING_HEAD_CAP
-    }
-
-    /// Bound write-behind: drain if the queue is at/over [`PENDING_HEAD_CAP`].
-    pub fn head_drain_pending_if_full(&self) -> Result<(), StoreError> {
-        if self.pending_head_is_full() {
-            self.head_drain_pending()?;
-        }
-        Ok(())
     }
 
     /// Insert txid→fk into the segmented head (mixes keys; may seal/roll).

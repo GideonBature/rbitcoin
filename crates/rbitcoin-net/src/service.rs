@@ -295,11 +295,6 @@ impl P2PNode {
         Ok(local_addr)
     }
 
-    /// BIP14 subversion advertised in `version` (same as RPC `getnetworkinfo`).
-    pub fn set_user_agent(&mut self, ua: impl Into<String>) {
-        self.user_agent = ua.into();
-    }
-
     /// Number of live outbound tip-follow sessions.
     pub fn follow_live_count(&self) -> usize {
         self.follow_live.load(Ordering::SeqCst)

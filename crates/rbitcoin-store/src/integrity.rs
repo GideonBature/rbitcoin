@@ -95,7 +95,7 @@ impl TipSeal {
     }
 }
 
-/// Result of [`Store::revalidate_tip_window`].
+/// Result of [`Store::revalidate_tip_window_n`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TipRevalidateReport {
     /// Confirmed tip height before any shrink (`None` if empty chain).
@@ -235,15 +235,7 @@ impl Store {
         ))
     }
 
-    /// Revalidate the last [`VERIFY_TIP_BLOCKS`] confirmed heights (structure + merkle).
-    ///
-    /// On failure: clear bad Class A associations and/or shrink tip to the last
-    /// good height, flush confirmed, then `repair_class_c_above_tip`.
-    pub fn revalidate_tip_window(&self) -> Result<TipRevalidateReport, StoreError> {
-        self.revalidate_tip_window_n(VERIFY_TIP_BLOCKS)
-    }
-
-    /// Same as [`Self::revalidate_tip_window`] with an explicit window.
+    /// Revalidate confirmed heights (structure + merkle).
     ///
     /// `n == 0` walks from genesis (Core `-checkblocks=0`). A missing
     /// `spend_durable` marker is that same walk: nothing has been device-flushed.
