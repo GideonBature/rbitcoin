@@ -114,6 +114,23 @@ fn published_tip_is_in_the_height_index() {
 }
 
 #[test]
+fn extend_refuses_a_height_the_store_already_left() {
+    let (dir, q) = temp_query("idx-left-height");
+    q.store().confirmed.set_raw_for_test(Height(0), 1).unwrap();
+    q.publish_confirmed_tip(0, [0x11; 32]);
+    let stale = [0x22; 32];
+    assert!(
+        !q.extend_height_index(&[(stale, 1)], 1, Some(0), false),
+        "a reader must not index a height the store has already left"
+    );
+    assert_eq!(q.height_of_hash(&stale).unwrap(), None);
+    q.store().confirmed.set_raw_for_test(Height(1), 2).unwrap();
+    assert!(q.extend_height_index(&[(stale, 1)], 1, Some(0), false));
+    assert_eq!(q.height_of_hash(&stale).unwrap(), Some(Height(1)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn height_index_catchup_does_not_hold_the_lock_across_header_reads() {
     let (dir, q) = temp_query("h2h-lock");
     let hashes = h2h_pad_0_4(&q);

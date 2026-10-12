@@ -357,6 +357,13 @@ impl Query {
         clear: bool,
     ) -> bool {
         self.with_height_index(|index| {
+            // A disconnect can finish while this extend was reading headers.
+            // The index tip does not move on that disconnect, so the expected
+            // check alone would commit a height the store has already left.
+            let live_tip = self.tip_height().map(|h| h.0);
+            if live_tip.is_none_or(|tip| tip < new_tip) {
+                return false;
+            }
             if index.tip == Some(new_tip) {
                 return true;
             }
