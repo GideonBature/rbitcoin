@@ -598,13 +598,15 @@ async fn join_client_set(
     })
 }
 
-pub async fn electrum_clients(
-    addr: &str,
-    timeout: Duration,
+async fn fan_out_clients<F, Fut>(
     wallets: Vec<Vec<String>>,
-    opts: &ClientsOpts,
     progress: Arc<Mutex<Progress>>,
-) -> Result<RunOutcome, String> {
+    mut spawn_one: F,
+) -> Result<RunOutcome, String>
+where
+    F: FnMut(Vec<String>, u32, Arc<Mutex<Progress>>) -> Fut,
+    Fut: std::future::Future<Output = Result<(Vec<Sample>, ClientRow), String>> + Send + 'static,
+{
     if wallets.is_empty() {
         if let Ok(mut p) = progress.lock() {
             p.finish();
@@ -612,15 +614,27 @@ pub async fn electrum_clients(
         return Ok(RunOutcome::default());
     }
     let mut set = JoinSet::new();
-    let opts = *opts;
     for (i, wallet) in wallets.into_iter().enumerate() {
-        let addr = addr.to_string();
         let progress = Arc::clone(&progress);
-        set.spawn(async move {
-            electrum_one_wallet(addr, timeout, wallet, i as u32, opts, progress).await
-        });
+        set.spawn(spawn_one(wallet, i as u32, progress));
     }
     join_client_set(set, &progress).await
+}
+
+pub async fn electrum_clients(
+    addr: &str,
+    timeout: Duration,
+    wallets: Vec<Vec<String>>,
+    opts: &ClientsOpts,
+    progress: Arc<Mutex<Progress>>,
+) -> Result<RunOutcome, String> {
+    let addr = addr.to_string();
+    let opts = *opts;
+    fan_out_clients(wallets, progress, move |wallet, i, progress| {
+        let addr = addr.clone();
+        async move { electrum_one_wallet(addr, timeout, wallet, i, opts, progress).await }
+    })
+    .await
 }
 
 pub async fn esplora_clients(
@@ -630,22 +644,13 @@ pub async fn esplora_clients(
     opts: &ClientsOpts,
     progress: Arc<Mutex<Progress>>,
 ) -> Result<RunOutcome, String> {
-    if wallets.is_empty() {
-        if let Ok(mut p) = progress.lock() {
-            p.finish();
-        }
-        return Ok(RunOutcome::default());
-    }
-    let mut set = JoinSet::new();
+    let url = url.to_string();
     let opts = *opts;
-    for (i, wallet) in wallets.into_iter().enumerate() {
-        let url = url.to_string();
-        let progress = Arc::clone(&progress);
-        set.spawn(async move {
-            esplora_one_wallet(url, timeout, wallet, i as u32, opts, progress).await
-        });
-    }
-    join_client_set(set, &progress).await
+    fan_out_clients(wallets, progress, move |wallet, i, progress| {
+        let url = url.clone();
+        async move { esplora_one_wallet(url, timeout, wallet, i, opts, progress).await }
+    })
+    .await
 }
 
 #[cfg(test)]
