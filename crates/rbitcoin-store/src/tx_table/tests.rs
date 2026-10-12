@@ -222,8 +222,10 @@ fn two_input_item() -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
         InputRecord::coinbase(u32::MAX, vec![0x01], vec![]),
         InputRecord {
             prev_txid: [2u8; 32],
-            create_fk: Fk(1),
-            prev_index: 0,
+            parent: InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -456,8 +458,10 @@ fn put_full_batch_from_pins_same_batch_spent_slot() {
     let parent_ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let child_ins = vec![InputRecord {
         prev_txid: [1u8; 32],
-        create_fk: Fk(1),
-        prev_index: 0,
+        parent: InputParent::Prevout {
+            create_fk: Fk(1),
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![0x01],
         witness: vec![],
@@ -628,7 +632,7 @@ fn open_repairs_body_leading_txid_count() {
                 input_start_fk: Fk::NULL,
                 output_start_fk: Fk::NULL,
             };
-            let outs = vec![OutputRecord::unspent(1000 + i64::from(i), vec![0x51])];
+            let outs = vec![OutputRecord::unspent(1000 + u64::from(i), vec![0x51])];
             items.push((tx, Vec::new(), outs));
         }
         t.put_full_batch_indexed(&items, true).unwrap();
@@ -875,8 +879,10 @@ fn reopen_backfills_legacy_seqsigwit_as_spans() {
         },
         vec![InputRecord {
             prev_txid: [1u8; 32],
-            create_fk: Fk(1),
-            prev_index: 0,
+            parent: InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![0xab; 8],
             witness: vec![vec![0x30; 16]],
@@ -974,8 +980,10 @@ fn reopen_resumes_partial_legacy_input_backfill() {
         },
         vec![InputRecord {
             prev_txid: [1u8; 32],
-            create_fk: Fk(1),
-            prev_index: 0,
+            parent: InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![0xab; 8],
             witness: vec![vec![0x30; 16]],
@@ -1068,8 +1076,10 @@ fn input_backfill_resume_starts_at_backfilled_count() {
         },
         vec![InputRecord {
             prev_txid: [1u8; 32],
-            create_fk: Fk(1),
-            prev_index: 0,
+            parent: InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![0xab; 8],
             witness: vec![vec![0x30; 16]],
@@ -1132,8 +1142,10 @@ fn input_backfill_resume_starts_at_backfilled_count() {
 fn decode_prevout_at_skips_script_and_witness() {
     let rec = InputRecord {
         prev_txid: [9u8; 32],
-        create_fk: Fk(1),
-        prev_index: 3,
+        parent: InputParent::Prevout {
+            create_fk: Fk(1),
+            vout: 3,
+        },
         sequence: 0xffff_fffe,
         script_sig: vec![0xab; 40],
         witness: vec![vec![0x30; 70], vec![0x21; 33]],
@@ -1147,7 +1159,7 @@ fn decode_prevout_at_skips_script_and_witness() {
     assert_eq!(used, enc.len());
     assert_eq!(full.script_sig.len(), 40);
     assert_eq!(full.sequence, 0xffff_fffe);
-    assert!(full.create_fk.is_null());
+    assert!(full.create_fk().is_null());
     let mut legacy =
         vec![input_flags::SEQ_FINAL | input_flags::EMPTY_SCRIPT | input_flags::EMPTY_WITNESS];
     legacy.extend_from_slice(&1u64.to_le_bytes());
@@ -1177,9 +1189,11 @@ fn decode_prevout_at_skips_script_and_witness() {
 #[test]
 fn input_encode_create_fk_not_prev_txid() {
     let rec = InputRecord {
-        prev_txid: [0xaa; 32], // soft only — not on disk
-        create_fk: Fk(42),
-        prev_index: 7,
+        prev_txid: [0xaa; 32],
+        parent: InputParent::Prevout {
+            create_fk: Fk(42),
+            vout: 7,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -1195,8 +1209,8 @@ fn input_encode_create_fk_not_prev_txid() {
         input_flags::PREV_ON_INPUTS
     );
     let dec = InputRecord::decode(&enc).unwrap();
-    assert!(dec.create_fk.is_null());
-    assert_eq!(dec.prev_index, 0);
+    assert!(dec.create_fk().is_null());
+    assert_eq!(dec.prev_index(), 0);
     assert_eq!(dec.prev_txid, [0u8; 32]);
     assert_eq!(dec.sequence, u32::MAX);
 }
@@ -1215,16 +1229,17 @@ fn scan_packed_meta_and_prevouts_no_output_alloc() {
     let inputs = vec![
         InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![0x01],
             witness: vec![],
         },
         InputRecord {
             prev_txid: [3u8; 32],
-            create_fk: Fk(1),
-            prev_index: 1,
+            parent: InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 1,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![vec![0xaa]],
@@ -1268,8 +1283,7 @@ fn packed_output_spender_rels_multi_vout_one_walk() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0x01],
         witness: vec![],
@@ -1325,16 +1339,21 @@ fn denserels_layout_exact_matches_encode_decode_shapes() {
             vec![
                 InputRecord {
                     prev_txid: [9u8; 32],
-                    create_fk: Fk(42),
-                    prev_index: 0,
+                    parent: InputParent::Prevout {
+                        create_fk: Fk(42),
+                        vout: 0,
+                    },
                     sequence: 1,
                     script_sig: vec![0xab; 40],
                     witness: vec![vec![0x01], vec![0x02; 33]],
                 },
                 InputRecord {
                     prev_txid: [8u8; 32],
-                    create_fk: Fk(99),
-                    prev_index: 300, // compact size 3 bytes
+                    parent: InputParent::Prevout {
+                        create_fk: Fk(99),
+                        vout: 300,
+                    },
+                    // compact size 3 bytes
                     sequence: u32::MAX,
                     script_sig: vec![],
                     witness: vec![],
@@ -1409,8 +1428,7 @@ fn body_txid_range_matches_serial() {
         };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -1466,11 +1484,10 @@ fn body_txid_thin_prefix_matches_fat_packed_body() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0xde; 64],
-        witness: vec![vec![0xad; 50_000]], // fat body
+        witness: vec![vec![0xad; 50_000]],
     }];
     let outputs = vec![OutputRecord::unspent(42, vec![0x51; 100])];
     let fk = t
@@ -1513,8 +1530,7 @@ fn bulk_body_range_matches_sequential() {
         };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![i],
             witness: vec![],
@@ -1570,7 +1586,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     std::fs::create_dir_all(&dir).unwrap();
     let t = create_tiny(&dir);
     let txid = [0x5a; 32];
-    let mk = |hint: u8, value: i64| {
+    let mk = |hint: u8, value: u64| {
         let rec = TxRecord {
             txid,
             version: 1,
@@ -1582,8 +1598,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
         };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![hint],
             witness: vec![],
@@ -1609,8 +1624,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     };
     let solo_in = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0x01],
         witness: vec![],
@@ -1683,8 +1697,7 @@ fn streaming_resolve_early_exit_fewer_body_lookups() {
         };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![hint],
             witness: vec![],
@@ -1730,8 +1743,7 @@ fn get_fk_by_txid_batch_depth_wins_with_workers() {
             };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![hint],
                 witness: vec![],
@@ -1757,8 +1769,7 @@ fn get_fk_by_txid_batch_depth_wins_with_workers() {
             };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![0x01],
                 witness: vec![],
@@ -1823,8 +1834,7 @@ fn get_fk_by_txid_batch_matches_single() {
         };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![0x01],
             witness: vec![],
@@ -1892,8 +1902,7 @@ fn get_outs_denserels_by_range_sparse_need() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0x01],
         witness: vec![],
@@ -2085,8 +2094,7 @@ fn head_leading_truncated_class_a_rebuilds_on_open() {
             };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2157,8 +2165,7 @@ fn get_output_spender_metas_at_one_walk() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0x01],
         witness: vec![],
@@ -2240,8 +2247,7 @@ fn put_spends_on_create_at_batch_patches_all_vouts() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0x01],
         witness: vec![],
@@ -2290,8 +2296,7 @@ fn pwrite_spend_batch_records_sole_multi_and_cold() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0x01],
         witness: vec![],
@@ -2355,16 +2360,18 @@ fn pwrite_spend_batch_records_sole_multi_and_cold() {
 fn input_witness_roundtrip() {
     let rec = InputRecord {
         prev_txid: [1u8; 32],
-        create_fk: Fk(1),
-        prev_index: 2,
+        parent: InputParent::Prevout {
+            create_fk: Fk(1),
+            vout: 2,
+        },
         sequence: 0xffff_fffe,
         script_sig: vec![0x00],
         witness: vec![vec![0x30, 0x01], vec![0x21, 0xaa]],
     };
     let enc = rec.encode();
     let dec = InputRecord::decode(&enc).unwrap();
-    assert!(dec.create_fk.is_null());
-    assert_eq!(dec.prev_index, 0);
+    assert!(dec.create_fk().is_null());
+    assert_eq!(dec.prev_index(), 0);
     assert_eq!(dec.sequence, rec.sequence);
     assert_eq!(dec.script_sig, rec.script_sig);
     assert_eq!(dec.witness, rec.witness);
@@ -2375,8 +2382,7 @@ fn input_witness_roundtrip() {
 fn input_flags_roundtrip() {
     let rec = InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -2395,8 +2401,8 @@ fn input_flags_roundtrip() {
     assert_eq!(dec.sequence, rec.sequence);
     assert!(dec.script_sig.is_empty());
     assert!(dec.witness.is_empty());
-    assert!(dec.create_fk.is_null());
-    assert_eq!(dec.prev_index, 0);
+    assert!(dec.create_fk().is_null());
+    assert_eq!(dec.prev_index(), 0);
 }
 
 #[test]
@@ -2417,24 +2423,27 @@ fn input_run_roundtrip() {
     let run = vec![
         InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![0x01],
             witness: vec![],
         },
         InputRecord {
             prev_txid: [2u8; 32],
-            create_fk: Fk(1),
-            prev_index: 0,
+            parent: InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 0,
+            },
             sequence: 1,
             script_sig: vec![],
             witness: vec![vec![0xab]],
         },
         InputRecord {
             prev_txid: [3u8; 32],
-            create_fk: Fk(1),
-            prev_index: 3,
+            parent: InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 3,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -2445,7 +2454,7 @@ fn input_run_roundtrip() {
     let mut dec = decode_input_run(&enc, 3).unwrap();
     assert_eq!(dec.len(), 3);
     assert!(!dec[0].is_coinbase());
-    assert!(dec[1].create_fk.is_null());
+    assert!(dec[1].create_fk().is_null());
     assert_eq!(dec[1].witness, vec![vec![0xab]]);
     assert_eq!(dec[1].prev_txid, [0u8; 32]);
     let edges = [
@@ -2461,10 +2470,10 @@ fn input_run_roundtrip() {
     ];
     apply_input_edges(&mut dec, &edges).unwrap();
     assert!(dec[0].is_coinbase());
-    assert_eq!(dec[1].create_fk, Fk(1));
-    assert_eq!(dec[1].prev_index, 0);
-    assert_eq!(dec[2].create_fk, Fk(1));
-    assert_eq!(dec[2].prev_index, 3);
+    assert_eq!(dec[1].create_fk(), Fk(1));
+    assert_eq!(dec[1].prev_index(), 0);
+    assert_eq!(dec[2].create_fk(), Fk(1));
+    assert_eq!(dec[2].prev_index(), 3);
 }
 
 #[test]
@@ -2553,37 +2562,6 @@ fn output_exp_nibble_10_is_corrupt() {
 }
 
 #[test]
-fn output_negative_value_is_corrupt() {
-    let rec = OutputRecord::unspent(-1, vec![0x51]);
-    let err = rec.try_encode_into(&mut Vec::new()).unwrap_err();
-    assert!(format!("{err}").contains("txout amount negative"), "{err}");
-}
-
-#[test]
-fn put_full_batch_from_pins_negative_value_is_corrupt() {
-    let dir = tempfile_dir("from-pins-neg");
-    let t = create_tiny(&dir);
-    let tx = TxRecord {
-        txid: [9u8; 32],
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: 1,
-    };
-    let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
-    let outs = vec![OutputRecord::unspent(-1, vec![0x51])];
-    let pin = std::sync::Arc::new((tx, outs));
-    let err = t
-        .put_full_batch_from_pins(&[(pin, ins)], true, &[])
-        .unwrap_err();
-    assert!(format!("{err}").contains("txout amount negative"), "{err}");
-    assert_eq!(t.count(), 0, "negative pin append must not write Class A");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn output_noncanonical_mantissa_is_corrupt() {
     let mut enc = Vec::new();
     enc.push(SCRIPT_KIND_V17_OP_TRUE | (1 << 4));
@@ -2643,8 +2621,7 @@ fn packed_tx_roundtrip() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![0x01, 0x00],
         witness: vec![],
@@ -2685,8 +2662,10 @@ fn seqsigwit_and_txout_secret_xor_roundtrip() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk(7),
-        prev_index: 1,
+        parent: InputParent::Prevout {
+            create_fk: Fk(7),
+            vout: 1,
+        },
         sequence: 1,
         script_sig: vec![0x11, 0x22, 0x33],
         witness: vec![vec![0xaa, 0xbb], vec![0xcc]],
@@ -2728,8 +2707,7 @@ fn visit_packed_script_hashes_matches_full_decode() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -2824,8 +2802,7 @@ fn address_head_get_by_txid() {
     };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
-        create_fk: Fk::NULL,
-        prev_index: u32::MAX,
+        parent: InputParent::Coinbase,
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -2902,8 +2879,10 @@ fn packed_encode_decode_flags_and_error_arms() {
     assert!(coin.is_coinbase());
     let non_final = InputRecord {
         prev_txid: [1u8; 32],
-        create_fk: Fk(3),
-        prev_index: 2,
+        parent: InputParent::Prevout {
+            create_fk: Fk(3),
+            vout: 2,
+        },
         sequence: 1,
         script_sig: vec![0xaa, 0xbb],
         witness: vec![vec![1, 2, 3], vec![4]],
@@ -2911,8 +2890,8 @@ fn packed_encode_decode_flags_and_error_arms() {
     for r in [&coin, &non_final] {
         let e = r.encode();
         let d = InputRecord::decode(&e).unwrap();
-        assert!(d.create_fk.is_null());
-        assert_eq!(d.prev_index, 0);
+        assert!(d.create_fk().is_null());
+        assert_eq!(d.prev_index(), 0);
         assert_eq!(d.sequence, r.sequence);
         assert_eq!(d.script_sig, r.script_sig);
         assert_eq!(d.witness, r.witness);
@@ -3277,7 +3256,7 @@ fn put_full_aligns_record_starts_and_txid_prefix() {
         items.push((
             tx,
             vec![InputRecord::coinbase(u32::MAX, vec![], vec![])],
-            vec![OutputRecord::unspent(1000 + i as i64, script)],
+            vec![OutputRecord::unspent(1000 + i as u64, script)],
         ));
     }
     let fks = t.put_full_batch_indexed(&items, true).unwrap();
@@ -3360,8 +3339,10 @@ fn span_prevouts_match_per_create() {
             },
             vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk(1),
-                prev_index: 0,
+                parent: InputParent::Prevout {
+                    create_fk: Fk(1),
+                    vout: 0,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -3382,16 +3363,20 @@ fn span_prevouts_match_per_create() {
         vec![
             InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk(1),
-                prev_index: 0,
+                parent: InputParent::Prevout {
+                    create_fk: Fk(1),
+                    vout: 0,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
             },
             InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk(2),
-                prev_index: 0,
+                parent: InputParent::Prevout {
+                    create_fk: Fk(2),
+                    vout: 0,
+                },
                 sequence: 1,
                 script_sig: vec![0xaa],
                 witness: vec![vec![0xbb]],
@@ -3404,23 +3389,23 @@ fn span_prevouts_match_per_create() {
     let last = fks[1024].get().unwrap();
     let span = t.get_full_span(first, last).unwrap();
     assert!(span[0].1[0].is_coinbase());
-    assert_eq!(span[1024].1[0].create_fk, Fk(1));
-    assert_eq!(span[1024].1[1].create_fk, Fk(2));
-    assert_eq!(span[1024].1[1].prev_index, 0);
+    assert_eq!(span[1024].1[0].create_fk(), Fk(1));
+    assert_eq!(span[1024].1[1].create_fk(), Fk(2));
+    assert_eq!(span[1024].1[1].prev_index(), 0);
     let one = t.get_full(fks[1024]).unwrap();
     assert_eq!(span[1024].1, one.1);
     let mid = t.get_full_span(2, 2).unwrap();
     assert_eq!(mid.len(), 1);
     assert_eq!(mid[0].1.len(), 1);
-    assert_eq!(mid[0].1[0].create_fk, Fk(1));
+    assert_eq!(mid[0].1[0].create_fk(), Fk(1));
     let tail = t.get_full_span(1025, 1025).unwrap();
     assert_eq!(tail[0].1.len(), 2);
-    assert_eq!(tail[0].1[1].create_fk, Fk(2));
+    assert_eq!(tail[0].1[1].create_fk(), Fk(2));
     assert_eq!(tail[0].1, t.get_full(Fk(1025)).unwrap().1);
     let early = t.get_full_span(1, 2).unwrap();
     assert_eq!(early.len(), 2);
     assert!(early[0].1[0].is_coinbase());
-    assert_eq!(early[1].1[0].create_fk, Fk(1));
+    assert_eq!(early[1].1[0].create_fk(), Fk(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3447,7 +3432,7 @@ fn get_full_span_matches_per_fk_get_full() {
                 vec![i],
                 vec![vec![0x51, i]],
             )],
-            vec![OutputRecord::unspent(100 + i as i64, vec![0x51])],
+            vec![OutputRecord::unspent(100 + i as u64, vec![0x51])],
         ));
     }
     let fks = t.put_full_batch_indexed(&items, true).unwrap();
@@ -3483,7 +3468,7 @@ fn pread_two_spans_parallel_matches_serial() {
                 output_count: 1,
             },
             vec![InputRecord::coinbase(u32::MAX, vec![0x02, i], vec![])],
-            vec![OutputRecord::unspent(i as i64 + 1, vec![0x00, i])],
+            vec![OutputRecord::unspent(i as u64 + 1, vec![0x00, i])],
         ));
     }
     let fks = t.put_full_batch_indexed(&items, true).unwrap();
@@ -3791,8 +3776,7 @@ fn fat_creates_do_not_roll_head() {
             };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![0xab; 64],
                 witness: vec![vec![0xcd; 400]],
@@ -4193,8 +4177,7 @@ fn plan_head_rebuild_ranges_ignores_body_soft_span() {
             };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![0xab; 64],
                 witness: vec![vec![0xcd; 400]],
@@ -4845,7 +4828,7 @@ fn put_n_out(t: &TxTable, tag: u8, n_out: u32) -> Fk {
     };
     let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x51], vec![])];
     let outs: Vec<OutputRecord> = (0..n_out)
-        .map(|i| OutputRecord::unspent(1 + i64::from(i), vec![0x51]))
+        .map(|i| OutputRecord::unspent(1 + u64::from(i), vec![0x51]))
         .collect();
     t.put_full_batch_indexed(&[(tx, inputs, outs)], false)
         .unwrap()[0]

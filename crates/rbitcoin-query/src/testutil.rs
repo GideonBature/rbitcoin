@@ -59,7 +59,7 @@ pub fn tx_apply_to_tx(ta: &TxApply) -> bitcoin::Transaction {
             .map(|inp| bitcoin::TxIn {
                 previous_output: bitcoin::OutPoint {
                     txid: bitcoin::Txid::from_byte_array(inp.prev_txid),
-                    vout: inp.prev_index,
+                    vout: inp.prev_index(),
                 },
                 script_sig: bitcoin::script::ScriptBuf::from_bytes(inp.script_sig.clone()),
                 sequence: bitcoin::Sequence::from_consensus(inp.sequence),
@@ -70,7 +70,7 @@ pub fn tx_apply_to_tx(ta: &TxApply) -> bitcoin::Transaction {
             .outputs
             .iter()
             .map(|o| bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(o.value.max(0) as u64),
+                value: bitcoin::Amount::from_sat(o.value),
                 script_pubkey: bitcoin::script::ScriptBuf::from_bytes(o.script.clone()),
             })
             .collect(),

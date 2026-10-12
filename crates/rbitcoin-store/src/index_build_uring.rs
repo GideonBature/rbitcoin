@@ -611,8 +611,10 @@ mod tests {
     fn spend(parent: Fk) -> InputRecord {
         InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: parent,
-            prev_index: 0,
+            parent: crate::InputParent::Prevout {
+                create_fk: parent,
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![1],
             witness: vec![],

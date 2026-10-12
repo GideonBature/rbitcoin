@@ -16,7 +16,7 @@ pub(super) fn encode_output_run_secret(
 
 /// Encode one unspent output (optional at-rest XOR of scriptPubKey).
 pub fn encode_unspent_output_into_secret(
-    value: i64,
+    value: u64,
     script: &[u8],
     out: &mut Vec<u8>,
     secret: Option<&crate::store_secret::StoreSecret>,
@@ -34,7 +34,6 @@ pub trait PackedCreate {
     fn packed_tx(&self) -> &TxRecord;
     fn packed_n_out(&self) -> u32;
     fn packed_outs_est(&self) -> usize;
-    fn packed_has_negative_amount(&self) -> bool;
     fn encode_txout_body(
         &self,
         buf: &mut Vec<u8>,
@@ -59,10 +58,6 @@ impl<T: PackedCreate + ?Sized> PackedCreate for std::sync::Arc<T> {
     fn packed_outs_est(&self) -> usize {
         (**self).packed_outs_est()
     }
-    #[inline]
-    fn packed_has_negative_amount(&self) -> bool {
-        (**self).packed_has_negative_amount()
-    }
     fn encode_txout_body(
         &self,
         buf: &mut Vec<u8>,
@@ -82,10 +77,6 @@ impl PackedCreate for std::sync::Arc<(TxRecord, Vec<OutputRecord>)> {
         &self.0
     }
     #[inline]
-    fn packed_has_negative_amount(&self) -> bool {
-        self.1.iter().any(|o| o.value < 0)
-    }
-    #[inline]
     fn packed_n_out(&self) -> u32 {
         self.1.len() as u32
     }
@@ -102,6 +93,40 @@ impl PackedCreate for std::sync::Arc<(TxRecord, Vec<OutputRecord>)> {
     }
 }
 
+/// Parent edge after decode. A null fk is only coinbase or not-yet-stamped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputParent {
+    /// `PREV_ON_INPUTS`: `input.body` has not been applied.
+    Unstamped,
+    /// Legacy `NULL_PREV` / consensus coinbase null prevout.
+    Coinbase,
+    /// Wire input whose Class A parent fk is not known yet. Vout is the wire index.
+    Unlinked { vout: u32 },
+    /// Non-null parent create.
+    Prevout { create_fk: Fk, vout: u32 },
+}
+
+impl InputParent {
+    pub fn create_fk(self) -> Fk {
+        match self {
+            Self::Prevout { create_fk, .. } => create_fk,
+            Self::Coinbase | Self::Unstamped | Self::Unlinked { .. } => Fk::NULL,
+        }
+    }
+
+    pub fn prev_index(self) -> u32 {
+        match self {
+            Self::Prevout { vout, .. } | Self::Unlinked { vout } => vout,
+            Self::Coinbase => u32::MAX,
+            Self::Unstamped => 0,
+        }
+    }
+
+    pub fn is_coinbase(self) -> bool {
+        matches!(self, Self::Coinbase)
+    }
+}
+
 /// Class A input + BIP141 witness.
 ///
 /// `seqsigwit` stores sequence, scriptSig, and witness. The parent edge is
@@ -110,14 +135,12 @@ impl PackedCreate for std::sync::Arc<(TxRecord, Vec<OutputRecord>)> {
 /// coinbase `NULL_PREV`, otherwise `create_fk:u64` LE plus CompactSize vout.
 ///
 /// [`Self::prev_txid`] is a soft cache for wire rebuild. Encoding never writes it.
-/// [`Self::create_fk`] on a new record is filled from `input.body` after decode.
+/// [`Self::parent`] on a new record is filled from `input.body` after decode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputRecord {
     /// Soft: wire txid of parent create (`[0;32]` if unknown / coinbase).
     pub prev_txid: [u8; 32],
-    /// Dense Class A fk of parent create; [`Fk::NULL`] for coinbase.
-    pub create_fk: Fk,
-    pub prev_index: u32,
+    pub parent: InputParent,
     pub sequence: u32,
     pub script_sig: Vec<u8>,
     /// Witness stack items (empty = no witness).
@@ -125,16 +148,69 @@ pub struct InputRecord {
 }
 
 impl InputRecord {
+    pub fn parent(&self) -> InputParent {
+        self.parent
+    }
+
     pub fn is_coinbase(&self) -> bool {
-        self.create_fk.is_null() && self.prev_index == u32::MAX
+        self.parent.is_coinbase()
+    }
+
+    pub fn create_fk(&self) -> Fk {
+        self.parent.create_fk()
+    }
+
+    pub fn prev_index(&self) -> u32 {
+        self.parent.prev_index()
+    }
+
+    /// Stamp a resolved Class A parent. Keeps the wire vout already on this record.
+    pub fn stamp_create_fk(&mut self, create_fk: Fk) {
+        debug_assert!(!create_fk.is_null());
+        let vout = self.prev_index();
+        self.parent = InputParent::Prevout { create_fk, vout };
+    }
+
+    /// Non-null parent. `create_fk` must not be null.
+    pub fn prevout(
+        prev_txid: [u8; 32],
+        create_fk: Fk,
+        vout: u32,
+        sequence: u32,
+        script_sig: Vec<u8>,
+        witness: Vec<Vec<u8>>,
+    ) -> Self {
+        debug_assert!(!create_fk.is_null());
+        Self {
+            prev_txid,
+            parent: InputParent::Prevout { create_fk, vout },
+            sequence,
+            script_sig,
+            witness,
+        }
+    }
+
+    /// `PREV_ON_INPUTS` before [`apply_input_edges`].
+    pub fn unstamped(
+        prev_txid: [u8; 32],
+        sequence: u32,
+        script_sig: Vec<u8>,
+        witness: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            prev_txid,
+            parent: InputParent::Unstamped,
+            sequence,
+            script_sig,
+            witness,
+        }
     }
 
     /// Coinbase null prevout.
     pub fn coinbase(sequence: u32, script_sig: Vec<u8>, witness: Vec<Vec<u8>>) -> Self {
         Self {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: InputParent::Coinbase,
             sequence,
             script_sig,
             witness,
@@ -184,9 +260,21 @@ impl InputRecord {
         let flags = buf[0];
         let mut off = 1usize;
         check_seqsigwit_flags(flags)?;
-        let (create_fk, prev_index) = match read_inline_prevout(buf, flags, &mut off)? {
-            Some(pair) => pair,
-            None => (Fk::NULL, 0),
+        let parent = match read_inline_prevout(buf, flags, &mut off)? {
+            Some((create_fk, prev_index)) => {
+                if create_fk.is_null() {
+                    if prev_index != u32::MAX {
+                        return Err(StoreError::Corrupt("invariant: input parent sentinel"));
+                    }
+                    InputParent::Coinbase
+                } else {
+                    InputParent::Prevout {
+                        create_fk,
+                        vout: prev_index,
+                    }
+                }
+            }
+            None => InputParent::Unstamped,
         };
         let sequence = if flags & input_flags::SEQ_FINAL != 0 {
             u32::MAX
@@ -235,8 +323,7 @@ impl InputRecord {
         Ok((
             Self {
                 prev_txid: [0u8; 32],
-                create_fk,
-                prev_index,
+                parent,
                 sequence,
                 script_sig,
                 witness,
@@ -679,7 +766,7 @@ fn read_inline_prevout(
     Ok(Some((Fk(id), vout as u32)))
 }
 
-/// Fill `create_fk` and `prev_index` from `input.body`. Coinbase edge → null prevout.
+/// Fill [`InputRecord::parent`] from `input.body`. Coinbase edge → null prevout.
 pub fn apply_input_edges(
     ins: &mut [InputRecord],
     edges: &[crate::input::InputEdge],
@@ -688,13 +775,14 @@ pub fn apply_input_edges(
         return Err(StoreError::Corrupt("input edge count"));
     }
     for (inp, edge) in ins.iter_mut().zip(edges.iter()) {
-        if edge.parent.is_null() {
-            inp.create_fk = Fk::NULL;
-            inp.prev_index = u32::MAX;
+        inp.parent = if edge.parent.is_null() {
+            InputParent::Coinbase
         } else {
-            inp.create_fk = edge.parent;
-            inp.prev_index = edge.vout;
-        }
+            InputParent::Prevout {
+                create_fk: edge.parent,
+                vout: edge.vout,
+            }
+        };
     }
     Ok(())
 }
@@ -1286,24 +1374,30 @@ mod borrowed_input_encode_tests {
             InputRecord::coinbase(1, vec![], vec![vec![0x00; 32]]),
             InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk(9),
-                prev_index: 3,
+                parent: InputParent::Prevout {
+                    create_fk: Fk(9),
+                    vout: 3,
+                },
                 sequence: 0xffff_fffe,
                 script_sig: vec![0xab; 40],
                 witness: vec![],
             },
             InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk(9),
-                prev_index: 1,
+                parent: InputParent::Prevout {
+                    create_fk: Fk(9),
+                    vout: 1,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![vec![0x30; 70], vec![0x21; 33]],
             },
             InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk(4),
-                prev_index: 0,
+                parent: InputParent::Prevout {
+                    create_fk: Fk(4),
+                    vout: 0,
+                },
                 sequence: 7,
                 script_sig: vec![0x16, 0x00, 0x14],
                 witness: vec![vec![0x30; 71], vec![0x21; 33], vec![0x51]],

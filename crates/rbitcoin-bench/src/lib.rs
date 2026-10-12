@@ -372,106 +372,143 @@ fn clients_opts(cfg: &Cfg) -> ClientsOpts {
     }
 }
 
-async fn run_clients(
-    cfg: &Cfg,
-    targets: &[String],
-    backend: &str,
-    electrum: Option<&str>,
-    esplora: Option<&str>,
-) -> Result<RunOutcome, String> {
-    let wallets = pack_wallets(targets, cfg.clients, cfg.wallet_keys)?;
-    let progress = Arc::new(Mutex::new(Progress::start(
-        format!("clients {backend}"),
-        clients_units(wallets.len(), cfg.warmup, cfg.passes),
-    )));
-    let opts = clients_opts(cfg);
-    match (electrum, esplora) {
-        (Some(addr), None) => electrum_clients(addr, cfg.timeout, wallets, &opts, progress).await,
-        (None, Some(url)) => esplora_clients(url, cfg.timeout, wallets, &opts, progress).await,
-        _ => Err("use one of --electrum or --esplora".into()),
+enum Endpoint<'a> {
+    Electrum(&'a str),
+    Esplora(&'a str),
+}
+
+impl Endpoint<'_> {
+    fn label(&self) -> &'static str {
+        match self {
+            Endpoint::Electrum(_) => "electrum",
+            Endpoint::Esplora(_) => "esplora",
+        }
     }
 }
 
-async fn run_async(cfg: Cfg, targets: Vec<String>) -> Result<(), String> {
-    let outcome: RunOutcome;
-    let backend;
+enum ElectrumSuite {
+    Casa,
+    Sparrow,
+    Hot,
+}
+
+enum EsploraSuite {
+    Casa,
+    Hot,
+}
+
+fn electrum_suite(suite: Suite) -> Option<ElectrumSuite> {
+    match suite {
+        Suite::Casa => Some(ElectrumSuite::Casa),
+        Suite::Sparrow => Some(ElectrumSuite::Sparrow),
+        Suite::Hot => Some(ElectrumSuite::Hot),
+        Suite::Clients => None,
+    }
+}
+
+fn esplora_suite(suite: Suite) -> Result<Option<EsploraSuite>, String> {
+    match suite {
+        Suite::Casa => Ok(Some(EsploraSuite::Casa)),
+        Suite::Hot => Ok(Some(EsploraSuite::Hot)),
+        Suite::Clients => Ok(None),
+        Suite::Sparrow => Err("sparrow suite is Electrum-only (subscribe)".into()),
+    }
+}
+
+fn endpoint_of(cfg: &Cfg) -> Result<Endpoint<'_>, String> {
     match (&cfg.electrum, &cfg.esplora) {
-        (Some(addr), None) => {
-            backend = "electrum";
-            outcome = if cfg.suite == Suite::Clients {
-                run_clients(&cfg, &targets, backend, Some(addr), None).await?
-            } else {
-                let mut c = ElectrumClient::connect(addr, cfg.timeout).await?;
-                match cfg.suite {
-                    Suite::Casa => {
-                        let mut progress = Progress::start(
-                            format!("casa {backend}"),
-                            casa_units(targets.len(), cfg.warmup, cfg.passes),
-                        );
-                        electrum_casa(
-                            &mut c,
-                            &targets,
-                            &CasaOpts {
-                                warmup: cfg.warmup,
-                                passes: cfg.passes,
-                            },
-                            &mut progress,
-                        )
-                        .await?
-                    }
-                    Suite::Sparrow => {
-                        let mut progress = Progress::start(
-                            "sparrow load",
-                            sparrow_units(targets.len(), cfg.batch),
-                        );
-                        electrum_sparrow(&mut c, &targets, cfg.batch, cfg.fetch_txs, &mut progress)
-                            .await?
-                    }
-                    Suite::Hot => {
-                        let mut progress =
-                            Progress::start(format!("hot {backend}"), targets.len() as u64);
-                        electrum_hot(&mut c, &targets, cfg.timeout, &mut progress).await?
-                    }
-                    Suite::Clients => unreachable!(),
-                }
-            };
+        (Some(addr), None) => Ok(Endpoint::Electrum(addr)),
+        (None, Some(url)) => Ok(Endpoint::Esplora(url)),
+        (Some(_), Some(_)) => Err("use one of --electrum or --esplora".into()),
+        (None, None) => Err("need --electrum HOST:PORT or --esplora http://HOST:PORT".into()),
+    }
+}
+
+async fn run_clients(
+    cfg: &Cfg,
+    targets: &[String],
+    endpoint: Endpoint<'_>,
+) -> Result<RunOutcome, String> {
+    let wallets = pack_wallets(targets, cfg.clients, cfg.wallet_keys)?;
+    let progress = Arc::new(Mutex::new(Progress::start(
+        format!("clients {}", endpoint.label()),
+        clients_units(wallets.len(), cfg.warmup, cfg.passes),
+    )));
+    let opts = clients_opts(cfg);
+    match endpoint {
+        Endpoint::Electrum(addr) => {
+            electrum_clients(addr, cfg.timeout, wallets, &opts, progress).await
         }
-        (None, Some(url)) => {
-            backend = "esplora";
-            if cfg.suite == Suite::Sparrow {
-                return Err("sparrow suite is Electrum-only (subscribe)".into());
-            }
-            outcome = if cfg.suite == Suite::Clients {
-                run_clients(&cfg, &targets, backend, None, Some(url)).await?
-            } else {
-                let mut c = EsploraClient::connect(url, cfg.timeout).await?;
-                match cfg.suite {
-                    Suite::Casa | Suite::Hot => {
-                        let (warmup, passes, label) = if cfg.suite == Suite::Hot {
-                            (0, 1, format!("hot {backend}"))
-                        } else {
-                            (cfg.warmup, cfg.passes, format!("casa {backend}"))
-                        };
-                        let mut progress =
-                            Progress::start(label, casa_units(targets.len(), warmup, passes));
-                        esplora_casa(
-                            &mut c,
-                            &targets,
-                            &CasaOpts { warmup, passes },
-                            &mut progress,
-                        )
-                        .await?
-                    }
-                    Suite::Sparrow => unreachable!(),
-                    Suite::Clients => unreachable!(),
-                }
-            };
+        Endpoint::Esplora(url) => esplora_clients(url, cfg.timeout, wallets, &opts, progress).await,
+    }
+}
+
+async fn run_electrum_suite(
+    cfg: &Cfg,
+    targets: &[String],
+    addr: &str,
+    suite: ElectrumSuite,
+) -> Result<RunOutcome, String> {
+    let backend = "electrum";
+    let mut c = ElectrumClient::connect(addr, cfg.timeout).await?;
+    match suite {
+        ElectrumSuite::Casa => {
+            let mut progress = Progress::start(
+                format!("casa {backend}"),
+                casa_units(targets.len(), cfg.warmup, cfg.passes),
+            );
+            electrum_casa(
+                &mut c,
+                targets,
+                &CasaOpts {
+                    warmup: cfg.warmup,
+                    passes: cfg.passes,
+                },
+                &mut progress,
+            )
+            .await
         }
-        (Some(_), Some(_)) => return Err("use one of --electrum or --esplora".into()),
-        (None, None) => {
-            return Err("need --electrum HOST:PORT or --esplora http://HOST:PORT".into())
+        ElectrumSuite::Sparrow => {
+            let mut progress =
+                Progress::start("sparrow load", sparrow_units(targets.len(), cfg.batch));
+            electrum_sparrow(&mut c, targets, cfg.batch, cfg.fetch_txs, &mut progress).await
+        }
+        ElectrumSuite::Hot => {
+            let mut progress = Progress::start(format!("hot {backend}"), targets.len() as u64);
+            electrum_hot(&mut c, targets, cfg.timeout, &mut progress).await
         }
     }
+}
+
+async fn run_esplora_suite(
+    cfg: &Cfg,
+    targets: &[String],
+    url: &str,
+    suite: EsploraSuite,
+) -> Result<RunOutcome, String> {
+    let backend = "esplora";
+    let mut c = EsploraClient::connect(url, cfg.timeout).await?;
+    let (warmup, passes, label) = match suite {
+        EsploraSuite::Hot => (0, 1, format!("hot {backend}")),
+        EsploraSuite::Casa => (cfg.warmup, cfg.passes, format!("casa {backend}")),
+    };
+    let mut progress = Progress::start(label, casa_units(targets.len(), warmup, passes));
+    esplora_casa(&mut c, targets, &CasaOpts { warmup, passes }, &mut progress).await
+}
+
+async fn run_async(cfg: Cfg, targets: Vec<String>) -> Result<(), String> {
+    let endpoint = endpoint_of(&cfg)?;
+    let backend = endpoint.label();
+    let outcome = match endpoint {
+        Endpoint::Electrum(addr) => match electrum_suite(cfg.suite) {
+            None => run_clients(&cfg, &targets, Endpoint::Electrum(addr)).await?,
+            Some(suite) => run_electrum_suite(&cfg, &targets, addr, suite).await?,
+        },
+        Endpoint::Esplora(url) => match esplora_suite(cfg.suite)? {
+            None => run_clients(&cfg, &targets, Endpoint::Esplora(url)).await?,
+            Some(suite) => run_esplora_suite(&cfg, &targets, url, suite).await?,
+        },
+    };
     let name = match cfg.suite {
         Suite::Casa => "casa",
         Suite::Sparrow => "sparrow",
@@ -664,6 +701,19 @@ mod tests {
         assert_eq!(c.max_txs, 500);
         assert_eq!(c.max_utxos, 40);
         assert!(c.clients_flag);
+    }
+
+    #[test]
+    fn sparrow_on_esplora_is_electrum_only() {
+        let err = run(vec![
+            OsString::from("rbitcoin-bench"),
+            OsString::from("--suite"),
+            OsString::from("sparrow"),
+            OsString::from("--esplora"),
+            OsString::from("http://127.0.0.1:9"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("Electrum-only"), "{err}");
     }
 
     #[test]

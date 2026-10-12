@@ -331,8 +331,7 @@ fn restatus_notes_scans_intermediate_tick_heights() {
         },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: rbitcoin_store::InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![0],
             witness: vec![],
@@ -369,8 +368,7 @@ fn restatus_notes_scans_intermediate_tick_heights() {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![1],
                 witness: vec![],
@@ -753,8 +751,7 @@ fn get_history_height_window_and_status_full() {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![h as u8],
                 witness: vec![],
@@ -880,8 +877,7 @@ async fn chain_view_reorg_notifies_dropped_scripthash() {
         },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: rbitcoin_store::InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![0],
             witness: vec![],
@@ -968,8 +964,7 @@ async fn chain_view_reorg_notifies_dropped_scripthash() {
         },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
+            parent: rbitcoin_store::InputParent::Coinbase,
             sequence: u32::MAX,
             script_sig: vec![1],
             witness: vec![],

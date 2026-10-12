@@ -214,15 +214,14 @@ impl HeightFence {
 
     /// Height both head drain and this fence have passed (`None` keeps inflight).
     ///
-    /// `drain_fk == 0` or a drain fk not on a run (drain ahead of fence, or
-    /// fence ahead of drain) is `None`. Fence tip can lead unpublished
-    /// `tx.head`; inflight must wait for the min.
+    /// `drain_fk == 0` or a drain fk not on a run (hole, or drain ahead of
+    /// the fence) is `None`. A hit is that run's height.
     pub fn drain_and_fence_hi(&self, drain_fk: u64) -> Option<u32> {
         if drain_fk == 0 {
             return None;
         }
         let drain_h = self.height_of(Fk(drain_fk))?;
-        Some(drain_h.min(self.max_height()?))
+        Some(drain_h)
     }
 
     /// Highest create_fk in any connected run (`0` if empty).

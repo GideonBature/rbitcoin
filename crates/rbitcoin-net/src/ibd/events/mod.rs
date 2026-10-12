@@ -1004,14 +1004,7 @@ pub(crate) fn apply_confirm_reject(
     sender: Option<usize>,
     parent: super::confirm::RejectParent,
 ) {
-    // Never blacklist the all-zero sentinel (write used to emit this on
-    // mis-attributed rejects).
     use super::confirm::ConfirmRejectClass;
-    use bitcoin::hashes::Hash;
-    if hash.to_byte_array() == [0u8; 32] {
-        warn!("ibd: confirm reject ignored zero-hash @{height}: {err}");
-        return;
-    }
     let sent = class;
     let class = if class == ConfirmRejectClass::ConsensusInvalid {
         if let Some(h) = hub {

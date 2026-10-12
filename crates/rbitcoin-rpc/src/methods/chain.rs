@@ -1063,7 +1063,7 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     Ok(json!({
         "bestblock": getbestblockhash(ctx)?,
         "confirmations": confs,
-        "value": Amount::from_sat(out.value as u64).to_btc(),
+        "value": Amount::from_sat(out.value).to_btc(),
         "scriptPubKey": {
             "hex": hex_encode(&out.script),
             "asm": ScriptBuf::from_bytes(out.script.clone()).to_asm_string(),

@@ -469,7 +469,7 @@ impl Query {
                     create_tx_fk: create.fk,
                     vout: vout as u32,
                     txid,
-                    value: o.value,
+                    value: o.value as i64,
                     create_height: height,
                 });
             }
@@ -1464,9 +1464,6 @@ impl Query {
                     let fks = self.block_tx_fks(Height(height))?;
                     fks.first().copied() == Some(u.create_tx_fk)
                 };
-                if u.value < 0 {
-                    continue;
-                }
                 out.push(ScanUtxo {
                     txid: u.tx_hash,
                     vout: u.tx_pos,

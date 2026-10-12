@@ -1776,7 +1776,14 @@ async fn run_ibd_or_skip(
                 warn!("signal: IBD cancelled ({e})");
             } else {
                 let tip = node.tip_height().unwrap_or(0);
-                if tip > 0 && node.hub.query.index_mode().is_tip() {
+                if tip > 0
+                    && node
+                        .hub
+                        .query
+                        .index_mode()
+                        .expect("index mode cell")
+                        .is_tip()
+                {
                     warn!(
                         "ibd: incomplete: {e}; tip={tip:?} — tip indexes present, continuing tip-follow"
                     );
@@ -1788,7 +1795,11 @@ async fn run_ibd_or_skip(
             }
             catch_up_after_err(
                 node.tip_height().unwrap_or(0),
-                node.hub.query.index_mode().is_tip(),
+                node.hub
+                    .query
+                    .index_mode()
+                    .expect("index mode cell")
+                    .is_tip(),
                 shutdown.requested(),
             )
         }
@@ -2124,7 +2135,7 @@ pub(crate) fn enter_tip_mode(
         query.enter_tip_index_mode();
         info!(
             "node: IndexMode::Tip (tx.head + spend annotations already live) mode={:?}",
-            query.index_mode()
+            query.index_mode().expect("index mode cell")
         );
         info!(
             "node: tip-follow ready without scripthash (shindex off); Electrum/Esplora listen, address methods fail closed"
@@ -2139,7 +2150,7 @@ pub(crate) fn enter_tip_mode(
         query.enter_tip_index_mode();
         info!(
             "node: IndexMode::Tip (tx.head + spend annotations already live) mode={:?}",
-            query.index_mode()
+            query.index_mode().expect("index mode cell")
         );
         match query.finalize_sh_runs_cancellable(cancel.as_deref()) {
             Ok(_) => {}
@@ -2153,7 +2164,7 @@ pub(crate) fn enter_tip_mode(
     }
 
     info!("node: index materialize from Class A (Direct collect, then Tip)…");
-    if !query.index_mode().is_direct() {
+    if !query.index_mode().expect("index mode cell").is_direct() {
         if let Err(e) = query.enter_direct_index_mode_sh(true) {
             warn!("node: enter Direct for SH collect: {e}");
         }
@@ -2189,7 +2200,7 @@ pub(crate) fn enter_tip_mode(
     query.enter_tip_index_mode();
     info!(
         "node: IndexMode::Tip (tx.head + spend annotations already live) mode={:?}",
-        query.index_mode()
+        query.index_mode().expect("index mode cell")
     );
 
     let leftover = query.scripthash_run_count();

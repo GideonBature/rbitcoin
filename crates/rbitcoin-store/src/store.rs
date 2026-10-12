@@ -2399,8 +2399,10 @@ mod tests {
         };
         let non_in = vec![InputRecord {
             prev_txid: [10u8; 32],
-            prev_index: 0,
-            create_fk: cb_fks[0],
+            parent: crate::InputParent::Prevout {
+                create_fk: cb_fks[0],
+                vout: 0,
+            },
             script_sig: vec![],
             sequence: 0xffff_ffff,
             witness: vec![],
@@ -2554,8 +2556,7 @@ mod tests {
             },
             vec![InputRecord {
                 prev_txid: [10u8; 32],
-                create_fk,
-                prev_index: 0,
+                parent: crate::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2579,8 +2580,7 @@ mod tests {
             },
             vec![InputRecord {
                 prev_txid: [10u8; 32],
-                create_fk,
-                prev_index: 0,
+                parent: crate::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2604,8 +2604,7 @@ mod tests {
             },
             vec![InputRecord {
                 prev_txid: [10u8; 32],
-                create_fk,
-                prev_index: 0,
+                parent: crate::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -3728,8 +3727,10 @@ mod tests {
                     },
                     vec![InputRecord {
                         prev_txid: txid,
-                        create_fk: old,
-                        prev_index: 0,
+                        parent: crate::InputParent::Prevout {
+                            create_fk: old,
+                            vout: 0,
+                        },
                         sequence: u32::MAX,
                         script_sig: vec![],
                         witness: vec![],

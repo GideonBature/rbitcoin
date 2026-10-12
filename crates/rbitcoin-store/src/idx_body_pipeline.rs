@@ -468,15 +468,14 @@ mod tests {
             };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: crate::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![i],
                 witness: vec![],
             }];
             let mut outs = Vec::new();
             for j in 0..(1 + (i % 3)) {
-                outs.push(OutputRecord::unspent(j as i64 + 1, vec![0x51, j]));
+                outs.push(OutputRecord::unspent(j as u64 + 1, vec![0x51, j]));
             }
             fks.push(
                 t.put_full_batch_indexed(&[(tx, inputs, outs)], true)

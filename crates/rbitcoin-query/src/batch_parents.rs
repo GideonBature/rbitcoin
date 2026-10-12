@@ -55,7 +55,7 @@ pub struct PinnedOuts {
 impl SharedPrevoutScript {
     /// Amount and script for a pinned vout. `None` for [`Self::Wire`] (the
     /// block lives on the script job) and when the vout is absent.
-    pub fn parts(&self) -> Option<(i64, &[u8])> {
+    pub fn parts(&self) -> Option<(u64, &[u8])> {
         match self {
             Self::Wire { .. } => None,
             Self::Pinned(p) => p.outs.get_parts(p.vout),
@@ -117,7 +117,7 @@ impl PinOuts {
         }
     }
 
-    fn get_parts(&self, vout: u32) -> Option<(i64, &[u8])> {
+    fn get_parts(&self, vout: u32) -> Option<(u64, &[u8])> {
         match self {
             Self::Full { pin, .. } => pin.out_parts(vout),
             Self::Sparse { outs, .. } => {
@@ -489,7 +489,7 @@ pub struct ParentPinView {
 impl ParentPinView {
     /// Value, script bytes, and parent txid. Always loads the outs `Arc`
     /// (no sticky cache).
-    pub fn txout_parts(&self, fk: Fk, vout: u32) -> Option<(i64, Vec<u8>, [u8; 32])> {
+    pub fn txout_parts(&self, fk: Fk, vout: u32) -> Option<(u64, Vec<u8>, [u8; 32])> {
         let id = fk.get()?;
         let pin = self.pins.get(&id)?;
         let outs = pin.load_outs();
@@ -716,7 +716,7 @@ impl BatchParents {
         &self,
         fk: Fk,
         vout: u32,
-        f: impl FnOnce(i64, &[u8], [u8; 32]) -> R,
+        f: impl FnOnce(u64, &[u8], [u8; 32]) -> R,
     ) -> Option<R> {
         self.parent_txout_parts_inner(fk, vout, f)
     }
@@ -752,7 +752,7 @@ impl BatchParents {
         &self,
         fk: Fk,
         vout: u32,
-        f: impl FnOnce(i64, &[u8], [u8; 32]) -> R,
+        f: impl FnOnce(u64, &[u8], [u8; 32]) -> R,
     ) -> Option<R> {
         let id = fk.get()?;
         let e = self.pins.get(&id)?;
@@ -1172,7 +1172,7 @@ mod tests {
     }
 
     fn out(v: i64) -> OutputRecord {
-        OutputRecord::unspent(v, vec![0x51])
+        OutputRecord::unspent(v as u64, vec![0x51])
     }
 
     /// Vacant CreatePin insert must keep the script allocation (no PinOuts clone).

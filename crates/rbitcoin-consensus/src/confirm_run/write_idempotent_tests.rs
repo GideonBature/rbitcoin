@@ -813,7 +813,7 @@ fn fill_edges_from_packed(plan: &mut rbitcoin_query::ArchiveWritePlan) {
         let mut edges = Vec::with_capacity(ins.len());
         for (vin, inp) in ins.iter().enumerate() {
             let vin = vin as u32;
-            if inp.is_coinbase() || inp.prev_index == u32::MAX {
+            if inp.is_coinbase() || inp.prev_index() == u32::MAX {
                 edges.push(SpendEdge {
                     prev_txid: [0u8; 32],
                     vout: u32::MAX,
@@ -824,9 +824,9 @@ fn fill_edges_from_packed(plan: &mut rbitcoin_query::ArchiveWritePlan) {
             } else {
                 edges.push(SpendEdge {
                     prev_txid: inp.prev_txid,
-                    vout: inp.prev_index,
+                    vout: inp.prev_index(),
                     spend_fk: *fk,
-                    create_fk: inp.create_fk,
+                    create_fk: inp.create_fk(),
                     vin,
                 });
             }
@@ -869,8 +869,10 @@ fn pin_and_ensure_journey() {
         ),
         vec![InputRecord {
             prev_txid: [0xBB; 32],
-            create_fk: missing_parent,
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: missing_parent,
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -931,8 +933,10 @@ fn pin_and_ensure_journey() {
 
     let spend_ins = vec![InputRecord {
         prev_txid: parent_tx.txid,
-        create_fk: pfk,
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: pfk,
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -1096,8 +1100,10 @@ fn pin_and_ensure_journey() {
             ),
             vec![InputRecord {
                 prev_txid: [0x32; 32],
-                create_fk: Fk(2),
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Prevout {
+                    create_fk: Fk(2),
+                    vout: 0,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -1172,8 +1178,10 @@ fn fill_same_batch_abs_from_append_loc_ram() {
     let parent_ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let child_ins = vec![InputRecord {
         prev_txid: [0x32; 32],
-        create_fk: Fk(1),
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: Fk(1),
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -1376,8 +1384,10 @@ fn structural_same_batch_overlay_skips_meta_pread() {
     let parent_ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let child_ins = vec![InputRecord {
         prev_txid: [0x32; 32],
-        create_fk: Fk(1),
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: Fk(1),
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -1452,6 +1462,13 @@ fn structural_same_batch_overlay_skips_meta_pread() {
     bp.set_spent_range_only(fks[0], loc[0].spent);
 
     let spends = vec![([0x32u8; 32], 0u32, fks[1], fks[0], 0)];
+    let abs_jobs = bp
+        .spend_abs_jobs(
+            spends
+                .iter()
+                .map(|&(_, vout, sfk, cfk, vin)| (cfk, vout, sfk, vin)),
+        )
+        .expect("pin abs");
     let mut map = FkMap::default();
     map.insert(fks[0], (1, false));
     map.insert(fks[1], (1, false));
@@ -1480,7 +1497,7 @@ fn structural_same_batch_overlay_skips_meta_pread() {
         &run,
         &crate::block::ClassAWave::new(fks.clone()),
         &mut scratch,
-        None,
+        &abs_jobs,
     )
     .expect("overlay spend is not durable-spent before tip");
     let meta_n = q
@@ -1615,6 +1632,13 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
     let run = RunCreateHeight::Spans(Vec::new());
     for vout in [0u32, 1] {
         let spends = vec![([0x41u8; 32], vout, Fk(9), fks[0], 0)];
+        let abs_jobs = bp
+            .spend_abs_jobs(
+                spends
+                    .iter()
+                    .map(|&(_, vout, sfk, cfk, vin)| (cfk, vout, sfk, vin)),
+            )
+            .expect("pin abs");
         structural_validate_spends(
             &q,
             &block,
@@ -1628,7 +1652,7 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
             &run,
             &crate::block::ClassAWave::default(),
             &mut scratch,
-            None,
+            &abs_jobs,
         )
         .unwrap();
     }
@@ -1894,8 +1918,10 @@ fn pin_and_ensure_from_pin_loc_without_tls() {
 
     let spend_ins = vec![InputRecord {
         prev_txid: parent_pin.tx().txid,
-        create_fk: fks[0],
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: fks[0],
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -1962,8 +1988,10 @@ fn pin_creates_only_ibd_skeleton_miss_is_lookup_stage_miss() {
         ),
         vec![InputRecord {
             prev_txid: parent_tx.txid,
-            create_fk: Fk(1),
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: Fk(1),
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -2007,8 +2035,10 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
     };
     let spend_ins = vec![InputRecord {
         prev_txid: [0xDDu8; 32],
-        create_fk: parent_fk,
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: parent_fk,
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -2151,8 +2181,10 @@ fn pin_takes_stamp_parent_vouts() {
         ),
         vec![InputRecord {
             prev_txid: parent_tx.txid,
-            create_fk: pfk,
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: pfk,
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -2226,8 +2258,10 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
             ),
             vec![InputRecord {
                 prev_txid: parent_tx.txid,
-                create_fk: Fk(1),
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Prevout {
+                    create_fk: Fk(1),
+                    vout: 0,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2459,8 +2493,10 @@ fn pin_sparse_need_high_vout_only() {
     };
     let spend_ins = vec![InputRecord {
         prev_txid: parent_tx.txid,
-        create_fk: pfk,
-        prev_index: 3,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: pfk,
+            vout: 3,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -2535,7 +2571,7 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
                 output_count: 1,
             },
             vec![InputRecord::coinbase(u32::MAX, vec![tag], vec![])],
-            vec![OutputRecord::unspent(1000 + tag as i64, vec![0x51, tag])],
+            vec![OutputRecord::unspent(1000 + tag as u64, vec![0x51, tag])],
         )
     };
     let items = [mk_parent(1), mk_parent(2), mk_parent(3)];
@@ -2558,8 +2594,10 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
     let spend_ins: Vec<InputRecord> = (0..3)
         .map(|i| InputRecord {
             prev_txid: items[i].0.txid,
-            create_fk: fks[i],
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: fks[i],
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],
@@ -2640,8 +2678,10 @@ fn pin_stamp_outs_is_cache_not_new() {
     };
     let spend_ins = vec![InputRecord {
         prev_txid: tid,
-        create_fk: pfk,
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: pfk,
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -2727,8 +2767,10 @@ fn pin_recent_identity_without_outs_still_range_fills() {
     };
     let spend_ins = vec![InputRecord {
         prev_txid: tid,
-        create_fk: fks[0],
-        prev_index: 0,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: fks[0],
+            vout: 0,
+        },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
@@ -3012,109 +3054,6 @@ fn wire_lookup_empty_and_noncontiguous() {
         Ok(_) => panic!("gap lookup must refuse"),
         Err(e) => panic!("gap lookup must refuse, got {e}"),
     }
-    let _ = std::fs::remove_dir_all(&path);
-}
-
-/// Load miss: spend edges without pin denserels must hard-fail (no cold tier).
-/// Pin-covered parent without denserels/abs fails structural (no body-range cold).
-#[test]
-fn structural_pinned_without_abs_is_invariant_error() {
-    use crate::block::{structural_validate_spends, RunCreateHeight};
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
-    use bitcoin::absolute::LockTime;
-    use bitcoin::block::{Header, Version};
-    use bitcoin::hashes::Hash;
-    use bitcoin::script::ScriptBuf;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{
-        Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut,
-        Witness,
-    };
-    use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::{BatchParents, OutPointSet};
-    use rbitcoin_store::{OutputRecord, TxRecord};
-    let (path, q) = tmp_query();
-    q.enter_direct_index_mode().unwrap();
-    let params = ChainParams::regtest();
-
-    // Minimal non-empty block (coinbase only) for structural entry.
-    let coinbase = Transaction {
-        version: TxVersion::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(vec![0x00, 0x01]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_0000_0000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let mut block = Block {
-        header: Header {
-            version: Version::from_consensus(4),
-            prev_blockhash: BlockHash::from_byte_array([0u8; 32]),
-            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
-            time: 1_300_000_000,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txdata: vec![coinbase],
-    };
-    block.header.merkle_root = block.compute_merkle_root().unwrap();
-
-    // Parent pin present (outs) but denserels/body_range missing → abs None.
-    let mut bp = BatchParents::new();
-    let parent_fk = Fk(42);
-    let tx = TxRecord {
-        txid: [7u8; 32],
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: 1,
-    };
-    let out = OutputRecord::unspent(1, vec![0x51]);
-    bp.insert_owned(
-        parent_fk,
-        tx,
-        vec![(0, out)],
-        vec![0],
-        Some(false),
-        None,   // no body_range
-        vec![], // no denserels
-    );
-
-    let spends = vec![([7u8; 32], 0u32, Fk(100), parent_fk, 0)];
-    let ctx = crate::block::ValidationContext::at(&params, Height(1), Milestone::NONE);
-    let mut pending = OutPointSet::default();
-    let mut mtp = rbitcoin_query::U32Map::<u32>::default();
-    let heights = RunCreateHeight::Spans(Vec::new());
-    let err = structural_validate_spends(
-        &q,
-        &block,
-        &ctx,
-        None,
-        &spends,
-        0,
-        &mut pending,
-        &bp,
-        &mut mtp,
-        &heights,
-        &crate::block::ClassAWave::default(),
-        &mut crate::block::StructuralScratch::default(),
-        None,
-    )
-    .expect_err("pinned without abs must be invariant");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("invariant") && msg.contains("denserels"),
-        "unexpected err: {msg}"
-    );
     let _ = std::fs::remove_dir_all(&path);
 }
 

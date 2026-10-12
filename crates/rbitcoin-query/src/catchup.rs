@@ -36,20 +36,21 @@ impl IndexMode {
     pub fn enqueues_sh_writebehind(self, sh_index: bool) -> bool {
         sh_index && self.is_tip()
     }
-    fn from_u8(v: u8) -> Self {
+    fn from_u8(v: u8) -> Result<Self, StoreError> {
         match v {
-            1 => Self::Direct,
-            // 0 was historical Catchup — treat as Direct (safe for residual stores).
-            0 => Self::Direct,
-            _ => Self::Tip,
+            1 => Ok(Self::Direct),
+            2 => Ok(Self::Tip),
+            _ => Err(StoreError::Corrupt("index mode byte")),
         }
     }
 }
 
 impl Query {
     /// Current index / spentness mode ([`IndexMode`]).
+    ///
+    /// The in-memory cell is only Direct (`1`) or Tip (`2`). Any other byte is corrupt.
     #[inline]
-    pub fn index_mode(&self) -> IndexMode {
+    pub fn index_mode(&self) -> Result<IndexMode, QueryError> {
         IndexMode::from_u8(self.index_mode_cell.load(Ordering::SeqCst))
     }
 
@@ -71,6 +72,7 @@ impl Query {
     #[inline]
     pub fn enqueues_sh_writebehind(&self) -> bool {
         self.index_mode()
+            .expect("index mode cell")
             .enqueues_sh_writebehind(self.sh_index_enabled())
     }
 
@@ -241,7 +243,7 @@ impl Query {
                      skip Class A recollect and bulk materialize"
                     );
                     self.mark_sh_indexed_through_tip();
-                } else if self.index_mode().is_direct() {
+                } else if self.index_mode()?.is_direct() {
                     rbitcoin_log::info!(
                         "node: scripthash durable head with HWM/SEAL lag while Direct — \
                      Class A tail backfill (write-behind no-ops until Tip)"
@@ -438,8 +440,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![h as u8],
                 witness: vec![],
@@ -447,6 +448,28 @@ mod tests {
             outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51, h as u8])],
         };
         (header, ta)
+    }
+
+    #[test]
+    fn unknown_index_mode_byte_is_corrupt() {
+        let (_dir, q) = crate::testutil::tiny_query_labeled("idx-mode-byte");
+        for bad in [0u8, 3] {
+            q.index_mode_cell
+                .store(bad, std::sync::atomic::Ordering::SeqCst);
+            match q.index_mode() {
+                Err(StoreError::Corrupt(msg)) => {
+                    assert_eq!(msg, "index mode byte", "byte {bad}");
+                }
+                other => panic!("byte {bad} must be corrupt, got {other:?}"),
+            }
+        }
+        q.index_mode_cell
+            .store(IndexMode::Direct as u8, std::sync::atomic::Ordering::SeqCst);
+        assert!(q.index_mode().expect("direct").is_direct());
+        q.index_mode_cell
+            .store(IndexMode::Tip as u8, std::sync::atomic::Ordering::SeqCst);
+        assert!(q.index_mode().expect("tip").is_tip());
+        assert!(!q.index_mode().expect("tip").is_direct());
     }
 
     fn seed_direct_chain(q: &Query, n: u32) {

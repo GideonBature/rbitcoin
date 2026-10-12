@@ -399,8 +399,8 @@ fn prevout_json(
     mempool: Option<&MempoolHub>,
 ) -> Result<Option<Value>, QueryError> {
     if let Some(inp) = stored_inputs.get(idx) {
-        if !inp.create_fk.is_null() {
-            if let Ok(out) = query.tx_output_at_fk(inp.create_fk, inp.prev_index) {
+        if !inp.create_fk().is_null() {
+            if let Ok(out) = query.tx_output_at_fk(inp.create_fk(), inp.prev_index()) {
                 return Ok(Some(vout_fields(&out.script, out.value, network)));
             }
         }
@@ -415,7 +415,7 @@ fn prevout_json(
         if let Some(o) = prev.output.get(tin.previous_output.vout as usize) {
             return Ok(Some(vout_fields(
                 o.script_pubkey.as_bytes(),
-                o.value.to_sat() as i64,
+                o.value.to_sat(),
                 network,
             )));
         }
@@ -423,7 +423,7 @@ fn prevout_json(
     Ok(None)
 }
 
-fn vout_fields(script: &[u8], value: i64, network: Network) -> Value {
+fn vout_fields(script: &[u8], value: u64, network: Network) -> Value {
     let f = esplora_script_fields(script, network);
     let mut o = json!({
         "scriptpubkey": f.hex,
@@ -620,8 +620,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![0x01],
                 witness: vec![],
@@ -835,8 +834,7 @@ mod tests {
                 },
                 inputs: vec![InputRecord {
                     prev_txid: [0u8; 32],
-                    create_fk: Fk::NULL,
-                    prev_index: u32::MAX,
+                    parent: rbitcoin_store::InputParent::Coinbase,
                     sequence: u32::MAX,
                     script_sig: vec![h as u8],
                     witness: vec![],
@@ -954,8 +952,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![0],
                 witness: vec![],
@@ -992,8 +989,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: create_txid,
-                create_fk,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -1030,8 +1026,10 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: spend1_txid,
-                create_fk: spend1_fk,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Prevout {
+                    create_fk: spend1_fk,
+                    vout: 0,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -1122,8 +1120,10 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: txid,
-                create_fk: fk,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Prevout {
+                    create_fk: fk,
+                    vout: 0,
+                },
                 sequence: u32::MAX,
                 script_sig: vec![0x51],
                 witness: vec![vec![0xab]],

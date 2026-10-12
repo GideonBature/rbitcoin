@@ -15,9 +15,17 @@ fn missing_reject_parent_is_not_consensus_invalid() {
     let hash = bitcoin::BlockHash::from_byte_array([0x9e; 32]);
     let parent = RejectParent::from_lookup(&hub, hash);
     assert!(parent.hash.is_none());
-    assert!(parent.unreadable);
+    assert!(!parent.unreadable);
     let class = ConfirmRejectClass::ConsensusInvalid.trust_consensus(parent, hub.tip_hash());
-    assert_eq!(class, ConfirmRejectClass::Cascade);
+    assert_eq!(class, ConfirmRejectClass::EngineFault);
+    let io = RejectParent {
+        hash: None,
+        unreadable: true,
+    };
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.trust_consensus(io, hub.tip_hash()),
+        ConfirmRejectClass::Cascade
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -622,7 +630,7 @@ fn requeue_clears_inflight_so_tip_can_retry() {
         g.inflight.insert(87);
         g.inflight.insert(88);
     }
-    feed.requeue_wire(&[(87, bh(1), None), (88, bh(2), None)]);
+    feed.requeue_wire(&[(87, bh(1)), (88, bh(2))]);
     let g = feed.inner.lock().unwrap();
     assert!(!g.inflight.contains(&87));
     assert!(!g.inflight.contains(&88));
@@ -724,10 +732,9 @@ fn feed_note_requeue_finish_surface() {
     feed.note(100, bh(1));
     {
         let mut g = feed.inner.lock().unwrap();
-        let (hash, wire) = g.ready.remove(&100).unwrap();
+        let hash = g.ready.remove(&100).unwrap();
         g.inflight.insert(100);
         assert_eq!(hash, bh(1));
-        assert!(wire.is_none());
     }
     // Main loop offer would re-note tip+1 every tick — must be ignored.
     feed.note(100, bh(1));
@@ -745,12 +752,12 @@ fn feed_note_requeue_finish_surface() {
         g.inflight.insert(50);
         g.inflight.insert(51);
     }
-    feed.requeue_wire(&[(50, bh(5), None), (51, bh(6), None)]);
+    feed.requeue_wire(&[(50, bh(5)), (51, bh(6))]);
     {
         let g = feed.inner.lock().unwrap();
         assert!(!g.inflight.contains(&50));
-        assert_eq!(g.ready.get(&50).map(|(h, _)| *h), Some(bh(5)));
-        assert_eq!(g.ready.get(&51).map(|(h, _)| *h), Some(bh(6)));
+        assert_eq!(g.ready.get(&50).copied(), Some(bh(5)));
+        assert_eq!(g.ready.get(&51).copied(), Some(bh(6)));
     }
 
     {
@@ -1078,59 +1085,40 @@ fn claim_feed_skips_inflight_and_confirmed_in_helper() {
     assert!(claim_feed_run(1, 0, 100, |_| true, |_| false).is_empty());
 }
 
-/// note_wire prefer path (instance-local; not process-global thr_stats).
+/// note_wire stores the hash only and does not replace one already noted.
 #[test]
 fn thr_stats_all_stages_and_note_wire_prefer() {
-    // note_wire: prefer keeping wire when already noted without; ignore inflight.
     let feed = ConfirmFeed::new();
     feed.note(10, bh(1));
     {
         let g = feed.inner.lock().unwrap();
-        assert!(g.ready.get(&10).unwrap().1.is_none());
+        assert_eq!(g.ready.get(&10).copied(), Some(bh(1)));
     }
-    // Re-note with wire upgrades the optional slot.
-    let genesis = rbitcoin_consensus::genesis_block(&rbitcoin_consensus::ChainParams::regtest());
-    feed.note_wire(10, bh(1), Some(genesis.clone()));
+    feed.note_wire(10, bh(2));
     {
         let g = feed.inner.lock().unwrap();
-        assert!(g.ready.get(&10).unwrap().1.is_some());
+        assert_eq!(g.ready.get(&10).copied(), Some(bh(1)), "first hash stays");
     }
-    // Second note_wire with wire does not replace existing wire.
-    let kept_nonce = genesis.header.nonce;
-    let mut other = genesis.clone();
-    other.header.nonce = kept_nonce.wrapping_add(99);
-    feed.note_wire(10, bh(1), Some(other));
-    {
-        let g = feed.inner.lock().unwrap();
-        assert_eq!(
-            g.ready.get(&10).unwrap().1.as_ref().unwrap().header.nonce,
-            kept_nonce,
-            "must keep first wire, not replace"
-        );
-    }
-    // Inflight height ignores note_wire entirely.
     {
         let mut g = feed.inner.lock().unwrap();
         g.inflight.insert(11);
     }
-    feed.note_wire(11, bh(2), Some(genesis.clone()));
+    feed.note_wire(11, bh(2));
     {
         let g = feed.inner.lock().unwrap();
         assert!(!g.ready.contains_key(&11));
     }
-    // requeue into existing ready without wire upgrades it.
-    feed.requeue_wire(&[(10, bh(1), None)]);
+    feed.requeue_wire(&[(10, bh(4))]);
     {
         let g = feed.inner.lock().unwrap();
-        assert!(g.ready.get(&10).unwrap().1.is_some());
+        assert_eq!(g.ready.get(&10).copied(), Some(bh(1)));
         assert!(!g.inflight.contains(&10));
     }
-    // requeue into existing ready that already has no wire, supply wire.
     feed.note(12, bh(3));
-    feed.requeue_wire(&[(12, bh(3), Some(genesis))]);
+    feed.requeue_wire(&[(12, bh(9))]);
     {
         let g = feed.inner.lock().unwrap();
-        assert!(g.ready.get(&12).unwrap().1.is_some());
+        assert_eq!(g.ready.get(&12).copied(), Some(bh(3)));
     }
     feed.clear();
     {
@@ -1171,6 +1159,57 @@ fn confirm_feed_clear_drops_queued_plans() {
     assert_eq!(ready, 0, "rewind must drop ready confirm plans");
     assert_eq!(inflight, 0, "rewind must drop inflight confirm plans");
     assert_eq!(feed.epoch(), 1, "clear bumps the rewind epoch");
+}
+
+/// Parent is tip → blacklist. Parent stored but not tip → cascade.
+/// No header row → engine fault (not a block verdict). Other classes pass through.
+#[test]
+fn trust_consensus_arms() {
+    use super::ConfirmRejectClass;
+    use rbitcoin_consensus::mine_empty_regtest;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("trust-consensus");
+    hub.ensure_genesis().unwrap();
+    let dummy = BlockHash::from_byte_array([9u8; 32]);
+    let missing = RejectParent::from_lookup(&hub, dummy);
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.trust_consensus(missing, hub.tip_hash()),
+        ConfirmRejectClass::EngineFault,
+        "missing header row is not a block verdict"
+    );
+    assert_eq!(
+        ConfirmRejectClass::SoftWire.trust_consensus(missing, hub.tip_hash()),
+        ConfirmRejectClass::SoftWire,
+        "only a consensus class is reclassified"
+    );
+
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let on_tip = mine_empty_regtest(hub.tip_hash().unwrap(), time + 600, 1);
+    hub.ensure_header(&on_tip.header).unwrap();
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.trust_consensus(
+            RejectParent::from_lookup(&hub, on_tip.block_hash()),
+            hub.tip_hash()
+        ),
+        ConfirmRejectClass::ConsensusInvalid,
+        "parent is the tip"
+    );
+
+    let off = mine_empty_regtest(hub.tip_hash().unwrap(), time + 1200, 1);
+    hub.accept_block(on_tip).unwrap();
+    hub.ensure_header(&off.header).unwrap();
+    assert_ne!(hub.tip_hash(), Some(off.header.prev_blockhash));
+    assert_eq!(
+        ConfirmRejectClass::ConsensusInvalid.trust_consensus(
+            RejectParent::from_lookup(&hub, off.block_hash()),
+            hub.tip_hash()
+        ),
+        ConfirmRejectClass::Cascade,
+        "parent exists but is not the tip"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1498,7 +1537,7 @@ fn lookup_ready_hash_none_when_missing() {
     let h = bitcoin::BlockHash::from_byte_array([2u8; 32]);
     {
         let mut g = feed.inner.lock().unwrap();
-        g.ready.insert(10, (h, None));
+        g.ready.insert(10, h);
     }
     assert_eq!(super::lookup_ready_hash(&feed, 10), Some(h));
 }
@@ -1825,8 +1864,10 @@ fn ibd_confirm_pin_fault() {
         },
         inputs: vec![InputRecord {
             prev_txid: cb_txid,
-            create_fk: cb_fk,
-            prev_index: 0,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: cb_fk,
+                vout: 0,
+            },
             sequence: u32::MAX,
             script_sig: vec![],
             witness: vec![],

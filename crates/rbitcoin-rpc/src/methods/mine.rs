@@ -1064,11 +1064,7 @@ fn read_confirmed_prevout(
         Err(StoreError::NotFound) => return Ok(None),
         Err(e) => return Err(e),
     };
-    let value = if out.value < 0 {
-        bitcoin::Amount::ZERO
-    } else {
-        bitcoin::Amount::from_sat(out.value as u64)
-    };
+    let value = bitcoin::Amount::from_sat(out.value);
     Ok(Some((
         fk,
         bitcoin::TxOut {

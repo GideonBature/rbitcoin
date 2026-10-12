@@ -1002,7 +1002,7 @@ impl ScriptCheckJob {
     ///
     /// Shared wire prevouts read the job's block. Pinned prevouts read the outs
     /// `Arc`. A missing vout is `Corrupt`, not an empty script.
-    pub(crate) fn prevout_parts(&self, i: usize) -> Result<(i64, &[u8]), ConsensusError> {
+    pub(crate) fn prevout_parts(&self, i: usize) -> Result<(u64, &[u8]), ConsensusError> {
         match &self.prevouts {
             JobPrevouts::Owned(v) => {
                 let o =
@@ -1010,7 +1010,7 @@ impl ScriptCheckJob {
                         .ok_or(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
                             "invariant: prevout index",
                         )))?;
-                Ok((o.value.to_sat() as i64, o.script_pubkey.as_bytes()))
+                Ok((o.value.to_sat(), o.script_pubkey.as_bytes()))
             }
             JobPrevouts::Shared(v) => {
                 let slot =
@@ -1021,7 +1021,7 @@ impl ScriptCheckJob {
                 match slot {
                     rbitcoin_query::SharedPrevoutScript::Wire { tx_index, vout } => {
                         let o = self.wire_output(*tx_index, *vout)?;
-                        Ok((o.value.to_sat() as i64, o.script_pubkey.as_bytes()))
+                        Ok((o.value.to_sat(), o.script_pubkey.as_bytes()))
                     }
                     rbitcoin_query::SharedPrevoutScript::Pinned(_) => {
                         slot.parts().ok_or(ConsensusError::Store(
@@ -1049,7 +1049,7 @@ impl ScriptCheckJob {
     #[inline]
     pub(crate) fn prevout_amount(&self, i: usize) -> Result<Amount, ConsensusError> {
         self.prevout_parts(i)
-            .map(|(value, _)| Amount::from_sat(value as u64))
+            .map(|(value, _)| Amount::from_sat(value))
     }
 
     #[inline]
@@ -1625,7 +1625,6 @@ impl AnnotateSlots {
 /// [`AnnotateSlots`] accumulate for the whole batch.
 pub(crate) struct StructuralScratch {
     abs_jobs: Vec<StructuralAbsJob>,
-    abs_seen: rbitcoin_query::U64Set,
     unique_fks: Vec<rbitcoin_primitives::Fk>,
     height_by_id: U64Map<u32>,
     skip_n: std::collections::HashMap<
@@ -1649,7 +1648,6 @@ impl Default for StructuralScratch {
     fn default() -> Self {
         Self {
             abs_jobs: Vec::new(),
-            abs_seen: rbitcoin_query::U64Set::default(),
             unique_fks: Vec::new(),
             height_by_id: U64Map::default(),
             skip_n: std::collections::HashMap::with_hasher(Default::default()),
@@ -1677,7 +1675,6 @@ impl StructuralScratch {
 
     fn begin_block(&mut self) {
         self.abs_jobs.clear();
-        self.abs_seen.clear();
         self.unique_fks.clear();
         self.height_by_id.clear();
         self.skip_n.clear();
@@ -1718,7 +1715,7 @@ pub(crate) fn structural_validate_spends(
     run_create_height: &RunCreateHeight,
     class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
-    precomputed_abs: Option<&[StructuralAbsJob]>,
+    abs_jobs: &[StructuralAbsJob],
 ) -> Result<StructuralPhaseNs, ConsensusError> {
     use std::time::Instant;
 
@@ -1728,14 +1725,7 @@ pub(crate) fn structural_validate_spends(
     let t_spent = Instant::now();
     reject_bip30_unspent_overwrite(query, block, ctx)?;
     let t_abs = Instant::now();
-    structural_abs_heights(
-        query,
-        spends,
-        batch_parents,
-        run_create_height,
-        scratch,
-        precomputed_abs,
-    )?;
+    structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
     let tip = query.tip_height().map(|h| h.0);
     let mut spent_strong_ns = 0u64;
     let mut multi_list_ns = 0u64;
@@ -1933,47 +1923,11 @@ fn overlay_meta_is_skip(
 
 fn structural_abs_heights(
     query: &Query,
-    spends: &[(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )],
-    batch_parents: &rbitcoin_query::BatchParents,
     run_create_height: &RunCreateHeight,
     scratch: &mut StructuralScratch,
-    precomputed_abs: Option<&[StructuralAbsJob]>,
+    abs_jobs: &[StructuralAbsJob],
 ) -> Result<(), ConsensusError> {
-    if let Some(jobs) = precomputed_abs {
-        // Tests recompute so a stale list cannot skip a missing abs.
-        #[cfg(test)]
-        {
-            let fresh = batch_parents
-                .spend_abs_jobs(
-                    spends
-                        .iter()
-                        .map(|&(_, vout, sfk, cfk, vin)| (cfk, vout, sfk, vin)),
-                )
-                .map_err(ConsensusError::from)?;
-            if fresh.as_slice() != jobs {
-                return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                    "invariant: precomputed spend abs diverged from pin",
-                )));
-            }
-        }
-        scratch.abs_jobs.extend_from_slice(jobs);
-    } else {
-        batch_parents
-            .spend_abs_jobs_into(
-                spends
-                    .iter()
-                    .map(|&(_, vout, sfk, cfk, vin)| (cfk, vout, sfk, vin)),
-                &mut scratch.abs_jobs,
-                &mut scratch.abs_seen,
-            )
-            .map_err(ConsensusError::from)?;
-    }
+    scratch.abs_jobs.extend_from_slice(abs_jobs);
     scratch.unique_fks.extend(
         scratch
             .abs_jobs
@@ -2610,7 +2564,7 @@ fn resolve_prevout(
             confirm_phase_stats::tl_note_batch_hit();
             return Ok(ResolvedPrevout {
                 txout: TxOut {
-                    value: Amount::from_sat(value as u64),
+                    value: Amount::from_sat(value),
                     script_pubkey: ScriptBuf::new(),
                 },
                 shared: need_script_buf.then_some(pinned),

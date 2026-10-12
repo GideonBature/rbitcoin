@@ -348,11 +348,8 @@ fn resolve_prevout(work: &BlockWork, spend: &SpendRef) -> Result<TxOut, Consensu
     if txid != spend.prev_txid {
         return Err(corrupt("invariant: live index prevout txid"));
     }
-    if value < 0 {
-        return Err(corrupt("invariant: live index prevout value"));
-    }
     Ok(TxOut {
-        value: Amount::from_sat(value as u64),
+        value: Amount::from_sat(value),
         script_pubkey: ScriptBuf::from_bytes(script),
     })
 }

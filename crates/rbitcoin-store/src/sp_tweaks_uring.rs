@@ -254,10 +254,10 @@ pub fn load_tweak_wave(table: &TxTable, fks: &[Fk]) -> Result<TweakWave, StoreEr
             if inp.is_coinbase() {
                 continue;
             }
-            if wave_outs.contains_key(&inp.create_fk.0) {
+            if wave_outs.contains_key(&inp.create_fk().0) {
                 continue;
             }
-            missing.push(inp.create_fk);
+            missing.push(inp.create_fk());
         }
     }
     missing.sort_by_key(|f| f.0);

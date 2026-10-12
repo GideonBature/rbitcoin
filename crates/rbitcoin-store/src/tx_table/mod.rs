@@ -342,15 +342,21 @@ fn edges_from_seqsigwit_ranges(
 
 fn input_edges(ins: &[InputRecord]) -> Vec<crate::input::InputEdge> {
     ins.iter()
-        .map(|inp| {
-            if inp.is_coinbase() {
-                crate::input::InputEdge::coinbase()
-            } else {
-                crate::input::InputEdge {
-                    parent: inp.create_fk,
-                    vout: inp.prev_index,
-                }
-            }
+        .map(|inp| match inp.parent() {
+            InputParent::Coinbase => crate::input::InputEdge::coinbase(),
+            InputParent::Prevout { create_fk, vout } => crate::input::InputEdge {
+                parent: create_fk,
+                vout,
+            },
+            // Edges not applied yet. Same bytes the old `(NULL, 0)` pair wrote.
+            InputParent::Unstamped => crate::input::InputEdge {
+                parent: Fk::NULL,
+                vout: 0,
+            },
+            InputParent::Unlinked { vout } => crate::input::InputEdge {
+                parent: Fk::NULL,
+                vout,
+            },
         })
         .collect()
 }
@@ -372,7 +378,8 @@ fn txstat_placeholders(
 /// Class A output (addressed via `tx.output_start_fk` run + local vout).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputRecord {
-    pub value: i64,
+    /// Satoshis. Decode rejects a mantissa above `i64::MAX` (`output value too large`).
+    pub value: u64,
     pub script: Vec<u8>,
     /// Schema v5: sole `spending_tx_fk` if !multi; else head fk into `spent.ovf`.
     pub spender_field: Fk,
@@ -381,7 +388,7 @@ pub struct OutputRecord {
 }
 
 impl OutputRecord {
-    pub fn unspent(value: i64, script: Vec<u8>) -> Self {
+    pub fn unspent(value: u64, script: Vec<u8>) -> Self {
         Self {
             value,
             script,
@@ -396,20 +403,15 @@ impl OutputRecord {
     }
 
     pub fn try_encode_into(&self, out: &mut Vec<u8>) -> Result<(), StoreError> {
-        if self.value < 0 {
-            return Err(StoreError::Corrupt("txout amount negative"));
-        }
         Self::encode_unspent_into(self.value, &self.script, out);
         Ok(())
     }
 
     /// Same bytes as [`Self::encode_into`] for an unspent `(value, script)` pair.
-    ///
-    /// `value` must be ≥ 0 (Class A append rejects negatives first).
-    pub fn encode_unspent_into(value: i64, script: &[u8], out: &mut Vec<u8>) {
+    pub fn encode_unspent_into(value: u64, script: &[u8], out: &mut Vec<u8>) {
         let flags_at = out.len();
         out.push(0);
-        let (exp, mantissa) = amount_exp_mantissa(value as u64);
+        let (exp, mantissa) = amount_exp_mantissa(value);
         write_uleb128(out, mantissa);
         let kind = encode_script_kind_v17(script, out);
         out[flags_at] = kind | (exp << 4);
@@ -442,9 +444,8 @@ impl OutputRecord {
         let flags = buf[0];
         let (kind, exp) = split_output_flags(flags)?;
         let mut off = 1usize;
-        let (v, n) = decode_output_amount(exp, &buf[off..])?;
+        let (value, n) = decode_output_amount(exp, &buf[off..])?;
         off += n;
-        let value = v as i64;
         let used = script_kind_v17_disk_used(kind, &buf[off..])?;
         let script = if let Some(sec) = secret {
             let mut payload = buf[off..off + used].to_vec();
@@ -499,10 +500,7 @@ impl OutputRecord {
             classify_script, SCRIPT_KIND_V17_OP_RETURN_PUSH, SCRIPT_KIND_V17_RAW,
         };
         use rbitcoin_primitives::{compact_size_len, uleb128_len};
-        if self.value < 0 {
-            return 0;
-        }
-        let (_exp, mantissa) = amount_exp_mantissa(self.value as u64);
+        let (_exp, mantissa) = amount_exp_mantissa(self.value);
         let (kind, payload) = classify_script(&self.script);
         let payload_len = match kind {
             SCRIPT_KIND_V17_RAW | SCRIPT_KIND_V17_OP_RETURN_PUSH => {
@@ -2359,12 +2357,6 @@ impl TxTable {
         if items.iter().any(|(_, _, outs)| outs.is_empty()) {
             return Err(StoreError::Corrupt("invariant: create n_out"));
         }
-        if items
-            .iter()
-            .any(|(_, _, outs)| outs.iter().any(|o| o.value < 0))
-        {
-            return Err(StoreError::Corrupt("txout amount negative"));
-        }
         let n_outs: Vec<u32> = items.iter().map(|(_, _, o)| o.len() as u32).collect();
         let (fks, _loc) = self.append_stems_one_wave(
             items.len(),
@@ -2512,9 +2504,6 @@ impl TxTable {
             let n_out = pin.packed_n_out();
             if n_out == 0 {
                 return Err(StoreError::Corrupt("invariant: create n_out"));
-            }
-            if pin.packed_has_negative_amount() {
-                return Err(StoreError::Corrupt("txout amount negative"));
             }
             let pairs = spent_overlay.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
             for &(vout, fk, vin) in pairs {

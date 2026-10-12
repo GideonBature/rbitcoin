@@ -114,7 +114,7 @@ impl CreatePinInner {
     }
 
     #[inline]
-    pub fn out_parts(&self, vout: u32) -> Option<(i64, &[u8])> {
+    pub fn out_parts(&self, vout: u32) -> Option<(u64, &[u8])> {
         match self {
             Self::Records { outs, .. } => {
                 let o = outs.get(vout as usize)?;
@@ -128,7 +128,7 @@ impl CreatePinInner {
                     .get(*tx_index as usize)?
                     .output
                     .get(vout as usize)?;
-                Some((o.value.to_sat() as i64, o.script_pubkey.as_bytes()))
+                Some((o.value.to_sat(), o.script_pubkey.as_bytes()))
             }
         }
     }
@@ -181,10 +181,6 @@ impl PackedCreate for CreatePinArc {
         self.inner.packed_n_out()
     }
     #[inline]
-    fn packed_has_negative_amount(&self) -> bool {
-        self.inner.packed_has_negative_amount()
-    }
-    #[inline]
     fn packed_outs_est(&self) -> usize {
         self.inner.packed_outs_est()
     }
@@ -205,13 +201,6 @@ impl PackedCreate for CreatePinInner {
     #[inline]
     fn packed_n_out(&self) -> u32 {
         self.n_out() as u32
-    }
-    #[inline]
-    fn packed_has_negative_amount(&self) -> bool {
-        match self {
-            Self::Records { outs, .. } => outs.iter().any(|o| o.value < 0),
-            Self::Wire { .. } => false,
-        }
     }
     fn packed_outs_est(&self) -> usize {
         let scripts: usize = match self {
@@ -241,7 +230,7 @@ impl PackedCreate for CreatePinInner {
                 if let Some(wtx) = self.wire_tx() {
                     for o in &wtx.output {
                         encode_unspent_output_into_secret(
-                            o.value.to_sat() as i64,
+                            o.value.to_sat(),
                             o.script_pubkey.as_bytes(),
                             buf,
                             secret,
@@ -552,13 +541,9 @@ impl ArchiveWritePlan {
         self.packed.append(&mut other.packed);
         if fees_aligned {
             self.tx_fees.append(&mut other.tx_fees);
-        } else {
-            self.tx_fees.clear();
         }
         if sizes_aligned {
             self.tx_sizes.append(&mut other.tx_sizes);
-        } else {
-            self.tx_sizes.clear();
         }
         self.planned_fks.append(&mut other.planned_fks);
         self.per_header_ranges.append(&mut other.per_header_ranges);
@@ -655,8 +640,10 @@ pub fn input_records_from_wire(
         }
         out.push(InputRecord {
             prev_txid: inp.previous_output.txid.to_byte_array(),
-            create_fk: e.create_fk,
-            prev_index: inp.previous_output.vout,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: e.create_fk,
+                vout: inp.previous_output.vout,
+            },
             sequence: inp.sequence.to_consensus_u32(),
             script_sig: inp.script_sig.to_bytes(),
             witness: inp.witness.to_vec(),
@@ -742,28 +729,113 @@ fn tx_record_from_wire(tx: &bitcoin::Transaction, txid: [u8; 32]) -> TxRecord {
 }
 
 fn stamp_txstat_rows(
-    query: &Query,
     plan: &ArchiveWritePlan,
-    parents: Option<&crate::BatchParents>,
 ) -> Result<Vec<rbitcoin_store::TxStatRow>, QueryError> {
-    if plan.tx_fees.len() == plan.packed.len() && !plan.tx_fees.is_empty() {
-        return stamp_txstat_from_fees(&plan.tx_fees, &plan.tx_sizes);
+    if plan.packed.is_empty() {
+        return Ok(Vec::new());
     }
-    if !plan.tx_fees.is_empty() {
+    if plan.tx_fees.len() != plan.packed.len() || plan.tx_sizes.len() != plan.packed.len() {
         return Err(StoreError::Corrupt("invariant: txstat fee length"));
     }
-    let packed = &plan.packed;
+    stamp_txstat_from_fees(&plan.tx_fees, &plan.tx_sizes)
+}
+
+/// Fee and size rows for a wire plan that did not pass confirm assemble.
+/// Commit refuses a non-empty plan whose vectors are empty or mis-sized.
+/// A records pin has no wire body: that is corrupt, not a zero row.
+fn stamp_wire_plan_txstat(query: &Query, plan: &mut ArchiveWritePlan) -> Result<(), QueryError> {
+    if plan.packed.is_empty() {
+        return Ok(());
+    }
     let mut idx: crate::U64Map<usize> = crate::U64Map::default();
     for (i, fk) in plan.planned_fks.iter().enumerate() {
         if let Some(id) = fk.get() {
             idx.insert(id, i);
         }
     }
-    let mut out = Vec::with_capacity(packed.len());
-    for i in 0..packed.len() {
-        out.push(stamp_one_txstat(query, plan, &idx, parents, i)?);
+    let mut fees = Vec::with_capacity(plan.packed.len());
+    let mut sizes = Vec::with_capacity(plan.packed.len());
+    for i in 0..plan.packed.len() {
+        let (is_cb, n_in) = {
+            let Some(tx) = plan.packed[i].0.wire_tx() else {
+                return Err(StoreError::Corrupt("invariant: txstat missing wire"));
+            };
+            (tx.is_coinbase(), tx.input.len())
+        };
+        let in_sum = if is_cb {
+            None
+        } else {
+            Some(txstat_in_sum(query, plan, &idx, i, n_in)?)
+        };
+        let row = {
+            let tx = plan.packed[i]
+                .0
+                .wire_tx()
+                .ok_or(StoreError::Corrupt("invariant: txstat missing wire"))?;
+            txstat_row_from_tx(tx, in_sum)?
+        };
+        let total = row
+            .base
+            .checked_add(row.wit_extra)
+            .ok_or(StoreError::Corrupt("invariant: txstat size total"))?;
+        fees.push(row.fee_sat);
+        sizes.push((row.base, total));
     }
-    Ok(out)
+    plan.tx_fees = fees;
+    plan.tx_sizes = sizes;
+    Ok(())
+}
+
+fn txstat_in_sum(
+    query: &Query,
+    plan: &ArchiveWritePlan,
+    idx: &crate::U64Map<usize>,
+    i: usize,
+    n_in: usize,
+) -> Result<u64, QueryError> {
+    let sid = plan
+        .planned_fks
+        .get(i)
+        .and_then(|fk| fk.get())
+        .ok_or(StoreError::Corrupt("invariant: wire plan edges missing"))?;
+    let eds = plan
+        .edges
+        .get(&sid)
+        .ok_or(StoreError::Corrupt("invariant: wire plan edges missing"))?;
+    if eds.len() != n_in {
+        return Err(StoreError::Corrupt("invariant: wire plan edges missing"));
+    }
+    let mut in_sum = 0u64;
+    for e in eds {
+        if e.create_fk.is_null() {
+            return Err(StoreError::Corrupt("invariant: spend missing create_fk"));
+        }
+        let val = prevout_value_at(query, plan, idx, e.create_fk, e.vout)?;
+        in_sum = in_sum
+            .checked_add(val)
+            .ok_or(StoreError::Corrupt("txstat in_sum overflow"))?;
+    }
+    Ok(in_sum)
+}
+
+fn prevout_value_at(
+    query: &Query,
+    plan: &ArchiveWritePlan,
+    idx: &crate::U64Map<usize>,
+    create_fk: Fk,
+    vout: u32,
+) -> Result<u64, QueryError> {
+    let Some(cid) = create_fk.get() else {
+        return Err(StoreError::Corrupt("invariant: spend missing create_fk"));
+    };
+    if let Some(&i) = idx.get(&cid) {
+        let (val, _) = plan.packed[i]
+            .0
+            .out_parts(vout)
+            .ok_or(StoreError::Corrupt("invariant: same-batch prevout"))?;
+        return Ok(val);
+    }
+    Ok(query.tx_output_at_fk(create_fk, vout)?.value)
 }
 
 /// Fee and `(base, total)` already recorded at assemble from the lookup precompute.
@@ -786,60 +858,6 @@ fn stamp_txstat_from_fees(
         });
     }
     Ok(out)
-}
-
-fn stamp_one_txstat(
-    query: &Query,
-    plan: &ArchiveWritePlan,
-    idx: &crate::U64Map<usize>,
-    parents: Option<&crate::BatchParents>,
-    i: usize,
-) -> Result<rbitcoin_store::TxStatRow, QueryError> {
-    let packed = &plan.packed;
-    let (pin, ins) = &packed[i];
-    let Some(tx) = pin.wire_tx() else {
-        return Ok(txstat_placeholder_query(pin.tx().input_count));
-    };
-    let in_sum = if tx.is_coinbase() {
-        None
-    } else if ins.is_empty() {
-        let sid = plan
-            .planned_fks
-            .get(i)
-            .and_then(|fk| fk.get())
-            .ok_or(StoreError::Corrupt("invariant: wire plan edges missing"))?;
-        let eds = plan
-            .edges
-            .get(&sid)
-            .ok_or(StoreError::Corrupt("invariant: wire plan edges missing"))?;
-        if eds.len() != tx.input.len() {
-            return Err(StoreError::Corrupt("invariant: wire plan edges missing"));
-        }
-        let mut in_sum = 0u64;
-        for e in eds {
-            if e.create_fk.is_null() {
-                return Err(StoreError::Corrupt("invariant: spend missing create_fk"));
-            }
-            let val = prevout_value_at(query, packed, idx, parents, e.create_fk, e.vout)?;
-            in_sum = in_sum
-                .checked_add(val)
-                .ok_or(StoreError::Corrupt("txstat in_sum overflow"))?;
-        }
-        Some(in_sum)
-    } else {
-        let mut in_sum = 0u64;
-        for inp in ins {
-            if inp.is_coinbase() {
-                return Err(StoreError::Corrupt("invariant: mixed coinbase vin"));
-            }
-            let val = prevout_value_at(query, packed, idx, parents, inp.create_fk, inp.prev_index)?;
-            in_sum = in_sum
-                .checked_add(val)
-                .ok_or(StoreError::Corrupt("txstat in_sum overflow"))?;
-        }
-        Some(in_sum)
-    };
-    txstat_row_from_tx(tx, in_sum)
 }
 
 fn txstat_size(tx: &bitcoin::Transaction) -> Result<(u32, u32), QueryError> {
@@ -871,53 +889,6 @@ pub(crate) fn txstat_row_from_tx(
         base,
         wit_extra,
     })
-}
-
-fn txstat_placeholder_query(_n_in: u32) -> rbitcoin_store::TxStatRow {
-    // No wire body: leave the cell unstamped (all-zero) so getblockstats
-    // reconstructs instead of reporting a zero-size row.
-    rbitcoin_store::TxStatRow {
-        fee_sat: 0,
-        base: 0,
-        wit_extra: 0,
-    }
-}
-
-fn prevout_value_at(
-    query: &Query,
-    packed: &[(CreatePin, Vec<InputRecord>)],
-    idx: &crate::U64Map<usize>,
-    parents: Option<&crate::BatchParents>,
-    create_fk: Fk,
-    vout: u32,
-) -> Result<u64, QueryError> {
-    let Some(cid) = create_fk.get() else {
-        return Err(StoreError::Corrupt("invariant: spend missing create_fk"));
-    };
-    if let Some(&i) = idx.get(&cid) {
-        let (val, _) = packed[i]
-            .0
-            .out_parts(vout)
-            .ok_or(StoreError::Corrupt("invariant: same-batch prevout"))?;
-        if val < 0 {
-            return Err(StoreError::Corrupt("txstat prevout negative"));
-        }
-        return Ok(val as u64);
-    }
-    if let Some(p) = parents {
-        if let Some(val) = p.get_parent_txout_parts(create_fk, vout, |v, _, _| v) {
-            if val < 0 {
-                return Err(StoreError::Corrupt("txstat prevout negative"));
-            }
-            return Ok(val as u64);
-        }
-        return Err(StoreError::Corrupt("txstat parent not pinned"));
-    }
-    let o = query.tx_output_at_fk(create_fk, vout)?;
-    if o.value < 0 {
-        return Err(StoreError::Corrupt("txstat prevout negative"));
-    }
-    Ok(o.value as u64)
 }
 
 fn edge_of(parent: Fk, vout: u32) -> InputEdge {
@@ -961,7 +932,7 @@ fn commit_input_edge_rows(plan: &ArchiveWritePlan) -> Result<Vec<Vec<InputEdge>>
                         if inp.is_coinbase() {
                             InputEdge::coinbase()
                         } else {
-                            edge_of(inp.create_fk, inp.prev_index)
+                            edge_of(inp.create_fk(), inp.prev_index())
                         }
                     })
                     .collect(),
@@ -1064,11 +1035,14 @@ impl Query {
             return Ok(());
         }
         let start = self.store.txs.count().saturating_add(1);
-        let plan =
+        let mut plan =
             self.archive_plan_batch_from_wire(&need, start, &crate::InFlight::new(), None, None)?;
         if plan.is_empty() {
             return Ok(());
         }
+        // Confirm assemble records fees before write. This wrapper is the
+        // other Class A planner: stamp here so commit never walks prevouts.
+        stamp_wire_plan_txstat(self, &mut plan)?;
         self.archive_commit_plan(plan)?;
         Ok(())
     }
@@ -1362,14 +1336,16 @@ impl Query {
         &self,
         plan: ArchiveWritePlan,
     ) -> Result<(bool, Vec<rbitcoin_store::CreateLocPair>), QueryError> {
-        self.archive_commit_plan_defer_head_parents(plan, None)
+        self.archive_commit_plan_defer_head_parents(plan)
     }
 
-    /// Class A commit with optional parent pins for `txstat` fee.
+    /// Class A commit. Fees and sizes were recorded before this call
+    /// (confirm assemble, or [`stamp_wire_plan_txstat`] on the Class A wire
+    /// planner). A non-empty plan whose vectors do not match `packed` is
+    /// corrupt. This function does not walk prevouts.
     pub fn archive_commit_plan_defer_head_parents(
         &self,
         mut plan: ArchiveWritePlan,
-        parents: Option<&crate::BatchParents>,
     ) -> Result<(bool, Vec<rbitcoin_store::CreateLocPair>), QueryError> {
         use std::time::Instant;
         if plan.packed.is_empty() {
@@ -1391,7 +1367,7 @@ impl Query {
 
         let t = Instant::now();
         let overlay = plan.same_batch_spent_overlay();
-        let txstat = stamp_txstat_rows(self, &plan, parents)?;
+        let txstat = stamp_txstat_rows(&plan)?;
         let txstat_ns = t.elapsed().as_nanos() as u64;
         self.confirm_stats().note_write_txstat(txstat_ns);
 
@@ -1493,10 +1469,10 @@ impl Query {
         if inp.prev_txid != [0u8; 32] {
             return Ok(inp.prev_txid);
         }
-        if inp.create_fk.is_null() {
+        if inp.create_fk().is_null() {
             return Err(StoreError::Corrupt("input missing create_fk for prev_txid"));
         }
-        self.store.txs.body_txid(inp.create_fk)
+        self.store.txs.body_txid(inp.create_fk())
     }
 }
 
@@ -1517,9 +1493,26 @@ mod tests {
         plan.edges.get(&id).expect("spend edges")[0].create_fk
     }
 
+    /// Planner stamp, then commit. Commit itself does not fill empty fee rows.
+    fn commit_stamped(
+        q: &Query,
+        mut plan: crate::ArchiveWritePlan,
+    ) -> Result<bool, crate::QueryError> {
+        super::stamp_wire_plan_txstat(q, &mut plan)?;
+        q.archive_commit_plan(plan)
+    }
+
+    fn commit_stamped_defer(
+        q: &Query,
+        mut plan: crate::ArchiveWritePlan,
+    ) -> Result<(bool, Vec<rbitcoin_store::CreateLocPair>), crate::QueryError> {
+        super::stamp_wire_plan_txstat(q, &mut plan)?;
+        q.archive_commit_plan_defer_head(plan)
+    }
+
     #[test]
     fn txstat_stamp_uses_plan_base_total() {
-        let (path, q) = temp_query("txstat-plan-sizes");
+        let (path, _q) = temp_query("txstat-plan-sizes");
         let tx = TxRecord {
             txid: [0x61; 32],
             version: 1,
@@ -1533,11 +1526,28 @@ mod tests {
         plan.packed = vec![(crate::CreatePinInner::records(tx, Vec::new()), Vec::new())];
         plan.tx_fees = vec![1];
         plan.tx_sizes = vec![(80, 100)];
-        let rows = super::stamp_txstat_rows(&q, &plan, None).expect("sizes without wire");
+        let rows = super::stamp_txstat_rows(&plan).expect("sizes without wire");
         assert_eq!(rows[0].fee_sat, 1);
         assert_eq!(rows[0].base, 80);
         assert_eq!(rows[0].wit_extra, 20);
         let _ = path;
+    }
+
+    /// A wire plan from the planner has empty fee rows. Commit must not
+    /// fill them from prevouts.
+    #[test]
+    fn commit_refuses_unstamped_wire_plan() {
+        let (dir, q) = temp_query("txstat-unstamped");
+        let need = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
+        assert!(plan.tx_fees.is_empty() && plan.tx_sizes.is_empty());
+        let err = q.archive_commit_plan(plan).unwrap_err();
+        assert!(
+            err.to_string().contains("invariant: txstat fee length"),
+            "{err}"
+        );
+        assert_eq!(q.tx_body_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn size_plan(tag: u8, with_size: bool) -> super::ArchiveWritePlan {
@@ -1571,11 +1581,11 @@ mod tests {
 
         let mut left_only = size_plan(1, true);
         left_only.append(size_plan(2, false));
-        assert!(left_only.tx_sizes.is_empty());
+        assert_ne!(left_only.tx_sizes.len(), left_only.packed.len());
 
         let mut right_only = size_plan(1, false);
         right_only.append(size_plan(2, true));
-        assert!(right_only.tx_sizes.is_empty());
+        assert_ne!(right_only.tx_sizes.len(), right_only.packed.len());
     }
 
     fn coinbase_apply(i: u64) -> TxApply {
@@ -1594,8 +1604,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![i as u8],
                 witness: vec![],
@@ -1628,7 +1637,7 @@ mod tests {
             .flat_map(|(_, txs)| {
                 txs.iter().flat_map(|ta| {
                     ta.inputs.iter().filter_map(|inp| {
-                        (inp.prev_index != u32::MAX && inp.prev_txid != [0u8; 32])
+                        (inp.prev_index() != u32::MAX && inp.prev_txid != [0u8; 32])
                             .then_some(inp.prev_txid)
                     })
                 })
@@ -1707,7 +1716,7 @@ mod tests {
             let need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(2)])];
             let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
             assert_eq!(plan.planned_fks.len(), 2);
-            q.archive_commit_plan(plan).unwrap();
+            commit_stamped(&q, plan).unwrap();
             let s = q.confirm_stats().take_window();
             assert!(
                 s.arch_blocks >= 1 || s.arch_prep_assign_ns > 0 || s.arch_prep_stamp_ns > 0,
@@ -1747,7 +1756,7 @@ mod tests {
             None,
         )
         .unwrap();
-        q.archive_commit_plan(p0).unwrap();
+        commit_stamped(&q, p0).unwrap();
         assert_eq!(q.tx_body_count(), 1);
 
         // Reserve two plans as prep would with write queue depth 2.
@@ -1765,9 +1774,9 @@ mod tests {
         // Durable count still 1 until commit.
         assert_eq!(q.tx_body_count(), 1);
 
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         assert_eq!(q.tx_body_count(), 3);
-        q.archive_commit_plan(plan_b).unwrap();
+        commit_stamped(&q, plan_b).unwrap();
         assert_eq!(q.tx_body_count(), 4);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1800,8 +1809,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: parent_txid,
-                create_fk: Fk::NULL, // must resolve
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Unstamped,
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -1830,8 +1838,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: parent_txid,
-                create_fk: Fk::NULL,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Unstamped,
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -1857,8 +1864,8 @@ mod tests {
             "child input must stamp prior planned create_fk"
         );
 
-        q.archive_commit_plan(plan_a).unwrap();
-        q.archive_commit_plan(plan_b).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
+        commit_stamped(&q, plan_b).unwrap();
         assert_eq!(q.tx_body_count(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1878,8 +1885,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid,
-                create_fk: Fk::NULL,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Unstamped,
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -1906,7 +1912,7 @@ mod tests {
                 .map(|(fk, pin)| (*fk, pin)),
             None,
         );
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         assert_eq!(q.store().tx_height_get(parent_fk).unwrap(), None);
 
         let need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xef)])];
@@ -1925,7 +1931,7 @@ mod tests {
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let header_fk = plan_a.per_header_ranges[0].0;
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         q.store()
             .height_fence_extend(rbitcoin_primitives::Height(0), header_fk)
             .unwrap();
@@ -1944,8 +1950,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: parent_txid,
-                create_fk: Fk::NULL,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Unstamped,
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2015,7 +2020,7 @@ mod tests {
                 .map(|(fk, pin)| (*fk, pin)),
             None,
         );
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         assert_eq!(q.store().tx_height_get(parent_fk).unwrap(), None);
         log.prune_below_height(q.drain_and_fence_hi());
         assert_eq!(
@@ -2068,7 +2073,7 @@ mod tests {
                 .map(|(fk, pin)| (*fk, pin)),
             None,
         );
-        q.archive_commit_plan_defer_head(plan_a).unwrap();
+        commit_stamped_defer(&q, plan_a).unwrap();
         assert!(
             q.store().txs.pending_head_len() >= 1,
             "create must still be queued — drain has not inserted tx.head"
@@ -2191,7 +2196,7 @@ mod tests {
         q.connect_block(Height::GENESIS, &ph, &[parent]).unwrap();
         let spent = q.store.txs.spent_range(Fk(1)).expect("spent range");
         let mut child = child_spend(parent_txid, 0xcf);
-        child.inputs[0].create_fk = Fk(1);
+        child.inputs[0].stamp_create_fk(Fk(1));
         let need = vec![(Fk(2), vec![child])];
         let plan =
             plan_applies(&q, &need, 2, &crate::InFlight::new(), None).expect("prestamp parent");
@@ -2290,8 +2295,7 @@ mod tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: parent_txid,
-                create_fk: Fk::NULL,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Unstamped,
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
@@ -2584,7 +2588,7 @@ mod tests {
             "body_est must count wire ins, got {}",
             plan.body_est
         );
-        q.archive_commit_plan(plan).expect("commit from wire");
+        commit_stamped(&q, plan).expect("commit from wire");
         let (_tx, ins, _outs) = q.store().get_tx_full(Fk(2)).unwrap();
         assert_eq!(ins[0].script_sig, script_sig);
         assert_eq!(ins[0].witness, vec![b"wit-item-1".to_vec(), vec![0x21; 33]]);
@@ -2614,7 +2618,7 @@ mod tests {
             .expect("wire plan");
         let fks = plan.planned_fks.clone();
         assert!(plan.packed.iter().all(|(_, ins)| ins.is_empty()));
-        q.archive_commit_plan(plan).expect("commit");
+        commit_stamped(&q, plan).expect("commit");
 
         q.note_seqsigwit_ram_for_confirmed(Height(1), &fks)
             .expect("ram window from append cache");
@@ -2647,8 +2651,7 @@ mod tests {
             plan.packed.iter().all(|(_, ins)| ins.is_empty()),
             "wire plan leaves packed ins empty"
         );
-        q.archive_commit_plan(plan)
-            .expect("wire edges encode seqsigwit");
+        commit_stamped(&q, plan).expect("wire edges encode seqsigwit");
         let (_tx, ins, _outs) = q.store().get_tx_full(Fk(2)).unwrap();
         assert_eq!(ins[0].script_sig.len(), 10_000);
 
@@ -2751,7 +2754,7 @@ mod tests {
         let (value, script) = plan.batch_pin[0].out_parts(0).expect("vout 0");
         assert_eq!(value, 50 * 100_000_000);
         assert_eq!(script, &[0x51]);
-        q.archive_commit_plan(plan).unwrap();
+        commit_stamped(&q, plan).unwrap();
         let (_tx, _ins, outs) = q.store().get_tx_full(Fk(1)).unwrap();
         assert_eq!(outs[0].value, 50 * 100_000_000);
         assert_eq!(outs[0].script, vec![0x51]);
@@ -3037,7 +3040,7 @@ mod tests {
         assert_eq!(plan_a.packed.len(), 3);
         assert_eq!(plan_a.batch_pin.len(), 3);
         // Contiguous Class A commit of the merged frozen plan.
-        assert!(q.archive_commit_plan(plan_a).unwrap());
+        assert!(commit_stamped(&q, plan_a).unwrap());
         assert_eq!(q.tx_body_count(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }

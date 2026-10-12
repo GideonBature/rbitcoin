@@ -21,13 +21,12 @@ fn op_true_apply(tag: u8) -> TxApply {
             output_count: 1,
         },
         inputs: vec![InputRecord {
-            prev_txid: [0u8; 32],
-            create_fk: Fk::NULL,
-            prev_index: u32::MAX,
-            sequence: u32::MAX,
-            script_sig: vec![tag],
-            witness: vec![],
-        }],
+    prev_txid: [0u8; 32],
+    parent: rbitcoin_store::InputParent::Coinbase,
+    sequence: u32::MAX,
+    script_sig: vec![tag],
+    witness: vec![],
+}],
         outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
     }
 }

@@ -161,7 +161,7 @@ mod tests {
 
     fn put_create(txs: &TxTable, txid: [u8; 32], n_out: u32) -> Fk {
         let outs: Vec<_> = (0..n_out)
-            .map(|i| OutputRecord::unspent(i as i64 + 1, vec![0x51]))
+            .map(|i| OutputRecord::unspent(i as u64 + 1, vec![0x51]))
             .collect();
         let item = (
             TxRecord {

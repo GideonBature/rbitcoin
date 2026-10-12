@@ -958,8 +958,7 @@ fn pin_megakey_block_disconnect(q: &Query, tip: Height, tip_hash: [u8; 32]) {
                 },
                 inputs: vec![InputRecord {
                     prev_txid: [0u8; 32],
-                    create_fk: Fk::NULL,
-                    prev_index: u32::MAX,
+                    parent: rbitcoin_store::InputParent::Coinbase,
                     sequence: u32::MAX,
                     script_sig: vec![i as u8, (i >> 8) as u8],
                     witness: vec![],
@@ -1125,8 +1124,7 @@ fn chain_connect_reorg_and_growth() {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![0],
                 witness: vec![],
@@ -1514,7 +1512,7 @@ fn resume_tx_head_resolves_external_prev() {
         let rec = q.get_tx(fks[1]).unwrap();
         let inp = q.tx_input_at_fk(fks[1], &rec, 0).unwrap();
         assert!(
-            !inp.create_fk.is_null(),
+            !inp.create_fk().is_null(),
             "v10 Class A stores create_fk (not prev_txid on disk)"
         );
         assert_eq!(
@@ -1535,7 +1533,7 @@ fn resume_tx_head_resolves_external_prev() {
             1,
             "Direct confirm writes durable spend annotations"
         );
-        pin_leftover_tiponly_one_fk(&q, cb1, inp.create_fk);
+        pin_leftover_tiponly_one_fk(&q, cb1, inp.create_fk());
     }
 }
 
@@ -1592,7 +1590,7 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
         chain.matured_coinbase_txid.to_byte_array()
     );
     assert!(
-        !inp.create_fk.is_null(),
+        !inp.create_fk().is_null(),
         "v10 spend input must carry create_fk"
     );
     assert_reconstruct_eq(&q, chain.spend_height, spend_block);
@@ -2245,7 +2243,7 @@ fn pin_block_and_tx_surface_on_pad(q: &Query, chain: &rbitcoin_test::MatureRegte
 
     let spend_rec = q.get_tx(fks[1]).unwrap();
     assert_eq!(
-        q.tx_input_at_fk(fks[1], &spend_rec, 0).unwrap().create_fk,
+        q.tx_input_at_fk(fks[1], &spend_rec, 0).unwrap().create_fk(),
         cb1_fk
     );
     assert!(q.tx_input_at_fk(fks[1], &spend_rec, 1).is_err());
@@ -2498,7 +2496,7 @@ fn pin_txstat_rows_after_write(q: &Query, run: &[(Height, Block)], spend_h: u32)
     let rec = q.get_tx(fks[1]).unwrap();
     let ins = q.tx_input_run_class_a(fks[1], &rec).unwrap();
     assert_eq!(ins.len(), 1);
-    assert_eq!(ins[0].create_fk, cb1_fk);
+    assert_eq!(ins[0].create_fk(), cb1_fk);
     let no_io = TxRecord {
         input_count: 0,
         output_count: 0,
@@ -3215,25 +3213,14 @@ fn pin_wire_prep_ahead_cross_batch(
         [(0, plan_a.planned_fks[2], 0)],
         "the in-block child spends the spend's output in this batch"
     );
-    if plan_a.batch_pin.len() == plan_a.planned_fks.len() {
-        inflight.note_pins(
-            plan_a
-                .planned_fks
-                .iter()
-                .zip(plan_a.batch_pin.iter())
-                .map(|(fk, pin)| (*fk, pin)),
-            None,
-        );
-    } else {
-        inflight.note_pins(
-            plan_a
-                .packed
-                .iter()
-                .zip(plan_a.planned_fks.iter())
-                .map(|((pin, _), fk)| (*fk, pin)),
-            None,
-        );
-    }
+    inflight.note_pins(
+        plan_a
+            .planned_fks
+            .iter()
+            .zip(plan_a.batch_pin.iter())
+            .map(|(fk, pin)| (*fk, pin)),
+        None,
+    );
     if let Some(last) = plan_a.planned_fks.last().and_then(|f| f.get()) {
         next_tx_start = last.saturating_add(1).max(1);
     }

@@ -397,14 +397,9 @@ impl ScriptOkBatch {
             *self = other;
             return Ok(());
         }
-        let Some(last) = self.prepared.last() else {
-            *self = other;
-            return Ok(());
-        };
-        let Some(first) = other.prepared.first() else {
-            return Ok(());
-        };
-        if first.height.0 != last.height.0.saturating_add(1) {
+        let last_h = self.prepared[self.prepared.len() - 1].height.0;
+        let first_h = other.prepared[0].height.0;
+        if first_h != last_h.saturating_add(1) {
             return Err(other);
         }
         if self.prepared.len() != self.wire_blocks.len()

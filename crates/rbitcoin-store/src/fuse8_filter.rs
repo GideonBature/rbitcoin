@@ -32,18 +32,11 @@ pub const VERSION_V2: u32 = 2;
 /// One-line operator refuse for leftover fuse8 v1.
 pub const INDEX_REFUSE_FUSE8_V1: &str = "index refuses fuse8 v1; wipe store/tx.head and store/scripthash* then restart (Class A kept; tx.head rebuilds, SH rematerializes with --sh-index)";
 
-/// Result of opening a sealed fuse file.
-#[derive(Debug)]
-pub enum FuseFileOpen {
-    /// Current v2 format; safe to use as a membership gate.
-    Ready(SealedFuse8),
-}
-
 /// On-disk / in-memory sealed fuse for one head segment.
 #[derive(Debug)]
 pub struct SealedFuse8 {
-    /// `None` ⇒ always probe (migration placeholder; no false negatives).
-    filter: Option<BinaryFuse8>,
+    /// Empty segments store dummy key 0 so the filter is always present.
+    filter: BinaryFuse8,
 }
 
 impl SealedFuse8 {
@@ -52,48 +45,34 @@ impl SealedFuse8 {
         if keys.is_empty() {
             // Empty sealed segment: dummy key so construction succeeds.
             return Ok(Self {
-                filter: Some(
-                    BinaryFuse8::try_from_keys(&[0u64])
-                        .map_err(|_| StoreError::Corrupt("binary fuse8 empty build"))?,
-                ),
+                filter: BinaryFuse8::try_from_keys(&[0u64])
+                    .map_err(|_| StoreError::Corrupt("binary fuse8 empty build"))?,
             });
         }
         let filter = BinaryFuse8::try_from_keys(keys)
             .map_err(|_| StoreError::Corrupt("binary fuse8 build failed (dup keys?)"))?;
-        Ok(Self {
-            filter: Some(filter),
-        })
+        Ok(Self { filter })
     }
 
     /// Membership test (no FN for keys passed to [`Self::build`]).
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
-        self.filter
-            .as_ref()
-            .map(|f| f.contains(key))
-            .unwrap_or(false)
+        self.filter.contains(key)
     }
 
     /// Fingerprint array length (bytes).
     pub fn fingerprint_bytes(&self) -> usize {
-        self.filter.as_ref().map(|f| f.len()).unwrap_or(0)
+        self.filter.len()
     }
 
     /// Heap-owned fingerprint bytes (0 when mapped from the sealed file).
     pub fn fingerprint_heap_bytes(&self) -> usize {
-        self.filter
-            .as_ref()
-            .map(|f| f.fingerprint_heap_bytes())
-            .unwrap_or(0)
+        self.filter.fingerprint_heap_bytes()
     }
 
     /// Write current (v2) layout.
     pub fn write_to(&self, path: &Path) -> Result<(), StoreError> {
-        let filter = self
-            .filter
-            .as_ref()
-            .ok_or(StoreError::Corrupt("fuse8 write missing filter"))?;
-        let body = encode_body(filter);
+        let body = encode_body(&self.filter);
         let mut f = File::create(path).map_err(|e| StoreError::io(path, e))?;
         f.write_all(MAGIC).map_err(|e| StoreError::io(path, e))?;
         f.write_all(&VERSION_V2.to_le_bytes())
@@ -112,14 +91,12 @@ impl SealedFuse8 {
     }
 
     pub fn read_from(path: &Path) -> Result<Self, StoreError> {
-        match open_file(path)? {
-            FuseFileOpen::Ready(f) => Ok(f),
-        }
+        open_file(path)
     }
 }
 
 /// Open a BF8R fuse file. v1 and unreadable v2 refuse (no always-probe).
-pub fn open_file(path: &Path) -> Result<FuseFileOpen, StoreError> {
+pub fn open_file(path: &Path) -> Result<SealedFuse8, StoreError> {
     let mut map = ReadonlyMap::map_path(path)?;
     let geo = {
         let bytes = map.as_file_bytes();
@@ -145,15 +122,15 @@ pub fn open_file(path: &Path) -> Result<FuseFileOpen, StoreError> {
         }
     };
     map.set_fingerprint_range(16 + geo.fp_off, geo.fp_len)?;
-    Ok(FuseFileOpen::Ready(SealedFuse8 {
-        filter: Some(BinaryFuse8 {
+    Ok(SealedFuse8 {
+        filter: BinaryFuse8 {
             seed: geo.seed,
             segment_length: geo.segment_length,
             segment_length_mask: geo.segment_length_mask,
             segment_count_length: geo.segment_count_length,
             fingerprints: Fingerprints::Map(map),
-        }),
-    }))
+        },
+    })
 }
 
 struct V2Geometry {
@@ -466,12 +443,9 @@ mod tests {
         assert!(gate.contains(10));
         assert!(gate.contains(50));
         gate.write_to(&path).unwrap();
-        match open_file(&path).unwrap() {
-            FuseFileOpen::Ready(g) => {
-                assert!(g.contains(10));
-                assert!(g.contains(50));
-            }
-        }
+        let g = open_file(&path).unwrap();
+        assert!(g.contains(10));
+        assert!(g.contains(50));
         // Empty keys path builds dummy.
         let empty = SealedFuse8::build(&[]).unwrap();
         assert!(empty.contains(0)); // dummy always built

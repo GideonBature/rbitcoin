@@ -3538,7 +3538,7 @@ fn confirmed_parent_outputs(
         for vout in vouts {
             if let Some(out) = all.get(vout as usize) {
                 let txout = TxOut {
-                    value: Amount::from_sat(u64::try_from(out.value).unwrap_or(0)),
+                    value: Amount::from_sat(out.value),
                     script_pubkey: ScriptBuf::from_bytes(out.script.clone()),
                 };
                 outs.insert(OutPoint { txid, vout }, (fk, created_h, txout));
@@ -5072,23 +5072,13 @@ mod tests {
 
         // Update pipeline caches from plan (load-thread note_lookup_ok).
         let plan = mat1.batch.archive_plan.as_ref().unwrap();
-        if plan.batch_pin.len() == plan.planned_fks.len() {
-            inflight.note_pins(
-                plan.planned_fks
-                    .iter()
-                    .zip(plan.batch_pin.iter())
-                    .map(|(fk, pin)| (*fk, pin)),
-                None,
-            );
-        } else {
-            inflight.note_pins(
-                plan.packed
-                    .iter()
-                    .zip(plan.planned_fks.iter())
-                    .map(|((pin, _), fk)| (*fk, pin)),
-                None,
-            );
-        }
+        inflight.note_pins(
+            plan.planned_fks
+                .iter()
+                .zip(plan.batch_pin.iter())
+                .map(|(fk, pin)| (*fk, pin)),
+            None,
+        );
         if let Some(last) = plan.planned_fks.last().and_then(|f| f.get()) {
             next_tx_start = last.saturating_add(1).max(1);
         }

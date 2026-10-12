@@ -574,7 +574,7 @@ pub(crate) mod crypto {
             let mut spent = job.pre().clone();
             let n = job.prevouts.len();
             let ok = spent.finish_spent_parts(n, |i| match job.prevout_parts(i) {
-                Ok(parts) => Some(parts),
+                Ok((value, script)) => Some((value as i64, script)),
                 Err(e) => {
                     failed = Some(e);
                     None
@@ -670,7 +670,7 @@ pub(crate) mod crypto {
             txin.previous_output
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
-            (value as u64)
+            value
                 .consensus_encode(&mut eng)
                 .expect("hash engines do not error");
             bitcoin::Script::from_bytes(script)

@@ -868,8 +868,10 @@ mod tests {
                     },
                     inputs: vec![InputRecord {
                         prev_txid: genesis_txid,
-                        create_fk: create0,
-                        prev_index: 0,
+                        parent: rbitcoin_store::InputParent::Prevout {
+                            create_fk: create0,
+                            vout: 0,
+                        },
                         sequence: u32::MAX,
                         script_sig: vec![],
                         witness: vec![vec![0u8; 64], ser.to_vec()],
@@ -916,8 +918,10 @@ mod tests {
                 },
                 inputs: vec![InputRecord {
                     prev_txid: spend_txid,
-                    create_fk: elig_fk,
-                    prev_index: 0,
+                    parent: rbitcoin_store::InputParent::Prevout {
+                        create_fk: elig_fk,
+                        vout: 0,
+                    },
                     sequence: u32::MAX,
                     script_sig: vec![],
                     witness: vec![vec![0u8; 64]],

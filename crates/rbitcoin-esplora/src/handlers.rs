@@ -2039,8 +2039,7 @@ mod pure_helper_tests {
             },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
-                create_fk: Fk::NULL,
-                prev_index: u32::MAX,
+                parent: rbitcoin_store::InputParent::Coinbase,
                 sequence: u32::MAX,
                 script_sig: vec![0x00],
                 witness: vec![vec![0u8; 32]],
@@ -2115,8 +2114,7 @@ mod pure_helper_tests {
             },
             vec![InputRecord {
                 prev_txid: [0xcb; 32],
-                create_fk,
-                prev_index: 0,
+                parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
                 sequence: u32::MAX,
                 script_sig: vec![],
                 witness: vec![],
