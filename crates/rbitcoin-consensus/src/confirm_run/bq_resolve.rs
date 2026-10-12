@@ -865,6 +865,14 @@ mod tests {
             !bq_resolve_wave_hold_partial(0, 180, 4_000, 1, 100, 100, false, MAX_IN, MAX_BL),
             "last available thin wave must emit (tip / empty BQ)"
         );
+        assert!(
+            !bq_resolve_wave_hold_partial(0, 0, 8_000, 1, 100, 150, true, MAX_IN, MAX_BL),
+            "exactly 8000 inputs is not under the floor"
+        );
+        assert!(
+            !bq_resolve_wave_hold_partial(90, 180, 9_000, 1, 100, 191, false, MAX_IN, MAX_BL),
+            "ready equal to half the window does not hold"
+        );
         assert!(!bq_resolve_wave_hold_partial(
             0, 180, 8_000, 2, 100, 100, true, MAX_IN, MAX_BL
         ));
