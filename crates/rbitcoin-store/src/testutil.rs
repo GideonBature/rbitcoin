@@ -82,6 +82,21 @@ impl std::ops::Deref for TempDir {
     }
 }
 
+/// Recursive copy of a store directory. Creates `dst` first.
+pub fn copy_store_tree(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create store copy");
+    for ent in std::fs::read_dir(src).expect("read store") {
+        let ent = ent.expect("store entry");
+        let to = dst.join(ent.file_name());
+        let ty = ent.file_type().expect("file type");
+        if ty.is_dir() {
+            copy_store_tree(&ent.path(), &to);
+        } else {
+            std::fs::copy(ent.path(), &to).expect("copy store file");
+        }
+    }
+}
+
 /// Tiny-head store in a drop-cleaning directory.
 pub fn tiny_store() -> (TempDir, Store) {
     tiny_store_labeled("store")
@@ -152,4 +167,22 @@ pub fn checkpoint_observed_spend_gap(
     during_sync: impl FnOnce(&Store),
 ) -> Result<(), crate::StoreError> {
     store.checkpoint_observed_spend_gap(after_first_read, during_sync)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_store_tree_copies_nested_files() {
+        let src = TempDir::labeled("copy-src").unwrap();
+        let nested = src.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("page"), b"store-bytes").unwrap();
+        let dst_root = TempDir::labeled("copy-dst").unwrap();
+        let dst = dst_root.path().join("out");
+        copy_store_tree(src.path(), &dst);
+        let got = std::fs::read(dst.join("nested/page")).unwrap();
+        assert_eq!(got, b"store-bytes");
+    }
 }
