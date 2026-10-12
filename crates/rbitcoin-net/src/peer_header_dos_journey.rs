@@ -1587,6 +1587,27 @@ async fn below_floor_headers_do_not_walk_parents() {
     let _ = std::fs::remove_dir_all(src_dir);
 }
 
+/// Headers with real regtest proof-of-work, not accepted blocks. Accepting
+/// two thousand blocks is a full connect per height.
+fn regtest_header_chain(prev: BlockHash, n: u32) -> Vec<bitcoin::block::Header> {
+    let mut out = Vec::with_capacity(n as usize);
+    let mut prev = prev;
+    for i in 1..=n {
+        let mut header = bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(4),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([i as u8; 32]),
+            time: 1_600_000_000 + i * 600,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        };
+        rbitcoin_consensus::grind_regtest_pow(&mut header);
+        prev = header.block_hash();
+        out.push(header);
+    }
+    out
+}
+
 /// More than one below-floor batch is required before minimum chain work.
 /// The node keeps asking, then stores the chain once the pending path crosses.
 #[tokio::test]
@@ -1595,16 +1616,20 @@ async fn below_floor_full_batch_continues_until_the_floor() {
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
     let peers = crate::peers::PeerHub::new();
-    let (src_dir, src) = crate::chain::tiny_regtest_hub_labeled("below-floor-full-src");
-    src.ensure_genesis().unwrap();
     let n = MAX_HEADERS_RESULTS as u32;
-    src.generate_to_script(n, op_true(), vec![]).unwrap();
-    let below = src.chain_work().unwrap().to_be_bytes();
-    src.generate_to_script(1, op_true(), vec![]).unwrap();
-    let floor = src.chain_work().unwrap().to_be_bytes();
-    assert!(below < floor, "the full batch is still under the next block");
+    let chain = regtest_header_chain(hub.tip_hash().unwrap(), n + 1);
+    let base = hub.chain_work().unwrap();
+    let below = crate::most_work::sum_work(
+        std::iter::once(base).chain(chain[..n as usize].iter().map(|h| h.work())),
+    )
+    .unwrap()
+    .to_be_bytes();
+    let floor = crate::most_work::sum_work(std::iter::once(base).chain(chain.iter().map(|h| h.work())))
+        .unwrap()
+        .to_be_bytes();
+    assert!(below < floor, "the full batch is still under the next header");
     hub.set_minimum_chain_work(Some(floor));
-    let first: Vec<_> = (1..=n).map(|h| header_at(&src, h)).collect();
+    let first = chain[..n as usize].to_vec();
     let last = first.last().unwrap().block_hash();
     let peer = live_peer(&peers, 18611, 51, false);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
@@ -1631,13 +1656,12 @@ async fn below_floor_full_batch_continues_until_the_floor() {
         "a full below-floor batch asks for the next"
     );
     assert_eq!(locators[0].first().copied(), Some(last));
-    let crossing = header_at(&src, n + 1);
     push(
         &hub,
         &out_tx,
         &mut follow,
         Some(peer.as_ref()),
-        NetworkMessage::Headers(vec![crossing]),
+        NetworkMessage::Headers(vec![chain[n as usize]]),
     )
     .await;
     assert!(
@@ -1645,5 +1669,4 @@ async fn below_floor_full_batch_continues_until_the_floor() {
         "the chain is stored once pending work crosses the floor"
     );
     let _ = std::fs::remove_dir_all(dir);
-    let _ = std::fs::remove_dir_all(src_dir);
 }

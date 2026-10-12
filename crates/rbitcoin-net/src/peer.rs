@@ -4887,8 +4887,10 @@ fn persist_pending_header_path(
         }
     }
     path.reverse();
-    for hdr in &path {
-        if hub.ensure_header(hdr).is_err() {
+    // One store batch. Per-header ensure walks parent heights to genesis, so a
+    // full below-floor chain (thousands of headers) is quadratic.
+    for chunk in path.chunks(MAX_HEADERS_RESULTS) {
+        if hub.ensure_headers_batch(chunk).is_err() {
             break;
         }
     }
