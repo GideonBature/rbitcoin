@@ -57,12 +57,12 @@ use exit::{
 };
 use peer_io::{empty_header_fk_bus, sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
 use progress::{
-    claim_ready, format_progress_line, ibd_pct, read_progress_published, work_chain_progress_at,
+    format_progress_line, ibd_pct, read_progress_published, work_chain_progress_at,
     ProgressLineInput, TipRateTracker,
 };
-use published::{apply_published_header_rows, spawn_header_thread};
-use state::HeaderCmd;
+use published::spawn_header_thread;
 use state::IbdWorkState;
+use state::{enqueue_header_cmd, flush_header_backlog, HeaderCmd};
 use status::LoopStats;
 
 use crate::chain::ChainHub;
@@ -389,7 +389,7 @@ pub async fn ibd_cancellable(
     st.addr_strikes = boot_strikes;
     st.perms = perms;
     header_walk::restore_adopt(&mut st, hub.as_ref());
-    let (header_tx, header_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (header_tx, header_rx) = tokio::sync::mpsc::channel(state::HEADER_CMD_BOUND);
     st.header_cmd = Some(header_tx.clone());
 
     let loop_stats = Arc::new(LoopStats::default());
@@ -461,17 +461,11 @@ pub async fn ibd_cancellable(
     update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
 
     let shared = Arc::new(std::sync::Mutex::new(st));
-    let published: Arc<arc_swap::ArcSwap<Vec<published::HeaderPathRow>>> =
-        Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new()));
-    let header_thread = spawn_header_thread(
-        Arc::clone(&shared),
-        Arc::clone(&hub),
-        header_rx,
-        Arc::clone(&published),
-        header_fks,
-    );
-    let _ = header_tx.send(HeaderCmd::Reseed);
-    let _ = header_tx.send(HeaderCmd::Ask);
+    let header_thread =
+        spawn_header_thread(Arc::clone(&shared), Arc::clone(&hub), header_rx, header_fks);
+    hub.query.publish_progress_snapshots();
+    let _ = header_tx.try_send(HeaderCmd::Reseed);
+    let _ = header_tx.try_send(HeaderCmd::Ask);
 
     let mut loop_n = 0u32;
     let mut cadence = IbdLoopCadence::new();
@@ -489,6 +483,7 @@ pub async fn ibd_cancellable(
         let pending_redial = {
             let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
             let st = &mut *st_guard;
+            flush_header_backlog(st);
             let tip_before_confirm = hub.tip_height();
             apply_confirm_events(
                 st,
@@ -635,7 +630,7 @@ pub async fn ibd_cancellable(
                     },
                 ) {
                     header_walk::HeaderPoll::Ask => {
-                        let _ = header_tx.send(HeaderCmd::Ask);
+                        enqueue_header_cmd(st, HeaderCmd::Ask);
                     }
                     header_walk::HeaderPoll::LatchDone => {
                         st.headers_done = true;
@@ -647,14 +642,13 @@ pub async fn ibd_cancellable(
 
             // Hard reset only when ordered is empty — a full queue still waiting on getdata is not stalled.
             if last_progress.elapsed() > cfg.stall.saturating_mul(6) && path_drained(st) {
-                let rebuilt = path::reseed_ordered_from_path(st, hub.as_ref());
-                let _ = header_tx.send(HeaderCmd::Reseed);
-                let _ = header_tx.send(HeaderCmd::Ask);
+                enqueue_header_cmd(st, HeaderCmd::Reseed);
+                enqueue_header_cmd(st, HeaderCmd::Ask);
                 info!(
-                "ibd: hard path reset (stall {:?}, st.ordered empty) rebuilt={rebuilt} ordered={}",
-                last_progress.elapsed(),
-                st.ordered.len()
-            );
+                    "ibd: hard path reset (stall {:?}, st.ordered empty) ordered={}",
+                    last_progress.elapsed(),
+                    st.ordered.len()
+                );
                 st.headers_done = false;
                 cadence.mark_headers(Instant::now());
                 last_progress = Instant::now();
@@ -663,8 +657,6 @@ pub async fn ibd_cancellable(
             if cadence.peer_slow_due(now_cadence) {
                 sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
                 let now = Instant::now();
-                let rows = published.swap(Arc::new(Vec::new()));
-                apply_published_header_rows(st, &rows);
                 let mut freed = disconnect_stalled_block_peers(
                     &mut st.slots,
                     &mut st.inflight,
@@ -746,7 +738,7 @@ pub async fn ibd_cancellable(
                         );
                         dark_redial_empty = 0;
                         if st.ordered.is_empty() && !st.headers_done {
-                            let _ = header_tx.send(HeaderCmd::Ask);
+                            enqueue_header_cmd(st, HeaderCmd::Ask);
                         }
                     } else {
                         dark_redial_empty = dark_redial_empty.saturating_add(1);
@@ -889,8 +881,7 @@ pub async fn ibd_cancellable(
                 conf_pipe.ready = ready_n;
                 conf_pipe.feed_ready = feed_ready;
                 conf_pipe.feed_inflight = feed_inflight;
-                let mut work_sizes = st.structure_sizes();
-                work_sizes.ordered = usize::try_from(published.header_rows).unwrap_or(usize::MAX);
+                let work_sizes = st.structure_sizes();
                 let owned_sizes = published.owned;
                 let rss = perf_log::read_platform_rss();
                 let perf = perf_log::sample(
@@ -926,32 +917,13 @@ pub async fn ibd_cancellable(
                     && st.inflight.is_empty()
                     && prog.ready_hwm > prog.tip.saturating_add(1)
                 {
-                    let expect = prog.tip.saturating_add(1);
-                    let hth = st.height_to_hash.get(&expect).copied();
-                    let ready = hth
-                        .map(|h| claim_ready(hub.as_ref(), &mut st.body, expect, &h))
-                        .unwrap_or(false);
-                    let has = hth.map(|h| hub.has_block(&h)).unwrap_or(false);
-                    let in_set = hth.map(|h| st.ordered_set.contains(&h)).unwrap_or(false);
-                    let noted = offer_confirm_ready(
-                        &confirm_feed,
-                        &st.height_to_hash,
-                        &st.path_prev,
-                        &mut st.body,
-                        hub.as_ref(),
-                        &mut st.max_ready_height,
-                        &max_ready_shared,
-                    );
-                    update_confirm_lag(&confirm_lag, published.tip, st.max_ready_height);
                     warn!(
-                    "ibd: tip stall tip={} expect={expect} hth={} claim_ready={ready} has_block={has} \
-                     in_ordered={in_set} offer_noted={noted} hwm={} ordered_len={} feed_ready={} \
-                     (idle {:?})",
+                    "ibd: tip stall tip={} hwm={} ordered_len={} feed_ready={} hole={} (idle {:?})",
                     prog.tip,
-                    hth.is_some(),
                     prog.ready_hwm,
                     st.ordered.len(),
                     feed_ready,
+                    prog.tip_hole,
                     last_progress.elapsed(),
                 );
                 }
@@ -1102,7 +1074,7 @@ pub async fn ibd_cancellable(
                         st.slots.iter().filter(|s| s.alive).count()
                     );
                     st.headers_done = false;
-                    let _ = header_tx.send(HeaderCmd::Ask);
+                    enqueue_header_cmd(st, HeaderCmd::Ask);
                     last_progress = Instant::now();
                 }
             }

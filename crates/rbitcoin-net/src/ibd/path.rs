@@ -32,6 +32,10 @@ pub(crate) fn load_resume_entries(
 }
 
 pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
+    if super::state::defer_header_store() {
+        st.defer_resume = true;
+        return;
+    }
     let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
     let path = load_resume_entries(hub, &exclude);
     install_resumed_path(st, hub, &path);
@@ -288,16 +292,19 @@ pub(crate) fn work_path_tips(st: &IbdWorkState) -> Vec<BlockHash> {
 
 /// Put connected work-path hashes back on an empty queue, tip toward far.
 /// No-op while the queue still holds headers. Returns how many were restored.
-pub(crate) fn reseed_ordered_from_path(st: &mut IbdWorkState, hub: &ChainHub) -> usize {
+pub(crate) fn reseed_candidates(st: &IbdWorkState, tip_h: u32) -> Vec<BlockHash> {
     if !st.ordered.is_empty() {
-        return 0;
+        return Vec::new();
     }
-    let tip_h = hub.tip_height().unwrap_or(0);
+    path_hashes_above_tip(st, tip_h)
+        .into_iter()
+        .map(|(_, hash)| hash)
+        .collect()
+}
+
+pub(crate) fn push_reseed(st: &mut IbdWorkState, hashes: &[BlockHash]) -> usize {
     let mut rebuilt = 0usize;
-    for (_ht, h) in path_hashes_above_tip(st, tip_h) {
-        if hub.has_block(&h) || st.body.is_rejected(&h) {
-            continue;
-        }
+    for &h in hashes {
         if st.ordered.len() >= super::MAX_ORDERED_HEADERS {
             break;
         }
@@ -307,6 +314,15 @@ pub(crate) fn reseed_ordered_from_path(st: &mut IbdWorkState, hub: &ChainHub) ->
         }
     }
     rebuilt
+}
+
+pub(crate) fn reseed_ordered_from_path(st: &mut IbdWorkState, hub: &ChainHub) -> usize {
+    let tip_h = hub.tip_height().unwrap_or(0);
+    let keep: Vec<BlockHash> = reseed_candidates(st, tip_h)
+        .into_iter()
+        .filter(|h| !hub.has_block(h) && !st.body.is_rejected(h))
+        .collect();
+    push_reseed(st, &keep)
 }
 
 /// Connected work-path hashes strictly above `tip_h` (`height_to_hash` occupants).

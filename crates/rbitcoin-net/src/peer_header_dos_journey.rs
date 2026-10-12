@@ -1538,6 +1538,7 @@ async fn below_floor_headers_do_not_walk_parents() {
     let mut follow = PeerFollowState::new();
     // Warm the tip-work prefix so the floor check itself is not the lookup.
     let _ = hub.meets_minimum_chain_work();
+    crate::chain::reset_header_store_counts();
     let before = rbitcoin_query::header_lookup_count();
     push(
         &hub,
@@ -1551,6 +1552,15 @@ async fn below_floor_headers_do_not_walk_parents() {
     assert_eq!(
         looked, 0,
         "below-floor ignore must not read parent headers, looked={looked}"
+    );
+    assert_eq!(
+        crate::chain::header_store_counts().2,
+        0,
+        "below-floor ignore uses the cached tip work"
+    );
+    assert!(
+        peer.best_known().is_none(),
+        "a low-work batch does not become the peer's best known"
     );
     assert!(
         asked_blocks(&mut out_rx).is_empty(),

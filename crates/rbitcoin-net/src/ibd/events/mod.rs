@@ -38,6 +38,8 @@ struct PreparedBatch {
 thread_local! {
     static PREPARED_BATCH: RefCell<Option<PreparedBatch>> = const { RefCell::new(None) };
     static APPLY_INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Header thread already ran `ensure_headers_batch` (including a short prefix).
+    static HEADER_STORE_PREPARED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub(crate) fn set_prepared_batch(fks: Vec<rbitcoin_primitives::Fk>, work: Option<bitcoin::Work>) {
@@ -52,6 +54,25 @@ pub(crate) fn clear_prepared_batch() {
 
 pub(crate) fn set_apply_inline(inline: bool) {
     APPLY_INLINE.with(|slot| slot.set(inline));
+}
+
+pub(crate) fn set_header_store_prepared(on: bool) {
+    HEADER_STORE_PREPARED.with(|slot| slot.set(on));
+}
+
+/// Persist `headers` before the coordination lock. A short acceptance is the
+/// prefix binary search, so the locked apply does not call the store again.
+pub(crate) fn prepare_header_store(
+    hub: &ChainHub,
+    headers: &[bitcoin::block::Header],
+) -> (Vec<rbitcoin_primitives::Fk>, Option<bitcoin::Work>) {
+    let fks = hub.ensure_headers_batch(headers).unwrap_or_default();
+    let work = hub.chain_work().ok();
+    if fks.len() == headers.len() {
+        return (fks, work);
+    }
+    let accepted = ensure_accepted_prefix(hub, headers);
+    (accepted.into_iter().map(|(_, fk)| fk).collect(), work)
 }
 
 /// Immediately stop getdata and disconnect every peer (SIGINT / IBD exit).
@@ -138,6 +159,9 @@ pub(crate) fn drain_ready_peer_and_body_events(
     let ctrl_t0 = Instant::now();
     let mut ctrl_n = 0u64;
     while ctrl_n < CTRL_DRAIN_EVENT_BUDGET && ctrl_t0.elapsed() < CTRL_DRAIN_TIME_BUDGET {
+        if st.header_backlog.len() >= super::state::HEADER_CMD_BOUND {
+            break;
+        }
         match ctrl_rx.try_recv() {
             Ok(ev) => {
                 events += 1;
@@ -306,6 +330,16 @@ fn accepted_headers(
     hub: &ChainHub,
     headers: &[bitcoin::block::Header],
 ) -> Vec<(bitcoin::block::Header, rbitcoin_primitives::Fk)> {
+    if HEADER_STORE_PREPARED.with(|slot| slot.get()) {
+        let fks = PREPARED_BATCH.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|prepared| prepared.fks.clone())
+                .unwrap_or_default()
+        });
+        let n = fks.len().min(headers.len());
+        return headers.iter().copied().zip(fks).take(n).collect();
+    }
     if let Some(fks) = PREPARED_BATCH.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -489,11 +523,9 @@ pub(crate) fn apply_headers_event(
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
 ) {
-    if !APPLY_INLINE.with(|slot| slot.get()) {
-        if let Some(tx) = st.header_cmd.clone() {
-            let _ = tx.send(super::state::HeaderCmd::Batch { peer, headers });
-            return;
-        }
+    if !APPLY_INLINE.with(|slot| slot.get()) && st.header_cmd.is_some() {
+        super::state::enqueue_header_cmd(st, super::state::HeaderCmd::Batch { peer, headers });
+        return;
     }
     let tip_before = super::header_walk::candidate_tip(st);
     let work_before = super::header_walk::candidate_work(st);

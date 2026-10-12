@@ -185,6 +185,8 @@ pub(crate) struct ProgressPublished {
     pub tip: Option<u32>,
     pub txs: u64,
     pub sh_runs: usize,
+    /// Last header-thread queue depth. The status line uses the live deque.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub header_rows: u64,
     pub owned: rbitcoin_query::ProcessOwnedSizes,
 }

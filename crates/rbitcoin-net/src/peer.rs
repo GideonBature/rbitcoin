@@ -3595,6 +3595,7 @@ fn on_headers(
 ) -> Result<(), NetError> {
     let n = headers.len();
     let _ = session.is_some_and(|s| s.take_awaiting_headers());
+    let mut ignored_low_work = false;
     if n == 0 {
         // Empty headers is a failed getheaders response, not an announcement.
     } else if n > 0
@@ -3602,12 +3603,12 @@ fn on_headers(
         && headers_are_below_floor(hub, &follow.pending_headers, headers)
     {
         // Work stays under the floor from the pending headers alone. Do not
-        // read parent headers to decide the ignore.
+        // read parent headers, and do not move this peer's best-known tip.
+        ignored_low_work = true;
         for hdr in headers.iter().take(n) {
             let hash = hdr.block_hash();
             if let Some(s) = session {
                 s.note_block_from_peer(hash);
-                s.note_best_known(hash);
             }
             admit_pending_header(&mut follow.pending_headers, hash, *hdr);
         }
@@ -3692,7 +3693,7 @@ fn on_headers(
             }
         }
     }
-    if n >= MAX_HEADERS_RESULTS {
+    if !ignored_low_work && n >= MAX_HEADERS_RESULTS {
         let from = headers.get(n - 1).map(|h| h.block_hash());
         let _ = queue_getheaders(out_tx, hub, session, true, from);
     }
@@ -4796,7 +4797,7 @@ fn pending_path_work(
             return crate::most_work::sum_work(extra.into_iter()).ok();
         }
         if hub.tip_hash() == Some(h) {
-            let base = hub.chain_work().ok()?;
+            let base = hub.cached_chain_work()?;
             extra.reverse();
             return crate::most_work::sum_work(std::iter::once(base).chain(extra)).ok();
         }

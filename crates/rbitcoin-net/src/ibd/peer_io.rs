@@ -87,13 +87,30 @@ pub(crate) enum PeerEvent {
     },
 }
 
+/// Header hash → fk for the peer thread. Inserts add keys; readers copy one fk.
+/// A `Mutex` so a publish does not clone the whole map.
 pub(crate) type HeaderFkBus =
-    Arc<arc_swap::ArcSwap<std::collections::HashMap<BlockHash, rbitcoin_primitives::Fk>>>;
+    Arc<Mutex<std::collections::HashMap<BlockHash, rbitcoin_primitives::Fk>>>;
 
 pub(crate) fn empty_header_fk_bus() -> HeaderFkBus {
-    Arc::new(arc_swap::ArcSwap::from_pointee(
-        std::collections::HashMap::new(),
-    ))
+    Arc::new(Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn header_fk_of(bus: &HeaderFkBus, hash: &BlockHash) -> Option<rbitcoin_primitives::Fk> {
+    bus.lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(hash)
+        .copied()
+}
+
+pub(crate) fn publish_header_fks(bus: &HeaderFkBus, rows: &[(BlockHash, rbitcoin_primitives::Fk)]) {
+    if rows.is_empty() {
+        return;
+    }
+    let mut map = bus.lock().unwrap_or_else(|err| err.into_inner());
+    for (hash, fk) in rows {
+        map.insert(*hash, *fk);
+    }
 }
 
 /// Dual fan-out so body delivery is never stuck behind header floods on one FIFO.
@@ -545,7 +562,7 @@ impl IbdReadCtx {
                     &hash,
                     n,
                 ) {
-                    let header_fk = self.sinks.header_fks.load().get(&hash).copied();
+                    let header_fk = header_fk_of(&self.sinks.header_fks, &hash);
                     self.sinks.send_body(PeerEvent::BlockFramed {
                         peer: self.id,
                         hash,

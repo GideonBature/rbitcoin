@@ -419,8 +419,15 @@ fn assign_densify(
     issued += steal_hung_densify(st, hub, alive, tip_batch_hi, &caps);
 
     let mut room = cfg.window.saturating_sub(st.inflight.len());
-    // Window is full and no retired holder is waiting for a racer. Skip the
-    // densify height walk.
+    if path_lo < st.assign_path_lo {
+        st.densify_scan_lo = path_lo;
+        st.densify_ready_through = path_lo;
+    }
+    st.assign_path_lo = path_lo;
+    st.densify_scan_lo = st.densify_scan_lo.max(path_lo);
+    rewind_densify_scan_lo(st, hub, path_lo);
+    // Window is full and no retired holder is waiting for a racer. The cursor
+    // already rewound. Skip issuing.
     if room == 0 && !st.inflight.values().any(inflight_needs_racer) {
         finish_assign(loop_stats, t0, issued);
         return;
@@ -443,12 +450,6 @@ fn assign_densify(
         fetched_hi,
     );
 
-    if path_lo < st.assign_path_lo {
-        st.densify_scan_lo = path_lo;
-    }
-    st.assign_path_lo = path_lo;
-    st.densify_scan_lo = st.densify_scan_lo.max(path_lo);
-    rewind_densify_scan_lo(st, hub, path_lo);
     if !alive
         .iter()
         .any(|&pid| peer_has_slot(st, pid, caps.get(&pid).copied().unwrap_or(1)))
@@ -558,12 +559,18 @@ fn live_getdata_cover(st: &IbdWorkState, hash: &BlockHash) -> bool {
 }
 
 /// Pull the densify cursor back to the first height that is not claim-ready.
+///
+/// Heights already recorded in `densify_ready_through` are not checked again.
 fn rewind_densify_scan_lo(st: &mut IbdWorkState, hub: &ChainHub, path_lo: u32) {
+    if st.densify_ready_through < path_lo {
+        st.densify_ready_through = path_lo;
+    }
     let hi = st.densify_scan_lo;
-    if hi <= path_lo {
+    let start = path_lo.max(st.densify_ready_through);
+    if hi <= start {
         return;
     }
-    for ht in path_lo..hi {
+    for ht in start..hi {
         let Some(&hash) = st.height_to_hash.get(&ht) else {
             return;
         };
@@ -571,6 +578,7 @@ fn rewind_densify_scan_lo(st: &mut IbdWorkState, hub: &ChainHub, path_lo: u32) {
             st.densify_scan_lo = ht;
             return;
         }
+        st.densify_ready_through = ht.saturating_add(1);
     }
 }
 

@@ -718,11 +718,11 @@ pub(crate) struct RejectParent {
 impl RejectParent {
     pub(crate) fn from_lookup(hub: &ChainHub, hash: BlockHash) -> Self {
         match super::reorg::parent_hash_of(hub, hash) {
-            Ok(hash) => Self {
-                hash,
+            Ok(Some(hash)) => Self {
+                hash: Some(hash),
                 unreadable: false,
             },
-            Err(_) => Self {
+            Ok(None) | Err(_) => Self {
                 hash: None,
                 unreadable: true,
             },

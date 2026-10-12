@@ -2,27 +2,22 @@
 
 use super::*;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
-
-#[cfg(test)]
 use std::cell::Cell;
 
 #[cfg(test)]
 thread_local! {
     static HEIGHT_INDEX_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+    static INDEX_IO_UNDER_LOCK: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
-static INDEX_IO_UNDER_LOCK: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(test)]
 pub(crate) fn reset_index_io_under_lock() {
-    INDEX_IO_UNDER_LOCK.store(0, Ordering::Relaxed);
+    INDEX_IO_UNDER_LOCK.with(|slot| slot.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn index_io_under_lock() -> u64 {
-    INDEX_IO_UNDER_LOCK.load(Ordering::Relaxed)
+    INDEX_IO_UNDER_LOCK.with(|slot| slot.get())
 }
 
 #[cfg(test)]
@@ -52,7 +47,7 @@ enum HeightIndexPlan {
 #[cfg(test)]
 fn note_header_io_under_index_lock() {
     if HEIGHT_INDEX_LOCK_HELD.with(|held| held.get()) {
-        INDEX_IO_UNDER_LOCK.fetch_add(1, Ordering::Relaxed);
+        INDEX_IO_UNDER_LOCK.with(|slot| slot.set(slot.get().saturating_add(1)));
     }
 }
 

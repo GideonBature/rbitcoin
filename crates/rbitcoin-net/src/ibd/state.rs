@@ -193,6 +193,18 @@ pub(crate) struct IbdWorkState {
     pub(crate) confirm_feed: Option<std::sync::Arc<super::confirm::ConfirmFeed>>,
     /// Set while a header thread owns store IO. Peer reads only enqueue.
     pub(crate) header_cmd: Option<HeaderCmdTx>,
+    /// Header commands that did not fit on the bounded header-thread channel.
+    pub(crate) header_backlog: VecDeque<HeaderCmd>,
+    /// Heights below this are already claim-ready. Rewind starts here.
+    pub(crate) densify_ready_through: u32,
+    /// Header thread: do the origin load after the coordination lock drops.
+    pub(crate) defer_origin: bool,
+    /// Header thread: resume the work path after the coordination lock drops.
+    pub(crate) defer_resume: bool,
+    /// Header thread: most-work rewind after the coordination lock drops.
+    pub(crate) defer_rewind: bool,
+    /// Header thread: `has_block` filter for a reseed after the lock drops.
+    pub(crate) defer_reseed: bool,
 }
 
 pub(crate) enum HeaderCmd {
@@ -204,7 +216,56 @@ pub(crate) enum HeaderCmd {
     Reseed,
 }
 
-pub(crate) type HeaderCmdTx = tokio::sync::mpsc::UnboundedSender<HeaderCmd>;
+/// Header batches waiting on the header thread. Past this, the coordination
+/// loop stops pulling header events so the queue cannot grow without bound.
+pub(crate) const HEADER_CMD_BOUND: usize = 64;
+
+pub(crate) type HeaderCmdTx = tokio::sync::mpsc::Sender<HeaderCmd>;
+
+thread_local! {
+    static DEFER_HEADER_STORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Header thread sets this around the locked apply so store IO is postponed.
+pub(crate) fn set_defer_header_store(on: bool) {
+    DEFER_HEADER_STORE.with(|slot| slot.set(on));
+}
+
+pub(crate) fn defer_header_store() -> bool {
+    DEFER_HEADER_STORE.with(|slot| slot.get())
+}
+
+/// Send `cmd` to the header thread. A full channel parks one batch on
+/// `header_backlog` instead of blocking the coordination loop.
+pub(crate) fn enqueue_header_cmd(st: &mut IbdWorkState, cmd: HeaderCmd) {
+    let Some(tx) = st.header_cmd.clone() else {
+        return;
+    };
+    match tx.try_send(cmd) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(cmd))
+        | Err(tokio::sync::mpsc::error::TrySendError::Closed(cmd)) => {
+            st.header_backlog.push_back(cmd);
+        }
+    }
+}
+
+/// Move parked header commands onto the channel until it is full again.
+pub(crate) fn flush_header_backlog(st: &mut IbdWorkState) {
+    let Some(tx) = st.header_cmd.clone() else {
+        return;
+    };
+    while let Some(cmd) = st.header_backlog.pop_front() {
+        match tx.try_send(cmd) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(cmd))
+            | Err(tokio::sync::mpsc::error::TrySendError::Closed(cmd)) => {
+                st.header_backlog.push_front(cmd);
+                break;
+            }
+        }
+    }
+}
 
 impl IbdWorkState {
     pub(crate) fn new(
@@ -268,6 +329,12 @@ impl IbdWorkState {
             perms: None,
             confirm_feed: None,
             header_cmd: None,
+            header_backlog: VecDeque::new(),
+            densify_ready_through: 0,
+            defer_origin: false,
+            defer_resume: false,
+            defer_rewind: false,
+            defer_reseed: false,
         }
     }
 
@@ -285,6 +352,7 @@ impl IbdWorkState {
             .min();
         if let Some(lo) = lowest {
             self.densify_scan_lo = self.densify_scan_lo.min(lo);
+            self.densify_ready_through = self.densify_ready_through.min(lo);
         }
     }
 

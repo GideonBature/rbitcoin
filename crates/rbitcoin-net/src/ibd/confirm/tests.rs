@@ -3,8 +3,20 @@
 use super::{
     format_conf_q, format_queue_depth, format_stamp_reject_missing_prevout,
     stamp_reject_operator_msg, write_drain_max_parts, write_queue_cap, ConfirmFeed,
-    ConfirmQueueDepths, CONFIRM_RUN_MAX_BLOCKS,
+    ConfirmQueueDepths, ConfirmRejectClass, RejectParent, CONFIRM_RUN_MAX_BLOCKS,
 };
+
+#[test]
+fn missing_reject_parent_is_not_consensus_invalid() {
+    let class = ConfirmRejectClass::ConsensusInvalid.trust_consensus(
+        RejectParent {
+            hash: None,
+            unreadable: true,
+        },
+        None,
+    );
+    assert_eq!(class, ConfirmRejectClass::Cascade);
+}
 
 #[test]
 fn index_startup_gap_matches_one_write_drain() {

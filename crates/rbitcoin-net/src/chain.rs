@@ -698,10 +698,16 @@ impl ChainHub {
         let min = *self.minimum_chain_work.read().unwrap();
         match min {
             None => true,
-            Some(min) => match self.chain_work() {
-                Ok(w) => w.to_be_bytes() >= min,
-                Err(_) => false,
-            },
+            Some(min) => {
+                let work = match self.cached_chain_work() {
+                    Some(w) => Ok(w),
+                    None => self.chain_work(),
+                };
+                match work {
+                    Ok(w) => w.to_be_bytes() >= min,
+                    Err(_) => false,
+                }
+            }
         }
     }
 
@@ -3173,6 +3179,22 @@ impl ChainHub {
     pub fn chain_work(&self) -> Result<Work, NetError> {
         CHAIN_WORK_N.with(|c| c.set(c.get().saturating_add(1)));
         self.work_from_fork_to_tip(None)
+    }
+
+    /// Tip work when the in-memory prefix already covers the tip.
+    ///
+    /// `None` means the prefix is cold. Callers that must not touch the header
+    /// store use this instead of [`Self::chain_work`].
+    pub fn cached_chain_work(&self) -> Option<Work> {
+        let Some(tip) = self.tip_height() else {
+            return Some(Work::from_be_bytes([0u8; 32]));
+        };
+        let prefix = self.chain_work_prefix.read().unwrap();
+        if prefix.len() == tip as usize + 1 {
+            prefix.last().copied()
+        } else {
+            None
+        }
     }
 
     /// Sum wire-header work on the best chain from `fork_height+1` through tip.
