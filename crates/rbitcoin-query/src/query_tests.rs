@@ -120,9 +120,15 @@ fn published_span_indexes_every_new_height() {
     q.store().confirmed.set_raw_for_test(Height(1), 2).unwrap();
     q.store().confirmed.set_raw_for_test(Height(2), 3).unwrap();
     q.publish_confirmed_tip(0, [0x11; 32]);
+    let _ = q.confirm_stats().take_window();
     let a = [0x22; 32];
     let b = [0x33; 32];
     q.publish_confirmed_rows(&[(a, 1), (b, 2)]);
+    assert_eq!(
+        q.confirm_stats().take_window().height_index_delta_n,
+        2,
+        "publishing two new heights counts as an incremental extend"
+    );
     let before = crate::chain_view::header_lookup_count();
     assert_eq!(q.height_of_hash(&a).unwrap(), Some(Height(1)));
     assert_eq!(q.height_of_hash(&b).unwrap(), Some(Height(2)));
