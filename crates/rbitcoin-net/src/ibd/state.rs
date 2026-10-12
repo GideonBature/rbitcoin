@@ -191,6 +191,35 @@ pub(crate) struct IbdWorkState {
     pub(crate) perms: Option<std::sync::Arc<crate::peers::PeerHub>>,
     /// Confirm engine feed: assign does not demote a body load still holds.
     pub(crate) confirm_feed: Option<std::sync::Arc<super::confirm::ConfirmFeed>>,
+    /// Set while a header thread owns store IO. Peer reads only enqueue.
+    pub(crate) header_cmd: Option<HeaderCmdTx>,
+    /// Heights below this are already claim-ready. Rewind starts here.
+    pub(crate) densify_ready_through: u32,
+}
+
+pub(crate) enum HeaderCmd {
+    Batch {
+        peer: usize,
+        headers: Vec<bitcoin::block::Header>,
+    },
+    Ask,
+    Reseed,
+}
+
+/// Header batches waiting on the header thread. Past this, the coordination
+/// loop stops pulling header events so the queue cannot grow without bound.
+pub(crate) const HEADER_CMD_BOUND: usize = 64;
+
+pub(crate) type HeaderCmdTx = tokio::sync::mpsc::Sender<HeaderCmd>;
+
+/// Send `cmd` to the header thread. A full channel leaves the event on the
+/// peer queue; the coordination loop stops pulling header events until there
+/// is room.
+pub(crate) fn enqueue_header_cmd(st: &mut IbdWorkState, cmd: HeaderCmd) {
+    let Some(tx) = st.header_cmd.clone() else {
+        return;
+    };
+    let _ = tx.try_send(cmd);
 }
 
 impl IbdWorkState {
@@ -254,6 +283,8 @@ impl IbdWorkState {
             header_walk: super::header_walk::HeaderWalk::default(),
             perms: None,
             confirm_feed: None,
+            header_cmd: None,
+            densify_ready_through: 0,
         }
     }
 
@@ -271,6 +302,7 @@ impl IbdWorkState {
             .min();
         if let Some(lo) = lowest {
             self.densify_scan_lo = self.densify_scan_lo.min(lo);
+            self.densify_ready_through = self.densify_ready_through.min(lo);
         }
     }
 

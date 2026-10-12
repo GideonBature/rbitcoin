@@ -3597,6 +3597,23 @@ fn on_headers(
     let _ = session.is_some_and(|s| s.take_awaiting_headers());
     if n == 0 {
         // Empty headers is a failed getheaders response, not an announcement.
+    } else if n > 0
+        && !session.is_some_and(|s| s.session_noban())
+        && headers_are_below_floor(hub, &follow.pending_headers, headers)
+    {
+        // Work stays under the floor from the pending headers alone. Do not
+        // read parent headers, and do not move this peer's best-known tip.
+        // A full batch still continues from its last header below.
+        for hdr in headers.iter().take(n) {
+            let hash = hdr.block_hash();
+            if let Some(s) = session {
+                s.note_block_from_peer(hash);
+            }
+            admit_pending_header(&mut follow.pending_headers, hash, *hdr);
+        }
+        let last = headers[n - 1].block_hash();
+        let announced_h = pending_announced_height(&follow.pending_headers, last);
+        rbitcoin_log::info!("{}", ignoring_low_work_chain_log(announced_h));
     } else if let Some(first) = headers.first() {
         let prev = first.prev_blockhash;
         if hub.is_block_invalid(&prev)
@@ -3625,11 +3642,11 @@ fn on_headers(
             }
         } else {
             let last = headers[n - 1].block_hash();
+            let noban = session.is_some_and(|s| s.session_noban());
             // Core `chain_start.nHeight + headers.size()`. One-header
             // tip announces still accumulate via `follow.pending_headers`
             // (`p2p_headers_sync_with_minchainwork` height=14).
             let announced_h = announced_headers_height(hub, &follow.pending_headers, last);
-            let noban = session.is_some_and(|s| s.session_noban());
             let work_cmp = announced_work_cmp(hub, &follow.pending_headers, last);
             let our_tip = hub.tip_height().unwrap_or(0);
             if announced_tip_is_hopeless(our_tip, announced_h, work_cmp) && !noban {
@@ -4736,6 +4753,74 @@ fn is_genesis_hash(h: &BlockHash) -> bool {
 
 /// Walk `pending` toward genesis. Returns the first hash **not** in `pending`
 /// and how many pending headers were consumed. Store is not consulted.
+/// `true` when this batch's pending work is under `-minimumchainwork`.
+///
+/// The sum uses the pending headers and, when they sit on our tip, the cached
+/// tip work. It does not walk parent headers in the store. `None` from the
+/// walk means the batch does not connect through pending headers, so this
+/// returns false and the caller keeps the store path.
+fn headers_are_below_floor(
+    hub: &ChainHub,
+    pending_before: &HashMap<BlockHash, bitcoin::block::Header>,
+    headers: &[bitcoin::block::Header],
+) -> bool {
+    let Some(min) = hub.min_chain_work_floor() else {
+        return false;
+    };
+    if hub.meets_minimum_chain_work() {
+        return false;
+    }
+    let mut pending = pending_before.clone();
+    for hdr in headers {
+        pending.insert(hdr.block_hash(), *hdr);
+    }
+    let Some(last) = headers.last().map(|h| h.block_hash()) else {
+        return false;
+    };
+    match pending_path_work(hub, &pending, last) {
+        Some(work) => work.to_be_bytes() < min,
+        None => false,
+    }
+}
+
+fn pending_path_work(
+    hub: &ChainHub,
+    pending: &HashMap<BlockHash, bitcoin::block::Header>,
+    tip: BlockHash,
+) -> Option<bitcoin::Work> {
+    let mut extra: Vec<bitcoin::Work> = Vec::new();
+    let mut h = tip;
+    for _ in 0..10_000 {
+        if is_genesis_hash(&h) {
+            extra.reverse();
+            return crate::most_work::sum_work(extra.into_iter()).ok();
+        }
+        if hub.tip_hash() == Some(h) {
+            let base = hub.cached_chain_work()?;
+            extra.reverse();
+            return crate::most_work::sum_work(std::iter::once(base).chain(extra)).ok();
+        }
+        let hdr = pending.get(&h).copied()?;
+        if !hub.header_claimed_pow_ok(&hdr) {
+            return None;
+        }
+        extra.push(hdr.work());
+        h = hdr.prev_blockhash;
+    }
+    None
+}
+
+/// Height of a pending path that reaches genesis. No header-store read.
+fn pending_announced_height(
+    pending: &HashMap<BlockHash, bitcoin::block::Header>,
+    tip: BlockHash,
+) -> u32 {
+    if is_genesis_hash(&tip) {
+        return 0;
+    }
+    pending_walk(pending, tip).1
+}
+
 fn pending_walk(
     pending: &HashMap<BlockHash, bitcoin::block::Header>,
     start: BlockHash,
@@ -4802,8 +4887,10 @@ fn persist_pending_header_path(
         }
     }
     path.reverse();
-    for hdr in &path {
-        if hub.ensure_header(hdr).is_err() {
+    // One store batch. Per-header ensure walks parent heights to genesis, so a
+    // full below-floor chain (thousands of headers) is quadratic.
+    for chunk in path.chunks(MAX_HEADERS_RESULTS) {
+        if hub.ensure_headers_batch(chunk).is_err() {
             break;
         }
     }

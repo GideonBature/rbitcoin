@@ -29,6 +29,21 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+/// Persist the headers classification kept. A short acceptance is the prefix
+/// binary search, so the locked commit does not call the store again.
+pub(crate) fn prepare_header_store(
+    hub: &ChainHub,
+    headers: &[bitcoin::block::Header],
+) -> (Vec<rbitcoin_primitives::Fk>, Option<bitcoin::Work>) {
+    let fks = hub.ensure_headers_batch(headers).unwrap_or_default();
+    let work = hub.chain_work().ok();
+    if fks.len() == headers.len() {
+        return (fks, work);
+    }
+    let accepted = ensure_accepted_prefix(hub, headers);
+    (accepted.into_iter().map(|(_, fk)| fk).collect(), work)
+}
+
 /// Immediately stop getdata and disconnect every peer (SIGINT / IBD exit).
 pub(crate) fn disconnect_all_peers(st: &mut IbdWorkState) {
     let n = st.slots.len();
@@ -49,6 +64,7 @@ pub(crate) fn disconnect_all_peers(st: &mut IbdWorkState) {
 }
 
 /// First 80 bytes of a consensus-serialized block → header (no full block decode).
+#[cfg(test)]
 fn decode_block_header_prefix(payload: &[u8]) -> Option<bitcoin::block::Header> {
     use bitcoin::consensus::Decodable;
     if payload.len() < 80 {
@@ -112,6 +128,9 @@ pub(crate) fn drain_ready_peer_and_body_events(
     let ctrl_t0 = Instant::now();
     let mut ctrl_n = 0u64;
     while ctrl_n < CTRL_DRAIN_EVENT_BUDGET && ctrl_t0.elapsed() < CTRL_DRAIN_TIME_BUDGET {
+        if st.header_cmd.as_ref().is_some_and(|tx| tx.capacity() == 0) {
+            break;
+        }
         match ctrl_rx.try_recv() {
             Ok(ev) => {
                 events += 1;
@@ -271,22 +290,18 @@ fn ensure_accepted_prefix(
     headers[..lo].iter().copied().zip(lo_fks).collect()
 }
 
-/// Leading headers this IBD already stored keep their fk. They were accepted
-/// when first seen, and [`ChainHub::ensure_headers_batch`] walks a stored
-/// header's ancestors back to the connected tip. The rest go through
-/// [`ensure_accepted_prefix`].
+/// `fks` comes from [`prepare_header_store`] after classification.
 fn accepted_headers(
-    st: &IbdWorkState,
-    hub: &ChainHub,
     headers: &[bitcoin::block::Header],
+    fks: &[rbitcoin_primitives::Fk],
 ) -> Vec<(bitcoin::block::Header, rbitcoin_primitives::Fk)> {
-    let mut accepted: Vec<_> = headers
+    let n = fks.len().min(headers.len());
+    headers
         .iter()
-        .map_while(|h| st.header_fks.get(&h.block_hash()).map(|fk| (*h, *fk)))
-        .collect();
-    let rest = &headers[accepted.len()..];
-    accepted.extend(ensure_accepted_prefix(hub, rest));
-    accepted
+        .copied()
+        .zip(fks.iter().copied())
+        .take(n)
+        .collect()
 }
 
 fn on_headers_batch(
@@ -294,8 +309,10 @@ fn on_headers_batch(
     hub: &ChainHub,
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
+    fks: &[rbitcoin_primitives::Fk],
+    work: Option<bitcoin::Work>,
 ) -> usize {
-    let accepted = accepted_headers(st, hub, &headers);
+    let accepted = accepted_headers(&headers, fks);
     let mut added = 0usize;
     let mut batch_prev: Option<(BlockHash, u32)> = None;
     let mut stored = Vec::with_capacity(accepted.len());
@@ -315,7 +332,7 @@ fn on_headers_batch(
             }
             if st.is_on_path(&hash, h) {
                 let base = if hub.tip_hash() == Some(prev) {
-                    hub.chain_work().ok()
+                    work
                 } else {
                     None
                 };
@@ -338,7 +355,7 @@ fn on_headers_batch(
     added
 }
 
-fn on_empty_headers(st: &mut IbdWorkState, hub: &ChainHub) {
+fn on_empty_headers(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
     st.empty_header_streak = st.empty_header_streak.saturating_add(1);
     let tip_h = hub.tip_height().unwrap_or(0);
     let lag = header_lag_behind_peers(st, tip_h);
@@ -369,7 +386,7 @@ fn on_empty_headers(st: &mut IbdWorkState, hub: &ChainHub) {
                 st.empty_header_streak,
                 st.ordered_set.is_empty(),
             ) {
-                super::path::seed_work_path_from_store(st, hub);
+                return true;
             }
             let _ = super::header_walk::send_getheaders(st, hub);
         }
@@ -378,6 +395,7 @@ fn on_empty_headers(st: &mut IbdWorkState, hub: &ChainHub) {
     } else if st.empty_header_streak >= 8 && lag <= 2 {
         st.headers_done = true;
     }
+    false
 }
 
 fn on_known_headers_batch(st: &mut IbdWorkState, hub: &ChainHub, _peer: usize, batch_len: usize) {
@@ -417,14 +435,18 @@ pub(crate) fn apply_peer_event(
             peer,
             hash,
             payload,
+            header_fk,
         } => apply_block_framed(
             st,
             hub,
             archive_write_next,
             confirm_feed,
-            peer,
-            hash,
-            payload,
+            FramedBody {
+                peer,
+                hash,
+                payload,
+                header_fk,
+            },
         ),
         PeerEvent::BlockDecodeFailed { peer, hash } => apply_block_decode_failed(st, peer, hash),
         PeerEvent::NotFound { peer, hashes } => apply_notfound(st, peer, hashes),
@@ -440,86 +462,252 @@ pub(crate) fn apply_peer_event(
     }
 }
 
-fn apply_headers_event(
+pub(crate) fn apply_headers_event(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
 ) {
-    let tip_before = super::header_walk::candidate_tip(st);
-    let work_before = super::header_walk::candidate_work(st);
-    let queued_before = st.ordered.len();
-    let batch_len = headers.len();
-    // An empty reply cannot extend. Retire before the empty handler asks again.
-    if batch_len == 0 {
-        super::header_walk::settle_walk_peer(st, hub, peer, tip_before, queued_before, batch_len);
+    if st.header_cmd.is_some() {
+        super::state::enqueue_header_cmd(st, super::state::HeaderCmd::Batch { peer, headers });
+        return;
     }
-    apply_headers_reply(st, hub, peer, headers);
-    if batch_len > 0 {
-        super::header_walk::settle_walk_peer(st, hub, peer, tip_before, queued_before, batch_len);
-    }
-    super::header_walk::note_reservation(st, hub, peer, tip_before, work_before);
+    let owned = std::mem::replace(st, IbdWorkState::new(Vec::new(), None, None));
+    let shared = std::sync::Mutex::new(owned);
+    let bus = super::peer_io::empty_header_fk_bus();
+    run_header_batch(&shared, hub, peer, headers, &bus);
+    *st = shared.into_inner().unwrap_or_else(|err| err.into_inner());
 }
 
-fn apply_headers_reply(
+enum HeaderPlan {
+    Done,
+    Resume,
+    Store {
+        headers: Vec<bitcoin::block::Header>,
+        known: Vec<rbitcoin_primitives::Fk>,
+        inflight: super::header_walk::InFlight,
+    },
+}
+
+struct BatchMark {
+    tip_before: Option<BlockHash>,
+    work_before: [u8; 32],
+    queued_before: usize,
+    outer_len: usize,
+}
+
+fn finish_mark(st: &mut IbdWorkState, hub: &ChainHub, peer: usize, mark: &BatchMark) {
+    if mark.outer_len > 0 {
+        super::header_walk::settle_walk_peer(
+            st,
+            hub,
+            peer,
+            mark.tip_before,
+            mark.queued_before,
+            mark.outer_len,
+        );
+    }
+    super::header_walk::note_reservation(st, hub, peer, mark.tip_before, mark.work_before);
+}
+
+/// Classify under the lock, persist only the new suffix outside it, then
+/// commit the in-memory path. This is the only header-batch apply.
+pub(crate) fn run_header_batch(
+    shared: &std::sync::Mutex<IbdWorkState>,
+    hub: &ChainHub,
+    peer: usize,
+    headers: Vec<bitcoin::block::Header>,
+    bus: &super::peer_io::HeaderFkBus,
+) {
+    let (mark, plan) = {
+        let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        plan_header_batch(&mut st, hub, peer, headers)
+    };
+    match plan {
+        HeaderPlan::Done => {}
+        HeaderPlan::Resume => {
+            let exclude: Vec<[u8; 32]> = {
+                let st = shared.lock().unwrap_or_else(|err| err.into_inner());
+                st.reorg.invalid.iter().collect()
+            };
+            let path = super::path::load_resume_entries(hub, &exclude);
+            let pairs: Vec<(BlockHash, rbitcoin_primitives::Fk)> = path
+                .iter()
+                .map(|e| (BlockHash::from_byte_array(e.hash), e.header_fk))
+                .collect();
+            {
+                let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+                super::path::stage_resumed_path(&mut st, hub, &path);
+            }
+            super::peer_io::publish_header_fks(bus, &pairs);
+            let rewound = match super::reorg::rewind_off_coord_lock(shared, hub, Some(bus)) {
+                Ok(rewound) => rewound,
+                Err(e) => {
+                    rbitcoin_log::warn!("ibd: header-thread rewind failed: {e}");
+                    false
+                }
+            };
+            let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+            if rewound {
+                let _ = try_complete_awaiting_reorg(&mut st, hub);
+            }
+            let _ = super::header_walk::send_getheaders(&mut st, hub);
+            finish_mark(&mut st, hub, peer, &mark);
+        }
+        HeaderPlan::Store {
+            headers,
+            known,
+            mut inflight,
+        } => {
+            let (fks, work) = fks_for_kept(&known, hub, &headers[known.len()..]);
+            let n = fks.len().min(headers.len());
+            let pairs: Vec<(BlockHash, rbitcoin_primitives::Fk)> = headers
+                .iter()
+                .take(n)
+                .map(|h| h.block_hash())
+                .zip(fks.iter().copied())
+                .collect();
+            let ask = {
+                let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let added = on_headers_batch(&mut st, hub, peer, headers, &fks, work);
+                let ask = complete_stored_headers(&mut st, hub, &mut inflight, added, n);
+                finish_mark(&mut st, hub, peer, &mark);
+                ask
+            };
+            super::peer_io::publish_header_fks(bus, &pairs);
+            let rewound =
+                super::reorg::rewind_off_coord_lock(shared, hub, Some(bus)).unwrap_or(false);
+            if rewound {
+                let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let _ = try_complete_awaiting_reorg(&mut st, hub);
+            }
+            if ask {
+                let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let _ = super::header_walk::send_getheaders(&mut st, hub);
+            }
+        }
+    }
+}
+
+/// Fks for a kept batch. Headers already in the work map are not written again.
+fn fks_for_kept(
+    known: &[rbitcoin_primitives::Fk],
+    hub: &ChainHub,
+    rest: &[bitcoin::block::Header],
+) -> (Vec<rbitcoin_primitives::Fk>, Option<bitcoin::Work>) {
+    if rest.is_empty() {
+        return (known.to_vec(), None);
+    }
+    let (new_fks, work) = prepare_header_store(hub, rest);
+    let mut fks = known.to_vec();
+    fks.extend(new_fks);
+    (fks, work)
+}
+
+fn plan_header_batch(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
-) {
+) -> (BatchMark, HeaderPlan) {
+    let mark = BatchMark {
+        tip_before: super::header_walk::candidate_tip(st),
+        work_before: super::header_walk::candidate_work(st),
+        queued_before: st.ordered.len(),
+        outer_len: headers.len(),
+    };
+    if mark.outer_len == 0 {
+        super::header_walk::settle_walk_peer(
+            st,
+            hub,
+            peer,
+            mark.tip_before,
+            mark.queued_before,
+            mark.outer_len,
+        );
+    }
+    let plan = plan_header_reply(st, hub, peer, headers);
+    if matches!(plan, HeaderPlan::Done) {
+        finish_mark(st, hub, peer, &mark);
+    }
+    (mark, plan)
+}
+
+fn plan_header_reply(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    peer: usize,
+    headers: Vec<bitcoin::block::Header>,
+) -> HeaderPlan {
     let ask = super::header_walk::take_header_ask(st, peer);
     let mut inflight = super::header_walk::InFlight::capture(st);
     if headers.is_empty() {
         inflight.hold(st);
         if super::header_walk::note_empty(st, hub, peer) {
-            return;
+            return HeaderPlan::Done;
         }
-        on_empty_headers(st, hub);
-        return;
+        return if on_empty_headers(st, hub) {
+            HeaderPlan::Resume
+        } else {
+            HeaderPlan::Done
+        };
     }
     let class = super::header_walk::classify(st, hub, ask, &headers);
     let mut headers = headers;
     let keep = match class {
         super::header_walk::HeaderClass::WalkAbsorb => {
             if super::header_walk::absorb_lookahead(st, hub, peer, ask, &headers) {
-                return;
+                return HeaderPlan::Done;
             }
             headers.len()
         }
         super::header_walk::HeaderClass::WalkStore => headers.len(),
         super::header_walk::HeaderClass::Stray => {
-            // A heavier fork is offered before a below-floor batch is dropped.
             if super::header_walk::suppress_competing_chain(st, hub, peer, &headers) {
-                return;
+                return HeaderPlan::Done;
             }
-            return;
+            return HeaderPlan::Done;
         }
         super::header_walk::HeaderClass::Refill => {
             if super::header_walk::reject_refill_miss(st, hub, &headers) {
-                return;
+                return HeaderPlan::Done;
             }
             super::header_walk::proven_header_prefix(st, hub, &headers)
         }
         super::header_walk::HeaderClass::Fork => {
             if super::header_walk::suppress_competing_chain(st, hub, peer, &headers) {
-                return;
+                return HeaderPlan::Done;
             }
             if super::header_walk::reject_refill_miss(st, hub, &headers) {
-                return;
+                return HeaderPlan::Done;
             }
             super::header_walk::proven_header_prefix(st, hub, &headers)
         }
     };
     if keep == 0 {
-        return;
+        return HeaderPlan::Done;
     }
     headers.truncate(keep);
-    let batch_len = headers.len();
-    let added = on_headers_batch(st, hub, peer, headers);
+    let known = headers
+        .iter()
+        .map_while(|h| st.header_fks.get(&h.block_hash()).copied())
+        .collect();
+    HeaderPlan::Store {
+        headers,
+        known,
+        inflight,
+    }
+}
+
+fn complete_stored_headers(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    inflight: &mut super::header_walk::InFlight,
+    added: usize,
+    batch_len: usize,
+) -> bool {
+    inflight.hold(st);
     if added > 0 {
-        if super::reorg::consider_disconnected_heavier(st, hub).unwrap_or(false) {
-            let _ = try_complete_awaiting_reorg(st, hub);
-        }
         st.empty_header_streak = 0;
         st.headers_done = false;
         let live = st.ordered_set.len();
@@ -529,20 +717,22 @@ fn apply_headers_reply(
             st.max_ordered_height.saturating_sub(st.max_ready_height),
             4096,
         );
-        if batch_len >= MAX_HEADERS_RESULTS
+        return batch_len >= MAX_HEADERS_RESULTS
             && live < MAX_ORDERED_HEADERS
-            && (live < ORDERED_HEADERS_SOFT_CAP || need_ready_headroom)
-        {
-            inflight.hold(st);
-            let _ = super::header_walk::send_getheaders(st, hub);
-        }
-    } else if batch_len == 0 {
-        inflight.hold(st);
-        on_empty_headers(st, hub);
-    } else {
-        inflight.hold(st);
-        on_known_headers_batch(st, hub, peer, batch_len);
+            && (live < ORDERED_HEADERS_SOFT_CAP || need_ready_headroom);
     }
+    if batch_len == 0 {
+        return false;
+    }
+    on_known_headers_batch(st, hub, 0, batch_len);
+    false
+}
+
+pub(crate) struct FramedBody {
+    pub peer: usize,
+    pub hash: BlockHash,
+    pub payload: Vec<u8>,
+    pub header_fk: Option<rbitcoin_primitives::Fk>,
 }
 
 fn apply_block_framed(
@@ -550,10 +740,14 @@ fn apply_block_framed(
     hub: &ChainHub,
     archive_write_next: &AtomicU32,
     confirm_feed: Option<&super::confirm::ConfirmFeed>,
-    peer: usize,
-    hash: BlockHash,
-    payload: Vec<u8>,
+    body: FramedBody,
 ) {
+    let FramedBody {
+        peer,
+        hash,
+        payload,
+        header_fk,
+    } = body;
     let wire_bytes = payload.len();
     // Unsolicited wire is not a body we asked for. Drop it before any copy
     // and before it can move this peer's progress clock.
@@ -567,27 +761,14 @@ fn apply_block_framed(
     if st.body.is_rejected(&hash) || hub.has_block(&hash) {
         return;
     }
-    let header_fk = if let Some(&fk) = st.header_fks.get(&hash) {
+    let header_fk = if let Some(fk) = header_fk {
+        st.header_fks.insert(hash, fk);
+        fk
+    } else if let Some(&fk) = st.header_fks.get(&hash) {
         fk
     } else {
-        let header = match decode_block_header_prefix(&payload) {
-            Some(h) => h,
-            None => {
-                st.body.mark_missing(hash);
-                return;
-            }
-        };
-        match hub.ensure_header_fk(&header) {
-            Ok(fk) => {
-                st.header_fks.insert(hash, fk);
-                fk
-            }
-            Err(e) => {
-                warn!("ibd: ensure_header {hash}: {e}");
-                st.body.mark_missing(hash);
-                return;
-            }
-        }
+        st.body.mark_missing(hash);
+        return;
     };
     let tip_h = hub.tip_height().unwrap_or(0);
     let Some(height) = st.hash_height.get(&hash).copied() else {
@@ -783,6 +964,7 @@ pub(crate) fn apply_confirm_events(
                 err,
                 batch_len,
                 sender,
+                parent,
             } => {
                 apply_confirm_reject(
                     st,
@@ -795,6 +977,7 @@ pub(crate) fn apply_confirm_events(
                     batch_len,
                     feed,
                     sender,
+                    parent,
                 );
             }
         }
@@ -819,6 +1002,7 @@ pub(crate) fn apply_confirm_reject(
     batch_len: usize,
     feed: Option<&super::confirm::ConfirmFeed>,
     sender: Option<usize>,
+    parent: super::confirm::RejectParent,
 ) {
     // Never blacklist the all-zero sentinel (write used to emit this on
     // mis-attributed rejects).
@@ -831,7 +1015,7 @@ pub(crate) fn apply_confirm_reject(
     let sent = class;
     let class = if class == ConfirmRejectClass::ConsensusInvalid {
         if let Some(h) = hub {
-            class.trust_consensus(h, hash)
+            class.trust_consensus(parent, h.tip_hash())
         } else {
             class
         }
@@ -1183,6 +1367,62 @@ mod misbehavior_dead_tests {
             "a body already counted keeps an ordinary death off the cooldown"
         );
         assert!(!book.flags(&other_addr).failed_last_connect());
+    }
+}
+
+#[cfg(test)]
+mod header_batch_tests {
+    use super::super::peer_io::empty_header_fk_bus;
+    use super::super::state::IbdWorkState;
+    use super::run_header_batch;
+    use bitcoin::hashes::Hash;
+    use bitcoin::BlockHash;
+    use std::sync::Mutex;
+
+    /// A batch classification drops is not written. The header thread used to
+    /// persist every batch before it knew the batch was stray.
+    #[test]
+    fn stray_batch_is_not_persisted() {
+        let (dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("stray-batch");
+        hub.ensure_genesis().unwrap();
+        hub.milestone = rbitcoin_consensus::Milestone {
+            height: 1,
+            anchor: Some(rbitcoin_consensus::MilestoneAnchor {
+                hash: BlockHash::from_byte_array([0xcd; 32]),
+                min_work_be: [0xff; 32],
+            }),
+        };
+        let header = {
+            let mut h = bitcoin::block::Header {
+                version: bitcoin::block::Version::from_consensus(4),
+                prev_blockhash: BlockHash::from_byte_array([0xab; 32]),
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([1; 32]),
+                time: 1_600_000_000,
+                bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            };
+            rbitcoin_consensus::grind_regtest_pow(&mut h);
+            h
+        };
+        let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+        let _ = super::super::header_walk::send_getheaders(&mut st, &hub);
+        let shared = Mutex::new(st);
+        crate::chain::reset_header_store_counts();
+        run_header_batch(&shared, &hub, 0, vec![header], &empty_header_fk_bus());
+        assert_eq!(
+            crate::chain::header_store_counts().0,
+            0,
+            "a stray batch is classified before any header is persisted"
+        );
+        assert_eq!(side_count(&hub), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn side_count(hub: &crate::chain::ChainHub) -> usize {
+        hub.chaintips()
+            .iter()
+            .filter(|t| t.status != "active")
+            .count()
     }
 }
 

@@ -30,6 +30,7 @@ ignore that file.
 These wreck a session if you skip them. The owner has the procedure.
 
 - No production change without a test that fails first. Docs, comments, and formatting need no tests. Do not open a mainnet datadir here. Perf A/B is operator-host only. Cycle: [`docs/how-we-plan.md`](docs/how-we-plan.md#agent-contract).
+- Do not leave a second path beside the one a change adds. Delete the old branch in the same change. [`docs/code-shape.md`](docs/code-shape.md) rule 9.
 - Do not load `cargo test`, clippy, deny, or rustc stdout into the session. Redirect to `/tmp`; read the exit code, failure names, and at most ~80 lines of tail. [`docs/how-we-plan.md`](docs/how-we-plan.md) (Agent RAM).
 - Do not run `cargo mutants`. Hand-edit the missed operator and run the journey. [`TESTING.md`](TESTING.md). `rearden-grok[bot]`: [`rearden-vm-HOST.md`](rearden-vm-HOST.md).
 - Do not merge unless asked. Never commit the plan onto `master`.

@@ -56,7 +56,21 @@ use rbitcoin_store::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering as AtomicOrdering,
+};
+
+thread_local! {
+    static RESUME_WORK_PATH_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub fn resume_work_path_count() -> u64 {
+    RESUME_WORK_PATH_N.with(|c| c.get())
+}
+
+pub fn reset_resume_work_path_count() {
+    RESUME_WORK_PATH_N.with(|c| c.set(0));
+}
 use std::sync::{Arc, Condvar, Mutex};
 
 pub use confirm_stats::{
@@ -86,6 +100,31 @@ pub const DEFAULT_MAX_SH_CREATES: u32 = 10_000;
 pub enum UringRecover {
     Recovered,
     Exhausted,
+}
+
+thread_local! {
+    static SCRIPTHASH_RUN_COUNT_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static OWNED_SIZE_SNAPSHOT_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn note_scripthash_run_count_call() {
+    SCRIPTHASH_RUN_COUNT_N.with(|c| c.set(c.get().saturating_add(1)));
+}
+
+fn note_owned_size_snapshot_call() {
+    OWNED_SIZE_SNAPSHOT_N.with(|c| c.set(c.get().saturating_add(1)));
+}
+
+pub fn reset_progress_snapshot_counts() {
+    SCRIPTHASH_RUN_COUNT_N.with(|c| c.set(0));
+    OWNED_SIZE_SNAPSHOT_N.with(|c| c.set(0));
+}
+
+pub fn progress_snapshot_counts() -> (u64, u64) {
+    (
+        SCRIPTHASH_RUN_COUNT_N.with(|c| c.get()),
+        OWNED_SIZE_SNAPSHOT_N.with(|c| c.get()),
+    )
 }
 
 pub(crate) fn uring_recover_credit(last_tip: Option<u32>, tip: u32) -> bool {
@@ -184,7 +223,7 @@ pub use batch_parents::{
 };
 pub use block_filter::{basic_filter_from_scripts, basic_filter_of};
 pub use catchup::IndexMode;
-pub use chain_view::{ChainView, ChainViewKind};
+pub use chain_view::{header_lookup_count, ChainView, ChainViewKind};
 pub use confirm_load::SpendEdges;
 pub use connect::{spawn_sh_writebehind, ConfirmPrepared};
 pub use id_map::{IdMap, OutPointHasher, OutPointSet, TxidHasher, TxidMap, TxidSet};
@@ -355,6 +394,10 @@ pub struct Query {
     /// Confirmed tip hash published by the write that advanced `confirmed[]`.
     /// The IBD orchestration loop loads this instead of reading the header store.
     published_tip: arc_swap::ArcSwapOption<PublishedTip>,
+    /// Scripthash run count last published by the confirm thread.
+    sh_runs_published: AtomicUsize,
+    /// Process-owned sizes last published by the confirm thread.
+    owned_sizes_published: arc_swap::ArcSwap<ProcessOwnedSizes>,
     /// Held from the tip-height check through `flush_class_c_tip` / disconnect
     /// flush. Rewind tries it and retries; it does not disconnect mid-flush.
     tip_commit: Mutex<()>,
@@ -501,6 +544,8 @@ impl Query {
             disconnect_height: AtomicU32::new(0),
             disconnect_gen: AtomicU64::new(0),
             published_tip: arc_swap::ArcSwapOption::empty(),
+            sh_runs_published: AtomicUsize::new(0),
+            owned_sizes_published: arc_swap::ArcSwap::from_pointee(ProcessOwnedSizes::default()),
             tip_commit: Mutex::new(()),
             confirm_stats: Arc::new(ConfirmStats::default()),
             uring_recover_tip: AtomicU32::new(u32::MAX),
@@ -1854,6 +1899,7 @@ impl Query {
     /// Brief mutex locks only (header plans / SH / heads). Call from the ~5s
     /// status tick — not the hot path.
     pub fn process_owned_size_snapshot(&self) -> ProcessOwnedSizes {
+        note_owned_size_snapshot_call();
         // Header + tx_fks plans (not the unused scan-watermark `plans` BTreeMap).
         // Wire path always put_header_plan; conf_plans=0 was a metering bug.
         let conf_plans = self.confirm_parents.header_plan_count();
@@ -1905,6 +1951,22 @@ impl Query {
     /// Class A tx body count (for backfill heuristics / logs).
     pub fn tx_body_count(&self) -> u64 {
         self.store.txs.count()
+    }
+
+    /// Confirm thread: refresh the scripthash-run and owned-size counters.
+    pub fn publish_progress_snapshots(&self) {
+        let runs = self.scripthash_run_count();
+        self.sh_runs_published.store(runs, AtomicOrdering::Relaxed);
+        let owned = self.process_owned_size_snapshot();
+        self.owned_sizes_published.store(Arc::new(owned));
+    }
+
+    pub fn published_scripthash_run_count(&self) -> usize {
+        self.sh_runs_published.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn published_owned_sizes(&self) -> ProcessOwnedSizes {
+        **self.owned_sizes_published.load()
     }
 
     /// Durable `tx.head` occupied slots (for backfill heuristics / logs).
@@ -1980,6 +2042,7 @@ impl Query {
         &self,
         hash: &[u8; 32],
     ) -> Result<Option<(Fk, HeaderRecord)>, QueryError> {
+        crate::chain_view::note_header_lookup();
         if let Some(v) = self.confirm_parents.get_header_by_hash(hash) {
             return Ok(Some(v));
         }
@@ -2218,6 +2281,7 @@ impl Query {
         max: usize,
         exclude: &[[u8; 32]],
     ) -> Result<Vec<ResumeWorkEntry>, QueryError> {
+        RESUME_WORK_PATH_N.with(|c| c.set(c.get().saturating_add(1)));
         self.resume_work_path_limited(
             tip_hash,
             tip_height,

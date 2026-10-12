@@ -8,7 +8,7 @@ use crate::most_work::{sum_work, work_better, InvalidHashSet};
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, CompactTarget, Target};
 use rbitcoin_log::{info, warn};
-use rbitcoin_primitives::Height;
+use rbitcoin_primitives::{Fk, Height};
 use std::collections::{HashMap, HashSet};
 
 /// Whether a confirm reject string is the soft BadPrev class.
@@ -166,10 +166,26 @@ fn header_hashes_to_best_ancestor_n(
     Ok(rev)
 }
 
+thread_local! {
+    static PARENT_HASH_OF_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_parent_hash_of_count() {
+    PARENT_HASH_OF_N.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn parent_hash_of_count() -> u64 {
+    PARENT_HASH_OF_N.with(|c| c.get())
+}
+
 pub(crate) fn parent_hash_of(
     hub: &ChainHub,
     hash: BlockHash,
 ) -> Result<Option<BlockHash>, NetError> {
+    #[cfg(test)]
+    PARENT_HASH_OF_N.with(|c| c.set(c.get().saturating_add(1)));
     let Some((_, rec)) = hub
         .query
         .get_header_by_hash(&hash.to_byte_array())
@@ -344,21 +360,12 @@ pub fn consider_disconnected_heavier(
     st: &mut super::state::IbdWorkState,
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
-    for h in connecting_search_candidates(st, hub)? {
-        if st.reorg.invalid.contains(h.to_byte_array()) {
-            continue;
-        }
-        if let Some(path) = connecting_hashes_heavier_disconnected(hub, h)? {
-            if path
-                .iter()
-                .any(|p| st.reorg.invalid.contains(p.to_byte_array()))
-            {
-                continue;
-            }
-            return apply_header_rewind(st, hub, &path);
-        }
-    }
-    Ok(false)
+    let cands = connecting_search_candidates(st, hub)?;
+    let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
+        return Ok(false);
+    };
+    apply_header_rewind(st, hub, &path)
 }
 
 /// Header tips on known competing forks that do not contain an invalid hash.
@@ -461,7 +468,19 @@ pub(crate) fn maybe_rewind_to_best_work(
     st: &mut super::state::IbdWorkState,
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
-    let mut seen = std::collections::HashSet::new();
+    let cands = rewind_candidate_hashes(st, hub)?;
+    let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
+        return Ok(false);
+    };
+    apply_header_rewind(st, hub, &path)
+}
+
+fn rewind_candidate_hashes(
+    st: &super::state::IbdWorkState,
+    hub: &ChainHub,
+) -> Result<Vec<BlockHash>, NetError> {
+    let mut seen = HashSet::new();
     let mut cands = Vec::new();
     for t in st.reorg.explore_tips() {
         if seen.insert(*t) {
@@ -473,35 +492,49 @@ pub(crate) fn maybe_rewind_to_best_work(
             cands.push(h);
         }
     }
+    Ok(cands)
+}
+
+fn select_heavier_path(
+    hub: &ChainHub,
+    cands: &[BlockHash],
+    invalid: &HashSet<[u8; 32]>,
+) -> Result<Option<Vec<BlockHash>>, NetError> {
     for cand in cands {
-        if st.reorg.invalid.contains(cand.to_byte_array()) {
+        if invalid.contains(&cand.to_byte_array()) {
             continue;
         }
-        if let Some(path) = connecting_hashes_heavier_disconnected(hub, cand)? {
-            if path
-                .iter()
-                .any(|h| st.reorg.invalid.contains(h.to_byte_array()))
-            {
+        if let Some(path) = connecting_hashes_heavier_disconnected(hub, *cand)? {
+            if path.iter().any(|h| invalid.contains(&h.to_byte_array())) {
                 continue;
             }
-            return apply_header_rewind(st, hub, &path);
+            return Ok(Some(path));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Disconnect to the path's LCA and re-point height slots at `path`
 /// (oldest-first, unconfirmed hashes after the LCA).
-pub(crate) fn apply_header_rewind(
-    st: &mut super::state::IbdWorkState,
+struct RewindPrep {
+    lca: BlockHash,
+    lca_h: u32,
+    archived: Vec<bool>,
+    connected: Vec<bool>,
+    fks: Vec<Option<Fk>>,
+}
+
+/// Store side of a rewind: parent lookup and the confirmed-tip disconnect.
+/// No `IbdWorkState` borrow, so the coordination lock is not held.
+fn prepare_header_rewind(
     hub: &ChainHub,
     path: &[BlockHash],
-) -> Result<bool, NetError> {
+) -> Result<Option<RewindPrep>, NetError> {
     if path.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(lca) = parent_hash_of(hub, path[0])? else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(lca_h) = hub
         .query
@@ -509,7 +542,7 @@ pub(crate) fn apply_header_rewind(
         .map_err(NetError::store)?
         .map(|h| h.0)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let tip_h = hub.tip_height().unwrap_or(0);
     if tip_h.saturating_sub(lca_h) > REWIND_MAX_DEPTH {
@@ -517,11 +550,11 @@ pub(crate) fn apply_header_rewind(
             "ibd: heavier fork rewind depth {} exceeds cap {REWIND_MAX_DEPTH} (lca={lca_h} tip={tip_h})",
             tip_h.saturating_sub(lca_h)
         );
-        return Ok(false);
+        return Ok(None);
     }
     if tip_h > lca_h {
         if !hub.try_rewind_to_height(lca_h)? {
-            return Ok(false);
+            return Ok(None);
         }
         info!(
             "ibd: most-work header rewind tip {tip_h} → {lca_h} (winning path {} header(s))",
@@ -533,37 +566,123 @@ pub(crate) fn apply_header_rewind(
             path.len()
         );
     }
-    st.clear_path_above(lca_h);
-    hub.query.clear_milestone_path_above(lca_h);
-    super::header_walk::on_confirmed_rewind(st, hub, lca_h);
-    hub.query.set_lookup_taken_hi(Some(lca_h));
+    let archived = path
+        .iter()
+        .map(|hash| {
+            hub.query
+                .is_block_archived(&hash.to_byte_array())
+                .unwrap_or(false)
+        })
+        .collect();
+    let connected = path.iter().map(|hash| hub.is_connected(hash)).collect();
+    let fks = path
+        .iter()
+        .map(|hash| {
+            hub.query
+                .get_header_by_hash(&hash.to_byte_array())
+                .ok()
+                .flatten()
+                .map(|(fk, _)| fk)
+        })
+        .collect();
+    Ok(Some(RewindPrep {
+        lca,
+        lca_h,
+        archived,
+        connected,
+        fks,
+    }))
+}
+
+fn commit_header_rewind(
+    st: &mut super::state::IbdWorkState,
+    hub: &ChainHub,
+    path: &[BlockHash],
+    prep: &RewindPrep,
+) {
+    st.clear_path_above(prep.lca_h);
+    hub.query.clear_milestone_path_above(prep.lca_h);
+    super::header_walk::on_confirmed_rewind(st, hub, prep.lca_h);
+    hub.query.set_lookup_taken_hi(Some(prep.lca_h));
     st.headers_done = false;
     let tip = hub.tip_height().zip(hub.tip_hash());
-    let mut prev = lca;
+    let mut prev = prep.lca;
     for (i, hash) in path.iter().enumerate() {
-        let ht = lca_h.saturating_add(1).saturating_add(i as u32);
+        let ht = prep.lca_h.saturating_add(1).saturating_add(i as u32);
         let _ = st.try_set_path_slot(*hash, ht, prev, tip);
         st.known_headers.insert(*hash);
+        if let Some(fk) = prep.fks.get(i).copied().flatten() {
+            st.header_fks.insert(*hash, fk);
+        }
         st.max_ordered_height = st.max_ordered_height.max(ht);
-        if !hub.is_connected(hash) && st.ordered_set.insert(*hash) {
+        if !prep.connected[i] && st.ordered_set.insert(*hash) {
             st.ordered.push_back(*hash);
         }
-        if hub
-            .query
-            .is_block_archived(&hash.to_byte_array())
-            .unwrap_or(false)
-        {
+        if prep.archived[i] {
             st.body.mark_archived(*hash);
         }
         prev = *hash;
     }
     for h in hub.query.block_queue_queued_heights() {
-        if h > lca_h {
+        if h > prep.lca_h {
             let _ = hub.query.block_queue_dequeue_height(h);
         }
     }
     st.reorg.clear_explore();
     st.confirm_quiesce = true;
+}
+
+pub(crate) fn apply_header_rewind(
+    st: &mut super::state::IbdWorkState,
+    hub: &ChainHub,
+    path: &[BlockHash],
+) -> Result<bool, NetError> {
+    let Some(prep) = prepare_header_rewind(hub, path)? else {
+        return Ok(false);
+    };
+    commit_header_rewind(st, hub, path, &prep);
+    Ok(true)
+}
+
+/// Most-work rewind with the store reads outside `shared`.
+///
+/// `bus` receives the path's header fks after the lock drops. Those fks are
+/// also in `header_fks`, so a body that arrives before the publish still
+/// resolves.
+pub(crate) fn rewind_off_coord_lock(
+    shared: &std::sync::Mutex<super::state::IbdWorkState>,
+    hub: &ChainHub,
+    bus: Option<&super::peer_io::HeaderFkBus>,
+) -> Result<bool, NetError> {
+    let (cands, invalid) = {
+        let st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        let cands = rewind_candidate_hashes(&st, hub)?;
+        let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
+        (cands, invalid)
+    };
+    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
+        return Ok(false);
+    };
+    let Some(prep) = prepare_header_rewind(hub, &path)? else {
+        return Ok(false);
+    };
+    let pairs = {
+        let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        if path
+            .iter()
+            .any(|h| st.reorg.invalid.contains(h.to_byte_array()))
+        {
+            return Ok(false);
+        }
+        commit_header_rewind(&mut st, hub, &path, &prep);
+        path.iter()
+            .zip(prep.fks.iter())
+            .filter_map(|(hash, fk)| fk.map(|fk| (*hash, fk)))
+            .collect::<Vec<_>>()
+    };
+    if let Some(bus) = bus {
+        super::peer_io::publish_header_fks(bus, &pairs);
+    }
     Ok(true)
 }
 
@@ -756,7 +875,9 @@ mod tests {
         st.note_path_prev(w3.block_hash(), w2.block_hash());
         st.record_height(w4.block_hash(), 4);
         st.max_ordered_height = 4;
-        assert!(consider_disconnected_heavier(&mut st, &hub).unwrap());
+        let shared = std::sync::Mutex::new(st);
+        assert!(rewind_off_coord_lock(&shared, &hub, None).unwrap());
+        let st = shared.into_inner().unwrap_or_else(|err| err.into_inner());
         assert_eq!(
             hub.tip_height(),
             Some(0),
@@ -764,6 +885,10 @@ mod tests {
         );
         assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
         assert_eq!(st.height_to_hash.get(&2), Some(&w2.block_hash()));
+        assert!(
+            st.header_fks.contains_key(&w1.block_hash()),
+            "a rewound header keeps the fk the body path needs"
+        );
         assert!(
             st.reorg.need_getdata().is_empty(),
             "winner is a linear extension after rewind; need={:?}",
@@ -824,6 +949,7 @@ mod tests {
             1,
             None,
             None,
+            super::super::confirm::RejectParent::default(),
         );
         assert_eq!(hub.tip_height(), Some(1), "unknown prev must not rewind");
         assert!(!st.headers_done, "soft reget clears the header latch");

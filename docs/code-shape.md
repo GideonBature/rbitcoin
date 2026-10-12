@@ -48,6 +48,12 @@ do not restate them here.
    needs a **named seam** (two stages, two protocols, two roles) — see
    **R-10**.
 
+9. **One path.** A change that replaces a behavior deletes the old branch
+   in the same change. Do not leave the old way behind a flag, a
+   thread-local, a test-only wrapper, or a second function that does the
+   same job. Confirm-stage IO has the same rule in
+   [`invariants.md`](./invariants.md).
+
 ---
 
 ## Extract under tests

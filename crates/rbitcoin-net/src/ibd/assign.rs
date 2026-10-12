@@ -419,8 +419,15 @@ fn assign_densify(
     issued += steal_hung_densify(st, hub, alive, tip_batch_hi, &caps);
 
     let mut room = cfg.window.saturating_sub(st.inflight.len());
-    // Window is full and no retired holder is waiting for a racer. Skip the
-    // densify height walk.
+    if path_lo < st.assign_path_lo {
+        st.densify_scan_lo = path_lo;
+        st.densify_ready_through = path_lo;
+    }
+    st.assign_path_lo = path_lo;
+    st.densify_scan_lo = st.densify_scan_lo.max(path_lo);
+    rewind_densify_scan_lo(st, hub, path_lo);
+    // Window is full and no retired holder is waiting for a racer. The cursor
+    // already rewound. Skip issuing.
     if room == 0 && !st.inflight.values().any(inflight_needs_racer) {
         finish_assign(loop_stats, t0, issued);
         return;
@@ -443,11 +450,6 @@ fn assign_densify(
         fetched_hi,
     );
 
-    if path_lo < st.assign_path_lo {
-        st.densify_scan_lo = path_lo;
-    }
-    st.assign_path_lo = path_lo;
-    st.densify_scan_lo = st.densify_scan_lo.max(path_lo);
     if !alive
         .iter()
         .any(|&pid| peer_has_slot(st, pid, caps.get(&pid).copied().unwrap_or(1)))
@@ -547,6 +549,39 @@ fn collect_height_band(
     out
 }
 
+/// An alive peer already holds getdata for `hash`.
+fn live_getdata_cover(st: &IbdWorkState, hash: &BlockHash) -> bool {
+    st.inflight.get(hash).is_some_and(|req| {
+        req.peers
+            .iter()
+            .any(|pid| st.slots.iter().any(|s| s.id == *pid && s.alive))
+    })
+}
+
+/// Pull the densify cursor back to the first height that is not claim-ready.
+///
+/// Heights already recorded in `densify_ready_through` are not checked again.
+fn rewind_densify_scan_lo(st: &mut IbdWorkState, hub: &ChainHub, path_lo: u32) {
+    if st.densify_ready_through < path_lo {
+        st.densify_ready_through = path_lo;
+    }
+    let hi = st.densify_scan_lo;
+    let start = path_lo.max(st.densify_ready_through);
+    if hi <= start {
+        return;
+    }
+    for ht in start..hi {
+        let Some(&hash) = st.height_to_hash.get(&ht) else {
+            return;
+        };
+        if !super::progress::claim_ready(hub, &mut st.body, ht, &hash) {
+            st.densify_scan_lo = ht;
+            return;
+        }
+        st.densify_ready_through = ht.saturating_add(1);
+    }
+}
+
 fn densify_prefix_filled(st: &mut IbdWorkState, hub: &ChainHub, ht: u32) -> bool {
     let Some(&h) = st.height_to_hash.get(&ht) else {
         return false;
@@ -554,7 +589,7 @@ fn densify_prefix_filled(st: &mut IbdWorkState, hub: &ChainHub, ht: u32) -> bool
     if super::progress::claim_ready(hub, &mut st.body, ht, &h) {
         return true;
     }
-    if st.inflight.contains_key(&h) {
+    if live_getdata_cover(st, &h) {
         return true;
     }
     st.body.is_known_archived(&h)
@@ -603,7 +638,7 @@ fn need_hash_at(st: &mut IbdWorkState, hub: &ChainHub, ht: u32, room: usize) -> 
     if super::progress::claim_ready(hub, &mut st.body, ht, &h) {
         return None;
     }
-    if st.inflight.get(&h).is_some_and(|req| !req.peers.is_empty())
+    if live_getdata_cover(st, &h)
         || st.body.is_rejected(&h)
         || st.reorg.invalid.contains(h.to_byte_array())
     {
@@ -633,9 +668,7 @@ pub(crate) fn pop_need(
     hub: &ChainHub,
 ) -> Option<BlockHash> {
     while let Some(h) = q.pop_front() {
-        if st.body.skip_download(hub, &h)
-            || st.inflight.get(&h).is_some_and(|req| !req.peers.is_empty())
-        {
+        if st.body.skip_download(hub, &h) || live_getdata_cover(st, &h) {
             continue;
         }
         return Some(h);
@@ -2744,7 +2777,8 @@ pub(in crate::ibd) mod tests {
         assert_eq!(st.slots[1].in_flight.len(), 16);
         assert!(st.slots[0].in_flight.len() <= 8 && st.slots[2].in_flight.len() <= 8);
 
-        // Every peer at its cap: no band walk, and the cursor stays.
+        // Every peer at its cap: no new getdata. The cursor still rewinds to
+        // the first height that is not claim-ready.
         restart_on(&mut st, &hub, &mut wire, &[0, 1]);
         plant_work_path(&mut st, 1, 70);
         mark_tip_batch_ready(&mut st, &hub, 1);
@@ -2759,10 +2793,10 @@ pub(in crate::ibd) mod tests {
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         let after: HashSet<_> = st.inflight.keys().copied().collect();
         assert_eq!(after, before, "no new densify when peers at cap");
-        assert_eq!(st.densify_scan_lo, 40);
+        assert_eq!(st.densify_scan_lo, 33);
 
-        // Peer 0 disconnects holding work below the cursor. Densify re-asks
-        // it only once the cursor is rewound.
+        // Peer 0 disconnects holding work below the cursor. The next assign
+        // rewinds and re-asks it.
         restart_on(&mut st, &hub, &mut wire, &[0, 1, 2]);
         plant_work_path(&mut st, 1, 49);
         mark_tip_batch_ready(&mut st, &hub, 1);
@@ -2775,7 +2809,10 @@ pub(in crate::ibd) mod tests {
         st.densify_scan_lo = 50;
         let freed = release_peer_block_work(&mut st.slots, &mut st.inflight, &mut st.body, 0);
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
-        assert!(!st.inflight.contains_key(&lost), "below the cursor");
+        assert!(
+            st.inflight.contains_key(&lost),
+            "a gone holder below the cursor is re-asked"
+        );
         st.reopen_for_densify(&freed);
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(st.inflight.contains_key(&lost), "reopened work is re-asked");
@@ -3067,6 +3104,52 @@ pub(in crate::ibd) mod tests {
             !st.inflight.contains_key(&h(1)) && !st.inflight.contains_key(&h(2)),
             "queue already at the stop: no new getdata; inflight={:?}",
             st.inflight.keys().collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A hole in front of queued bodies is requested even when the densify
+    /// cursor has moved past it. A holder whose peer is gone does not cover it.
+    #[test]
+    fn tip_hole_in_front_of_queued_bodies_is_requested() {
+        let _env = lock_default_assign_stop();
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let (slots, mut wire) = wired_slots(2);
+        let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+        restart_on(&mut st, &hub, &mut wire, &[0]);
+        let stats = LoopStats::default();
+        let mut cfg = IbdConfig::for_test();
+        cfg.window = 16;
+        cfg.per_peer = 8;
+
+        plant_work_path(&mut st, 1, 8);
+        mark_heights_ready(&mut st, &hub, 3, 8);
+        st.densify_scan_lo = 5;
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
+        assert!(
+            st.inflight.contains_key(&h(1)) && st.inflight.contains_key(&h(2)),
+            "hole in front of queued bodies is requested; inflight={:?}",
+            st.inflight.keys().collect::<Vec<_>>()
+        );
+        assert!(st.inflight[&h(1)].peers.contains(&0));
+
+        restart_on(&mut st, &hub, &mut wire, &[0]);
+        plant_work_path(&mut st, 1, 8);
+        mark_heights_ready(&mut st, &hub, 3, 8);
+        st.densify_scan_lo = 5;
+        st.slots[1].alive = false;
+        st.slots[1].in_flight.insert(h(1));
+        st.inflight
+            .insert(h(1), super::super::state::InflightReq::new(1));
+        assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
+        assert!(
+            st.inflight
+                .get(&h(1))
+                .is_some_and(|req| req.peers.contains(&0)),
+            "a gone holder does not cover the hole; inflight={:?}",
+            st.inflight.get(&h(1)).map(|req| req.peers.clone())
         );
 
         let _ = std::fs::remove_dir_all(dir);

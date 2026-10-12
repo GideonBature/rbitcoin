@@ -110,12 +110,22 @@ pub(crate) fn claim_ready(
 /// - Rejected tip+1 → stop (not a download gap; confirm is blacklisted).
 /// - In hand (confirmed / BQ hash / taken onto loadq) → stop.
 /// - Otherwise increment hole (needs getdata).
+#[cfg(test)]
 pub(crate) fn tip_fetch_hole(
     hub: &ChainHub,
     height_to_hash: &HashMap<u32, BlockHash>,
     body: &mut BodyPresence,
 ) -> usize {
-    let path_lo = match hub.tip_height() {
+    tip_fetch_hole_at(hub, hub.tip_height(), height_to_hash, body)
+}
+
+pub(crate) fn tip_fetch_hole_at(
+    hub: &ChainHub,
+    tip: Option<u32>,
+    height_to_hash: &HashMap<u32, BlockHash>,
+    body: &mut BodyPresence,
+) -> usize {
+    let path_lo = match tip {
         None => 0u32,
         Some(t) => t.saturating_add(1),
     };
@@ -134,6 +144,7 @@ pub(crate) fn tip_fetch_hole(
 }
 
 /// Build a status snapshot for the ~5s operator tick.
+#[cfg(test)]
 pub(crate) fn work_chain_progress(
     hub: &ChainHub,
     height_to_hash: &HashMap<u32, BlockHash>,
@@ -141,13 +152,48 @@ pub(crate) fn work_chain_progress(
     horizon: u32,
     max_ready_height: u32,
 ) -> WorkChainProgress {
-    let tip = hub.tip_height().unwrap_or(0);
-    let tip_hole = tip_fetch_hole(hub, height_to_hash, body);
+    work_chain_progress_at(
+        hub,
+        hub.tip_height(),
+        height_to_hash,
+        body,
+        horizon,
+        max_ready_height,
+    )
+}
+
+pub(crate) fn work_chain_progress_at(
+    hub: &ChainHub,
+    tip: Option<u32>,
+    height_to_hash: &HashMap<u32, BlockHash>,
+    body: &mut BodyPresence,
+    horizon: u32,
+    max_ready_height: u32,
+) -> WorkChainProgress {
+    let tip_n = tip.unwrap_or(0);
+    let tip_hole = tip_fetch_hole_at(hub, tip, height_to_hash, body);
     WorkChainProgress {
-        tip,
-        ready_hwm: tip.max(max_ready_height),
-        headers: tip.max(horizon),
+        tip: tip_n,
+        ready_hwm: tip_n.max(max_ready_height),
+        headers: tip_n.max(horizon),
         tip_hole,
+    }
+}
+
+/// Numbers the 5s tick reads. No directory listing and no height-index lock.
+pub(crate) struct ProgressPublished {
+    pub tip: Option<u32>,
+    pub txs: u64,
+    pub sh_runs: usize,
+    pub owned: rbitcoin_query::ProcessOwnedSizes,
+}
+
+pub(crate) fn read_progress_published(query: &rbitcoin_query::Query) -> ProgressPublished {
+    ProgressPublished {
+        tip: query.published_tip().map(|p| p.height),
+        txs: query.tx_body_count(),
+        sh_runs: query.published_scripthash_run_count(),
+        owned: query.published_owned_sizes(),
     }
 }
 
@@ -614,5 +660,29 @@ mod tests {
             warm.eta_string(t0 + Duration::from_secs(100), 100, 100),
             "done"
         );
+    }
+
+    #[test]
+    fn progress_tick_reads_published_counters() {
+        use bitcoin::hashes::Hash;
+
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("prog-pub");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        hub.query.publish_confirmed_tip(0, gen.to_byte_array());
+        rbitcoin_query::reset_progress_snapshot_counts();
+        hub.query.publish_progress_snapshots();
+        let (sh_calls, owned_calls) = rbitcoin_query::progress_snapshot_counts();
+        assert!(sh_calls >= 1 && owned_calls >= 1);
+        let sh = hub.query.published_scripthash_run_count();
+        let h2h = hub.query.published_owned_sizes().h2h_keys;
+        rbitcoin_query::reset_progress_snapshot_counts();
+        let view = super::read_progress_published(&hub.query);
+        assert_eq!(view.tip, Some(0));
+        assert_eq!(view.txs, hub.query.tx_body_count());
+        assert_eq!(view.sh_runs, sh);
+        assert_eq!(view.owned.h2h_keys, h2h);
+        assert_eq!(rbitcoin_query::progress_snapshot_counts(), (0, 0));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -53,8 +53,43 @@ impl Query {
     /// Publish `hash` as the confirmed tip at `height`. Called in the same
     /// confirm that advanced `confirmed[]`, before the Class C flush.
     pub fn publish_confirmed_tip(&self, height: u32, hash: [u8; 32]) {
+        self.publish_confirmed_rows(&[(hash, height)]);
+    }
+
+    /// Publish `rows` (height order) as the new tip and index every height
+    /// from the previous index tip through the last row, when that span is
+    /// contiguous. A gap still waits for the catch-up walk.
+    pub fn publish_confirmed_rows(&self, rows: &[([u8; 32], u32)]) {
+        let Some(&(hash, height)) = rows.last() else {
+            return;
+        };
         self.published_tip
             .store(Some(std::sync::Arc::new(PublishedTip { height, hash })));
+        let expected = self.with_height_index(|index| index.tip);
+        let start = match expected {
+            None => {
+                if rows.len() == 1 && height == 0 {
+                    let _ = self.extend_height_index(rows, 0, None, false);
+                }
+                return;
+            }
+            Some(prev) => prev.saturating_add(1),
+        };
+        if height < start {
+            return;
+        }
+        let mut seq = Vec::with_capacity((height - start) as usize + 1);
+        for h in start..=height {
+            let Some(row) = rows.iter().find(|(_, rh)| *rh == h) else {
+                return;
+            };
+            seq.push(*row);
+        }
+        if self.extend_height_index(&seq, height, expected, false) {
+            // Same counter the catch-up walk records, so a span publish is
+            // still an incremental extend and not a silent index update.
+            crate::note_confirm(&self.confirm_stats().height_index_delta_n, seq.len() as u64);
+        }
     }
 
     pub fn clear_published_tip(&self) {
@@ -289,8 +324,12 @@ impl Query {
         self.store.confirmed.set_many(&confirmed_pairs)?;
         // Same commit as `confirmed[]`, before the flush. `tip_height` is
         // already the new tip; the orchestration loop reads this snapshot.
-        if let Some(last) = items.last() {
-            self.publish_confirmed_tip(last.height.0, last.hash);
+        if !items.is_empty() {
+            let rows: Vec<([u8; 32], u32)> = items
+                .iter()
+                .map(|item| (item.hash, item.height.0))
+                .collect();
+            self.publish_confirmed_rows(&rows);
         }
         // Do not forget pending here: drain may still be inserting tx.head
         // (67438). Write forgets after drain.join() *and* this extend.

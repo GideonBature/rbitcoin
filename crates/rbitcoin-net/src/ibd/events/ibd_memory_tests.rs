@@ -7,6 +7,20 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash};
 use std::sync::atomic::AtomicU32;
 
+fn stored_batch(
+    st: &mut IbdWorkState,
+    hub: &crate::chain::ChainHub,
+    peer: usize,
+    headers: Vec<bitcoin::block::Header>,
+) -> usize {
+    let known: Vec<_> = headers
+        .iter()
+        .map_while(|h| st.header_fks.get(&h.block_hash()).copied())
+        .collect();
+    let (fks, work) = super::fks_for_kept(&known, hub, &headers[known.len()..]);
+    on_headers_batch(st, hub, peer, headers, &fks, work)
+}
+
 fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, crate::chain::ChainHub) {
     crate::chain::tiny_regtest_hub_labeled("ibd-memory")
 }
@@ -24,7 +38,7 @@ fn rejected_header_batch_does_not_grow_path_or_explore() {
     let path_before = st.hash_height.len();
     let mut bad = mine(gen, 1_500_010_000, 1);
     bad.header.time = 0;
-    on_headers_batch(&mut st, &hub, 0, vec![bad.header]);
+    stored_batch(&mut st, &hub, 0, vec![bad.header]);
     assert_eq!(
         st.hash_height.len(),
         path_before,
@@ -34,7 +48,7 @@ fn rejected_header_batch_does_not_grow_path_or_explore() {
     assert!(st.reorg.explore_tips().is_empty());
 
     let good = mine(gen, 1_500_010_000, 1);
-    on_headers_batch(&mut st, &hub, 0, vec![good.header]);
+    stored_batch(&mut st, &hub, 0, vec![good.header]);
     assert!(
         st.hash_height.contains_key(&good.block_hash()),
         "a valid header still records path state"
@@ -49,7 +63,7 @@ fn rejected_header_batch_does_not_grow_path_or_explore() {
     let mut child = mine(good.block_hash(), 1_500_010_600, 2);
     child.header.time = 0;
     let broken = child.header.block_hash();
-    on_headers_batch(&mut st, &hub, 0, vec![good.header, child.header]);
+    stored_batch(&mut st, &hub, 0, vec![good.header, child.header]);
     assert!(
         st.hash_height.contains_key(&good.block_hash()),
         "the valid prefix stays on the path"
@@ -67,7 +81,7 @@ fn rejected_header_batch_does_not_grow_path_or_explore() {
     bad_tail.header.time = 0;
     let fresh_hash = fresh.block_hash();
     let tail_hash = bad_tail.header.block_hash();
-    let added = on_headers_batch(&mut st, &hub, 0, vec![fresh.header, bad_tail.header]);
+    let added = stored_batch(&mut st, &hub, 0, vec![fresh.header, bad_tail.header]);
     assert!(
         st.hash_height.contains_key(&fresh_hash),
         "binary search must keep the valid prefix of a rejected tail"
@@ -82,7 +96,7 @@ fn rejected_header_batch_does_not_grow_path_or_explore() {
     let mut bad_third = mine(second.block_hash(), 1_500_012_800, 4);
     bad_third.header.time = 0;
     let second_hash = second.block_hash();
-    on_headers_batch(
+    stored_batch(
         &mut st,
         &hub,
         0,
@@ -109,7 +123,18 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
     st.header_fks.insert(hash, rbitcoin_primitives::Fk(1));
     let before = hub.query.block_queue_stats().1;
     let write_next = AtomicU32::new(0);
-    apply_block_framed(&mut st, &hub, &write_next, None, 0, hash, payload.clone());
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        super::FramedBody {
+            peer: 0,
+            hash,
+            payload: payload.clone(),
+            header_fk: None,
+        },
+    );
     assert_eq!(
         hub.query.block_queue_stats().1,
         before,
@@ -118,7 +143,18 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
 
     st.inflight
         .insert(hash, super::super::state::InflightReq::new(0));
-    apply_block_framed(&mut st, &hub, &write_next, None, 0, hash, payload);
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        super::FramedBody {
+            peer: 0,
+            hash,
+            payload,
+            header_fk: None,
+        },
+    );
     assert!(
         hub.query.block_queue_stats().1 > before,
         "a requested body is still queued"
@@ -126,7 +162,18 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
     let queued = hub.query.block_queue_stats().1;
     st.inflight
         .insert(hash, super::super::state::InflightReq::new(0));
-    apply_block_framed(&mut st, &hub, &write_next, None, 0, hash, serialize(&block));
+    apply_block_framed(
+        &mut st,
+        &hub,
+        &write_next,
+        None,
+        super::FramedBody {
+            peer: 0,
+            hash,
+            payload: serialize(&block),
+            header_fk: None,
+        },
+    );
     assert_eq!(
         hub.query.block_queue_stats().1,
         queued,
@@ -152,15 +199,15 @@ fn stored_header_resends_walk_once() {
         chain.push(header);
     }
     let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
-    on_headers_batch(&mut st, &hub, 0, chain[..200].to_vec());
+    stored_batch(&mut st, &hub, 0, chain[..200].to_vec());
     let _ = hub.take_stored_height_walk_steps();
-    on_headers_batch(&mut st, &hub, 0, chain[100..200].to_vec());
+    stored_batch(&mut st, &hub, 0, chain[100..200].to_vec());
     assert_eq!(
         hub.take_stored_height_walk_steps(),
         0,
         "a re-sent run of stored headers walks no ancestors"
     );
-    on_headers_batch(&mut st, &hub, 0, chain.clone());
+    stored_batch(&mut st, &hub, 0, chain.clone());
     assert_eq!(
         hub.take_stored_height_walk_steps(),
         0,
@@ -176,7 +223,7 @@ fn stored_header_resends_walk_once() {
 
     let mut fresh = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
     let _ = hub.take_stored_height_walk_steps();
-    on_headers_batch(&mut fresh, &hub, 0, chain[..200].to_vec());
+    stored_batch(&mut fresh, &hub, 0, chain[..200].to_vec());
     assert_eq!(
         hub.take_stored_height_walk_steps(),
         1,
@@ -199,7 +246,7 @@ fn stored_header_resends_walk_once() {
         side.push(header);
     }
     let mut side_st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
-    on_headers_batch(&mut side_st, &hub, 0, side.clone());
+    stored_batch(&mut side_st, &hub, 0, side.clone());
     assert!(side_st.header_fks.is_empty());
     for header in &side {
         assert!(!side_st.hash_height.contains_key(&header.block_hash()));
@@ -213,7 +260,7 @@ fn stored_header_resends_walk_once() {
     batch.push(rejected);
     let mut tail = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
     let _ = hub.take_stored_height_walk_steps();
-    on_headers_batch(&mut tail, &hub, 0, batch);
+    stored_batch(&mut tail, &hub, 0, batch);
     assert!(hub.take_stored_height_walk_steps() >= u64::from(CAP));
     for header in &chain[CAP as usize..CAP as usize + 8] {
         assert!(tail.header_fks.contains_key(&header.block_hash()));
@@ -223,7 +270,7 @@ fn stored_header_resends_walk_once() {
     let above = (CAP as usize)..(CAP as usize + 2);
     let mut past = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
     let _ = hub.take_stored_height_walk_steps();
-    on_headers_batch(&mut past, &hub, 0, chain[above.clone()].to_vec());
+    stored_batch(&mut past, &hub, 0, chain[above.clone()].to_vec());
     assert_eq!(
         hub.take_stored_height_walk_steps(),
         u64::from(CAP),

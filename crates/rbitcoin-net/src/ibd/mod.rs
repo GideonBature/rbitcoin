@@ -27,6 +27,7 @@ mod path;
 mod peer_io;
 mod perf_log;
 mod progress;
+mod published;
 mod rate;
 mod reorg;
 mod state;
@@ -54,13 +55,14 @@ use exit::{
     all_peers_dead_action, best_chain_remainder, empty_path_header_fan, header_lag_behind_peers,
     ibd_caught_up, path_drained, should_unlatch_headers_done, AllPeersDead,
 };
-use path::seed_work_path_from_store;
-use peer_io::{sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
+use peer_io::{empty_header_fk_bus, sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
 use progress::{
-    claim_ready, format_progress_line, ibd_pct, work_chain_progress, ProgressLineInput,
-    TipRateTracker,
+    format_progress_line, ibd_pct, read_progress_published, work_chain_progress_at,
+    ProgressLineInput, TipRateTracker,
 };
+use published::spawn_header_thread;
 use state::IbdWorkState;
+use state::{enqueue_header_cmd, HeaderCmd};
 use status::LoopStats;
 
 use crate::chain::ChainHub;
@@ -288,9 +290,11 @@ pub async fn ibd_cancellable(
     // Body events must not wait behind Headers (single-FIFO waste).
     let (body_tx, mut body_rx) = mpsc::unbounded_channel::<PeerEvent>();
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<PeerEvent>();
+    let header_fks = empty_header_fk_bus();
     let sinks = PeerEventSinks {
         body: body_tx,
         ctrl: ctrl_tx,
+        header_fks: Arc::clone(&header_fks),
     };
 
     // Nested `ibd-net` runtime panicked on SIGINT (`Cannot drop a runtime in an
@@ -384,15 +388,9 @@ pub async fn ibd_cancellable(
     st.addr_cooldown = boot_cooldown;
     st.addr_strikes = boot_strikes;
     st.perms = perms;
-    seed_work_path_from_store(&mut st, hub.as_ref());
     header_walk::restore_adopt(&mut st, hub.as_ref());
-
-    // Channel may close if handshake races the first getheaders.
-    for _ in 0..st.slots.len().min(4) {
-        if header_walk::send_getheaders(&mut st, &hub).unwrap_or(false) {
-            break;
-        }
-    }
+    let (header_tx, header_rx) = tokio::sync::mpsc::channel(state::HEADER_CMD_BOUND);
+    st.header_cmd = Some(header_tx.clone());
 
     let loop_stats = Arc::new(LoopStats::default());
     let store_class_a_bodies = hub.query.archived_block_count().unwrap_or(0);
@@ -462,6 +460,13 @@ pub async fn ibd_cancellable(
     );
     update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
 
+    let shared = Arc::new(std::sync::Mutex::new(st));
+    let header_thread =
+        spawn_header_thread(Arc::clone(&shared), Arc::clone(&hub), header_rx, header_fks);
+    hub.query.publish_progress_snapshots();
+    let _ = header_tx.try_send(HeaderCmd::Reseed);
+    let _ = header_tx.try_send(HeaderCmd::Ask);
+
     let mut loop_n = 0u32;
     let mut cadence = IbdLoopCadence::new();
     let mut halt_err: Option<String> = None;
@@ -475,479 +480,82 @@ pub async fn ibd_cancellable(
             tokio::task::yield_now().await;
         }
 
-        let tip_before_confirm = hub.tip_height();
-        apply_confirm_events(
-            &mut st,
-            hub.as_ref(),
-            &confirm_ev_rx,
-            &archive_write_next,
-            &max_ready_shared,
-            &mut last_progress,
-            Some(confirm_feed.as_ref()),
-        );
-        if hub.tip_height() < tip_before_confirm {
-            confirm_feed.clear();
-        }
-        if let Some(msg) = st.halt.take() {
-            warn!("ibd: engine fault halt: {msg}");
-            halt_err = Some(msg);
-            break;
-        }
-
-        if !drain_ready_peer_and_body_events(
-            &mut st,
-            hub.as_ref(),
-            &mut body_rx,
-            &mut ctrl_rx,
-            &archive_write_next,
-            &loop_stats,
-            peer_sess.book_mut(),
-            local_addr,
-            Some(confirm_feed.as_ref()),
-        )? {
-            break;
-        }
-
-        let tip_now = hub.tip_height().unwrap_or(0);
-        while let Some(&front) = st.ordered.front() {
-            let past = hub.has_block(&front)
-                || st.hash_height.get(&front).is_some_and(|&ht| ht <= tip_now);
-            if past {
-                st.ordered.pop_front();
-                st.ordered_set.remove(&front);
-            } else {
-                break;
-            }
-        }
-        let now_cadence = Instant::now();
-        if cadence.hygiene_due(now_cadence, st.ordered_bloated()) {
-            st.hygiene();
-            cadence.mark_hygiene(now_cadence);
-        }
-
-        if cadence.assign_due(now_cadence, st.inflight.is_empty()) {
-            let tip_rate_opt = tip_rate_tracker.eta_rate(now_cadence);
-            let _ = hub.query.block_queue_update_soft_pressure(tip_rate_opt);
-            let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
-            let bq_window_covered = rbitcoin_query::soft_confirm_window_covered(
-                bq_count as u32,
-                bq_bytes,
-                tip_rate_opt,
-            );
-            let depth = if bq_pipeline_saturated(st.inflight.len(), bq_window_covered) {
-                AssignDepth::Critical
-            } else {
-                AssignDepth::Full
-            };
-            let tip_before_assign = hub.tip_height();
-            assign_work_ordered(
-                &mut st,
+        let pending_redial = {
+            let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+            let st = &mut *st_guard;
+            let tip_before_confirm = hub.tip_height();
+            apply_confirm_events(
+                st,
                 hub.as_ref(),
-                &cfg,
-                &loop_stats,
-                depth,
-                tip_rate_opt,
+                &confirm_ev_rx,
+                &archive_write_next,
+                &max_ready_shared,
+                &mut last_progress,
+                Some(confirm_feed.as_ref()),
             );
-            if hub.tip_height() < tip_before_assign {
+            if hub.tip_height() < tip_before_confirm {
                 confirm_feed.clear();
             }
-            sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
-            cadence.mark_assign(now_cadence);
-        }
-
-        offer_confirm_ready(
-            &confirm_feed,
-            &st.height_to_hash,
-            &st.path_prev,
-            &mut st.body,
-            hub.as_ref(),
-            &mut st.max_ready_height,
-            &max_ready_shared,
-        );
-        update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
-        apply_confirm_events(
-            &mut st,
-            hub.as_ref(),
-            &confirm_ev_rx,
-            &archive_write_next,
-            &max_ready_shared,
-            &mut last_progress,
-            Some(confirm_feed.as_ref()),
-        );
-        if !drain_ready_peer_and_body_events(
-            &mut st,
-            hub.as_ref(),
-            &mut body_rx,
-            &mut ctrl_rx,
-            &archive_write_next,
-            &loop_stats,
-            peer_sess.book_mut(),
-            local_addr,
-            Some(confirm_feed.as_ref()),
-        )? {
-            break;
-        }
-
-        // Soft-cap `ordered_set` (not deque ghosts). Bypass only when the path is dense
-        // (sparse far-ready used to look empty forever → header flood / drain livelock).
-        // Full-batch continuation still fires from apply_peer_event; this is the poll.
-        let path_empty = st.ordered.is_empty() && !st.headers_done;
-        // A block inv is not a queue-depth event. Ask on this turn, not
-        // after the 500 ms header period, or the announced header waits
-        // behind a full queue.
-        let challenge_due = header_walk::inv_challenge_due(&st);
-        if cadence.headers_due(now_cadence, path_empty, challenge_due) {
-            let live = st.ordered_set.len();
-            let known_ready = st.body.known_len();
-            let ready_gap = st.max_ordered_height.saturating_sub(st.max_ready_height);
-            let need_ready_headroom = need_ready_headroom(
-                want_headers_beyond_soft_cap(
-                    live,
-                    known_ready,
-                    ready_gap,
-                    (window as u32).saturating_mul(4).max(2048),
-                ),
-                st.header_walk.has_checkpoints(),
-            );
-            if should_unlatch_headers_done(&st, hub.tip_height().unwrap_or(0)) {
-                st.headers_done = false;
+            if let Some(msg) = st.halt.take() {
+                warn!("ibd: engine fault halt: {msg}");
+                halt_err = Some(msg);
+                break;
             }
-            let tip_h = hub.tip_height().unwrap_or(0);
-            let lag = header_lag_behind_peers(&st, tip_h);
-            let min_cache = window.saturating_mul(8).max(4096);
-            let alive = st.slots.iter().filter(|s| s.alive).count();
-            let fan = empty_path_header_fan(&st, tip_h, alive);
-            match header_walk::header_poll(
-                &st,
-                header_walk::HeaderPollIn {
-                    live,
-                    need_ready_headroom,
-                    lag,
-                    min_cache,
-                    fan,
-                },
-            ) {
-                header_walk::HeaderPoll::Ask => {
-                    let _ = header_walk::send_getheaders(&mut st, &hub);
-                }
-                header_walk::HeaderPoll::LatchDone => {
-                    st.headers_done = true;
-                }
-                header_walk::HeaderPoll::Wait => {}
-            }
-            cadence.mark_headers(now_cadence);
-        }
 
-        // Hard reset only when ordered is empty — a full queue still waiting on getdata is not stalled.
-        if last_progress.elapsed() > cfg.stall.saturating_mul(6) && path_drained(&st) {
-            let rebuilt = path::reseed_ordered_from_path(&mut st, hub.as_ref());
-            let before_seed = st.ordered.len();
-            seed_work_path_from_store(&mut st, hub.as_ref());
-            let seeded = st.ordered.len().saturating_sub(before_seed);
-            info!(
-                "ibd: hard path reset (stall {:?}, st.ordered empty) rebuilt={rebuilt} store_seeded={seeded} ordered={}",
-                last_progress.elapsed(),
-                st.ordered.len()
-            );
-            st.headers_done = false;
-            let _ = header_walk::send_getheaders(&mut st, &hub);
-            cadence.mark_headers(Instant::now());
-            last_progress = Instant::now();
-        }
-
-        if cadence.peer_slow_due(now_cadence) {
-            sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
-            let now = Instant::now();
-            let mut freed = disconnect_stalled_block_peers(
-                &mut st.slots,
-                &mut st.inflight,
-                &mut st.body,
-                &mut st.addr_cooldown,
-                &mut st.addr_strikes,
-                now,
-                cfg.stall,
-            );
-            freed.extend(disconnect_relative_slow_block_peers(
-                &mut st.slots,
-                &mut st.inflight,
-                &mut st.body,
-                &mut st.addr_cooldown,
-                &mut st.addr_strikes,
-                now,
-                peer_sess.book(),
-                &mut st.relative_slow_suspect,
-                &mut st.relative_slow_last_kick_ms,
-            ));
-            st.reopen_for_densify(&freed);
-            expire_addr_cooldown(&mut st.addr_cooldown, now);
-            cadence.mark_peer_slow(now);
-        }
-        st.slots.retain(|s| s.alive);
-
-        if redial_handle
-            .as_ref()
-            .map(|h| h.is_finished())
-            .unwrap_or(false)
-        {
-            if let Some(h) = redial_handle.take() {
-                match h.await {
-                    Ok(result) => {
-                        apply_dial_result(
-                            peer_sess.book_mut(),
-                            &result,
-                            &mut st.addr_cooldown,
-                            &mut st.addr_strikes,
-                            Instant::now(),
-                        );
-                        // A successful dial ends that address's cooldown, including
-                        // the one we admitted while every candidate was cooling.
-                        for s in &result.slots {
-                            if let Some(sock) = s.net.socket_addr() {
-                                st.addr_cooldown.remove(&sock);
-                            }
-                        }
-                        let blocked =
-                            dial_blocked_addrs(&st.slots, &st.addr_cooldown, Instant::now());
-                        let mut n = 0usize;
-                        for s in result.slots {
-                            // Race: same addr may have connected on another path.
-                            if blocked.contains(&s.net) || st.slots.iter().any(|x| x.net == s.net) {
-                                warn!(
-                                    "ibd: drop duplicate/cooldown dial peer[{}] {}",
-                                    s.id, s.addr
-                                );
-                                continue;
-                            }
-                            st.max_peer_height = st.max_peer_height.max(s.peer_height);
-                            info!(
-                                "ibd: peer[{}] {} connected (peer_height={})",
-                                s.id, s.addr, s.peer_height
-                            );
-                            st.slots.push(s);
-                            n += 1;
-                        }
-                        if n > 0 {
-                            st.slots.sort_by_key(|s| s.id);
-                            info!(
-                                "ibd: redial added {n} peer(s); live={}",
-                                st.slots.iter().filter(|s| s.alive).count()
-                            );
-                            dark_redial_empty = 0;
-                            if st.ordered.is_empty() && !st.headers_done {
-                                let _ = header_walk::send_getheaders(&mut st, &hub);
-                            }
-                        } else {
-                            dark_redial_empty = dark_redial_empty.saturating_add(1);
-                            warn!(
-                                "ibd: redial returned 0 peers (empty_rounds={dark_redial_empty})"
-                            );
-                        }
-                    }
-                    Err(e) => warn!("ibd: redial task failed: {e}"),
-                }
-            }
-        }
-
-        // When *all* peers are dead (network blip), do not wait for the 15s
-        // interval — redial immediately so we never race the exit check.
-        let alive_n = st.slots.iter().filter(|s| s.alive).count();
-        let target = cfg.target_peers.max(1);
-        let redial_interval = if alive_n == 0 {
-            Duration::from_secs(0)
-        } else {
-            Duration::from_secs(15)
-        };
-        if redial_handle.is_none()
-            && alive_n < target
-            && !peer_sess.book().is_empty()
-            && last_redial.elapsed() >= redial_interval
-        {
-            let want = redial_want(alive_n, target);
-            let mut already = dial_blocked_addrs(&st.slots, &st.addr_cooldown, Instant::now());
-            let occupied = alive_dial_addrs(&st.slots);
-            let live: HashSet<_> = st.slots.iter().map(|s| s.net).collect();
-            if let Some(addr) = admit_cooldown_fallback(
-                peer_sess.book(),
-                &mut already,
-                &occupied,
-                &st.addr_cooldown,
-                Instant::now(),
-                &live,
-            ) {
-                info!("ibd: every candidate is cooling; retrying least-recent {addr}");
-            }
-            info!(
-                "ibd: redialing up to {want} peers (alive={alive_n}/{target}, book={}, blocked={})…",
-                peer_sess.book().len(),
-                already.len()
-            );
-            let book = peer_sess.book().clone();
-            let tip_h = hub.tip_height();
-            let sinks_r = sinks.clone();
-            let cto = cfg.connect_timeout;
-            let cancel_c = cancel.as_ref().map(Arc::clone);
-            let dialer_c = cfg.dialer.clone();
-            let clock_c = Arc::clone(&hub.clock);
-            redial_handle = Some(tokio::spawn(async move {
-                dial_batch(
-                    &book, want, already, &occupied, magic, local_addr, tip_h, sinks_r, cto,
-                    cancel_c, dialer_c, &clock_c,
-                )
-                .await
-            }));
-            last_redial = Instant::now();
-        }
-
-        if last_status.elapsed() >= Duration::from_secs(5) {
-            let now = Instant::now();
-            let window_secs = last_status.elapsed().as_secs_f64().max(0.001);
-            let scan_t0 = Instant::now();
-            let horizon = header_walk::peer_horizon(&st);
-            let prog = work_chain_progress(
+            if !drain_ready_peer_and_body_events(
+                st,
                 hub.as_ref(),
-                &st.height_to_hash,
-                &mut st.body,
-                horizon,
-                st.max_ready_height,
-            );
-            loop_stats
-                .status_scan_ns
-                .fetch_add(scan_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-            let tip_delta = prog.tip.saturating_sub(last_sample_tip);
-            let tip_rate = tip_delta as f64 / window_secs;
-            let peers_n = st.slots.iter().filter(|s| s.alive).count();
-            let (load_q, script_q, write_q) = confirm_queues.snap();
-            let path_lo = hub.tip_height().map(|t| t.saturating_add(1)).unwrap_or(0);
-            let inflight_h = {
-                let g = confirm_feed.inner.lock().unwrap();
-                g.inflight.clone()
-            };
-            let ready_n = confirm::confirm_ready_count(&hub.query, path_lo, &inflight_h);
-            let txs = hub.query.tx_body_count();
-            let pct = ibd_pct(prog.tip, prog.headers);
-            let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
-
-            tip_rate_tracker.push(now, prog.tip);
-            let eta = tip_rate_tracker.eta_string(now, prog.tip, prog.headers);
-            let eta_rate = tip_rate_tracker.eta_rate(now);
-            let bq_soft_stop = rbitcoin_query::soft_confirm_window_n(eta_rate);
-            let _ = hub.query.block_queue_update_soft_pressure(eta_rate);
-
-            let conf_q = confirm::format_conf_q(
-                load_q,
-                script_q,
-                write_q,
-                confirm::load_queue_cap(),
-                confirm::script_queue_cap(),
-                confirm::write_queue_cap(),
-            );
-            let progress_line = format_progress_line(&ProgressLineInput {
-                pct,
-                tip: prog.tip,
-                tip_rate,
-                tip_hole: prog.tip_hole,
-                peers: peers_n,
-                conf_q,
-                txs,
-                horizon: prog.headers,
-                eta,
-                bq_bytes,
-                bq_count,
-                bq_soft_stop,
-            });
-            info_bold!("{progress_line}");
-            header_walk::retire_adopt_if_confirmed(&mut st, &hub);
-            header_walk::log_status(&mut st, &hub, prog.headers);
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-
-            last_sample_tip = prog.tip;
-
-            let peer_cap = peers_n.saturating_mul(cfg.per_peer);
-            let inflight_cap = cfg.window.min(peer_cap).max(1);
-            let ahead = prog
-                .ready_hwm
-                .saturating_sub(prog.tip)
-                .saturating_add(st.inflight.len() as u32);
-            let conf_q_hwm = confirm_queues.sample_hwm_and_reset();
-            let mut conf_pipe = confirm_queues.content_snap();
-            let (feed_ready, feed_inflight) = confirm_feed.size_snap();
-            conf_pipe.ready = ready_n;
-            conf_pipe.feed_ready = feed_ready;
-            conf_pipe.feed_inflight = feed_inflight;
-            let work_sizes = st.structure_sizes();
-            let owned_sizes = hub.query.process_owned_size_snapshot();
-            let rss = perf_log::read_platform_rss();
-            let perf = perf_log::sample(
+                &mut body_rx,
+                &mut ctrl_rx,
+                &archive_write_next,
                 &loop_stats,
-                st.inflight.len(),
-                inflight_cap,
-                (bq_bytes, bq_count, bq_soft_stop),
-                ahead,
-                prog.tip_hole,
-                peers_n,
-                st.headers_done,
-                ready_n,
-                script_q,
-                write_q,
-                conf_q_hwm,
-                hub.query.scripthash_run_count(),
-                work_sizes,
-                owned_sizes,
-                conf_pipe,
-                rss,
-                hub.query.confirm_stats(),
-            );
-            perf_log::log_sample(&perf);
-
-            // Stall WARN only if the pipeline is idle. ready_n is BQ inventory, not occupancy.
-            let conf_busy = feed_inflight > 0
-                || script_q > 0
-                || write_q > 0
-                || loop_stats.confirm_live_snap().is_some();
-            if last_progress.elapsed() > Duration::from_secs(15)
-                && prog.tip_hole == 0
-                && !conf_busy
-                && st.inflight.is_empty()
-                && prog.ready_hwm > prog.tip.saturating_add(1)
-            {
-                let expect = prog.tip.saturating_add(1);
-                let hth = st.height_to_hash.get(&expect).copied();
-                let ready = hth
-                    .map(|h| claim_ready(hub.as_ref(), &mut st.body, expect, &h))
-                    .unwrap_or(false);
-                let has = hth.map(|h| hub.has_block(&h)).unwrap_or(false);
-                let in_set = hth.map(|h| st.ordered_set.contains(&h)).unwrap_or(false);
-                let noted = offer_confirm_ready(
-                    &confirm_feed,
-                    &st.height_to_hash,
-                    &st.path_prev,
-                    &mut st.body,
-                    hub.as_ref(),
-                    &mut st.max_ready_height,
-                    &max_ready_shared,
-                );
-                update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
-                warn!(
-                    "ibd: tip stall tip={} expect={expect} hth={} claim_ready={ready} has_block={has} \
-                     in_ordered={in_set} offer_noted={noted} hwm={} ordered_len={} feed_ready={} \
-                     (idle {:?})",
-                    prog.tip,
-                    hth.is_some(),
-                    prog.ready_hwm,
-                    st.ordered.len(),
-                    feed_ready,
-                    last_progress.elapsed(),
-                );
+                peer_sess.book_mut(),
+                local_addr,
+                Some(confirm_feed.as_ref()),
+            )? {
+                break;
             }
-            last_status = Instant::now();
-        }
 
-        // Exit when the connected best chain has no remainder. Empty-EOF
-        // (`headers_done`) means we do not chase advertised height (less-work
-        // fork / bogus `version.start_height`). See `ibd_caught_up`.
-        let tip_h = hub.tip_height().unwrap_or(0);
-        if ibd_caught_up(&st, tip_h) {
+            let tip_now = hub.tip_height().unwrap_or(0);
+            while let Some(&front) = st.ordered.front() {
+                let past = hub.has_block(&front)
+                    || st.hash_height.get(&front).is_some_and(|&ht| ht <= tip_now);
+                if past {
+                    st.ordered.pop_front();
+                    st.ordered_set.remove(&front);
+                } else {
+                    break;
+                }
+            }
+            let now_cadence = Instant::now();
+            if cadence.hygiene_due(now_cadence, st.ordered_bloated()) {
+                st.hygiene();
+                cadence.mark_hygiene(now_cadence);
+            }
+
+            if cadence.assign_due(now_cadence, st.inflight.is_empty()) {
+                let tip_rate_opt = tip_rate_tracker.eta_rate(now_cadence);
+                let _ = hub.query.block_queue_update_soft_pressure(tip_rate_opt);
+                let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
+                let bq_window_covered = rbitcoin_query::soft_confirm_window_covered(
+                    bq_count as u32,
+                    bq_bytes,
+                    tip_rate_opt,
+                );
+                let depth = if bq_pipeline_saturated(st.inflight.len(), bq_window_covered) {
+                    AssignDepth::Critical
+                } else {
+                    AssignDepth::Full
+                };
+                let tip_before_assign = hub.tip_height();
+                assign_work_ordered(st, hub.as_ref(), &cfg, &loop_stats, depth, tip_rate_opt);
+                if hub.tip_height() < tip_before_assign {
+                    confirm_feed.clear();
+                }
+                sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
+                cadence.mark_assign(now_cadence);
+            }
+
             offer_confirm_ready(
                 &confirm_feed,
                 &st.height_to_hash,
@@ -958,42 +566,420 @@ pub async fn ibd_cancellable(
                 &max_ready_shared,
             );
             update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
-            let tip_h = hub.tip_height().unwrap_or(0);
-            if ibd_caught_up(&st, tip_h) {
-                info!(
-                    "ibd: catch-up complete tip={tip_h} max_peer_height={} max_ready={} headers_done={} — exiting IBD",
-                    st.max_peer_height, st.max_ready_height, st.headers_done
-                );
+            apply_confirm_events(
+                st,
+                hub.as_ref(),
+                &confirm_ev_rx,
+                &archive_write_next,
+                &max_ready_shared,
+                &mut last_progress,
+                Some(confirm_feed.as_ref()),
+            );
+            if !drain_ready_peer_and_body_events(
+                st,
+                hub.as_ref(),
+                &mut body_rx,
+                &mut ctrl_rx,
+                &archive_write_next,
+                &loop_stats,
+                peer_sess.book_mut(),
+                local_addr,
+                Some(confirm_feed.as_ref()),
+            )? {
                 break;
             }
-        }
-        // All peers dead — never treat mid-chain peer death as catch-up complete.
-        if st.slots.iter().all(|s| !s.alive) {
-            let tip_h = hub.tip_height().unwrap_or(0);
-            match all_peers_dead_action(&st, tip_h, redial_handle.is_some(), dark_redial_empty) {
-                AllPeersDead::CatchupComplete => {
-                    info!(
-                        "ibd: catch-up complete (no live peers) tip={tip_h} max_peer_height={} max_ready={} — exiting IBD",
-                        st.max_peer_height, st.max_ready_height
-                    );
-                    break;
+
+            // Soft-cap `ordered_set` (not deque ghosts). Bypass only when the path is dense
+            // (sparse far-ready used to look empty forever → header flood / drain livelock).
+            // Full-batch continuation still fires from apply_peer_event; this is the poll.
+            let path_empty = st.ordered.is_empty() && !st.headers_done;
+            // A block inv is not a queue-depth event. Ask on this turn, not
+            // after the 500 ms header period, or the announced header waits
+            // behind a full queue.
+            let challenge_due = header_walk::inv_challenge_due(st);
+            if cadence.headers_due(now_cadence, path_empty, challenge_due) {
+                let live = st.ordered_set.len();
+                let known_ready = st.body.known_len();
+                let ready_gap = st.max_ordered_height.saturating_sub(st.max_ready_height);
+                let need_ready_headroom = need_ready_headroom(
+                    want_headers_beyond_soft_cap(
+                        live,
+                        known_ready,
+                        ready_gap,
+                        (window as u32).saturating_mul(4).max(2048),
+                    ),
+                    st.header_walk.has_checkpoints(),
+                );
+                if should_unlatch_headers_done(st, hub.tip_height().unwrap_or(0)) {
+                    st.headers_done = false;
                 }
-                AllPeersDead::GiveUpMidCatchup => {
-                    warn!(
-                        "ibd: all peers dead mid catch-up tip={tip_h} max_peer_height={} lag={} accepted={} empty_redials={} — giving up (not tip mode)",
-                        st.max_peer_height,
-                        header_lag_behind_peers(&st, tip_h),
-                        accepted.load(Ordering::SeqCst),
-                        dark_redial_empty
-                    );
-                    return Err(NetError::Protocol(
-                        "all peers dead mid catch-up (not complete)",
-                    ));
+                let tip_h = hub.tip_height().unwrap_or(0);
+                let lag = header_lag_behind_peers(st, tip_h);
+                let min_cache = window.saturating_mul(8).max(4096);
+                let alive = st.slots.iter().filter(|s| s.alive).count();
+                let fan = empty_path_header_fan(st, tip_h, alive);
+                match header_walk::header_poll(
+                    st,
+                    header_walk::HeaderPollIn {
+                        live,
+                        need_ready_headroom,
+                        lag,
+                        min_cache,
+                        fan,
+                    },
+                ) {
+                    header_walk::HeaderPoll::Ask => {
+                        enqueue_header_cmd(st, HeaderCmd::Ask);
+                    }
+                    header_walk::HeaderPoll::LatchDone => {
+                        st.headers_done = true;
+                    }
+                    header_walk::HeaderPoll::Wait => {}
                 }
-                AllPeersDead::WaitRedial => {}
+                cadence.mark_headers(now_cadence);
+            }
+
+            // Hard reset only when ordered is empty — a full queue still waiting on getdata is not stalled.
+            if last_progress.elapsed() > cfg.stall.saturating_mul(6) && path_drained(st) {
+                enqueue_header_cmd(st, HeaderCmd::Reseed);
+                enqueue_header_cmd(st, HeaderCmd::Ask);
+                info!(
+                    "ibd: hard path reset (stall {:?}, st.ordered empty) ordered={}",
+                    last_progress.elapsed(),
+                    st.ordered.len()
+                );
+                st.headers_done = false;
+                cadence.mark_headers(Instant::now());
+                last_progress = Instant::now();
+            }
+
+            if cadence.peer_slow_due(now_cadence) {
+                sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
+                let now = Instant::now();
+                let mut freed = disconnect_stalled_block_peers(
+                    &mut st.slots,
+                    &mut st.inflight,
+                    &mut st.body,
+                    &mut st.addr_cooldown,
+                    &mut st.addr_strikes,
+                    now,
+                    cfg.stall,
+                );
+                freed.extend(disconnect_relative_slow_block_peers(
+                    &mut st.slots,
+                    &mut st.inflight,
+                    &mut st.body,
+                    &mut st.addr_cooldown,
+                    &mut st.addr_strikes,
+                    now,
+                    peer_sess.book(),
+                    &mut st.relative_slow_suspect,
+                    &mut st.relative_slow_last_kick_ms,
+                ));
+                st.reopen_for_densify(&freed);
+                expire_addr_cooldown(&mut st.addr_cooldown, now);
+                cadence.mark_peer_slow(now);
+            }
+            st.slots.retain(|s| s.alive);
+            if redial_handle
+                .as_ref()
+                .map(|h| h.is_finished())
+                .unwrap_or(false)
+            {
+                redial_handle.take()
+            } else {
+                None
+            }
+        };
+        if let Some(h) = pending_redial {
+            match h.await {
+                Ok(result) => {
+                    let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                    let st = &mut *st_guard;
+                    apply_dial_result(
+                        peer_sess.book_mut(),
+                        &result,
+                        &mut st.addr_cooldown,
+                        &mut st.addr_strikes,
+                        Instant::now(),
+                    );
+                    // A successful dial ends that address's cooldown, including
+                    // the one we admitted while every candidate was cooling.
+                    for s in &result.slots {
+                        if let Some(sock) = s.net.socket_addr() {
+                            st.addr_cooldown.remove(&sock);
+                        }
+                    }
+                    let blocked = dial_blocked_addrs(&st.slots, &st.addr_cooldown, Instant::now());
+                    let mut n = 0usize;
+                    for s in result.slots {
+                        // Race: same addr may have connected on another path.
+                        if blocked.contains(&s.net) || st.slots.iter().any(|x| x.net == s.net) {
+                            warn!(
+                                "ibd: drop duplicate/cooldown dial peer[{}] {}",
+                                s.id, s.addr
+                            );
+                            continue;
+                        }
+                        st.max_peer_height = st.max_peer_height.max(s.peer_height);
+                        info!(
+                            "ibd: peer[{}] {} connected (peer_height={})",
+                            s.id, s.addr, s.peer_height
+                        );
+                        st.slots.push(s);
+                        n += 1;
+                    }
+                    if n > 0 {
+                        st.slots.sort_by_key(|s| s.id);
+                        info!(
+                            "ibd: redial added {n} peer(s); live={}",
+                            st.slots.iter().filter(|s| s.alive).count()
+                        );
+                        dark_redial_empty = 0;
+                        if st.ordered.is_empty() && !st.headers_done {
+                            enqueue_header_cmd(st, HeaderCmd::Ask);
+                        }
+                    } else {
+                        dark_redial_empty = dark_redial_empty.saturating_add(1);
+                        warn!("ibd: redial returned 0 peers (empty_rounds={dark_redial_empty})");
+                    }
+                }
+                Err(e) => warn!("ibd: redial task failed: {e}"),
             }
         }
 
+        // When *all* peers are dead (network blip), do not wait for the 15s
+        // interval — redial immediately so we never race the exit check.
+        {
+            let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+            let st = &mut *st_guard;
+            let alive_n = st.slots.iter().filter(|s| s.alive).count();
+            let target = cfg.target_peers.max(1);
+            let redial_interval = if alive_n == 0 {
+                Duration::from_secs(0)
+            } else {
+                Duration::from_secs(15)
+            };
+            if redial_handle.is_none()
+                && alive_n < target
+                && !peer_sess.book().is_empty()
+                && last_redial.elapsed() >= redial_interval
+            {
+                let want = redial_want(alive_n, target);
+                let mut already = dial_blocked_addrs(&st.slots, &st.addr_cooldown, Instant::now());
+                let occupied = alive_dial_addrs(&st.slots);
+                let live: HashSet<_> = st.slots.iter().map(|s| s.net).collect();
+                if let Some(addr) = admit_cooldown_fallback(
+                    peer_sess.book(),
+                    &mut already,
+                    &occupied,
+                    &st.addr_cooldown,
+                    Instant::now(),
+                    &live,
+                ) {
+                    info!("ibd: every candidate is cooling; retrying least-recent {addr}");
+                }
+                info!(
+                "ibd: redialing up to {want} peers (alive={alive_n}/{target}, book={}, blocked={})…",
+                peer_sess.book().len(),
+                already.len()
+            );
+                let book = peer_sess.book().clone();
+                let tip_h = hub.tip_height();
+                let sinks_r = sinks.clone();
+                let cto = cfg.connect_timeout;
+                let cancel_c = cancel.as_ref().map(Arc::clone);
+                let dialer_c = cfg.dialer.clone();
+                let clock_c = Arc::clone(&hub.clock);
+                redial_handle = Some(tokio::spawn(async move {
+                    dial_batch(
+                        &book, want, already, &occupied, magic, local_addr, tip_h, sinks_r, cto,
+                        cancel_c, dialer_c, &clock_c,
+                    )
+                    .await
+                }));
+                last_redial = Instant::now();
+            }
+
+            if last_status.elapsed() >= Duration::from_secs(5) {
+                let now = Instant::now();
+                let window_secs = last_status.elapsed().as_secs_f64().max(0.001);
+                let scan_t0 = Instant::now();
+                let horizon = header_walk::peer_horizon(st);
+                let published = read_progress_published(&hub.query);
+                let prog = work_chain_progress_at(
+                    hub.as_ref(),
+                    published.tip,
+                    &st.height_to_hash,
+                    &mut st.body,
+                    horizon,
+                    st.max_ready_height,
+                );
+                loop_stats
+                    .status_scan_ns
+                    .fetch_add(scan_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                let tip_delta = prog.tip.saturating_sub(last_sample_tip);
+                let tip_rate = tip_delta as f64 / window_secs;
+                let peers_n = st.slots.iter().filter(|s| s.alive).count();
+                let (load_q, script_q, write_q) = confirm_queues.snap();
+                let path_lo = published.tip.map(|t| t.saturating_add(1)).unwrap_or(0);
+                let inflight_h = {
+                    let g = confirm_feed.inner.lock().unwrap();
+                    g.inflight.clone()
+                };
+                let ready_n = confirm::confirm_ready_count(&hub.query, path_lo, &inflight_h);
+                let txs = published.txs;
+                let pct = ibd_pct(prog.tip, prog.headers);
+                let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
+
+                tip_rate_tracker.push(now, prog.tip);
+                let eta = tip_rate_tracker.eta_string(now, prog.tip, prog.headers);
+                let eta_rate = tip_rate_tracker.eta_rate(now);
+                let bq_soft_stop = rbitcoin_query::soft_confirm_window_n(eta_rate);
+                let _ = hub.query.block_queue_update_soft_pressure(eta_rate);
+
+                let conf_q = confirm::format_conf_q(
+                    load_q,
+                    script_q,
+                    write_q,
+                    confirm::load_queue_cap(),
+                    confirm::script_queue_cap(),
+                    confirm::write_queue_cap(),
+                );
+                let progress_line = format_progress_line(&ProgressLineInput {
+                    pct,
+                    tip: prog.tip,
+                    tip_rate,
+                    tip_hole: prog.tip_hole,
+                    peers: peers_n,
+                    conf_q,
+                    txs,
+                    horizon: prog.headers,
+                    eta,
+                    bq_bytes,
+                    bq_count,
+                    bq_soft_stop,
+                });
+                info_bold!("{progress_line}");
+                header_walk::retire_adopt_if_confirmed(st, &hub);
+                header_walk::log_status(st, &hub, prog.headers);
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+
+                last_sample_tip = prog.tip;
+
+                let peer_cap = peers_n.saturating_mul(cfg.per_peer);
+                let inflight_cap = cfg.window.min(peer_cap).max(1);
+                let ahead = prog
+                    .ready_hwm
+                    .saturating_sub(prog.tip)
+                    .saturating_add(st.inflight.len() as u32);
+                let conf_q_hwm = confirm_queues.sample_hwm_and_reset();
+                let mut conf_pipe = confirm_queues.content_snap();
+                let (feed_ready, feed_inflight) = confirm_feed.size_snap();
+                conf_pipe.ready = ready_n;
+                conf_pipe.feed_ready = feed_ready;
+                conf_pipe.feed_inflight = feed_inflight;
+                let work_sizes = st.structure_sizes();
+                let owned_sizes = published.owned;
+                let rss = perf_log::read_platform_rss();
+                let perf = perf_log::sample(
+                    &loop_stats,
+                    st.inflight.len(),
+                    inflight_cap,
+                    (bq_bytes, bq_count, bq_soft_stop),
+                    ahead,
+                    prog.tip_hole,
+                    peers_n,
+                    st.headers_done,
+                    ready_n,
+                    script_q,
+                    write_q,
+                    conf_q_hwm,
+                    published.sh_runs,
+                    work_sizes,
+                    owned_sizes,
+                    conf_pipe,
+                    rss,
+                    hub.query.confirm_stats(),
+                );
+                perf_log::log_sample(&perf);
+
+                // Stall WARN only if the pipeline is idle. ready_n is BQ inventory, not occupancy.
+                let conf_busy = feed_inflight > 0
+                    || script_q > 0
+                    || write_q > 0
+                    || loop_stats.confirm_live_snap().is_some();
+                if last_progress.elapsed() > Duration::from_secs(15)
+                    && prog.tip_hole == 0
+                    && !conf_busy
+                    && st.inflight.is_empty()
+                    && prog.ready_hwm > prog.tip.saturating_add(1)
+                {
+                    warn!(
+                    "ibd: tip stall tip={} hwm={} ordered_len={} feed_ready={} hole={} (idle {:?})",
+                    prog.tip,
+                    prog.ready_hwm,
+                    st.ordered.len(),
+                    feed_ready,
+                    prog.tip_hole,
+                    last_progress.elapsed(),
+                );
+                }
+                last_status = Instant::now();
+            }
+
+            // Exit when the connected best chain has no remainder. Empty-EOF
+            // (`headers_done`) means we do not chase advertised height (less-work
+            // fork / bogus `version.start_height`). See `ibd_caught_up`.
+            let tip_h = hub.tip_height().unwrap_or(0);
+            if ibd_caught_up(st, tip_h) {
+                offer_confirm_ready(
+                    &confirm_feed,
+                    &st.height_to_hash,
+                    &st.path_prev,
+                    &mut st.body,
+                    hub.as_ref(),
+                    &mut st.max_ready_height,
+                    &max_ready_shared,
+                );
+                update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
+                let tip_h = hub.tip_height().unwrap_or(0);
+                if ibd_caught_up(st, tip_h) {
+                    info!(
+                    "ibd: catch-up complete tip={tip_h} max_peer_height={} max_ready={} headers_done={} — exiting IBD",
+                    st.max_peer_height, st.max_ready_height, st.headers_done
+                );
+                    break;
+                }
+            }
+            // All peers dead — never treat mid-chain peer death as catch-up complete.
+            if st.slots.iter().all(|s| !s.alive) {
+                let tip_h = hub.tip_height().unwrap_or(0);
+                match all_peers_dead_action(st, tip_h, redial_handle.is_some(), dark_redial_empty) {
+                    AllPeersDead::CatchupComplete => {
+                        info!(
+                        "ibd: catch-up complete (no live peers) tip={tip_h} max_peer_height={} max_ready={} — exiting IBD",
+                        st.max_peer_height, st.max_ready_height
+                    );
+                        break;
+                    }
+                    AllPeersDead::GiveUpMidCatchup => {
+                        warn!(
+                        "ibd: all peers dead mid catch-up tip={tip_h} max_peer_height={} lag={} accepted={} empty_redials={} — giving up (not tip mode)",
+                        st.max_peer_height,
+                        header_lag_behind_peers(st, tip_h),
+                        accepted.load(Ordering::SeqCst),
+                        dark_redial_empty
+                    );
+                        return Err(NetError::Protocol(
+                            "all peers dead mid catch-up (not complete)",
+                        ));
+                    }
+                    AllPeersDead::WaitRedial => {}
+                }
+            }
+        }
         let tick = tokio::time::sleep(Duration::from_millis(50));
         tokio::pin!(tick);
         tokio::select! {
@@ -1004,8 +990,10 @@ pub async fn ibd_cancellable(
                     break;
                 }
                 let Some(ev) = peer_ev else { break };
+                let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let st = &mut *st_guard;
                 apply_peer_event(
-                    &mut st,
+                    st,
                     hub.as_ref(),
                     ev,
                     &archive_write_next,
@@ -1020,8 +1008,10 @@ pub async fn ibd_cancellable(
                     break;
                 }
                 let Some(ev) = peer_ev else { break };
+                let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let st = &mut *st_guard;
                 apply_peer_event(
-                    &mut st,
+                    st,
                     hub.as_ref(),
                     ev,
                     &archive_write_next,
@@ -1035,6 +1025,8 @@ pub async fn ibd_cancellable(
                     warn!("ibd: cancel requested — stopping IBD");
                     break;
                 }
+                let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let st = &mut *st_guard;
                 offer_confirm_ready(
                     &confirm_feed,
                     &st.height_to_hash,
@@ -1046,7 +1038,7 @@ pub async fn ibd_cancellable(
                 );
                 update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
                 apply_confirm_events(
-                    &mut st,
+                    st,
                     hub.as_ref(),
                     &confirm_ev_rx,
                     &archive_write_next,
@@ -1064,10 +1056,10 @@ pub async fn ibd_cancellable(
                 // while peers die" as success → node entered tip mode at height 0.
                 if last_progress.elapsed() > cfg.stall
                     && st.ordered.is_empty()
-                    && !best_chain_remainder(&st, hub.tip_height().unwrap_or(0))
+                    && !best_chain_remainder(st, hub.tip_height().unwrap_or(0))
                 {
                     let tip_h = hub.tip_height().unwrap_or(0);
-                    if ibd_caught_up(&st, tip_h) {
+                    if ibd_caught_up(st, tip_h) {
                         info!(
                             "ibd: catch-up complete (stall, path empty) tip={tip_h} max_peer_height={} — exiting IBD",
                             st.max_peer_height
@@ -1077,11 +1069,11 @@ pub async fn ibd_cancellable(
                     warn!(
                         "ibd: stall with empty path tip={tip_h} max_peer_height={} lag={} peers={} — re-request headers (not complete)",
                         st.max_peer_height,
-                        header_lag_behind_peers(&st, tip_h),
+                        header_lag_behind_peers(st, tip_h),
                         st.slots.iter().filter(|s| s.alive).count()
                     );
                     st.headers_done = false;
-                    let _ = header_walk::send_getheaders(&mut st, &hub);
+                    enqueue_header_cmd(st, HeaderCmd::Ask);
                     last_progress = Instant::now();
                 }
             }
@@ -1091,11 +1083,17 @@ pub async fn ibd_cancellable(
     let cancelled_exit = cancelled();
     let t_teardown = Instant::now();
 
-    disconnect_all_peers(&mut st);
+    drop(header_tx);
+    {
+        let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        st.header_cmd = None;
+        disconnect_all_peers(&mut st);
+    }
     if let Some(h) = redial_handle.take() {
         h.abort();
     }
     info!("ibd: peers disconnected in {:?}", t_teardown.elapsed());
+    let _ = header_thread.join();
 
     // Always join confirm before return (no ghost rejects after "clean exit").
     confirm_feed.request_stop();

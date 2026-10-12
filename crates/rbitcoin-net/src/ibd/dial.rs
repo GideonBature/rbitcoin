@@ -417,6 +417,19 @@ pub(crate) fn request_headers_from(
     Ok(s.cmd_tx.send(PeerCmd::GetHeaders { locator }).is_ok())
 }
 
+thread_local! {
+    static WARM_LOCATOR: std::cell::RefCell<Option<Vec<BlockHash>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn set_warm_locator(locator: Option<Vec<BlockHash>>) {
+    WARM_LOCATOR.with(|slot| *slot.borrow_mut() = locator);
+}
+
+fn warm_locator() -> Option<Vec<BlockHash>> {
+    WARM_LOCATOR.with(|slot| slot.borrow().clone())
+}
+
 /// Locator for IBD getheaders: prefer the **work-path tip** (highest ordered /
 /// archived hash) ahead of the confirmed store tip.
 ///
@@ -442,10 +455,13 @@ pub(crate) fn ibd_header_locator(
             locator.push(t);
         }
     }
-    let rest = hub
-        .query
-        .locator_hashes()
-        .map_err(|e| NetError::Consensus(e.to_string()))?;
+    let rest = if let Some(warm) = warm_locator() {
+        warm
+    } else {
+        hub.query
+            .locator_hashes()
+            .map_err(|e| NetError::Consensus(e.to_string()))?
+    };
     for h in rest {
         if !locator.contains(&h) {
             locator.push(h);
@@ -1319,6 +1335,8 @@ mod tests {
         let sinks = PeerEventSinks {
             body: body_tx,
             ctrl: ctrl_tx,
+
+            header_fks: super::super::peer_io::empty_header_fk_bus(),
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1375,6 +1393,7 @@ mod tests {
         inflight.insert(h, super::super::state::InflightReq::new(5));
         let mut cooldown = HashMap::new();
         let mut strikes = HashMap::new();
+        crate::chain::reset_header_store_counts();
         disconnect_stalled_block_peers_at(
             std::slice::from_mut(&mut slot),
             &mut inflight,
@@ -1387,6 +1406,7 @@ mod tests {
         );
         assert!(cooldown.contains_key(&a));
         assert!(inflight.is_empty());
+        assert_eq!(crate::chain::header_store_counts(), (0, 0, 0));
     }
 
     #[test]

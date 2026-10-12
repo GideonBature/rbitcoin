@@ -8,39 +8,75 @@ use bitcoin::BlockHash;
 use rbitcoin_log::{info, warn};
 use std::time::Instant;
 
+pub(crate) fn load_resume_entries(
+    hub: &ChainHub,
+    exclude: &[[u8; 32]],
+) -> Vec<rbitcoin_query::ResumeWorkEntry> {
+    let Some(tip_hash) = hub.tip_hash() else {
+        return Vec::new();
+    };
+    let tip_h = hub.tip_height().unwrap_or(0);
+    info!("ibd: resume seed walk start tip={tip_h} max_ordered={MAX_ORDERED_HEADERS}");
+    match hub.query.resume_work_path_after_tip_excluding(
+        tip_hash.to_byte_array(),
+        tip_h,
+        MAX_ORDERED_HEADERS,
+        exclude,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("ibd: resume seed from store failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
 pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
+    let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
+    let path = load_resume_entries(hub, &exclude);
+    install_resumed_path(st, hub, &path);
+}
+
+pub(crate) fn install_resumed_path(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    path: &[rbitcoin_query::ResumeWorkEntry],
+) {
+    install_resume(st, hub, path, true);
+}
+
+/// Plant the resume path and leave the most-work rewind to the caller, which
+/// runs it after dropping the coordination lock.
+pub(crate) fn stage_resumed_path(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    path: &[rbitcoin_query::ResumeWorkEntry],
+) {
+    install_resume(st, hub, path, false);
+}
+
+fn install_resume(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    path: &[rbitcoin_query::ResumeWorkEntry],
+    rewind_now: bool,
+) {
     let Some(tip_hash) = hub.tip_hash() else {
         return;
     };
     let tip_h = hub.tip_height().unwrap_or(0);
     let t0 = Instant::now();
-    // Operator breadcrumb: crash between "peers ready" and this line is in
-    // resume_work_path (header graph walk), not getdata assign.
-    info!("ibd: resume seed walk start tip={tip_h} max_ordered={MAX_ORDERED_HEADERS}");
-    let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
-    let path = match hub.query.resume_work_path_after_tip_excluding(
-        tip_hash.to_byte_array(),
-        tip_h,
-        MAX_ORDERED_HEADERS,
-        &exclude,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("ibd: resume seed from store failed: {e}");
-            return;
-        }
-    };
+    if path.is_empty() {
+        return;
+    }
     info!(
         "ibd: resume seed graph n={} (store walk {:?})",
         path.len(),
         t0.elapsed()
     );
-    if path.is_empty() {
-        return;
-    }
     let mut explore_is_sibling_fork = false;
     let mut explore_need = Vec::new();
-    for e in &path {
+    for e in path {
         let hash = BlockHash::from_byte_array(e.hash);
         if st.reorg.invalid.contains(e.hash) {
             break;
@@ -64,23 +100,25 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
             .find(|e| !st.reorg.invalid.contains(e.hash))
             .map(|e| BlockHash::from_byte_array(e.hash));
         st.reorg.register_explore(explore_need, explore_tip);
-        match super::reorg::maybe_rewind_to_best_work(st, hub) {
-            Ok(true) => {
-                info!(
-                    "ibd: resume seed rewound to most-work header path (store walk {:?})",
-                    t0.elapsed()
-                );
-                return;
-            }
-            Ok(false) => {
-                info!(
+        if rewind_now {
+            match super::reorg::maybe_rewind_to_best_work(st, hub) {
+                Ok(true) => {
+                    info!(
+                        "ibd: resume seed rewound to most-work header path (store walk {:?})",
+                        t0.elapsed()
+                    );
+                    return;
+                }
+                Ok(false) => {
+                    info!(
                     "ibd: resume seed greater-work sibling fork explore_need={} explore_tip={:?}",
                     st.reorg.need_getdata().len(),
                     explore_tip
                 );
-            }
-            Err(e) => {
-                warn!("ibd: resume seed most-work rewind failed: {e}");
+                }
+                Err(e) => {
+                    warn!("ibd: resume seed most-work rewind failed: {e}");
+                }
             }
         }
     }
@@ -88,7 +126,7 @@ pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
     let mut ready_prefix_to = tip_h;
     let mut ready_prefix = true;
     let tip = hub.tip_height().zip(hub.tip_hash());
-    for e in &path {
+    for e in path {
         if st.reorg.invalid.contains(e.hash) {
             break;
         }
@@ -271,16 +309,19 @@ pub(crate) fn work_path_tips(st: &IbdWorkState) -> Vec<BlockHash> {
 
 /// Put connected work-path hashes back on an empty queue, tip toward far.
 /// No-op while the queue still holds headers. Returns how many were restored.
-pub(crate) fn reseed_ordered_from_path(st: &mut IbdWorkState, hub: &ChainHub) -> usize {
+pub(crate) fn reseed_candidates(st: &IbdWorkState, tip_h: u32) -> Vec<BlockHash> {
     if !st.ordered.is_empty() {
-        return 0;
+        return Vec::new();
     }
-    let tip_h = hub.tip_height().unwrap_or(0);
+    path_hashes_above_tip(st, tip_h)
+        .into_iter()
+        .map(|(_, hash)| hash)
+        .collect()
+}
+
+pub(crate) fn push_reseed(st: &mut IbdWorkState, hashes: &[BlockHash]) -> usize {
     let mut rebuilt = 0usize;
-    for (_ht, h) in path_hashes_above_tip(st, tip_h) {
-        if hub.has_block(&h) || st.body.is_rejected(&h) {
-            continue;
-        }
+    for &h in hashes {
         if st.ordered.len() >= super::MAX_ORDERED_HEADERS {
             break;
         }
@@ -290,6 +331,15 @@ pub(crate) fn reseed_ordered_from_path(st: &mut IbdWorkState, hub: &ChainHub) ->
         }
     }
     rebuilt
+}
+
+pub(crate) fn reseed_ordered_from_path(st: &mut IbdWorkState, hub: &ChainHub) -> usize {
+    let tip_h = hub.tip_height().unwrap_or(0);
+    let keep: Vec<BlockHash> = reseed_candidates(st, tip_h)
+        .into_iter()
+        .filter(|h| !hub.has_block(h) && !st.body.is_rejected(h))
+        .collect();
+    push_reseed(st, &keep)
 }
 
 /// Connected work-path hashes strictly above `tip_h` (`height_to_hash` occupants).

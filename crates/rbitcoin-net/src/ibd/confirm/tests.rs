@@ -3,8 +3,23 @@
 use super::{
     format_conf_q, format_queue_depth, format_stamp_reject_missing_prevout,
     stamp_reject_operator_msg, write_drain_max_parts, write_queue_cap, ConfirmFeed,
-    ConfirmQueueDepths, CONFIRM_RUN_MAX_BLOCKS,
+    ConfirmQueueDepths, ConfirmRejectClass, RejectParent, CONFIRM_RUN_MAX_BLOCKS,
 };
+
+#[test]
+fn missing_reject_parent_is_not_consensus_invalid() {
+    use bitcoin::hashes::Hash;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("missing-reject-parent");
+    hub.ensure_genesis().unwrap();
+    let hash = bitcoin::BlockHash::from_byte_array([0x9e; 32]);
+    let parent = RejectParent::from_lookup(&hub, hash);
+    assert!(parent.hash.is_none());
+    assert!(parent.unreadable);
+    let class = ConfirmRejectClass::ConsensusInvalid.trust_consensus(parent, hub.tip_hash());
+    assert_eq!(class, ConfirmRejectClass::Cascade);
+    let _ = std::fs::remove_dir_all(dir);
+}
 
 #[test]
 fn index_startup_gap_matches_one_write_drain() {
@@ -1199,6 +1214,7 @@ fn emit_confirm_reject_isolates_batched_consensus_and_requests_single() {
         "script failed".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(
@@ -1227,6 +1243,7 @@ fn emit_confirm_reject_isolates_batched_consensus_and_requests_single() {
         "script failed".into(),
         1,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(
@@ -1254,6 +1271,7 @@ fn emit_confirm_reject_isolates_batched_consensus_and_requests_single() {
         "io_uring leftover cqe".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(
@@ -1279,6 +1297,7 @@ fn isolate_clears_only_after_original_batch_last_height() {
         "script failed".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(feed.isolate_until(), 107);
@@ -1311,6 +1330,7 @@ fn isolate_clears_only_after_original_batch_last_height() {
         "script failed".into(),
         8,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(feed_n1.isolate_until(), 107);
@@ -1323,6 +1343,7 @@ fn isolate_clears_only_after_original_batch_last_height() {
         "script failed".into(),
         1,
         None,
+        super::RejectParent::default(),
     )
     .unwrap();
     assert_eq!(
