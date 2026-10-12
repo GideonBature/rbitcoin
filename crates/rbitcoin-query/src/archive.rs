@@ -740,11 +740,11 @@ fn stamp_txstat_rows(
     stamp_txstat_from_fees(&plan.tx_fees, &plan.tx_sizes)
 }
 
-/// Wire plans that never passed through confirm assemble (Class A wrapper,
-/// fixtures) have empty fee vectors. Fill them from the wire tx and resolved
-/// prevouts. A records pin has no wire body: that is corrupt, not a zero row.
-fn ensure_wire_txstat(query: &Query, plan: &mut ArchiveWritePlan) -> Result<(), QueryError> {
-    if plan.packed.is_empty() || !plan.tx_fees.is_empty() || !plan.tx_sizes.is_empty() {
+/// Fee and size rows for a wire plan that did not pass confirm assemble.
+/// Commit refuses a non-empty plan whose vectors are empty or mis-sized.
+/// A records pin has no wire body: that is corrupt, not a zero row.
+fn stamp_wire_plan_txstat(query: &Query, plan: &mut ArchiveWritePlan) -> Result<(), QueryError> {
+    if plan.packed.is_empty() {
         return Ok(());
     }
     let mut idx: crate::U64Map<usize> = crate::U64Map::default();
@@ -1035,11 +1035,14 @@ impl Query {
             return Ok(());
         }
         let start = self.store.txs.count().saturating_add(1);
-        let plan =
+        let mut plan =
             self.archive_plan_batch_from_wire(&need, start, &crate::InFlight::new(), None, None)?;
         if plan.is_empty() {
             return Ok(());
         }
+        // Confirm assemble records fees before write. This wrapper is the
+        // other Class A planner: stamp here so commit never walks prevouts.
+        stamp_wire_plan_txstat(self, &mut plan)?;
         self.archive_commit_plan(plan)?;
         Ok(())
     }
@@ -1336,7 +1339,10 @@ impl Query {
         self.archive_commit_plan_defer_head_parents(plan)
     }
 
-    /// Class A commit. Fees and sizes were recorded at assemble.
+    /// Class A commit. Fees and sizes were recorded before this call
+    /// (confirm assemble, or [`stamp_wire_plan_txstat`] on the Class A wire
+    /// planner). A non-empty plan whose vectors do not match `packed` is
+    /// corrupt. This function does not walk prevouts.
     pub fn archive_commit_plan_defer_head_parents(
         &self,
         mut plan: ArchiveWritePlan,
@@ -1361,7 +1367,6 @@ impl Query {
 
         let t = Instant::now();
         let overlay = plan.same_batch_spent_overlay();
-        ensure_wire_txstat(self, &mut plan)?;
         let txstat = stamp_txstat_rows(&plan)?;
         let txstat_ns = t.elapsed().as_nanos() as u64;
         self.confirm_stats().note_write_txstat(txstat_ns);
@@ -1488,6 +1493,23 @@ mod tests {
         plan.edges.get(&id).expect("spend edges")[0].create_fk
     }
 
+    /// Planner stamp, then commit. Commit itself does not fill empty fee rows.
+    fn commit_stamped(
+        q: &Query,
+        mut plan: crate::ArchiveWritePlan,
+    ) -> Result<bool, crate::QueryError> {
+        super::stamp_wire_plan_txstat(q, &mut plan)?;
+        q.archive_commit_plan(plan)
+    }
+
+    fn commit_stamped_defer(
+        q: &Query,
+        mut plan: crate::ArchiveWritePlan,
+    ) -> Result<(bool, Vec<rbitcoin_store::CreateLocPair>), crate::QueryError> {
+        super::stamp_wire_plan_txstat(q, &mut plan)?;
+        q.archive_commit_plan_defer_head(plan)
+    }
+
     #[test]
     fn txstat_stamp_uses_plan_base_total() {
         let (path, _q) = temp_query("txstat-plan-sizes");
@@ -1509,6 +1531,23 @@ mod tests {
         assert_eq!(rows[0].base, 80);
         assert_eq!(rows[0].wit_extra, 20);
         let _ = path;
+    }
+
+    /// A wire plan from the planner has empty fee rows. Commit must not
+    /// fill them from prevouts.
+    #[test]
+    fn commit_refuses_unstamped_wire_plan() {
+        let (dir, q) = temp_query("txstat-unstamped");
+        let need = vec![(Fk(1), vec![coinbase_apply(1)])];
+        let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
+        assert!(plan.tx_fees.is_empty() && plan.tx_sizes.is_empty());
+        let err = q.archive_commit_plan(plan).unwrap_err();
+        assert!(
+            err.to_string().contains("invariant: txstat fee length"),
+            "{err}"
+        );
+        assert_eq!(q.tx_body_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn size_plan(tag: u8, with_size: bool) -> super::ArchiveWritePlan {
@@ -1677,7 +1716,7 @@ mod tests {
             let need = vec![(Fk(1), vec![coinbase_apply(1), coinbase_apply(2)])];
             let plan = plan_applies(&q, &need, 1, &crate::InFlight::new(), None).unwrap();
             assert_eq!(plan.planned_fks.len(), 2);
-            q.archive_commit_plan(plan).unwrap();
+            commit_stamped(&q, plan).unwrap();
             let s = q.confirm_stats().take_window();
             assert!(
                 s.arch_blocks >= 1 || s.arch_prep_assign_ns > 0 || s.arch_prep_stamp_ns > 0,
@@ -1717,7 +1756,7 @@ mod tests {
             None,
         )
         .unwrap();
-        q.archive_commit_plan(p0).unwrap();
+        commit_stamped(&q, p0).unwrap();
         assert_eq!(q.tx_body_count(), 1);
 
         // Reserve two plans as prep would with write queue depth 2.
@@ -1735,9 +1774,9 @@ mod tests {
         // Durable count still 1 until commit.
         assert_eq!(q.tx_body_count(), 1);
 
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         assert_eq!(q.tx_body_count(), 3);
-        q.archive_commit_plan(plan_b).unwrap();
+        commit_stamped(&q, plan_b).unwrap();
         assert_eq!(q.tx_body_count(), 4);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1825,8 +1864,8 @@ mod tests {
             "child input must stamp prior planned create_fk"
         );
 
-        q.archive_commit_plan(plan_a).unwrap();
-        q.archive_commit_plan(plan_b).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
+        commit_stamped(&q, plan_b).unwrap();
         assert_eq!(q.tx_body_count(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1873,7 +1912,7 @@ mod tests {
                 .map(|(fk, pin)| (*fk, pin)),
             None,
         );
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         assert_eq!(q.store().tx_height_get(parent_fk).unwrap(), None);
 
         let need_b = vec![(Fk(2), vec![child_spend(parent_txid, 0xef)])];
@@ -1892,7 +1931,7 @@ mod tests {
         let parent_txid = plan_a.batch_creates[0].0;
         let parent_fk = plan_a.batch_creates[0].1;
         let header_fk = plan_a.per_header_ranges[0].0;
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         q.store()
             .height_fence_extend(rbitcoin_primitives::Height(0), header_fk)
             .unwrap();
@@ -1981,7 +2020,7 @@ mod tests {
                 .map(|(fk, pin)| (*fk, pin)),
             None,
         );
-        q.archive_commit_plan(plan_a).unwrap();
+        commit_stamped(&q, plan_a).unwrap();
         assert_eq!(q.store().tx_height_get(parent_fk).unwrap(), None);
         log.prune_below_height(q.drain_and_fence_hi());
         assert_eq!(
@@ -2034,7 +2073,7 @@ mod tests {
                 .map(|(fk, pin)| (*fk, pin)),
             None,
         );
-        q.archive_commit_plan_defer_head(plan_a).unwrap();
+        commit_stamped_defer(&q, plan_a).unwrap();
         assert!(
             q.store().txs.pending_head_len() >= 1,
             "create must still be queued — drain has not inserted tx.head"
@@ -2549,7 +2588,7 @@ mod tests {
             "body_est must count wire ins, got {}",
             plan.body_est
         );
-        q.archive_commit_plan(plan).expect("commit from wire");
+        commit_stamped(&q, plan).expect("commit from wire");
         let (_tx, ins, _outs) = q.store().get_tx_full(Fk(2)).unwrap();
         assert_eq!(ins[0].script_sig, script_sig);
         assert_eq!(ins[0].witness, vec![b"wit-item-1".to_vec(), vec![0x21; 33]]);
@@ -2579,7 +2618,7 @@ mod tests {
             .expect("wire plan");
         let fks = plan.planned_fks.clone();
         assert!(plan.packed.iter().all(|(_, ins)| ins.is_empty()));
-        q.archive_commit_plan(plan).expect("commit");
+        commit_stamped(&q, plan).expect("commit");
 
         q.note_seqsigwit_ram_for_confirmed(Height(1), &fks)
             .expect("ram window from append cache");
@@ -2612,8 +2651,7 @@ mod tests {
             plan.packed.iter().all(|(_, ins)| ins.is_empty()),
             "wire plan leaves packed ins empty"
         );
-        q.archive_commit_plan(plan)
-            .expect("wire edges encode seqsigwit");
+        commit_stamped(&q, plan).expect("wire edges encode seqsigwit");
         let (_tx, ins, _outs) = q.store().get_tx_full(Fk(2)).unwrap();
         assert_eq!(ins[0].script_sig.len(), 10_000);
 
@@ -2716,7 +2754,7 @@ mod tests {
         let (value, script) = plan.batch_pin[0].out_parts(0).expect("vout 0");
         assert_eq!(value, 50 * 100_000_000);
         assert_eq!(script, &[0x51]);
-        q.archive_commit_plan(plan).unwrap();
+        commit_stamped(&q, plan).unwrap();
         let (_tx, _ins, outs) = q.store().get_tx_full(Fk(1)).unwrap();
         assert_eq!(outs[0].value, 50 * 100_000_000);
         assert_eq!(outs[0].script, vec![0x51]);
@@ -3002,7 +3040,7 @@ mod tests {
         assert_eq!(plan_a.packed.len(), 3);
         assert_eq!(plan_a.batch_pin.len(), 3);
         // Contiguous Class A commit of the merged frozen plan.
-        assert!(q.archive_commit_plan(plan_a).unwrap());
+        assert!(commit_stamped(&q, plan_a).unwrap());
         assert_eq!(q.tx_body_count(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }

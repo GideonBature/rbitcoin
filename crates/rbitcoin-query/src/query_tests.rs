@@ -1251,8 +1251,8 @@ fn confirm_txstat_miss_is_corrupt() {
     plan.body_est = 256;
     let err = q.archive_commit_plan_defer_head_parents(plan).unwrap_err();
     assert!(
-        !matches!(err, StoreError::Corrupt("invariant: txstat fee length")),
-        "a missing prevout fails closed before a fee-length check: {err}"
+        matches!(err, StoreError::Corrupt("invariant: txstat fee length")),
+        "empty fee rows are corrupt; commit does not walk prevouts: {err}"
     );
     assert!(q.store().get_tx_meta_and_outputs(parent_fk).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
