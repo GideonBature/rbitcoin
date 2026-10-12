@@ -103,7 +103,8 @@ pub use params::{
 pub use policy::PolicyResult;
 pub use regtest_pad::{
     grind_regtest_pow, mine_empty_regtest, mine_op_true_signet_paying, mine_regtest_paying,
-    pad_empty_from, prepare_regtest_candidate, REGTEST_BLOCK_SPACING, REGTEST_POW_BITS,
+    mine_regtest_paying_at, pad_empty_from, prepare_regtest_candidate, regtest_coinbase,
+    REGTEST_BLOCK_SPACING, REGTEST_POW_BITS,
 };
 pub use signet::{
     default_signet_challenge, signet_challenge_transactions, signet_magic,
@@ -360,14 +361,11 @@ fn prepare_block_for_archive_new(
 mod coverage_tests {
     use super::*;
     use bitcoin::absolute::LockTime;
-    use bitcoin::block::{Header, Version};
+    use bitcoin::block::Version;
     use bitcoin::hashes::Hash;
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{
-        Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn,
-        TxMerkleNode, TxOut, Witness,
-    };
+    use bitcoin::{Amount, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness};
     use rbitcoin_primitives::Height;
     use rbitcoin_query::Query;
     use std::path::PathBuf;
@@ -383,53 +381,6 @@ mod coverage_tests {
         std::fs::create_dir_all(&path).unwrap();
         let q = Query::open_or_create_tiny(&path).expect("open store");
         (path, q)
-    }
-
-    fn mine_regtest(prev: BlockHash, time: u32, height: u32, extras: Vec<Transaction>) -> Block {
-        let mut ss = if height == 0 {
-            vec![0x00]
-        } else {
-            bip34_height_script(height)
-        };
-        while ss.len() < 2 {
-            ss.push(0x00);
-        }
-        let mut txdata = vec![Transaction {
-            version: TxVersion::ONE,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint::null(),
-                script_sig: ScriptBuf::from_bytes(ss),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(50_0000_0000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            }],
-        }];
-        txdata.extend(extras);
-        let bits = CompactTarget::from_consensus(0x207f_ffff);
-        let mut block = Block {
-            header: Header {
-                version: Version::from_consensus(4),
-                prev_blockhash: prev,
-                merkle_root: TxMerkleNode::from_byte_array([0; 32]),
-                time,
-                bits,
-                nonce: 0,
-            },
-            txdata,
-        };
-        block.header.merkle_root = block.compute_merkle_root().unwrap();
-        let target = Target::from_compact(bits);
-        for nonce in 0..u32::MAX {
-            block.header.nonce = nonce;
-            if block.header.validate_pow(target).is_ok() {
-                break;
-            }
-        }
-        block
     }
 
     #[test]
@@ -502,7 +453,7 @@ mod coverage_tests {
         let genesis = genesis_block(&params);
         let gen_fk = accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
 
-        let b1 = mine_regtest(genesis.block_hash(), genesis.header.time + 600, 1, vec![]);
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
         // prepare helpers stay (CPU-side); confirm is sole Class A.
         let (_hr, _txs) = prepare_block_for_archive(&q, &params, &b1).unwrap();
         accept_and_connect_block(&q, &params, Height(1), &b1, ms).unwrap();
@@ -521,8 +472,8 @@ mod coverage_tests {
         let genesis = genesis_block(&params);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
 
-        let b1 = mine_regtest(genesis.block_hash(), genesis.header.time + 600, 1, vec![]);
-        let mut b2 = mine_regtest(b1.block_hash(), b1.header.time + 600, 2, vec![]);
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        let mut b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
         b2.header.version = Version::from_consensus(1);
         let target = Target::from_compact(b2.header.bits);
         for nonce in 0..u32::MAX {

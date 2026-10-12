@@ -1,13 +1,10 @@
 //! Regtest block construction helpers for high-level consensus scenarios.
 
 use bitcoin::absolute::LockTime;
-use bitcoin::block::{Header, Version};
-use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{
-    Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
-    Witness,
+    Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
 };
 
 /// BIP34 height encoding in coinbase scriptSig (Core `CScript << height`).
@@ -16,31 +13,7 @@ pub fn bip34_script(height: u32) -> ScriptBuf {
 }
 
 pub fn coinbase_tx(height: u32, value: Amount) -> Transaction {
-    // Consensus: coinbase scriptSig length must be in 2..=100.
-    let mut ss = if height == 0 {
-        vec![0x00]
-    } else {
-        rbitcoin_consensus::bip34_height_script(height)
-    };
-    while ss.len() < 2 {
-        ss.push(0x00);
-    }
-    let script_sig = ScriptBuf::from_bytes(ss);
-    Transaction {
-        version: TxVersion::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig,
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value,
-            // OP_TRUE — anyone can spend (tests skip consensus script for this)
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    }
+    rbitcoin_consensus::regtest_coinbase(height, value, ScriptBuf::from_bytes(vec![0x51]))
 }
 
 /// Simple P2WPKH-like anyone-can-spend spend of a previous OP_TRUE output is not needed;
@@ -139,32 +112,16 @@ pub fn mine_regtest_block_at(
     time: u32,
     height: u32,
     bits: CompactTarget,
-    mut extra_txs: Vec<Transaction>,
+    extra_txs: Vec<Transaction>,
 ) -> Block {
-    let mut txdata = vec![coinbase_tx(height, Amount::from_sat(50_0000_0000))];
-    txdata.append(&mut extra_txs);
-
-    let header = Header {
-        version: Version::from_consensus(4),
-        prev_blockhash: prev_hash,
-        merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+    rbitcoin_consensus::mine_regtest_paying_at(
+        prev_hash,
         time,
+        height,
         bits,
-        nonce: 0,
-    };
-    let mut block = Block { header, txdata };
-    block.header.merkle_root = block
-        .compute_merkle_root()
-        .expect("non-empty block has merkle root");
-
-    let target = Target::from_compact(bits);
-    for nonce in 0..u32::MAX {
-        block.header.nonce = nonce;
-        if block.header.validate_pow(target).is_ok() {
-            break;
-        }
-    }
-    block
+        ScriptBuf::from_bytes(vec![0x51]),
+        extra_txs,
+    )
 }
 
 pub fn regtest_genesis() -> Block {
@@ -174,6 +131,7 @@ pub fn regtest_genesis() -> Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Target;
 
     #[test]
     fn bip34_and_coinbase_height_zero_and_pow() {
