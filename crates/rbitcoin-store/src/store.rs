@@ -114,15 +114,11 @@ impl StoreLayout {
     }
 }
 
-pub(crate) fn rename_legacy_input_files(dir: &Path) -> Result<(), StoreError> {
+fn rename_legacy_pairs(dir: &Path, pairs: &[(&str, &str)]) -> Result<(), StoreError> {
     if !dir.exists() {
         return Ok(());
     }
-    for (old, new) in [
-        ("inputs.loc", "input.loc"),
-        ("inputs.off", "input.off"),
-        ("inputs.body", "input.body"),
-    ] {
+    for (old, new) in pairs {
         let from = dir.join(old);
         let to = dir.join(new);
         if !from.exists() {
@@ -141,36 +137,55 @@ pub(crate) fn rename_legacy_input_files(dir: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+pub(crate) fn rename_legacy_input_files(dir: &Path) -> Result<(), StoreError> {
+    rename_legacy_pairs(
+        dir,
+        &[
+            ("inputs.loc", "input.loc"),
+            ("inputs.off", "input.off"),
+            ("inputs.body", "input.body"),
+        ],
+    )
+}
+
 pub(crate) fn rename_legacy_inwit_files(dir: &Path) -> Result<(), StoreError> {
-    if !dir.exists() {
-        return Ok(());
+    rename_legacy_pairs(
+        dir,
+        &[
+            ("inwit.body", "seqsigwit.body"),
+            ("inwit.loc", "seqsigwit.loc"),
+            ("inwit.off", "seqsigwit.off"),
+            ("inwit.loc.ovf", "seqsigwit.loc.ovf"),
+            ("inwit.idx", "seqsigwit.idx"),
+            ("inwit.reloc", "seqsigwit.reloc"),
+            ("inwit.prune", "seqsigwit.prune"),
+            ("inwit.window", "seqsigwit.window"),
+        ],
+    )
+}
+
+#[cfg(test)]
+mod legacy_rename_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_names_rename_and_both_exist_errors() {
+        let dir = crate::testutil::TempDir::labeled("legacy-rename").unwrap();
+        std::fs::write(dir.join("inputs.loc"), b"loc").unwrap();
+        std::fs::write(dir.join("inwit.body"), b"body").unwrap();
+        rename_legacy_input_files(dir.path()).unwrap();
+        rename_legacy_inwit_files(dir.path()).unwrap();
+        assert_eq!(std::fs::read(dir.join("input.loc")).unwrap(), b"loc");
+        assert_eq!(std::fs::read(dir.join("seqsigwit.body")).unwrap(), b"body");
+        assert!(!dir.join("inputs.loc").exists());
+        std::fs::write(dir.join("inputs.off"), b"old").unwrap();
+        std::fs::write(dir.join("input.off"), b"new").unwrap();
+        let err = rename_legacy_input_files(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Layout(ref m) if m.contains("both exist")),
+            "{err}"
+        );
     }
-    for (old, new) in [
-        ("inwit.body", "seqsigwit.body"),
-        ("inwit.loc", "seqsigwit.loc"),
-        ("inwit.off", "seqsigwit.off"),
-        ("inwit.loc.ovf", "seqsigwit.loc.ovf"),
-        ("inwit.idx", "seqsigwit.idx"),
-        ("inwit.reloc", "seqsigwit.reloc"),
-        ("inwit.prune", "seqsigwit.prune"),
-        ("inwit.window", "seqsigwit.window"),
-    ] {
-        let from = dir.join(old);
-        let to = dir.join(new);
-        if !from.exists() {
-            continue;
-        }
-        if to.exists() {
-            return Err(StoreError::Layout(format!(
-                "{} and {} both exist; keep only {}",
-                from.display(),
-                to.display(),
-                new
-            )));
-        }
-        std::fs::rename(&from, &to).map_err(|e| StoreError::io(&from, e))?;
-    }
-    Ok(())
 }
 
 fn refuse_cold_index_dirs(hot: &Path, cold: &Path) -> Result<(), StoreError> {
