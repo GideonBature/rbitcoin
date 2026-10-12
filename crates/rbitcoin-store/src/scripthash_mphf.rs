@@ -342,19 +342,24 @@ mod tests {
     #[test]
     fn pread_file_exact_reports_the_pread_errno() {
         let dir = tmp();
-        let file = std::fs::File::open(&dir).unwrap();
-        let mut buf = [0u8; 4];
-        let err = pread_file_exact(&file, 0, &mut buf).unwrap_err();
-        assert_eq!(
-            err.raw_os_error(),
-            Some(libc::EISDIR),
-            "positional read must surface the negated pread errno, got {err:?}"
-        );
-        assert_ne!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::EISDIR),
-            "exact pread must keep -rc after the thread errno is cleared, got {err:?}"
-        );
+        // A directory fd reports EISDIR. Windows `File::open` of a directory
+        // fails before pread, so this half stays on unix.
+        #[cfg(unix)]
+        {
+            let file = std::fs::File::open(&dir).unwrap();
+            let mut buf = [0u8; 4];
+            let err = pread_file_exact(&file, 0, &mut buf).unwrap_err();
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::EISDIR),
+                "positional read must surface the negated pread errno, got {err:?}"
+            );
+            assert_ne!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EISDIR),
+                "exact pread must keep -rc after the thread errno is cleared, got {err:?}"
+            );
+        }
         let rw = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
