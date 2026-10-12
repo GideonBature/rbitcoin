@@ -286,48 +286,10 @@ pub async fn wait_peer_network(rpc: SocketAddr, net: &str, inbound: bool, wall: 
 /// I2P b32 hostname from a SAM `DESTINATION=` / `{datadir}/i2p/p2p.priv` blob.
 /// SESSION STATUS returns the private dest; hash is of the public Identity prefix.
 pub fn i2p_b32_from_dest(dest: &str) -> String {
-    let raw = decode_i2p_b64(dest.trim());
-    let digest = sha256::Hash::hash(i2p_public_ident(&raw));
+    let raw = rbitcoin_net::decode_i2p_b64(dest.trim()).unwrap_or_else(|e| panic!("{e}"));
+    let public = rbitcoin_net::i2p_public_destination(&raw).unwrap_or_else(|e| panic!("{e}"));
+    let digest = sha256::Hash::hash(public);
     format!("{}.b32.i2p", encode_b32_nopad(digest.as_byte_array()))
-}
-
-fn i2p_public_ident(raw: &[u8]) -> &[u8] {
-    if raw.len() < 387 {
-        return raw;
-    }
-    let cert_len = u16::from_be_bytes([raw[385], raw[386]]) as usize;
-    let ident_len = 387usize.saturating_add(cert_len);
-    if ident_len <= raw.len() {
-        &raw[..ident_len]
-    } else {
-        raw
-    }
-}
-
-fn decode_i2p_b64(s: &str) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let mut acc = 0u32;
-    let mut n = 0;
-    for c in s.chars() {
-        let v = match c {
-            'A'..='Z' => c as u32 - 'A' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 26,
-            '0'..='9' => c as u32 - '0' as u32 + 52,
-            '-' => 62,
-            '~' => 63,
-            '+' => 62,
-            '/' => 63,
-            '=' => break,
-            _ => continue,
-        };
-        acc = (acc << 6) | v;
-        n += 6;
-        if n >= 8 {
-            n -= 8;
-            bytes.push((acc >> n) as u8);
-        }
-    }
-    bytes
 }
 
 fn encode_b32_nopad(data: &[u8]) -> String {
@@ -420,25 +382,16 @@ mod tests {
     use super::*;
     use bitcoin::hashes::{sha256, Hash};
 
-    fn i2p_b64_encode(raw: &[u8]) -> String {
-        const ALPH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
-        let mut out = String::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let b0 = raw[i];
-            let b1 = if i + 1 < raw.len() { raw[i + 1] } else { 0 };
-            let b2 = if i + 2 < raw.len() { raw[i + 2] } else { 0 };
-            out.push(ALPH[(b0 >> 2) as usize] as char);
-            out.push(ALPH[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
-            if i + 1 < raw.len() {
-                out.push(ALPH[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
-            }
-            if i + 2 < raw.len() {
-                out.push(ALPH[(b2 & 63) as usize] as char);
-            }
-            i += 3;
-        }
-        out
+    #[test]
+    #[should_panic(expected = "i2p destination base64 contains")]
+    fn i2p_b32_rejects_unknown_base64() {
+        let _ = i2p_b32_from_dest("!!!");
+    }
+
+    #[test]
+    #[should_panic(expected = "i2p destination too short")]
+    fn i2p_b32_rejects_a_short_destination() {
+        let _ = i2p_b32_from_dest(&rbitcoin_net::i2p_b64_encode(&[1, 2, 3]));
     }
 
     #[test]
@@ -449,8 +402,8 @@ mod tests {
         ident[386] = 0;
         let mut privd = ident.clone();
         privd.extend_from_slice(&[9u8; 80]);
-        let a = i2p_b32_from_dest(&i2p_b64_encode(&ident));
-        let b = i2p_b32_from_dest(&i2p_b64_encode(&privd));
+        let a = i2p_b32_from_dest(&rbitcoin_net::i2p_b64_encode(&ident));
+        let b = i2p_b32_from_dest(&rbitcoin_net::i2p_b64_encode(&privd));
         assert_eq!(a, b, "private dest must hash the Identity prefix");
         let full = format!(
             "{}.b32.i2p",

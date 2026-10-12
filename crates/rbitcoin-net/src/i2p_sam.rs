@@ -381,7 +381,7 @@ fn i2p_addr_from_sam_b64(dest_b64: &str) -> Result<crate::NetAddr, NetError> {
     })
 }
 
-fn i2p_public_destination(raw: &[u8]) -> Result<&[u8], NetError> {
+pub fn i2p_public_destination(raw: &[u8]) -> Result<&[u8], NetError> {
     const DEST_LEN_BASE: usize = 387;
     const CERT_LEN_POS: usize = 385;
     if raw.len() < CERT_LEN_POS + 2 {
@@ -401,7 +401,7 @@ fn i2p_public_destination(raw: &[u8]) -> Result<&[u8], NetError> {
     Ok(&raw[..dest_len])
 }
 
-fn decode_i2p_b64(s: &str) -> Result<Vec<u8>, NetError> {
+pub fn decode_i2p_b64(s: &str) -> Result<Vec<u8>, NetError> {
     let mut bytes = Vec::with_capacity(s.len() * 3 / 4);
     let mut acc = 0u32;
     let mut n = 0u32;
@@ -429,6 +429,28 @@ fn decode_i2p_b64(s: &str) -> Result<Vec<u8>, NetError> {
         }
     }
     Ok(bytes)
+}
+
+/// I2P destination alphabet (`A–Z`, `a–z`, `0–9`, `-`, `~`). No padding.
+pub fn i2p_b64_encode(raw: &[u8]) -> String {
+    const ALPH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let b0 = raw[i];
+        let b1 = if i + 1 < raw.len() { raw[i + 1] } else { 0 };
+        let b2 = if i + 2 < raw.len() { raw[i + 2] } else { 0 };
+        out.push(ALPH[(b0 >> 2) as usize] as char);
+        out.push(ALPH[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+        if i + 1 < raw.len() {
+            out.push(ALPH[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
+        }
+        if i + 2 < raw.len() {
+            out.push(ALPH[(b2 & 63) as usize] as char);
+        }
+        i += 3;
+    }
+    out
 }
 
 fn sam_kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -1070,27 +1092,6 @@ mod tests {
         assert!(fw[1].contains("PORT=18444"), "{}", fw[1]);
         assert!(fw[1].contains("SILENT=true"), "{}", fw[1]);
         clear_installed();
-    }
-
-    fn i2p_b64_encode(raw: &[u8]) -> String {
-        const ALPH: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-~";
-        let mut out = String::new();
-        let mut i = 0;
-        while i < raw.len() {
-            let b0 = raw[i];
-            let b1 = if i + 1 < raw.len() { raw[i + 1] } else { 0 };
-            let b2 = if i + 2 < raw.len() { raw[i + 2] } else { 0 };
-            out.push(ALPH[(b0 >> 2) as usize] as char);
-            out.push(ALPH[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
-            if i + 1 < raw.len() {
-                out.push(ALPH[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
-            }
-            if i + 2 < raw.len() {
-                out.push(ALPH[(b2 & 63) as usize] as char);
-            }
-            i += 3;
-        }
-        out
     }
 
     #[test]
