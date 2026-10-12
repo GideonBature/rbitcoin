@@ -124,7 +124,7 @@ impl UnknownBitsScan {
     }
 }
 
-/// Last header of period index `periods` (the block at `periods * period - 1`).
+/// Last header of a prefix of `periods` counted periods (`periods * period - 1`).
 fn period_boundary_height(periods: u32, period: u32) -> u32 {
     periods * period - 1
 }

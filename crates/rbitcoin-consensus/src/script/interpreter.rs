@@ -2468,10 +2468,10 @@ mod success_and_disabled_tests {
             .expect("2SWAP");
         assert_eq!(swap5, vec![num(1), num(4), num(5), num(2), num(3)]);
 
-        // 201 counted ops still pass. 202 OP_16 passes only while OP_16 is not counted.
-        eval(&vec![0x60; 202], SigVersion::WitnessV0).expect("OP_16 is not an op-count");
+        eval(&vec![0x61; 201], SigVersion::WitnessV0).expect("201 ops is the limit");
         let err = eval(&vec![0x61; 202], SigVersion::WitnessV0).unwrap_err();
         assert!(format!("{err}").contains("op count"), "{err}");
+        eval(&vec![0x60; 202], SigVersion::WitnessV0).expect("OP_16 is not an op-count");
 
         // MAX_STACK_SIZE is typically 1000; push 999 ones then 2DUP overflows.
         let mut script = vec![0x51; 999];
