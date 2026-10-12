@@ -1393,6 +1393,7 @@ mod tests {
         inflight.insert(h, super::super::state::InflightReq::new(5));
         let mut cooldown = HashMap::new();
         let mut strikes = HashMap::new();
+        crate::chain::reset_header_store_counts();
         disconnect_stalled_block_peers_at(
             std::slice::from_mut(&mut slot),
             &mut inflight,
@@ -1405,6 +1406,7 @@ mod tests {
         );
         assert!(cooldown.contains_key(&a));
         assert!(inflight.is_empty());
+        assert_eq!(crate::chain::header_store_counts(), (0, 0, 0));
     }
 
     #[test]

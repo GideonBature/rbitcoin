@@ -32,10 +32,6 @@ pub(crate) fn load_resume_entries(
 }
 
 pub(crate) fn seed_work_path_from_store(st: &mut IbdWorkState, hub: &ChainHub) {
-    if super::state::defer_header_store() {
-        super::state::note_store_follow(super::state::FOLLOW_RESUME);
-        return;
-    }
     let exclude: Vec<[u8; 32]> = st.reorg.invalid.iter().collect();
     let path = load_resume_entries(hub, &exclude);
     install_resumed_path(st, hub, &path);
@@ -45,6 +41,25 @@ pub(crate) fn install_resumed_path(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     path: &[rbitcoin_query::ResumeWorkEntry],
+) {
+    install_resume(st, hub, path, true);
+}
+
+/// Plant the resume path and leave the most-work rewind to the caller, which
+/// runs it after dropping the coordination lock.
+pub(crate) fn stage_resumed_path(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    path: &[rbitcoin_query::ResumeWorkEntry],
+) {
+    install_resume(st, hub, path, false);
+}
+
+fn install_resume(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    path: &[rbitcoin_query::ResumeWorkEntry],
+    rewind_now: bool,
 ) {
     let Some(tip_hash) = hub.tip_hash() else {
         return;
@@ -85,23 +100,25 @@ pub(crate) fn install_resumed_path(
             .find(|e| !st.reorg.invalid.contains(e.hash))
             .map(|e| BlockHash::from_byte_array(e.hash));
         st.reorg.register_explore(explore_need, explore_tip);
-        match super::reorg::maybe_rewind_to_best_work(st, hub) {
-            Ok(true) => {
-                info!(
-                    "ibd: resume seed rewound to most-work header path (store walk {:?})",
-                    t0.elapsed()
-                );
-                return;
-            }
-            Ok(false) => {
-                info!(
+        if rewind_now {
+            match super::reorg::maybe_rewind_to_best_work(st, hub) {
+                Ok(true) => {
+                    info!(
+                        "ibd: resume seed rewound to most-work header path (store walk {:?})",
+                        t0.elapsed()
+                    );
+                    return;
+                }
+                Ok(false) => {
+                    info!(
                     "ibd: resume seed greater-work sibling fork explore_need={} explore_tip={:?}",
                     st.reorg.need_getdata().len(),
                     explore_tip
                 );
-            }
-            Err(e) => {
-                warn!("ibd: resume seed most-work rewind failed: {e}");
+                }
+                Err(e) => {
+                    warn!("ibd: resume seed most-work rewind failed: {e}");
+                }
             }
         }
     }

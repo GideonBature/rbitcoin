@@ -343,10 +343,6 @@ fn ensure_origin(st: &mut IbdWorkState, hub: &ChainHub) {
     if st.header_walk.origin {
         return;
     }
-    if super::state::defer_header_store() {
-        super::state::note_store_follow(super::state::FOLLOW_ORIGIN);
-        return;
-    }
     let input = origin_input(st, hub);
     let loaded = load_origin(hub, &input);
     install_origin(st, hub, loaded);
@@ -2092,11 +2088,7 @@ pub(crate) fn send_getheaders(
     // A walk that is already past the stored path needs those headers back on
     // the queue. An empty reply before any walk must be able to finish.
     if walk_ahead_of_queue(st, hub) {
-        if super::state::defer_header_store() {
-            super::state::note_store_follow(super::state::FOLLOW_RESEED);
-        } else {
-            super::path::reseed_ordered_from_path(st, hub);
-        }
+        super::path::reseed_ordered_from_path(st, hub);
     }
     let (want_walk, want_refill) = header_lanes_due(st, hub);
     if !want_walk {
