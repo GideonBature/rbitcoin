@@ -371,10 +371,8 @@ pub struct ChainHub {
     chain_work_prefix: RwLock<Vec<Work>>,
     /// Once the relay-inhibited latch clears, stay out.
     finished_ibd: AtomicBool,
-    /// Header-walk tip during IBD: hash and height. Follow sessions locate
-    /// from this hash instead of the confirmed tip. `None` before the walk
-    /// has an origin.
-    ibd_header_tip: std::sync::Mutex<Option<(BlockHash, u32)>>,
+    /// A follow-session block inv during IBD. The walk asks its header peer.
+    header_inv_challenge: AtomicBool,
     #[cfg(test)]
     block_at_height_calls: AtomicU64,
     #[cfg(test)]
@@ -447,7 +445,7 @@ impl ChainHub {
             asked_blocks: RwLock::new(HashSet::new()),
             chain_work_prefix: RwLock::new(Vec::new()),
             finished_ibd: AtomicBool::new(false),
-            ibd_header_tip: std::sync::Mutex::new(None),
+            header_inv_challenge: AtomicBool::new(false),
             #[cfg(test)]
             block_at_height_calls: AtomicU64::new(0),
             #[cfg(test)]
@@ -742,21 +740,19 @@ impl ChainHub {
         self.clock.now_secs().saturating_sub(u64::from(h.time)) > self.max_tip_age_secs()
     }
 
-    /// Record the header-walk tip so a peer connecting during IBD is asked
-    /// for headers from that hash. `None` clears it.
-    pub(crate) fn note_ibd_header_tip(&self, tip: Option<(BlockHash, u32)>) {
-        *self
-            .ibd_header_tip
-            .lock()
-            .unwrap_or_else(|err| err.into_inner()) = tip;
+    /// A follow session saw a block it does not have, while still in IBD.
+    pub(crate) fn note_header_inv_challenge(&self) {
+        self.header_inv_challenge.store(true, Ordering::Release);
     }
 
-    /// Header-walk tip (hash, height) while IBD is running.
-    pub(crate) fn ibd_header_tip(&self) -> Option<(BlockHash, u32)> {
-        *self
-            .ibd_header_tip
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
+    /// Whether a follow-session block inv is waiting for the header walk.
+    pub(crate) fn header_inv_challenge_pending(&self) -> bool {
+        self.header_inv_challenge.load(Ordering::Acquire)
+    }
+
+    /// Clear a follow-session block inv once the walk has taken it.
+    pub(crate) fn clear_header_inv_challenge(&self) {
+        self.header_inv_challenge.store(false, Ordering::Release);
     }
 
     /// Relay-inhibited: tip too old **or** work below the min-chain-work floor.

@@ -307,16 +307,52 @@ pub(crate) fn work_path_tips(st: &IbdWorkState) -> Vec<BlockHash> {
     tips
 }
 
-/// Put connected work-path hashes back on an empty queue, tip toward far.
-/// No-op while the queue still holds headers. Returns how many were restored.
-pub(crate) fn reseed_candidates(st: &IbdWorkState, tip_h: u32) -> Vec<BlockHash> {
-    if !st.ordered.is_empty() {
-        return Vec::new();
+/// Height of the next header after the queue tail, or one above the confirmed
+/// tip when the queue is empty.
+pub(crate) fn next_path_height(st: &IbdWorkState, hub: &ChainHub) -> Option<u32> {
+    let tail = st
+        .ordered
+        .iter()
+        .rev()
+        .find(|hash| st.ordered_set.contains(*hash));
+    if let Some(tail) = tail {
+        return st
+            .hash_height
+            .get(tail)
+            .map(|height| height.saturating_add(1));
     }
-    path_hashes_above_tip(st, tip_h)
-        .into_iter()
-        .map(|(_, hash)| hash)
-        .collect()
+    Some(hub.tip_height().unwrap_or(0).saturating_add(1))
+}
+
+/// The header after the stored path is already in `height_to_hash`.
+pub(crate) fn next_header_indexed(st: &IbdWorkState, hub: &ChainHub) -> bool {
+    next_path_height(st, hub).is_some_and(|height| st.height_to_hash.contains_key(&height))
+}
+
+/// Append stored work-path headers while the queue is under the soft cap.
+/// Stops at the first height that is not indexed. Returns how many were added.
+pub(crate) fn append_stored_headers(st: &mut IbdWorkState, hub: &ChainHub) -> usize {
+    let mut added = 0usize;
+    while st.ordered.len() < super::ORDERED_HEADERS_SOFT_CAP {
+        let Some(height) = next_path_height(st, hub) else {
+            break;
+        };
+        let Some(&hash) = st.height_to_hash.get(&height) else {
+            break;
+        };
+        if st.reorg.invalid.contains(hash.to_byte_array())
+            || st.body.is_rejected(&hash)
+            || hub.has_block(&hash)
+        {
+            break;
+        }
+        let n = push_reseed(st, &[hash]);
+        if n == 0 {
+            break;
+        }
+        added += n;
+    }
+    added
 }
 
 pub(crate) fn push_reseed(st: &mut IbdWorkState, hashes: &[BlockHash]) -> usize {
@@ -333,34 +369,9 @@ pub(crate) fn push_reseed(st: &mut IbdWorkState, hashes: &[BlockHash]) -> usize 
     rebuilt
 }
 
-pub(crate) fn reseed_ordered_from_path(st: &mut IbdWorkState, hub: &ChainHub) -> usize {
-    let tip_h = hub.tip_height().unwrap_or(0);
-    let keep: Vec<BlockHash> = reseed_candidates(st, tip_h)
-        .into_iter()
-        .filter(|h| !hub.has_block(h) && !st.body.is_rejected(h))
-        .collect();
-    push_reseed(st, &keep)
-}
-
-/// Connected work-path hashes strictly above `tip_h` (`height_to_hash` occupants).
-///
-/// Competing `hash_height` entries are not path work — hard reset must not
-/// promote them onto `ordered`.
-pub(crate) fn path_hashes_above_tip(st: &IbdWorkState, tip_h: u32) -> Vec<(u32, BlockHash)> {
-    let mut above: Vec<(u32, BlockHash)> = st
-        .height_to_hash
-        .iter()
-        .filter(|(&ht, _)| ht > tip_h)
-        .map(|(&ht, &h)| (ht, h))
-        .collect();
-    above.sort_by_key(|(ht, _)| *ht);
-    above
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::state::IbdWorkState;
-    use super::path_hashes_above_tip;
     use super::work_path_tips;
     use bitcoin::hashes::Hash;
     use bitcoin::BlockHash;
@@ -490,16 +501,6 @@ mod tests {
         let tips = work_path_tips(&st);
         // rev walk: 3 (live), 2 (ghost skip), 1 (live) — only set members.
         assert_eq!(tips, vec![h(3), h(1)]);
-    }
-
-    #[test]
-    fn path_hashes_above_tip_skips_competing_hash_height() {
-        let mut st = IbdWorkState::new(Vec::new(), None, Some(10));
-        let occupant = h(1);
-        st.record_height(occupant, 11);
-        st.hash_height.insert(h(9), 12);
-        assert_eq!(path_hashes_above_tip(&st, 10), vec![(11, occupant)]);
-        assert!(path_hashes_above_tip(&st, 11).is_empty());
     }
 
     #[test]

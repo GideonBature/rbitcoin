@@ -1958,7 +1958,7 @@ pub async fn peer_session_with(
 
 /// Tip locator for post-handshake `getheaders` (store chain; genesis fallback).
 pub(crate) fn tip_follow_locator(hub: &ChainHub) -> Vec<BlockHash> {
-    let mut v = match hub.query.locator_hashes() {
+    match hub.query.locator_hashes() {
         Ok(mut v) if !v.is_empty() => {
             if v.len() > MAX_LOCATOR_SZ {
                 v.truncate(MAX_LOCATOR_SZ);
@@ -1973,27 +1973,6 @@ pub(crate) fn tip_follow_locator(hub: &ChainHub) -> Vec<BlockHash> {
             v.push(BlockHash::from_byte_array([0u8; 32]));
             v
         }
-    };
-    prepend_ibd_header_tip(hub, &mut v);
-    v
-}
-
-/// During IBD the first locator hash is the header-walk tip. The confirmed
-/// chain stays behind it so a peer that does not have the walk tip can still
-/// find a common block.
-fn prepend_ibd_header_tip(hub: &ChainHub, loc: &mut Vec<BlockHash>) {
-    if !hub.in_ibd() {
-        return;
-    }
-    let Some((walk, _)) = hub.ibd_header_tip() else {
-        return;
-    };
-    if loc.first() == Some(&walk) {
-        return;
-    }
-    loc.insert(0, walk);
-    if loc.len() > MAX_LOCATOR_SZ {
-        loc.truncate(MAX_LOCATOR_SZ);
     }
 }
 
@@ -2067,6 +2046,9 @@ fn maybe_queue_initial_getheaders(
     hub: &ChainHub,
     session: &crate::peers::LivePeer,
 ) -> bool {
+    if hub.in_ibd() {
+        return false;
+    }
     if session.conn_type == crate::peers::PeerConnType::AddrFetch {
         return false;
     }
@@ -2079,11 +2061,7 @@ fn maybe_queue_initial_getheaders(
         .peer_hub()
         .is_some_and(|ph| ph.try_start_headers_sync(session, now, best_t));
     if started {
-        let h = hub
-            .ibd_header_tip()
-            .filter(|_| hub.in_ibd())
-            .map(|(_, height)| height)
-            .unwrap_or_else(|| hub.tip_height().unwrap_or(0));
+        let h = hub.tip_height().unwrap_or(0);
         rbitcoin_log::info!("{}", crate::chain::initial_getheaders_log(h, session.id));
         let _ = queue_getheaders(out, hub, Some(session), true, None);
     }
@@ -3508,6 +3486,10 @@ fn on_inv_block_needs_headers(
     if hub.knows_header(h) || follow.pending_headers.contains_key(h) {
         return false;
     }
+    if hub.in_ibd() {
+        hub.note_header_inv_challenge();
+        return false;
+    }
     session.is_none_or(|s| {
         s.peer_hub()
             .is_some_and(|ph| ph.should_getheaders_for_inv(s, *h))
@@ -3617,6 +3599,7 @@ fn on_headers(
 ) -> Result<(), NetError> {
     let n = headers.len();
     let _ = session.is_some_and(|s| s.take_awaiting_headers());
+    let mut ignored_below_floor = false;
     if n == 0 {
         // Empty headers is a failed getheaders response, not an announcement.
     } else if n > 0
@@ -3624,8 +3607,8 @@ fn on_headers(
         && headers_are_below_floor(hub, &follow.pending_headers, headers)
     {
         // Work stays under the floor from the pending headers alone. Do not
-        // read parent headers, and do not move this peer's best-known tip.
-        // A full batch still continues from its last header below.
+        // read parent headers, do not move this peer's best-known tip, and
+        // do not ask for the next page of a batch we refused.
         for hdr in headers.iter().take(n) {
             let hash = hdr.block_hash();
             if let Some(s) = session {
@@ -3636,6 +3619,7 @@ fn on_headers(
         let last = headers[n - 1].block_hash();
         let announced_h = pending_announced_height(&follow.pending_headers, last);
         rbitcoin_log::info!("{}", ignoring_low_work_chain_log(announced_h));
+        ignored_below_floor = true;
     } else if let Some(first) = headers.first() {
         let prev = first.prev_blockhash;
         if hub.is_block_invalid(&prev)
@@ -3686,6 +3670,7 @@ fn on_headers(
                     rbitcoin_log::info!("{}", synchronizing_blockheaders_log(announced_h));
                 } else {
                     rbitcoin_log::info!("{}", ignoring_low_work_chain_log(announced_h));
+                    ignored_below_floor = true;
                 }
                 // Core: do not download bodies until the chain meets
                 // `-minimumchainwork` (`p2p_headers_sync_with_minchainwork`).
@@ -3714,7 +3699,7 @@ fn on_headers(
             }
         }
     }
-    if n >= MAX_HEADERS_RESULTS {
+    if n >= MAX_HEADERS_RESULTS && !ignored_below_floor {
         let from = headers.get(n - 1).map(|h| h.block_hash());
         let _ = queue_getheaders(out_tx, hub, session, true, from);
     }

@@ -94,9 +94,6 @@ pub(crate) const MAX_ORDERED_HEADERS: usize = 500_000;
 /// expensive Headers events (drain livelock → multi-minute freezes, getdata starved).
 /// ~64k is ample cache for window=1024 archive race + tip holes.
 pub(crate) const ORDERED_HEADERS_SOFT_CAP: usize = 64_000;
-/// One header peer serves the queue below this and the walk above it.
-/// At early-block confirm rates this is several header round trips of blocks.
-pub(crate) const ORDERED_REFILL_LOW: usize = ORDERED_HEADERS_SOFT_CAP / 4;
 
 /// Max blocks in flight to a single peer.
 ///
@@ -286,12 +283,6 @@ fn publish_status_snap(st: &IbdWorkState, hub: &ChainHub, board: &StatusBoard) {
         header_quiet: headers.quiet,
         wires,
     });
-    let walk_tip = if headers.origin {
-        st.header_walk.tip_hash().map(|hash| (hash, headers.height))
-    } else {
-        None
-    };
-    hub.note_ibd_header_tip(walk_tip);
 }
 
 #[allow(clippy::cognitive_complexity)] // IBD coordination: dial, confirm, headers, stall
@@ -645,6 +636,9 @@ pub async fn ibd_cancellable(
             // A block inv is not a queue-depth event. Ask on this turn, not
             // after the 500 ms header period, or the announced header waits
             // behind a full queue.
+            if hub.header_inv_challenge_pending() && header_walk::note_external_block_inv(st) {
+                hub.clear_header_inv_challenge();
+            }
             let challenge_due = header_walk::inv_challenge_due(st);
             if cadence.headers_due(now_cadence, path_empty, challenge_due) {
                 let live = st.ordered_set.len();
