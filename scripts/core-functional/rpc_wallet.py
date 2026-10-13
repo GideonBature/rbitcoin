@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from rpc_proxy import RpcError
+from rpc_proxy import RpcError, shim_miniwallet_scantxoutset
 from core_dest import decode_destination
 from rpc_util import (
     COIN,
@@ -152,6 +152,7 @@ class WalletHub:
         p.register("signrawtransactionwithwallet", self.signrawtransactionwithwallet)
         p.register("gettransaction", self.gettransaction)
         p.register("getrawtransaction", self.getrawtransaction)
+        p.register("scantxoutset", self.scantxoutset)
 
     def _cur(self) -> Wallet:
         if not self.wallets:
@@ -483,6 +484,12 @@ class WalletHub:
                 continue
             out.append(u)
         return out
+
+    def scantxoutset(self, params: Any) -> dict[str, Any]:
+        height = int(self._node("getblockcount", []))
+        return shim_miniwallet_scantxoutset(
+            params, esplora=self._esplora, tip_height=height
+        )
 
     def listunspent(self, params: Any) -> list[dict[str, Any]]:
         w = self._cur()

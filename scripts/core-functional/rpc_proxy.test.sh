@@ -25,7 +25,7 @@ from rpc_proxy import (
     rewrite_core_maxfeerate,
     rewrite_testmempoolaccept_abort,
     rewrite_unspendable_spend,
-    shim_gettxoutsetinfo,
+    shim_miniwallet_scantxoutset,
     whitelist_map,
 )
 
@@ -89,8 +89,77 @@ seq = {
         },
     ]
 }
-info = shim_gettxoutsetinfo(3, "ab" * 32)
-assert info == {"height": 3, "bestblock": "ab" * 32, "txouts": -1}, info
+import hashlib
+
+script = bytes.fromhex("51")
+sh = hashlib.sha256(script).digest()[::-1].hex()
+txid = "ab" * 32
+genesis = "22" * 32
+seen = []
+
+def esplora(path):
+    seen.append(path)
+    if path == f"/scripthash/{sh}/utxo":
+        return [
+            {
+                "txid": txid,
+                "vout": 0,
+                "value": 50_0000_0000,
+                "status": {
+                    "confirmed": True,
+                    "block_height": 2,
+                    "block_hash": "cd" * 32,
+                },
+            },
+            {
+                "txid": "11" * 32,
+                "vout": 1,
+                "value": 1,
+                "status": {"confirmed": False},
+            },
+            {
+                "txid": genesis,
+                "vout": 0,
+                "value": 50_0000_0000,
+                "status": {
+                    "confirmed": True,
+                    "block_height": 0,
+                    "block_hash": "00" * 32,
+                },
+            },
+        ]
+    if path == f"/tx/{txid}":
+        return {"vin": [{"is_coinbase": True}]}
+    if path == f"/tx/{genesis}":
+        return {"vin": [{"is_coinbase": True}]}
+    raise AssertionError(path)
+
+# Checksum suffix is ignored. This is not a descriptor checksum test.
+got = shim_miniwallet_scantxoutset(
+    {"action": "start", "scanobjects": ["raw(51)#abcd1234"]},
+    esplora=esplora,
+    tip_height=5,
+)
+assert got["success"] is True, got
+assert got["height"] == 5, got
+assert len(got["unspents"]) == 1, got
+u = got["unspents"][0]
+assert u == {
+    "txid": txid,
+    "vout": 0,
+    "amount": 50.0,
+    "height": 2,
+    "coinbase": True,
+}, u
+try:
+    shim_miniwallet_scantxoutset(
+        ["start", ["combo(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)"]],
+        esplora=esplora,
+        tip_height=1,
+    )
+    raise SystemExit("combo must not be expanded")
+except RpcError as e:
+    assert "raw()" in e.message, e.message
 rewrite_testmempoolaccept_abort("testmempoolaccept", seq)
 assert seq["result"][0] == {"txid": "aa", "wtxid": "wa"}, seq
 assert seq["result"][1]["reject-reason"] == "missing-inputs", seq

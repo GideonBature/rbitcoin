@@ -451,8 +451,6 @@ pub(crate) fn parse_output_descriptor(ctx: &RpcContext, desc: &str) -> Result<Sc
     decode_output_script(ctx, desc)
 }
 
-/// Enough of Core `scantxoutset` for MiniWallet: `raw(script)` over Class A.
-/// Not a coins-DB product (no HD range / combo / addr expansion).
 pub(crate) fn mockscheduler(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["delta_seconds"])?;
     require_regtest(ctx, "mockscheduler")?;

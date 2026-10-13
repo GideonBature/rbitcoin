@@ -887,7 +887,7 @@ fn sh_pending_records_join_at_live_tip_before_apply() {
 ///
 /// Stealing the job (pop without apply) is the in-flight window today's
 /// `rbtc-sh-wb` opens: generate's drain sees an empty queue while apply is
-/// still running, MiniWallet scantxoutset pins the pre-tip watermark, and
+/// still running, a scripthash read pins the pre-tip watermark, and
 /// a spent coin looks live while Class C already spent it (orphaned).
 #[test]
 fn sh_pending_join_holds_while_job_is_in_flight() {

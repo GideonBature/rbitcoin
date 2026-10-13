@@ -946,7 +946,9 @@ analog = "none"
 
 [[test]]
 name = "rpc_scantxoutset.py"
-status = "run"
+status = "skip"
+reason = "no-utxo-set"
+analog = "none (no coins DB; descriptor scan is not a product)"
 
 [[test]]
 name = "rpc_setban.py"
@@ -965,7 +967,9 @@ reason = "no-wallet"
 
 [[test]]
 name = "rpc_signrawtransactionwithkey.py"
-status = "run"
+status = "skip"
+reason = "no-utxo-set"
+analog = "none (the script scans a p2sh-segwit descriptor; signrawtransactionwithkey stays on the proxy)"
 
 [[test]]
 name = "rpc_txoutproof.py"

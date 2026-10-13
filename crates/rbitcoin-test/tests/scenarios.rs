@@ -2142,17 +2142,18 @@ fn pin_scripthash_views_on_pad(
 
     let utxos = q.scripthash_listunspent(&sh).unwrap();
     assert_eq!(utxos.len() as u32, tip_h);
-
-    let scanned = q.scan_unspent_scripts(&[vec![0x51]]).unwrap();
-    assert_eq!(scanned.len(), utxos.len());
-    assert_eq!(
-        scanned
-            .iter()
-            .filter(|u| !u.coinbase)
-            .map(|u| u.txid)
-            .collect::<Vec<_>>(),
-        [spend_txid]
-    );
+    let non_cb: Vec<[u8; 32]> = utxos
+        .iter()
+        .filter(|u| {
+            let Ok(h) = u32::try_from(u.height) else {
+                return false;
+            };
+            let fks = q.block_tx_fks(Height(h)).unwrap();
+            fks.first().copied() != Some(u.create_tx_fk)
+        })
+        .map(|u| u.tx_hash)
+        .collect();
+    assert_eq!(non_cb, [spend_txid]);
 
     assert_eq!(q.scripthash_balance_slot(&sh, slot).unwrap(), balance);
     assert_eq!(q.scripthash_history_slot(&sh, slot).unwrap(), full);

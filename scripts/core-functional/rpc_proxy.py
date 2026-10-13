@@ -9,12 +9,14 @@ Wallet/utility methods are handled locally in later steps.
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import json
 import re
 import threading
 import urllib.error
 import urllib.request
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -292,9 +294,87 @@ _TMA_ABORT = frozenset(
 )
 
 
-def shim_gettxoutsetinfo(height: Any, bestblock: Any) -> dict[str, Any]:
-    """Harness stand-in. No UTXO set, so `txouts` is -1."""
-    return {"height": height, "bestblock": bestblock, "txouts": -1}
+# MiniWallet sends descsum_create("raw(HEX)"), optionally with a checksum
+# suffix. The suffix is not checked: this is not a descriptor engine.
+_RAW_SCAN = re.compile(r"^raw\(([0-9a-fA-F]*)\)(?:#[0-9a-z]{8})?$")
+
+
+def _scan_arg(params: Any, index: int, name: str) -> Any:
+    if isinstance(params, dict):
+        if name in params:
+            return params[name]
+        args = params.get("args")
+        if isinstance(args, list) and index < len(args):
+            return args[index]
+        return None
+    if isinstance(params, list) and index < len(params):
+        return params[index]
+    return None
+
+
+def _raw_script(obj: Any) -> bytes:
+    desc = obj
+    if isinstance(obj, dict):
+        desc = obj.get("desc")
+    if not isinstance(desc, str):
+        raise RpcError(-8, "only raw() descriptors are scanned")
+    m = _RAW_SCAN.fullmatch(desc)
+    if m is None:
+        raise RpcError(-8, "only raw() descriptors are scanned")
+    return bytes.fromhex(m.group(1))
+
+
+def _sat_btc(sats: int) -> float:
+    return float(Decimal(sats) / Decimal(100_000_000))
+
+
+def shim_miniwallet_scantxoutset(
+    params: Any, *, esplora: Callable[[str], Any], tip_height: int
+) -> dict[str, Any]:
+    """MiniWallet `raw()` scan. Confirmed Esplora unspents only.
+
+    Does not expand `combo`, xprv ranges, or checksums. Drops the genesis
+    coinbase (height 0) the way Core's coins view does.
+    """
+    action = _scan_arg(params, 0, "action")
+    if action != "start":
+        raise RpcError(-8, "only action start is scanned")
+    objects = _scan_arg(params, 1, "scanobjects")
+    if not isinstance(objects, list):
+        raise RpcError(-8, "scanobjects must be an array")
+    unspents: list[dict[str, Any]] = []
+    total = 0
+    tx_cache: dict[str, Any] = {}
+    for obj in objects:
+        script = _raw_script(obj)
+        sh = hashlib.sha256(script).digest()[::-1].hex()
+        rows = esplora(f"/scripthash/{sh}/utxo")
+        if not isinstance(rows, list):
+            raise RpcError(-1, "esplora utxo was not a list")
+        for row in rows:
+            status = row.get("status") or {}
+            if not status.get("confirmed"):
+                continue
+            height = int(status["block_height"])
+            txid = str(row["txid"])
+            if txid not in tx_cache:
+                tx_cache[txid] = esplora(f"/tx/{txid}")
+            vin = (tx_cache[txid].get("vin") or [{}])[0]
+            coinbase = bool(vin.get("is_coinbase"))
+            if height == 0 and coinbase:
+                continue
+            sats = int(row["value"])
+            total += sats
+            unspents.append(
+                {
+                    "txid": txid,
+                    "vout": int(row["vout"]),
+                    "amount": _sat_btc(sats),
+                    "height": height,
+                    "coinbase": coinbase,
+                }
+            )
+    return {"success": True, "height": int(tip_height), "unspents": unspents, "total_amount": _sat_btc(total)}
 
 
 def rewrite_testmempoolaccept_abort(method: Any, parsed: dict[str, Any]) -> None:

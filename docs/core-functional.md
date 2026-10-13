@@ -66,11 +66,13 @@ proxy rewrites multi-tx `testmempoolaccept` abort-class rows
 4× `-maxmempool` map makes that number match Core. A `generateblock` spend of
 an unspendable output still fails the script on the node; the proxy rewrites
 that error to Core's `CheckTxInputs` missing-input sentence
-(`feature_block.py`). The proxy answers `gettxoutsetinfo`
-with `getblockcount`, `getbestblockhash`, and `txouts: -1` so
-`rpc_scantxoutset.py` can compare an empty scan. The node does not
-implement that method. `rpc_packages.py` `run` includes that named shim
-dialect (same honesty as `WAIT_TIP_IDLE`).
+(`feature_block.py`). The proxy answers MiniWallet `scantxoutset`
+`raw(HEX)` from Esplora `/scripthash/:hash/utxo` (confirmed rows,
+coinbase from `/tx/:txid`, genesis coinbase omitted). It does not expand
+descriptors. `rpc_scantxoutset.py` and `rpc_signrawtransactionwithkey.py`
+are inventory skips. The node implements neither `scantxoutset` nor
+`gettxoutsetinfo`. `rpc_packages.py` `run` includes the package-dialect
+shim (same honesty as `WAIT_TIP_IDLE`).
 
 ```bash
 ./scripts/core-functional/bitcoind.test.sh
