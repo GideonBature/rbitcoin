@@ -229,7 +229,7 @@ pub use connect::{spawn_sh_writebehind, ConfirmPrepared};
 pub use id_map::{IdMap, OutPointHasher, OutPointSet, TxidHasher, TxidMap, TxidSet};
 pub use in_flight::InFlight;
 pub use scripthash::{
-    BlockTouch, FilteredHistory, HistoryFilter, HistoryOrder, ScanUtxo, ScriptHashBalance,
+    BlockTouch, FilteredHistory, HistoryFilter, HistoryOrder, ScriptHashBalance,
     ScriptHashChainStats, ScriptHashHistoryItem, ScriptHashTxSummary, ScriptHashUtxo, ShJoinSlot,
 };
 pub use spend_sync::SpendSync;

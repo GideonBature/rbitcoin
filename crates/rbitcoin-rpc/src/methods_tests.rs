@@ -488,7 +488,6 @@ fn method_help_named_arms_and_unknown() {
         "generate",
         "mockscheduler",
         "generatetodescriptor",
-        "scantxoutset",
         "decoderawtransaction",
         "decodescript",
         "validateaddress",
@@ -874,6 +873,22 @@ fn waitforblock_and_height_return_on_stop() {
     assert_eq!(got["height"], 0);
     assert!(t0.elapsed() < Duration::from_millis(1_000));
     h.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scantxoutset_is_method_not_found() {
+    let (ctx, dir) = ctx_empty();
+    let missing = dispatch(&ctx, "no-such-rpc", vec![]).unwrap_err();
+    let scan = dispatch(
+        &ctx,
+        "scantxoutset",
+        vec![json!("start"), json!(["raw(51)"])],
+    )
+    .unwrap_err();
+    assert_eq!(scan["code"], missing["code"]);
+    assert_eq!(scan["message"], missing["message"]);
+    assert_eq!(scan["code"], ERR_METHOD_NOT_FOUND);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1677,15 +1692,9 @@ fn miniwallet_raw_scan_and_gettxout() {
     assert_eq!(hashes.as_array().unwrap().len(), 2);
     assert_eq!(dispatch(&ctx, "getblockcount", vec![]).unwrap(), json!(2));
 
-    let scan = dispatch(&ctx, "scantxoutset", vec![json!("start"), json!([desc])]).unwrap();
-
-    assert_eq!(scan["success"], true);
-    assert_eq!(scan["height"], 2);
-    let uns = scan["unspents"].as_array().unwrap();
-    assert_eq!(uns.len(), 2, "two generated OP_TRUE coinbases: {scan}");
-    assert!(uns.iter().all(|u| u["coinbase"] == true));
-
-    let txid = uns[1]["txid"].as_str().unwrap();
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![tip, json!(1)]).unwrap();
+    let txid = blk["tx"].as_array().unwrap()[0].as_str().unwrap();
     let utxo = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
     assert!(utxo["confirmations"].as_u64().unwrap() >= 1);
     assert_eq!(utxo["coinbase"], true);
@@ -1697,28 +1706,6 @@ fn miniwallet_raw_scan_and_gettxout() {
 
     let waited = dispatch(&ctx, "waitforblockheight", vec![json!(2), json!(100)]).unwrap();
     assert_eq!(waited["height"], 2);
-
-    assert_eq!(
-        dispatch(&ctx, "scantxoutset", vec![json!("status")]).unwrap(),
-        Value::Null
-    );
-    assert_eq!(
-        dispatch(&ctx, "scantxoutset", vec![json!("abort")]).unwrap(),
-        json!(false)
-    );
-    let empty = dispatch(&ctx, "scantxoutset", vec![json!("start"), json!([])]).unwrap();
-    assert_eq!(empty["success"], true);
-    assert_eq!(empty["txouts"], json!(-1));
-    assert_eq!(empty["unspents"].as_array().unwrap().len(), 0, "{empty}");
-    let unknown = dispatch(&ctx, "scantxoutset", vec![json!("nope")]).unwrap_err();
-    assert_eq!(unknown["code"], ERR_INVALID_PARAMETER);
-    assert!(
-        unknown["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Invalid action"),
-        "{unknown}"
-    );
 
     let idx = dispatch(&ctx, "getindexinfo", vec![]).unwrap();
     assert_eq!(idx["txindex"]["synced"], true);
@@ -1791,12 +1778,12 @@ fn genesis_coinbase_is_not_a_utxo() {
     let body: Value = serde_json::from_slice(&rest.body).unwrap();
     assert_eq!(body["bitmap"], "0", "{body}");
 
-    let scan = dispatch(&ctx, "scantxoutset", vec![json!("start"), json!([desc])]).unwrap();
-    let uns = scan["unspents"].as_array().unwrap();
-    assert_eq!(uns.len(), 1, "only the height-1 coinbase: {scan}");
-    assert_eq!(uns[0]["height"], 1, "{scan}");
-    assert_ne!(uns[0]["txid"], json!(g_txid), "{scan}");
-    assert_eq!(scan["total_amount"], uns[0]["amount"], "{scan}");
+    let h1 = dispatch(&ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let h1_blk = dispatch(&ctx, "getblock", vec![h1, json!(1)]).unwrap();
+    let h1_txid = h1_blk["tx"].as_array().unwrap()[0].clone();
+    let live = dispatch(&ctx, "gettxout", vec![h1_txid, json!(0)]).unwrap();
+    assert_eq!(live["coinbase"], true, "{live}");
+    assert!(live["confirmations"].as_u64().unwrap() >= 1, "{live}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2795,90 +2782,6 @@ fn submitpackage_oversized_spk_is_scriptpubkey() {
 }
 
 #[test]
-fn scantxoutset_range_errors_match_core() {
-    let (ctx, dir) = ctx_empty();
-    let bad = |range: serde_json::Value| {
-        super::descriptor_scan::expand_scan_objects(
-            &ctx,
-            &[json!({"desc": "desc", "range": range})],
-        )
-        .unwrap_err()
-    };
-    let msg = |e: serde_json::Value| e["message"].as_str().unwrap().to_string();
-    assert_eq!(msg(bad(json!(-1))), "End of range is too high");
-    assert_eq!(
-        msg(bad(json!([-1, 10]))),
-        "Range should be greater or equal than 0"
-    );
-    assert_eq!(
-        msg(bad(json!([2, 1]))),
-        "Range specified as [begin,end] must not have begin after end"
-    );
-    assert_eq!(msg(bad(json!([0, 1000001]))), "Range is too large");
-    let huge = (2i64 << 32) - 1_000_000;
-    assert_eq!(
-        msg(bad(json!([huge, 2i64 << 32]))),
-        "End of range is too high"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn scantxoutset_combo_desc_matches_core() {
-    let desc = "combo(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/1/1/0)";
-    let (ctx, dir) = ctx_empty();
-    let scripts = super::descriptor_scan::expand_scan_objects(&ctx, &[json!(desc)]).unwrap();
-    let pkh = scripts
-        .iter()
-        .find(|s| s.desc.starts_with("pkh("))
-        .expect("combo expands a pkh");
-    assert_eq!(
-        pkh.desc,
-        "pkh([0c5f9a1e/1/1/0]03e1c5b6e650966971d7e71ef2674f80222752740fc1dfd63bbbd220d2da9bd0fb)#cxmct4w8"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn scantxoutset_hardened_wildcard_desc_matches_core() {
-    let desc = "combo(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/0h/0h/*)";
-    let (ctx, dir) = ctx_empty();
-    let obj = json!({"desc": desc, "range": 1});
-    let scripts = super::descriptor_scan::expand_scan_objects(&ctx, &[obj]).unwrap();
-    let mut pkhs: Vec<&str> = scripts
-        .iter()
-        .filter(|s| s.desc.starts_with("pkh("))
-        .map(|s| s.desc.as_str())
-        .collect();
-    pkhs.sort();
-    assert_eq!(
-        pkhs,
-        vec![
-            "pkh([0c5f9a1e/0h/0h/0]026dbd8b2315f296d36e6b6920b1579ca75569464875c7ebe869b536a7d9503c8c)#rthll0rg",
-            "pkh([0c5f9a1e/0h/0h/1]033e6f25d76c00bedb3a8993c7d5739ee806397f0529b1b31dda31ef890f19a60c)#mcjajulr",
-        ]
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn scantxoutset_requires_shindex() {
-    let (ctx, dir, _hub) = ctx_regtest_hub();
-    ctx.query.set_sh_index_enabled(false);
-    let desc = "raw(51)";
-    dispatch(&ctx, "generatetodescriptor", vec![json!(2), json!(desc)]).unwrap();
-    let err = dispatch(&ctx, "scantxoutset", vec![json!("start"), json!([desc])]).unwrap_err();
-    assert!(
-        err["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("scripthash index disabled"),
-        "{err}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn generate_selects_chained_mempool_parent_first() {
     use bitcoin::absolute::LockTime;
     use bitcoin::consensus::encode::serialize;
@@ -2951,19 +2854,11 @@ fn generate_selects_chained_mempool_parent_first() {
     assert_eq!(txids[1], parent_id);
     assert_eq!(txids[2], child_id);
 
-    let scan = dispatch(
-        &ctx,
-        "scantxoutset",
-        vec![json!("start"), json!(["raw(51)"])],
-    )
-    .unwrap();
-    let uns = scan["unspents"].as_array().unwrap();
     let cb_hex = hash_hex_display(&cb_txid.to_byte_array());
-    assert!(
-        uns.iter().all(|u| u["txid"] != json!(cb_hex)),
-        "spent coinbase must drop from scan: {scan}"
-    );
-    assert!(uns.iter().any(|u| u["coinbase"] == false));
+    let spent = dispatch(&ctx, "gettxout", vec![json!(cb_hex), json!(0)]).unwrap();
+    assert!(spent.is_null(), "spent coinbase is not unspent: {spent}");
+    let child_out = dispatch(&ctx, "gettxout", vec![child_id.clone(), json!(0)]).unwrap();
+    assert_eq!(child_out["coinbase"], false, "{child_out}");
 
     let immature_txid = cbs[9];
     let bad = Transaction {
@@ -5420,30 +5315,6 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     }
     let echoed = dispatch(&ctx, "echo", named(json!({"args": [1]}))).unwrap();
     assert_eq!(echoed, json!([1]));
-
-    let wpkh = format!("wpkh({pk})");
-    for (objects, needle) in [
-        (json!([1]), "scanobjects entries must be descriptor strings"),
-        (json!([{}]), "scanobject desc required"),
-        (
-            json!([{"desc": wpkh, "range": "nope"}]),
-            "Range must be a number or [begin,end]",
-        ),
-        (
-            json!([{"desc": wpkh, "range": [1]}]),
-            "Range must be specified as end or as [begin,end]",
-        ),
-        (json!(["not_a_desc"]), "Invalid descriptor"),
-        (json!(["raw(zz)"]), "Invalid descriptor"),
-        (json!(["addr(not-an-address)"]), "Invalid descriptor"),
-        (
-            json!([{"desc": wpkh, "range": [0, 1]}]),
-            "Range should not be specified for an un-ranged descriptor",
-        ),
-    ] {
-        let err = dispatch(&ctx, "scantxoutset", vec![json!("start"), objects]).unwrap_err();
-        assert!(rpc_message(&err).contains(needle), "{needle}: {err}");
-    }
 
     let mut peers = ctx_without_chain(&ctx);
     peers.peers = Some(rbitcoin_net::PeerHub::new());

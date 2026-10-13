@@ -15,7 +15,6 @@ rbitcoin-store = { workspace = true }
 rbitcoin-net = { workspace = true }
 rbitcoin-consensus = { workspace = true }
 bitcoin = { workspace = true }
-miniscript = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

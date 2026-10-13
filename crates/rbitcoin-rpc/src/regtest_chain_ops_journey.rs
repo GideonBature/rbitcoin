@@ -86,11 +86,11 @@ fn rpc_regtest_from_genesis() {
     chain_ops_equal_work_sibling_checkblock(&ctx, &hub);
     chain_ops_coinbase_script_and_sigops(&ctx, &hub, &p2wpkh);
     chain_ops_submit_tx_shape(&ctx, &hub, &p2wpkh);
-    chain_ops_echo_overlap_and_ranged_scan(&ctx);
+    chain_ops_echo_overlap(&ctx);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn chain_ops_echo_overlap_and_ranged_scan(ctx: &RpcContext) {
+fn chain_ops_echo_overlap(ctx: &RpcContext) {
     let twice = dispatch(ctx, "echo", named(json!({"args": [0, 1], "arg1": 1}))).unwrap_err();
     assert_eq!(twice["code"], ERR_INVALID_PARAMETER);
     assert_eq!(
@@ -98,7 +98,6 @@ fn chain_ops_echo_overlap_and_ranged_scan(ctx: &RpcContext) {
         "Parameter arg1 specified twice both as positional and named argument"
     );
 
-    // p2pkh of the ranged combo's child 0. generatetodescriptor has no xprv derive.
     let mined = dispatch(
         ctx,
         "generatetodescriptor",
@@ -109,23 +108,6 @@ fn chain_ops_echo_overlap_and_ranged_scan(ctx: &RpcContext) {
     )
     .unwrap();
     assert_eq!(mined.as_array().unwrap().len(), 1, "{mined}");
-    let ranged = "combo(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/0h/0h/*)";
-    let scan = dispatch(
-        ctx,
-        "scantxoutset",
-        vec![json!("start"), json!([{"desc": ranged, "range": 1}])],
-    )
-    .unwrap();
-    let uns = scan["unspents"].as_array().unwrap();
-    assert!(
-        uns.iter().any(|u| {
-            u["desc"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("pkh([0c5f9a1e/0h/0h/0]")
-        }),
-        "ranged scan returns the derived child: {scan}"
-    );
 }
 
 /// One regtest hub past maturity: templates, sigops, packages, invalidate,
@@ -1488,14 +1470,11 @@ fn chain_ops_generateblock_and_parent_first(ctx: &RpcContext, cbs: &mut TrueCoin
     let stats = dispatch(ctx, "getblockstats", vec![tip, json!(["totalfee", "ins"])]).unwrap();
     assert_eq!(stats, json!({"ins": 2, "totalfee": 3_000}));
 
-    let scan = dispatch(ctx, "scantxoutset", vec![json!("start"), json!([op_true])]).unwrap();
-    let uns = scan["unspents"].as_array().unwrap();
     let cb_hex = parent.input[0].previous_output.txid.to_string();
-    assert!(
-        uns.iter().all(|u| u["txid"] != json!(cb_hex)),
-        "spent coinbase drops from the scan: {scan}"
-    );
-    assert!(uns.iter().any(|u| u["txid"] == child_id && u["coinbase"] == false));
+    let spent = dispatch(ctx, "gettxout", vec![json!(cb_hex), json!(0)]).unwrap();
+    assert!(spent.is_null(), "spent coinbase is not unspent: {spent}");
+    let child_out = dispatch(ctx, "gettxout", vec![child_id.clone(), json!(0)]).unwrap();
+    assert_eq!(child_out["coinbase"], false, "{child_out}");
 
     let young = tip_count(ctx) as u32 - 5;
     let (hex, _) =

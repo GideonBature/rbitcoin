@@ -64,7 +64,6 @@ pub(crate) fn genesis_coinbase_txid(ctx: &RpcContext) -> [u8; 32] {
 
 mod chain;
 mod decode;
-mod descriptor_scan;
 mod mempool;
 mod mine;
 mod net;
@@ -527,7 +526,6 @@ pub(crate) fn dispatch_inner(
         "invalidateblock" => invalidateblock(ctx, &params),
         "reconsiderblock" => reconsiderblock(ctx, &params),
         "preciousblock" => preciousblock(ctx, &params),
-        "scantxoutset" => scantxoutset(ctx, &params),
         "gettxout" => gettxout(ctx, &params),
         "getindexinfo" => getindexinfo(ctx, &params),
         "getchaintips" => getchaintips(ctx, &params),
@@ -682,7 +680,6 @@ const METHOD_LIST: &[&str] = &[
     "generatetodescriptor",
     "generateblock",
     "generate",
-    "scantxoutset",
     "getblockfilter",
     "gettxout",
     "getindexinfo",
@@ -762,11 +759,6 @@ const NAMED_HELP: &[(&str, &str)] = &[
         "generatetodescriptor",
         "generatetodescriptor nblocks descriptor (maxtries)\n\
          Regtest harness only. raw(HEX), addr(ADDRESS), or a bare address.",
-    ),
-    (
-        "scantxoutset",
-        "scantxoutset \"action\" ( [scanobjects,...] )\n\
-         Descriptor scan on --sh-index. action is start, abort, or status.",
     ),
     (
         "getblockfilter",

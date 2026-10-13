@@ -347,7 +347,7 @@ mod tests {
         api_call(
             "rpc",
             "-",
-            "scantxoutset",
+            "gettxout",
             &format!("[\"start\",[\"{xprv}\",\"{tprv}\"]]"),
             5,
             None,

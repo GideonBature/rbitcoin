@@ -1117,38 +1117,6 @@ async fn pin_rest_deployment_and_filter(rpc_addr: SocketAddr, tip: &str) {
     assert_eq!(st, 400, "{body}");
 }
 
-async fn pin_scantxoutset_drops_spent_coinbase(rpc_addr: SocketAddr, spent_cb: &str) {
-    let scan = jsonrpc(rpc_addr, "scantxoutset", json!(["start", ["raw(51)"]])).await;
-    assert_eq!(scan["result"]["success"], true, "{scan}");
-    let uns = scan["result"]["unspents"]
-        .as_array()
-        .expect("scantxoutset unspents");
-    assert!(
-        uns.iter().all(|u| u["txid"].as_str() != Some(spent_cb)),
-        "spent coinbase must drop from scan: {scan}"
-    );
-    assert!(
-        uns.iter().any(|u| u["coinbase"] == false),
-        "scan must still see a non-coinbase unspent: {scan}"
-    );
-    let xpub = "pkh(tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp/0/*)";
-    let ranged = jsonrpc(
-        rpc_addr,
-        "scantxoutset",
-        json!(["start", [{"desc": xpub, "range": 1}]]),
-    )
-    .await;
-    assert_eq!(ranged["result"]["success"], true, "{ranged}");
-    let hardened = "pkh(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/*h)";
-    let hard = jsonrpc(
-        rpc_addr,
-        "scantxoutset",
-        json!(["start", [{"desc": hardened, "range": 0}]]),
-    )
-    .await;
-    assert_eq!(hard["result"]["success"], true, "{hard}");
-}
-
 async fn electrum_rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Value {
     let req = json!({"jsonrpc":"2.0","id": id, "method": method, "params": params});
     let mut line = serde_json::to_string(&req).unwrap();
@@ -2025,7 +1993,6 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         );
     }
     pin_mined_parent_before_child(txs, &pkg_parent_txid, &pkg_child_txid);
-    pin_scantxoutset_drops_spent_coinbase(rpc_addr, &cb_hex).await;
     let cb_txid = txs[0]["txid"].as_str().expect("coinbase txid").to_string();
     pin_rest_chaininfo_and_blockhash(rpc_addr, new_hash, 107).await;
     pin_rest_headers(rpc_addr).await;

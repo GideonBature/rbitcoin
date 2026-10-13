@@ -14,10 +14,7 @@ subset** (table below). Official Core dialect scripts (`rpc_decodescript.py`,
 `rpc_validateaddress.py`, `rpc_invalid_address_message.py`) stay inventory
 `rpc-dialect`; the functional harness does not intercept those names.
 `getblocktemplate` / `getmininginfo` are a miner-backend (no stratum, no BIP9
-testdummy). `scantxoutset` expands descriptors and looks them up on the
-scripthash index. It requires `--sh-index` (`scripthash index disabled`
-otherwise). Prefer **Electrum / Esplora** (with `--sh-index`) for address
-history.
+testdummy). Address history is **Electrum / Esplora** with `--sh-index`.
 
 ## `getnetworkinfo.version`
 
@@ -55,7 +52,7 @@ later Core RPC is present, including descriptor-wallet calls from 0.21
 | `--rpc-listen [ADDR]` / conf `rpc_listen=` | **off** | TCP JSON-RPC; omit ADDR → `127.0.0.1` and Core-matching port (8332 / 18332 / 38332 / 18443). Implies `--rpc`. |
 | `--rpc-token-file PATH` | `{datadir}/rpc.token` | CSPRNG hex token; TCP `Authorization: Bearer` |
 | `--rpc-cookie-file PATH` / conf `rpc_cookie_file=` | **off** | Existing Core-format `username:password` file (no trailing newline) accepted as TCP HTTP Basic in addition to Bearer; it is never created or logged |
-| `--sh-index` | **off** | Class B scripthash for Electrum/Esplora address history and RPC `scantxoutset`. RPC by height/hash/txid does not need it |
+| `--sh-index` | **off** | Class B scripthash for Electrum/Esplora address history. RPC by height/hash/txid does not need it |
 | `--block-filter-index` | **off** | BIP158 basic. IBD seals them when the flag is on from the start. A later enable still materializes after catch-up. `NODE_COMPACT_FILTERS` is advertised once filters first reach the tip (`getnetworkinfo` lists `COMPACT_FILTERS`), then for the life of the process. `getblockfilter` serves a sealed height, one block whose parent filter is already sealed, and a stale branch back to that sealed fork point. An unsealed best-chain gap is refused. `/rest/blockfilter/` and P2P still serve only heights the watermark covers. Independent of `--sh-index` |
 | `--rpc-work-queue N` | **16** | In-flight HTTP RPC (Core `-rpcworkqueue`). One POST is one slot (a JSON-RPC array is still one slot). Full permit is HTTP **503** `Work queue depth exceeded`. **0** is the default queue of 16. |
 | `--rest` / conf `rest=` | **off** | Unauthenticated `/rest/` on the RPC listener. Own queue, same depth as `--rpc-work-queue`'s default. The body is read before that permit is taken. Without the flag those paths are 404. |
@@ -157,7 +154,6 @@ still wait for durable SH when shindex is on.
 | `submitpackage` | All networks. `MempoolHub::submit_package_rpc` admits each tx with trim deferred, then package-evaluates a remainder of two or more that failed static min relay, the dynamic mempool min fee, or missing inputs. The package path is a child-with-parents tree; an in-mempool parent outside the remainder still supplies prevouts. When that remainder's combined fee meets static min relay, those members skip the dynamic floor. `fees.effective-feerate` / `effective-includes` for an individually admitted tx are that tx's modified fee and its own wtxid; for a package-eval tx they are the remainder's summed modified fees and vsizes, in package order. One unprotected trim runs after the package; a tx that was admitted and then dropped is `mempool full`. Package-admitted txs use the same relay-age clock as an individual admit. RPC `maxfeerate` / `maxburnamount` / `"version"` pre-checks. A member whose own feerate exceeds `maxfeerate`, including a parent that exists only in the package, is rejected (`max feerate exceeded`) and is not used to rescue the rest. An individual admit still lists the transactions it replaced. A 3-gen chain admits when fees/policy allow. A later member that failed missing-inputs and is not in a successful remainder stays `bad-txns-inputs-missingorspent`. `IsChildWithParents` `-25` applies only when `RBITCOIN_RPC_PACKAGE_DIALECT` is on ([`env-knobs.md`](./env-knobs.md)). `package_msg` / `tx-results` / `replaced-transactions`. Esplora `POST /txs/package` and Electrum `broadcast_package` still use atomic `accept_package` (all-or-nothing; child-fail rollback). |
 | `gettxspendingprevout` | All networks. Live mempool spender of each `{txid,vout}`. |
 | `submitblock` | All networks. Same `ChainHub::accept_received_block` as a P2P `block` message: tip-extend, or hold by hash + most-work `accept_branch`. A consensus reject is a BIP22 reason string. A local store fault, including one reading the parent or tip header or a spent output, is RPC error `-25` (Core `state.IsError()`). A cancelled connect is `inconclusive`. Neither caches the block as invalid. |
-| `scantxoutset` | All networks. Requires `--sh-index`. Expands output descriptors (`range` default 1000, Core's range errors) and looks each script up on the scripthash index. Refuses more than 10000 derived scripts. Does not store the descriptor. Never returns the genesis coinbase output (Core never adds it to the coins view). `txouts` is always `-1` (no coins DB; the count is not computed). |
 | `getblockfilter` | All networks. Requires `--block-filter-index`. `filtertype` `basic` only (anything else is `-5`). Returns `filter` and `header` hex. A sealed best-chain height uses the index. One block whose parent filter header is already sealed (genesis uses the zero prev-header) is built from the stored body. A stale branch is rebuilt back to that sealed fork point. An unsealed best-chain gap is “Filter not found. Block filters are still in the process of being indexed.” Unknown hash is `-5` “Block not found”. Flag off is “Index is not enabled”. REST `/rest/blockfilter/` stays watermark-only (“still in the process of being indexed” past the watermark). |
 | `gettxout` | All networks. Connected Class A + mempool. Default `include_mempool=true` returns `null` for a confirmed out spent by a live mempool tx. `include_mempool=false` still returns the confirmed coin. A leftover still live in the hub (IBD / `-blocksonly`) uses the connected path, not `confirmations: 0`. A disconnected archive row is `null` (not tip+1 confirmations). A vout at or past the output count is `null`. The genesis coinbase output is `null` (Core never adds it to the coins view); REST `getutxos` follows. |
 | `getindexinfo` | All networks. Reports `txindex` synced at tip — we reconstruct by txid from Class A (no separate index flag). |
@@ -178,7 +174,7 @@ still wait for durable SH when shindex is on.
 | Core `generate*` as a mining product | **Regtest harness only.** `submitblock` is the same receive path as P2P |
 | `combinerawtransaction` / `createrawtransaction` / `signrawtransactionwithkey` / `createmultisig` / `deriveaddresses` | Not implemented (harness proxy only) |
 | Decode Core dialect | Node `decodescript` omits wrap/`desc`; `validateaddress` omits `error_locations`; `decoderawtransaction` asm is rust-bitcoin. Official scripts stay `rpc-dialect`. |
-| `gettxoutsetinfo` | No UTXO set. Not implemented. |
+| `scantxoutset` / `gettxoutsetinfo` | No UTXO set and no descriptor scan. Not implemented. Address history is Electrum/Esplora. |
 | Address history via Core method names | Use Electrum/Esplora with `--sh-index` |
 | Exact Core JSON field-for-field | Best-effort |
 | Multi-user `rpcauth` / method whitelist | Future |

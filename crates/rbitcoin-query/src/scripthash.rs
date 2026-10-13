@@ -291,17 +291,6 @@ pub struct BlockTouch {
     ids: std::collections::HashSet<u64>,
 }
 
-/// One confirmed unspent from [`Query::scan_unspent_scripts`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ScanUtxo {
-    pub txid: [u8; 32],
-    pub vout: u32,
-    pub height: u32,
-    pub value: u64,
-    pub script: Vec<u8>,
-    pub coinbase: bool,
-}
-
 /// Esplora-style confirmed chain stats for a scripthash.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ScriptHashChainStats {
@@ -1440,41 +1429,6 @@ impl Query {
         };
         self.fill_create_txids(&mut Arc::make_mut(slot_arc).joined, true)?;
         self.listunspent_from_joined(&slot_arc.joined)
-    }
-
-    /// Confirmed unspents whose `scriptPubKey` is in `scripts`.
-    ///
-    /// Scripthash lookups only. Callers require `--sh-index`.
-    pub fn scan_unspent_scripts(&self, scripts: &[Vec<u8>]) -> Result<Vec<ScanUtxo>, QueryError> {
-        if !self.sh_index_enabled() {
-            return Err(StoreError::Cancelled("scripthash index disabled"));
-        }
-        self.scan_unspent_via_shindex(scripts)
-    }
-
-    fn scan_unspent_via_shindex(&self, scripts: &[Vec<u8>]) -> Result<Vec<ScanUtxo>, QueryError> {
-        let mut out = Vec::new();
-        for spk in scripts {
-            let sh = script_hash(spk);
-            for u in self.scripthash_listunspent(&sh)? {
-                let Ok(height) = u32::try_from(u.height) else {
-                    continue;
-                };
-                let coinbase = {
-                    let fks = self.block_tx_fks(Height(height))?;
-                    fks.first().copied() == Some(u.create_tx_fk)
-                };
-                out.push(ScanUtxo {
-                    txid: u.tx_hash,
-                    vout: u.tx_pos,
-                    height,
-                    value: u.value as u64,
-                    script: spk.clone(),
-                    coinbase,
-                });
-            }
-        }
-        Ok(out)
     }
 
     /// Durable SH create count plus pending write-behind for this key.
