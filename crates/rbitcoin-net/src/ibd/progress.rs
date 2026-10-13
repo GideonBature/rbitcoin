@@ -547,6 +547,20 @@ impl StatusBoard {
     }
 }
 
+/// Drop remembered kicks whose address is no longer in the snapshot.
+///
+/// A kick stays remembered while that peer is still published, so the
+/// status thread does not shut the same socket down every 5 seconds.
+/// Once the coordination loop has dropped the peer, a later redial of
+/// the same address can stall and be disconnected again.
+fn forget_departed_addrs(
+    dropped: &mut std::collections::HashSet<std::net::SocketAddr>,
+    wires: &[WireWatch],
+) {
+    let live: std::collections::HashSet<_> = wires.iter().map(|w| w.addr).collect();
+    dropped.retain(|addr| live.contains(addr));
+}
+
 pub(crate) fn spawn_status_thread(
     board: Arc<StatusBoard>,
     query: Arc<rbitcoin_query::Query>,
@@ -579,6 +593,7 @@ pub(crate) fn spawn_status_thread(
                 );
                 let tip = published.tip.unwrap_or(0);
                 let frozen = clock.tip_frozen(tip, now, stall);
+                forget_departed_addrs(&mut dropped, &snap.wires);
                 snap.wires.retain(|w| !dropped.contains(&w.addr));
                 let kicked =
                     drop_stalled_wires(&snap.wires, super::peer_io::ibd_mono_ms(), stall, frozen);
@@ -946,6 +961,44 @@ mod tests {
         assert_eq!(view.owned.h2h_keys, h2h);
         assert_eq!(rbitcoin_query::progress_snapshot_counts(), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_redial_of_a_kicked_addr_can_stall_again() {
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let other: std::net::SocketAddr = "127.0.0.1:2".parse().unwrap();
+        let mut dropped = std::collections::HashSet::new();
+        dropped.insert(addr);
+        let still = [watch_addr(addr)];
+        super::forget_departed_addrs(&mut dropped, &still);
+        assert!(
+            dropped.contains(&addr),
+            "a kicked peer still in the snapshot is not shut down again"
+        );
+        let gone = [watch_addr(other)];
+        super::forget_departed_addrs(&mut dropped, &gone);
+        assert!(
+            !dropped.contains(&addr),
+            "once the peer leaves the snapshot, a redial of that address can stall again"
+        );
+        still[0].abort.abort();
+        gone[0].abort.abort();
+    }
+
+    fn watch_addr(addr: std::net::SocketAddr) -> super::WireWatch {
+        let (cmd_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task: tokio::task::JoinHandle<()> = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        super::WireWatch {
+            cmd_tx,
+            abort,
+            in_flight: 1,
+            getdata_wire: super::super::peer_io::GetdataWire::new(),
+            rate: super::super::rate::PeerRate::default(),
+            alive: true,
+            addr,
+            bytes_rx: 0,
+        }
     }
 
     fn stalled_wire() -> (
