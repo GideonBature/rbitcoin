@@ -167,6 +167,16 @@ impl InFlight {
         }
     }
 
+    /// True when a [`Self::prune_below_height`] at `hi` would drop a tagged pack.
+    ///
+    /// `None` keeps every pack. Equality keeps, matching the prune.
+    pub fn has_tagged_below(&self, hi: Option<u32>) -> bool {
+        let Some(h) = hi else {
+            return false;
+        };
+        self.by_height.range(..h).any(|(_, keys)| !keys.is_empty())
+    }
+
     /// Drop tagged packs with height below `hi`.
     ///
     /// `None` hi keeps every pack. Untagged stay. Equality keeps
