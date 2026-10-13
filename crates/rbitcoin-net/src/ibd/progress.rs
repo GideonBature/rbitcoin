@@ -8,7 +8,8 @@ use super::body::BodyPresence;
 use crate::chain::ChainHub;
 use bitcoin::BlockHash;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Cap status-tick hole walk so a huge missing header band cannot burn the loop.
 const TIP_HOLE_SCAN_MAX: u32 = 8192;
@@ -325,6 +326,267 @@ pub(crate) fn format_rate(rate: f64) -> String {
     } else {
         format!("{rate:.0}")
     }
+}
+
+/// One live peer's block-getdata watch. The status thread sends shutdown
+/// on this copy. It does not take the coordination lock.
+#[derive(Clone)]
+pub(crate) struct WireWatch {
+    pub cmd_tx: tokio::sync::mpsc::UnboundedSender<super::peer_io::PeerCmd>,
+    pub abort: tokio::task::AbortHandle,
+    pub in_flight: usize,
+    pub getdata_wire: Arc<super::peer_io::GetdataWire>,
+    pub rate: super::rate::PeerRate,
+    pub alive: bool,
+    pub addr: std::net::SocketAddr,
+    pub bytes_rx: u64,
+}
+
+/// Numbers the status thread prints. The coordination loop publishes a new
+/// copy when it runs. A stuck loop leaves this snapshot in place.
+#[derive(Clone, Default)]
+pub(crate) struct StatusSnap {
+    pub peers: usize,
+    pub horizon: u32,
+    pub hole: usize,
+    pub header_origin: bool,
+    pub header_height: u32,
+    pub header_stored: u32,
+    pub header_queue: usize,
+    pub header_work_ok: bool,
+    pub header_walk: bool,
+    pub header_quiet: bool,
+    pub wires: Vec<WireWatch>,
+}
+
+/// Confirm-tip clock for the status thread. Wire stalls disconnect only
+/// after this tip has stopped advancing.
+pub(crate) struct StatusClock {
+    tip: u32,
+    moved: Instant,
+    last_sample_tip: u32,
+    last_sample_at: Instant,
+    saw_quiet: bool,
+    rate: TipRateTracker,
+}
+
+impl StatusClock {
+    pub(crate) fn new(tip: u32, now: Instant) -> Self {
+        let mut rate = TipRateTracker::new();
+        rate.push(now, tip);
+        Self {
+            tip,
+            moved: now,
+            last_sample_tip: tip,
+            last_sample_at: now,
+            saw_quiet: false,
+            rate,
+        }
+    }
+
+    /// True when `tip` has not changed for longer than `stall`.
+    pub(crate) fn tip_frozen(&mut self, tip: u32, now: Instant, stall: Duration) -> bool {
+        if tip != self.tip {
+            self.tip = tip;
+            self.moved = now;
+        }
+        now.saturating_duration_since(self.moved) > stall
+    }
+}
+
+fn wire_is_stalled(wire: &WireWatch, now_ms: u64, stall_ms: u64) -> bool {
+    if !wire.alive || wire.in_flight == 0 {
+        return false;
+    }
+    if wire.getdata_wire.unwritten() >= wire.in_flight {
+        return false;
+    }
+    let mut rate = wire.rate;
+    let written = wire.getdata_wire.written_ms();
+    if written > rate.work_started_ms {
+        rate.work_started_ms = written;
+    }
+    rate.stalled(now_ms, stall_ms, true)
+}
+
+/// Shutdown peers whose block getdata is already on the wire, but only when
+/// the confirmed tip itself has stopped. A stuck coordination loop does not
+/// look like a peer stall while confirm is still advancing.
+pub(crate) fn drop_stalled_wires(
+    wires: &[WireWatch],
+    now_ms: u64,
+    stall: Duration,
+    tip_frozen: bool,
+) -> Vec<std::net::SocketAddr> {
+    if !tip_frozen {
+        return Vec::new();
+    }
+    let stall_ms = stall.max(Duration::from_secs(30)).as_millis() as u64;
+    let mut kicked = Vec::new();
+    for wire in wires {
+        if !wire_is_stalled(wire, now_ms, stall_ms) {
+            continue;
+        }
+        rbitcoin_log::warn!(
+            "ibd: peer {} stalled (no block progress for {stall:?}, {} in-flight, stream={}) — disconnect",
+            wire.addr,
+            wire.in_flight,
+            wire.bytes_rx
+        );
+        let _ = wire.cmd_tx.send(super::peer_io::PeerCmd::Shutdown);
+        wire.abort.abort();
+        kicked.push(wire.addr);
+    }
+    kicked
+}
+
+/// One progress line from published counters and the last coordination snapshot.
+pub(crate) fn log_progress_tick(
+    clock: &mut StatusClock,
+    snap: &StatusSnap,
+    published: &ProgressPublished,
+    queues: (usize, usize, usize),
+    bq_count: usize,
+    bq_bytes: u64,
+    now: Instant,
+) {
+    let tip = published.tip.unwrap_or(0);
+    clock.rate.push(now, tip);
+    let horizon = snap.horizon.max(tip);
+    let pct = ibd_pct(tip, horizon);
+    let window = now
+        .saturating_duration_since(clock.last_sample_at)
+        .as_secs_f64()
+        .max(0.001);
+    let tip_rate = tip.saturating_sub(clock.last_sample_tip) as f64 / window;
+    clock.last_sample_tip = tip;
+    clock.last_sample_at = now;
+    let eta_rate = clock.rate.eta_rate(now);
+    let eta = clock.rate.eta_string(now, tip, horizon);
+    let conf_q = super::confirm::format_conf_q(
+        queues.0,
+        queues.1,
+        queues.2,
+        super::confirm::load_queue_cap(),
+        super::confirm::script_queue_cap(),
+        super::confirm::write_queue_cap(),
+    );
+    let line = format_progress_line(&ProgressLineInput {
+        pct,
+        tip,
+        tip_rate,
+        tip_hole: snap.hole,
+        peers: snap.peers,
+        conf_q,
+        txs: published.txs,
+        horizon,
+        eta,
+        bq_bytes,
+        bq_count,
+        bq_soft_stop: rbitcoin_query::soft_confirm_window_n(eta_rate),
+    });
+    rbitcoin_log::info_bold!("{line}");
+    if !snap.header_origin || snap.header_quiet {
+        if snap.header_quiet && !clock.saw_quiet {
+            rbitcoin_log::info!(
+                "ibd: headers done height={} horizon={horizon}",
+                snap.header_height
+            );
+        }
+        clock.saw_quiet = snap.header_quiet;
+        return;
+    }
+    clock.saw_quiet = false;
+    let pct_h = ibd_pct(snap.header_height, horizon.max(snap.header_height));
+    let work = if snap.header_work_ok { "ok" } else { "below" };
+    let phase = if snap.header_walk { "walk" } else { "write" };
+    rbitcoin_log::info!(
+        "ibd: headers height={} ({pct_h}%) horizon={horizon} stored={} queue={} work={work} phase={phase}",
+        snap.header_height,
+        snap.header_stored,
+        snap.header_queue
+    );
+}
+
+/// Snapshot plus stall kicks the coordination loop applies when it next runs.
+pub(crate) struct StatusBoard {
+    snap: std::sync::Mutex<StatusSnap>,
+    kicks: std::sync::Mutex<Vec<std::net::SocketAddr>>,
+    hole: std::sync::atomic::AtomicUsize,
+}
+
+impl StatusBoard {
+    pub(crate) fn new() -> Self {
+        Self {
+            snap: std::sync::Mutex::new(StatusSnap::default()),
+            kicks: std::sync::Mutex::new(Vec::new()),
+            hole: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn publish(&self, snap: StatusSnap) {
+        *self.snap.lock().unwrap_or_else(|e| e.into_inner()) = snap;
+    }
+
+    pub(crate) fn set_hole(&self, hole: usize) {
+        self.hole.store(hole, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_kicks(&self) -> Vec<std::net::SocketAddr> {
+        std::mem::take(&mut *self.kicks.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn note_kicks(&self, addrs: Vec<std::net::SocketAddr>) {
+        if addrs.is_empty() {
+            return;
+        }
+        self.kicks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(addrs);
+    }
+}
+
+pub(crate) fn spawn_status_thread(
+    board: Arc<StatusBoard>,
+    query: Arc<rbitcoin_query::Query>,
+    queues: Arc<super::confirm::ConfirmQueueDepths>,
+    stall: Duration,
+    start_tip: u32,
+    stop: std::sync::mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("ibd-status".into())
+        .spawn(move || {
+            let mut clock = StatusClock::new(start_tip, Instant::now());
+            let mut dropped = std::collections::HashSet::new();
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stop.recv_timeout(Duration::from_secs(5))
+            {
+                let mut snap = board.snap.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                snap.hole = board.hole.load(std::sync::atomic::Ordering::Relaxed);
+                let published = read_progress_published(&query);
+                let (_budget, bq_bytes, bq_count) = query.block_queue_stats();
+                let now = Instant::now();
+                log_progress_tick(
+                    &mut clock,
+                    &snap,
+                    &published,
+                    queues.snap(),
+                    bq_count,
+                    bq_bytes,
+                    now,
+                );
+                let tip = published.tip.unwrap_or(0);
+                let frozen = clock.tip_frozen(tip, now, stall);
+                snap.wires.retain(|w| !dropped.contains(&w.addr));
+                let kicked =
+                    drop_stalled_wires(&snap.wires, super::peer_io::ibd_mono_ms(), stall, frozen);
+                dropped.extend(kicked.iter().copied());
+                board.note_kicks(kicked);
+            }
+        })
+        .expect("ibd-status thread")
 }
 
 /// Pure tip-hole count over tip+1.. using claim-ready flags.
@@ -684,5 +946,48 @@ mod tests {
         assert_eq!(view.owned.h2h_keys, h2h);
         assert_eq!(rbitcoin_query::progress_snapshot_counts(), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn stalled_wire() -> (
+        super::WireWatch,
+        tokio::sync::mpsc::UnboundedReceiver<super::super::peer_io::PeerCmd>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (cmd_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        let wire = super::WireWatch {
+            cmd_tx,
+            abort,
+            in_flight: 1,
+            getdata_wire: super::super::peer_io::GetdataWire::new(),
+            rate: super::super::rate::PeerRate::default(),
+            alive: true,
+            addr: "127.0.0.1:1".parse().unwrap(),
+            bytes_rx: 0,
+        };
+        (wire, rx, task)
+    }
+
+    #[tokio::test]
+    async fn moving_confirm_tip_does_not_drop_a_stalled_wire() {
+        let (wire, mut rx, task) = stalled_wire();
+        let kicked = super::drop_stalled_wires(&[wire], 60_000, Duration::from_secs(30), false);
+        assert!(kicked.is_empty());
+        assert!(rx.try_recv().is_err());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn frozen_confirm_tip_drops_a_stalled_wire() {
+        let (wire, mut rx, _task) = stalled_wire();
+        let mut clock = super::StatusClock::new(10, Instant::now() - Duration::from_secs(60));
+        assert!(clock.tip_frozen(10, Instant::now(), Duration::from_secs(30)));
+        let kicked = super::drop_stalled_wires(&[wire], 60_000, Duration::from_secs(30), true);
+        assert_eq!(kicked.len(), 1);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(super::super::peer_io::PeerCmd::Shutdown)
+        ));
     }
 }

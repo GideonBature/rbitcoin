@@ -869,11 +869,11 @@ impl ChainHub {
     /// Download / fork-start decisions must use this, not [`Self::has_block`]:
     /// the RAM body cache can evict, and `confirmed` is insert-only across
     /// reorgs. A stale "we have it" would permanently suppress getdata.
+    /// The check is the published height index only. A lagging index is a
+    /// miss, not a header-store walk.
     pub fn is_connected(&self, hash: &BlockHash) -> bool {
         self.query
-            .height_of_hash(&hash.to_byte_array())
-            .ok()
-            .flatten()
+            .published_height_of_hash(&hash.to_byte_array())
             .is_some()
     }
 
@@ -1131,12 +1131,7 @@ impl ChainHub {
 
     /// Best-chain or header-only height of `hash`.
     pub fn header_height(&self, hash: &BlockHash) -> Option<u32> {
-        if let Some(h) = self
-            .query
-            .height_of_hash(&hash.to_byte_array())
-            .ok()
-            .flatten()
-        {
+        if let Some(h) = self.query.published_height_of_hash(&hash.to_byte_array()) {
             return Some(h.0);
         }
         self.header_tips.read().unwrap().height_of(hash)

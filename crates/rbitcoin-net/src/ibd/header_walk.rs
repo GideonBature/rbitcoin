@@ -87,7 +87,9 @@ pub(crate) struct HeaderWalk {
     proven: bool,
     /// Stored header hashes from this peer that are not on the download path.
     off_path: std::collections::HashMap<usize, HashSet<BlockHash>>,
-    /// The caught-up line has already been logged.
+    /// The caught-up line has already been logged. The status thread keeps
+    /// its own latch; this one exists so header-walk tests can see it.
+    #[cfg(test)]
     announced_done: bool,
     /// Peers retired from the walk after a short reply that did not extend
     /// the candidate. A block inv or a redial clears the bit. Not written
@@ -355,7 +357,36 @@ fn below_floor(hub: &ChainHub, work: &[u8; 32]) -> bool {
     }
 }
 
-/// Operator line for the header walk, about every 5 seconds.
+/// Header fields for the status thread. No store read.
+pub(crate) struct HeaderStatusView {
+    pub origin: bool,
+    pub height: u32,
+    pub stored: u32,
+    pub queue: usize,
+    pub work_ok: bool,
+    pub walk: bool,
+    pub quiet: bool,
+    pub horizon: u32,
+}
+
+pub(crate) fn header_status_view(st: &IbdWorkState, hub: &ChainHub) -> HeaderStatusView {
+    let walk = wants_lookahead(st);
+    let quiet = st.header_walk.origin && st.header_walk.proven && !walk;
+    HeaderStatusView {
+        origin: st.header_walk.origin,
+        height: st.header_walk.tip_height(),
+        stored: path_top(st, hub).map(|(_, h)| h).unwrap_or(0),
+        queue: st.ordered.len(),
+        work_ok: st.header_walk.proven,
+        walk,
+        quiet,
+        horizon: peer_horizon(st),
+    }
+}
+
+/// Operator line for the header walk. Production logs this from the status
+/// thread. Tests call this to observe the once-only caught-up latch.
+#[cfg(test)]
 pub(crate) fn log_status(st: &mut IbdWorkState, hub: &ChainHub, horizon: u32) {
     if !st.header_walk.origin {
         return;
@@ -2842,6 +2873,7 @@ fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         emptied: HashSet::new(),
         proven: false,
         off_path: std::collections::HashMap::new(),
+        #[cfg(test)]
         announced_done: false,
         walk_quiet: HashSet::new(),
         reserved: None,

@@ -216,6 +216,9 @@ fn misbehavior_disconnects(ban_score: u32, session: Option<&crate::peers::LivePe
 const MAX_PENDING_CMPCT: usize = 1;
 /// Cap on headers held while assembling tip/reorg work (DoS / process RAM).
 const MAX_PENDING_HEADERS: usize = 8_000;
+/// One more step than a full pending map plus one `headers` batch, so the
+/// walk can still see genesis or our tip after the last header.
+const PENDING_WALK_LIMIT: usize = MAX_PENDING_HEADERS + MAX_HEADERS_RESULTS + 1;
 
 /// A new hash at the cap is refused. The headers already held stay.
 fn admit_pending_header(
@@ -1983,7 +1986,7 @@ pub(crate) fn headers_sync_locator(hub: &ChainHub, from: Option<BlockHash>) -> V
 }
 
 fn locator_from_start(hub: &ChainHub, start: BlockHash) -> Vec<BlockHash> {
-    if let Ok(Some(h)) = hub.query.height_of_hash(&start.to_byte_array()) {
+    if let Some(h) = hub.query.published_height_of_hash(&start.to_byte_array()) {
         return locator_from_height(hub, h.0);
     }
     let mut out = vec![start];
@@ -2013,13 +2016,7 @@ fn locator_from_height(hub: &ChainHub, start: u32) -> Vec<BlockHash> {
 }
 
 fn push_genesis_locator(hub: &ChainHub, out: &mut Vec<BlockHash>) {
-    let g = hub
-        .query
-        .header_at_height(Height::GENESIS)
-        .ok()
-        .flatten()
-        .map(|(_, rec)| BlockHash::from_byte_array(rec.hash))
-        .unwrap_or_else(|| BlockHash::from_byte_array([0u8; 32]));
+    let g = hub.params.genesis_hash;
     if out.last() != Some(&g) {
         out.push(g);
     }
@@ -2033,7 +2030,7 @@ pub(crate) fn should_poll_peer_headers(hub: &ChainHub, best_known: Option<BlockH
         return true;
     };
     let our_tip = hub.tip_height().unwrap_or(0);
-    if let Ok(Some(h)) = hub.query.height_of_hash(&best.to_byte_array()) {
+    if let Some(h) = hub.query.published_height_of_hash(&best.to_byte_array()) {
         return h.0 >= our_tip;
     }
     let empty = HashMap::new();
@@ -4755,10 +4752,10 @@ fn is_genesis_hash(h: &BlockHash) -> bool {
 /// and how many pending headers were consumed. Store is not consulted.
 /// `true` when this batch's pending work is under `-minimumchainwork`.
 ///
-/// The sum uses the pending headers and, when they sit on our tip, the cached
-/// tip work. It does not walk parent headers in the store. `None` from the
-/// walk means the batch does not connect through pending headers, so this
-/// returns false and the caller keeps the store path.
+/// The sum uses the pending headers and, when they sit on our tip or another
+/// indexed block, that block's cached chain work. It does not walk parent
+/// headers in the store. `None` means the walk never reached an indexed
+/// block. While our chain is under the floor, that is still the ignore path.
 fn headers_are_below_floor(
     hub: &ChainHub,
     pending_before: &HashMap<BlockHash, bitcoin::block::Header>,
@@ -4779,7 +4776,7 @@ fn headers_are_below_floor(
     };
     match pending_path_work(hub, &pending, last) {
         Some(work) => work.to_be_bytes() < min,
-        None => false,
+        None => true,
     }
 }
 
@@ -4790,7 +4787,7 @@ fn pending_path_work(
 ) -> Option<bitcoin::Work> {
     let mut extra: Vec<bitcoin::Work> = Vec::new();
     let mut h = tip;
-    for _ in 0..10_000 {
+    for _ in 0..PENDING_WALK_LIMIT {
         if is_genesis_hash(&h) {
             extra.reverse();
             return crate::most_work::sum_work(extra.into_iter()).ok();
@@ -4800,7 +4797,14 @@ fn pending_path_work(
             extra.reverse();
             return crate::most_work::sum_work(std::iter::once(base).chain(extra)).ok();
         }
-        let hdr = pending.get(&h).copied()?;
+        let Some(hdr) = pending.get(&h).copied() else {
+            // An indexed ancestor is our chain. Do not walk the header store
+            // to discover a parent this batch did not connect.
+            let height = hub.query.published_height_of_hash(&h.to_byte_array())?;
+            let base = hub.work_through_height(height.0).ok()?;
+            extra.reverse();
+            return crate::most_work::sum_work(std::iter::once(base).chain(extra)).ok();
+        };
         if !hub.header_claimed_pow_ok(&hdr) {
             return None;
         }
@@ -4827,7 +4831,7 @@ fn pending_walk(
 ) -> (BlockHash, u32) {
     let mut h = start;
     let mut steps = 0u32;
-    while steps < 10_000 {
+    while steps < PENDING_WALK_LIMIT as u32 {
         if is_genesis_hash(&h) {
             return (h, steps);
         }
@@ -4873,7 +4877,7 @@ fn persist_pending_header_path(
 ) {
     let mut path = Vec::new();
     let mut h = tip;
-    for _ in 0..10_000 {
+    for _ in 0..PENDING_WALK_LIMIT {
         let Some(hdr) = pending.get(&h) else {
             break;
         };
@@ -4952,9 +4956,7 @@ fn header_branch_vs_tip(
     if hub.is_connected(&start) {
         let ancestor = hub
             .query
-            .height_of_hash(&start.to_byte_array())
-            .ok()
-            .flatten()?
+            .published_height_of_hash(&start.to_byte_array())?
             .0;
         let tip = hub.tip_height()?;
         return Some(0u32.cmp(&tip.saturating_sub(ancestor)));
@@ -4963,14 +4965,9 @@ fn header_branch_vs_tip(
     if is_genesis_hash(&h) {
         return Some(std::cmp::Ordering::Greater);
     }
-    for _ in 0..10_000 {
+    for _ in 0..PENDING_WALK_LIMIT {
         if hub.is_connected(&h) {
-            let ancestor = hub
-                .query
-                .height_of_hash(&h.to_byte_array())
-                .ok()
-                .flatten()?
-                .0;
+            let ancestor = hub.query.published_height_of_hash(&h.to_byte_array())?.0;
             let tip = hub.tip_height()?;
             return Some(n_new.cmp(&tip.saturating_sub(ancestor)));
         }
@@ -5023,14 +5020,9 @@ fn work_of_header_path(
 ) -> Option<bitcoin::Work> {
     let mut extra: Vec<bitcoin::Work> = Vec::new();
     let mut h = tip;
-    for _ in 0..10_000 {
+    for _ in 0..PENDING_WALK_LIMIT {
         if hub.is_connected(&h) {
-            let height = hub
-                .query
-                .height_of_hash(&h.to_byte_array())
-                .ok()
-                .flatten()?
-                .0;
+            let height = hub.query.published_height_of_hash(&h.to_byte_array())?.0;
             let base = hub.work_through_height(height).ok()?;
             extra.reverse();
             return crate::most_work::sum_work(std::iter::once(base).chain(extra)).ok();
@@ -5065,7 +5057,7 @@ fn connecting_header_path(
     }
     let mut path = Vec::new();
     let mut h = tip;
-    for _ in 0..10_000 {
+    for _ in 0..PENDING_WALK_LIMIT {
         if hub.is_connected(&h) {
             break;
         }

@@ -660,6 +660,11 @@ pub(crate) fn note_misbehavior_dead(
 ///
 /// Stalled addresses enter a cooldown so redial does not immediately re-open
 /// the same host under a new peer id (log spam + wasted slots).
+///
+/// The status thread sends that shutdown without this lock. The coordination
+/// loop records the kick and releases in-flight blocks when the task ends.
+/// This lock-holding form is what the stall tests drive.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn disconnect_stalled_block_peers(
     slots: &mut [PeerSlot],
     inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
@@ -681,6 +686,7 @@ pub(crate) fn disconnect_stalled_block_peers(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub(crate) fn disconnect_stalled_block_peers_at(
     slots: &mut [PeerSlot],
