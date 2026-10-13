@@ -213,7 +213,7 @@ file](#tcp-rpc-cookie), not `rpcuser` / `rpcpassword`.
 | Electrum `scriptpubkey.*` (protocol 1.7) | A future Electrum that drops 1.4–1.6, and 1.7-only servers' clients | Hash the provided script and serve the existing scripthash index under the 1.7 response shapes. Then advertise 1.7. |
 | TLS on port 50002 inside the node (**Q-63**) | Phone wallets whose only server field is SSL, when the operator will not run a proxy | A listener. The product today is the reverse proxy. |
 | `getblockchaininfo.softforks` | A client that reads that object and stops | Copy the buried map `getdeploymentinfo` already returns. Current LND does not stop: a missing `softforks` map falls through to `getdeploymentinfo`, and `deployments.taproot` is present. See [`lightning.md`](./lightning.md#bitcoind-with-rpc-polling). |
-| ZMQ | LND's default bitcoind mode, Eclair, Dojo / Ashigaru | A publisher. Not a 1.0 surface. LND's `rpcpolling` path does not need it ([`lightning.md`](./lightning.md)). Eclair and Dojo also need Core wallet RPC. |
+| ZMQ | LND's default bitcoind mode, Eclair, Dojo / Ashigaru | A publisher. Out of scope. LND's `rpcpolling` path does not need it ([`lightning.md`](./lightning.md)). Eclair and Dojo also need Core wallet RPC. |
 | Core wallet RPC | The Core-wallet table above, plus Eclair | Out of scope. |
 | Blockbook WebSocket | Trezor Suite | A new API. |
 | `--network testnet4` | Wallets whose chain selector is testnet4 | A network. Not implemented. |

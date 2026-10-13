@@ -169,7 +169,7 @@ P2P to make Neutrino connect is out of scope.
 ### Default ZMQ mode
 
 `bitcoind.zmqpubrawblock` and `bitcoind.zmqpubrawtx` have nothing to
-connect to. ZMQ is not a 1.0 surface ([`road-to-1.0.md`](./road-to-1.0.md)).
+connect to. ZMQ is out of scope ([`wallets.md`](./wallets.md#what-is-still-missing-for-other-wallets)).
 `rpcpolling` is the configuration that matches the RPC we already serve.
 
 ## Eclair

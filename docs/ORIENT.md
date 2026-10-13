@@ -49,7 +49,7 @@ Ask before any of these, including when the change looks locally justified:
 - Bump or wipe the schema, or add an `RBITCOIN_*` knob.
 - Widen who is trusted beyond [`../SECURITY.md`](../SECURITY.md).
 - Merge, force-push `master`, or `cargo clean` the shared cargo silo.
-- Start an item in [`quality.md`](./quality.md), [`peer-clients.md`](./peer-clients.md),
-  or [`road-to-1.0.md`](./road-to-1.0.md) that the user did not name.
+- Start an item in [`quality.md`](./quality.md) or [`peer-clients.md`](./peer-clients.md)
+  that the user did not name.
 - Open a mainnet datadir, or treat an agent-VM run as a perf result.
 - Label an ordinary net or RPC pull request `core-functional`.

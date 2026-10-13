@@ -1,8 +1,7 @@
 # Quality roadmap (living)
 
 Ranked remaining work and invariants that must not slip. Closed work lives
-in [`CHANGELOG.md`](../CHANGELOG.md). 1.0 product gates:
-[`road-to-1.0.md`](./road-to-1.0.md). Peer-node notes:
+in [`CHANGELOG.md`](../CHANGELOG.md). Peer-node notes:
 [`peer-clients.md`](./peer-clients.md) (do not copy here).
 
 **Last reaudit:** 2026-10-08. Live schema: [`SCHEMA.md`](../SCHEMA.md)
