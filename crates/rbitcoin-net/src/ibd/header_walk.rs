@@ -2,9 +2,10 @@
 //!
 //! The ordered queue is a window over headers already written. One peer, the
 //! lowest time to a first block byte among peers that have not failed the
-//! walk, is asked for the next header only when that header is not already
-//! in the store. The locator is the stored path tip. Headers already written
-//! are appended locally while the queue is under [`ORDERED_HEADERS_SOFT_CAP`].
+//! walk, is asked for the header after the candidate. The locator starts at
+//! that tip, then a lighter fork still being weighed, then earlier
+//! checkpoints. Headers already written are appended locally while the queue
+//! is under [`ORDERED_HEADERS_SOFT_CAP`].
 //! An accepted batch is written and recorded as a checkpoint.
 //! Above the work floor, one short reply that leaves the candidate
 //! unextended retires that peer and the reservation moves. A full
@@ -94,6 +95,9 @@ pub(crate) struct HeaderWalk {
     reserved: Option<usize>,
     /// One ask owed after a block inv.
     challenge: Option<usize>,
+    /// The challenge came from a session that has no header slot. A reply
+    /// that does not beat the candidate must not retire the reserved peer.
+    challenge_external: bool,
     /// Challenge ask already sent. Judged when that peer replies or times out.
     challenge_open: Option<usize>,
     /// The one in-flight headers ask. Not written to `header.adopt`.
@@ -153,6 +157,48 @@ impl HeaderWalk {
 
     pub(crate) fn has_checkpoints(&self) -> bool {
         !self.checkpoints.is_empty()
+    }
+
+    /// Candidate tip, then a lighter fork, then earlier checkpoints.
+    pub(crate) fn locator_hashes(&self) -> Vec<BlockHash> {
+        let mut out = Vec::new();
+        if let Some(h) = self.tip.hash {
+            out.push(h);
+        }
+        if let Some(ch) = &self.challenger {
+            if let Some(h) = ch.tip.hash {
+                if !out.contains(&h) {
+                    out.push(h);
+                }
+            }
+        }
+        let mut step = 1usize;
+        let mut i = self.checkpoints.len();
+        while i > 0 && out.len() < 8 {
+            i = i.saturating_sub(step);
+            let h = self.checkpoints[i].hash;
+            if !out.contains(&h) {
+                out.push(h);
+            }
+            if i == 0 {
+                break;
+            }
+            step = step.saturating_mul(2);
+        }
+        out
+    }
+
+    /// Height of the header after the candidate, when the walk has a tip.
+    pub(crate) fn next_height(&self) -> Option<u32> {
+        if !self.origin || self.tip.hash.is_none() {
+            return None;
+        }
+        Some(self.tip.height.saturating_add(1))
+    }
+
+    /// `height` is on the candidate and past the queue, so hygiene keeps it.
+    pub(crate) fn indexes_through(&self, height: u32) -> bool {
+        self.origin && self.tip.hash.is_some() && height > 0 && height <= self.tip.height
     }
 }
 
@@ -436,6 +482,10 @@ pub(crate) fn settle_walk_peer(
     if below_floor(hub, &st.header_walk.tip_work()) || extended {
         return;
     }
+    // This reply is the walk's answer to someone else's block inv.
+    if st.header_walk.challenge_open == Some(peer) && st.header_walk.challenge_external {
+        return;
+    }
     st.header_walk.walk_quiet.insert(peer);
 }
 
@@ -446,6 +496,7 @@ pub(crate) fn settle_walk_peer(
 /// is the challenge: connect-time height does not move when a new block
 /// is found.
 pub(crate) fn note_block_inv(st: &mut IbdWorkState, peer: usize) {
+    st.header_walk.challenge_external = false;
     st.header_walk.walk_quiet.remove(&peer);
     let above = st.header_walk.tip_height();
     let walk_will_ask = st.header_walk.reserved == Some(peer)
@@ -464,6 +515,16 @@ pub(crate) fn note_external_block_inv(st: &mut IbdWorkState) -> bool {
         return false;
     };
     note_block_inv(st, peer);
+    if st.header_walk.challenge == Some(peer) {
+        st.header_walk.challenge_external = true;
+        // The ask already in flight is the answer. Waiting for the lane to
+        // clear lets this reply retire the peer, and a quiet peer then drops
+        // the challenge.
+        if st.header_walk.walk.peer == Some(peer) {
+            st.header_walk.challenge = None;
+            st.header_walk.challenge_open = Some(peer);
+        }
+    }
     true
 }
 
@@ -475,9 +536,11 @@ pub(crate) fn forget_walk_peer(st: &mut IbdWorkState, peer: usize) {
     }
     if st.header_walk.challenge == Some(peer) {
         st.header_walk.challenge = None;
+        st.header_walk.challenge_external = false;
     }
     if st.header_walk.challenge_open == Some(peer) {
         st.header_walk.challenge_open = None;
+        st.header_walk.challenge_external = false;
     }
 }
 
@@ -497,11 +560,13 @@ pub(crate) fn note_reservation(
 ) {
     let beat = st.header_walk.tip_hash() != tip_before && st.header_walk.tip_work() > work_before;
     if st.header_walk.challenge_open == Some(peer) {
+        let external = st.header_walk.challenge_external;
         st.header_walk.challenge_open = None;
+        st.header_walk.challenge_external = false;
         if beat {
             st.header_walk.reserved = Some(peer);
             st.header_walk.walk_quiet.remove(&peer);
-        } else if !below_floor(hub, &st.header_walk.tip_work()) {
+        } else if !external && !below_floor(hub, &st.header_walk.tip_work()) {
             st.header_walk.walk_quiet.insert(peer);
             if st.header_walk.reserved == Some(peer) {
                 st.header_walk.reserved = None;
@@ -2000,6 +2065,7 @@ fn expire_header_ask(st: &mut IbdWorkState) -> Option<usize> {
     };
     if st.header_walk.challenge_open == Some(peer) {
         st.header_walk.challenge_open = None;
+        st.header_walk.challenge_external = false;
         if n >= HEADER_MISS_DISCONNECT {
             st.header_walk.header_misses.remove(&peer);
             punish_header_peer(st, peer);
@@ -2050,7 +2116,7 @@ pub(crate) fn send_getheaders(
 ) -> Result<bool, crate::error::NetError> {
     ensure_origin(st, hub);
     super::path::append_stored_headers(st, hub);
-    if super::path::next_header_indexed(st, hub) {
+    if st.header_walk.challenge.is_none() && super::path::walk_successor_indexed(st, hub) {
         release_lane(&mut st.header_walk.walk);
         return Ok(false);
     }
@@ -2068,13 +2134,17 @@ fn arm_header_ask(st: &mut IbdWorkState, hub: &ChainHub) -> Result<bool, crate::
         return Ok(true);
     }
     let skip = expire_header_ask(st);
-    let tips = super::path::work_path_tips(st);
+    let mut tips = st.header_walk.locator_hashes();
+    if tips.is_empty() {
+        tips = super::path::work_path_tips(st);
+    }
     let above = path_top(st, hub).map(|(_, height)| height).unwrap_or(0);
     if let Some(peer) = take_challenge(st) {
         if ask_header_peer(st, hub, peer, &tips)? {
             st.header_walk.challenge_open = Some(peer);
             return Ok(true);
         }
+        st.header_walk.challenge_external = false;
     }
     ensure_reserved(st, above, skip);
     if st.header_walk.reserved.is_none() {
@@ -2160,7 +2230,12 @@ fn pick_header_peer(st: &IbdWorkState, above: u32, skip: Option<usize>) -> Optio
 
 fn ensure_reserved(st: &mut IbdWorkState, above: u32, skip: Option<usize>) {
     if let Some(id) = st.header_walk.reserved {
-        if peer_can_head(st, id, above) && skip != Some(id) {
+        // An empty reply asks again before that challenge is judged. Moving
+        // the reservation here would drop the header peer for an inv that
+        // did not come from them.
+        let unjudged_external =
+            st.header_walk.challenge_open == Some(id) && st.header_walk.challenge_external;
+        if unjudged_external || (peer_can_head(st, id, above) && skip != Some(id)) {
             return;
         }
     }
@@ -2786,6 +2861,7 @@ fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         walk_quiet: HashSet::new(),
         reserved: None,
         challenge: None,
+        challenge_external: false,
         challenge_open: None,
         walk: Lane::default(),
         header_misses: HashMap::new(),
@@ -3447,8 +3523,8 @@ mod tests {
         };
         assert_eq!(
             front,
-            Some(gen),
-            "a missing next header is asked from the stored tip"
+            Some(second.block_hash()),
+            "a missing next header is asked from the walk tip, not the rewound queue"
         );
         let other = if ask == 0 {
             rx1.try_recv()
@@ -3552,21 +3628,21 @@ mod tests {
             }
         }
         assert!(
-            fronts.contains(&stored),
-            "the refill starts at the reseeded tail, not the confirmed tip: {fronts:?}"
+            fronts.contains(&second.block_hash()),
+            "the ask starts at the walk tip; the queue refill is the reseeded path: {fronts:?}"
         );
     }
 
     #[test]
     fn missing_next_header_asks_from_the_stored_tip() {
-        let (_dir, hub, mut st, mut rxs, _first, tail) =
+        let (_dir, hub, mut st, mut rxs, first, _tail) =
             walk_ahead_of_a_short_queue("header-walk-missing", 20_000, 1);
         st.height_to_hash.remove(&1);
         assert!(send_getheaders(&mut st, &hub).unwrap());
         assert_eq!(
             locator_front(&mut rxs[0]),
-            Some(tail),
-            "a missing next header is asked from the stored tip"
+            Some(first.block_hash()),
+            "a missing next header is asked from the walk tip, not the queue tail"
         );
     }
 
@@ -5440,6 +5516,160 @@ mod tests {
     }
 
     #[test]
+    fn a_full_queue_next_ask_starts_at_the_walk_tip() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-ask-past-cap");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let a1 = mine(gen, 1);
+        let a2 = mine(a1.block_hash(), 2);
+        floor_unreachable(&mut hub);
+        let (mut peer, mut rx) = slot(0);
+        peer.peer_height = 100_000;
+        let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        queue_at_cap_ending_on(&mut st, &hub, a1);
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        apply(&mut st, &hub, 0, vec![a2]);
+        assert!(
+            !st.ordered_set.contains(&a2.block_hash()),
+            "the soft cap keeps the new header off the queue"
+        );
+        assert_eq!(st.header_walk.tip_hash(), Some(a2.block_hash()));
+        st.hygiene();
+        assert!(
+            st.height_to_hash
+                .values()
+                .any(|hash| *hash == a2.block_hash()),
+            "a header written past the queue stays indexed until the queue takes it"
+        );
+        assert!(
+            send_getheaders(&mut st, &hub).unwrap(),
+            "the walk still needs the header after the one it just stored"
+        );
+        match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => {
+                assert_eq!(
+                    locator[0],
+                    a2.block_hash(),
+                    "the ask starts at the stored walk tip, not the queue tail"
+                );
+            }
+            Ok(_) => panic!("expected getheaders"),
+            Err(_) => panic!("peer was not asked for the next header"),
+        }
+    }
+
+    #[test]
+    fn a_heavier_fork_below_the_floor_is_written_when_the_queue_has_room() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-stray-write");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        floor_unreachable(&mut hub);
+        let (s0, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+        let mut prev = gen;
+        let mut candidate = Vec::new();
+        for n in 1..=2 {
+            let hdr = mine(prev, n);
+            prev = hdr.block_hash();
+            candidate.push(hdr);
+        }
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        apply(&mut st, &hub, 0, candidate);
+        let before = hub.query.store().header_count();
+        let mut prev = gen;
+        let mut fork = Vec::new();
+        for n in 20..26 {
+            let hdr = mine(prev, n);
+            prev = hdr.block_hash();
+            fork.push(hdr);
+        }
+        let heavy = prev;
+        apply(&mut st, &hub, 0, fork);
+        assert_eq!(st.header_walk.tip_hash(), Some(heavy));
+        assert!(
+            hub.query.store().header_count() > before,
+            "a heavier fork is written when the queue can hold it"
+        );
+    }
+
+    #[test]
+    fn an_external_block_inv_does_not_retire_the_header_peer() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-external-inv");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        hub.milestone.anchor = Some(rbitcoin_consensus::MilestoneAnchor {
+            hash: gen,
+            min_work_be: [0; 32],
+        });
+        let (mut peer, mut rx) = slot(0);
+        peer.peer_height = 1;
+        let (mut tall, _tall_rx) = slot(1);
+        tall.peer_height = 50;
+        let mut st = IbdWorkState::new(vec![peer, tall], Some(gen), Some(0));
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        apply(&mut st, &hub, 0, vec![mine(gen, 1)]);
+        assert_eq!(st.header_walk.reserved, Some(0));
+        assert_eq!(st.header_walk.tip_height(), 1);
+        assert!(note_external_block_inv(&mut st));
+        assert_eq!(st.header_walk.challenge, Some(0));
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        apply(&mut st, &hub, 0, vec![]);
+        assert_eq!(
+            st.header_walk.reserved,
+            Some(0),
+            "an inv from a peer with no header slot does not drop the reservation"
+        );
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "that empty reply does not retire the header peer"
+        );
+    }
+
+    #[test]
+    fn an_inflight_external_inv_does_not_retire_on_empty() {
+        let (_dir, mut hub) =
+            crate::chain::tiny_regtest_hub_labeled("header-walk-external-inflight");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        hub.milestone.anchor = Some(rbitcoin_consensus::MilestoneAnchor {
+            hash: gen,
+            min_work_be: [0; 32],
+        });
+        let (mut peer, mut rx) = slot(0);
+        peer.peer_height = 1;
+        let (mut tall, _tall_rx) = slot(1);
+        tall.peer_height = 50;
+        let mut st = IbdWorkState::new(vec![peer, tall], Some(gen), Some(0));
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        assert_eq!(st.header_walk.reserved, Some(0));
+        assert_eq!(st.header_walk.walk.peer, Some(0));
+        // The walk caught this peer's advertised height while their ask is
+        // still out, so the inv is a challenge rather than the next walk ask.
+        st.header_walk.tip.height = st.slots[0].peer_height;
+        assert!(note_external_block_inv(&mut st));
+        assert_eq!(
+            st.header_walk.challenge_open,
+            Some(0),
+            "the ask already in flight is the challenge answer"
+        );
+        apply(&mut st, &hub, 0, vec![]);
+        assert_eq!(
+            st.header_walk.reserved,
+            Some(0),
+            "an inv from a peer with no header slot does not drop the reservation"
+        );
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "the in-flight empty reply does not retire the header peer"
+        );
+    }
+
+    #[test]
     fn a_heavier_chain_arriving_in_two_batches_replaces_the_candidate() {
         let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-two-batch");
         hub.ensure_genesis().unwrap();
@@ -5482,12 +5712,10 @@ mod tests {
         assert!(send_getheaders(&mut st, &hub).unwrap());
         match rx.try_recv() {
             Ok(PeerCmd::GetHeaders { locator }) => {
-                assert_eq!(
-                    locator[0],
-                    st.ordered.back().copied().unwrap(),
-                    "the ask starts at the stored tip"
+                assert!(
+                    locator.contains(&prev),
+                    "the ask names the lighter fork so that peer can send the next window"
                 );
-                assert_ne!(locator[0], prev);
             }
             Ok(_) => panic!("expected getheaders"),
             Err(_) => panic!("peer was not asked for headers"),

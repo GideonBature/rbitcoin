@@ -419,9 +419,18 @@ impl IbdWorkState {
         });
         // Retain chained occupants. Do not clear+rebuild (HashMap order is
         // last-write and would remix two hashes at one height).
+        let queue_tail = self
+            .ordered
+            .iter()
+            .rev()
+            .find(|hash| live.contains(*hash))
+            .and_then(|hash| self.hash_height.get(hash).copied())
+            .unwrap_or(0);
         self.height_to_hash.retain(|ht, hash| {
             self.hash_height.get(hash) == Some(ht)
-                && (live.contains(hash) || inflight.contains_key(hash))
+                && (live.contains(hash)
+                    || inflight.contains_key(hash)
+                    || (*ht > queue_tail && self.header_walk.indexes_through(*ht)))
         });
         if self.known_headers.len() > live.len().saturating_add(4096) {
             self.known_headers

@@ -324,9 +324,24 @@ pub(crate) fn next_path_height(st: &IbdWorkState, hub: &ChainHub) -> Option<u32>
     Some(hub.tip_height().unwrap_or(0).saturating_add(1))
 }
 
-/// The header after the stored path is already in `height_to_hash`.
-pub(crate) fn next_header_indexed(st: &IbdWorkState, hub: &ChainHub) -> bool {
-    next_path_height(st, hub).is_some_and(|height| st.height_to_hash.contains_key(&height))
+/// The header after the candidate is indexed and can still join the queue.
+///
+/// An ineligible occupant (confirmed, rejected, or invalid) does not count:
+/// treating it as stored would suppress every later ask.
+pub(crate) fn walk_successor_indexed(st: &IbdWorkState, hub: &ChainHub) -> bool {
+    let height = if let Some(height) = st.header_walk.next_height() {
+        height
+    } else if let Some(height) = next_path_height(st, hub) {
+        height
+    } else {
+        return false;
+    };
+    let Some(&hash) = st.height_to_hash.get(&height) else {
+        return false;
+    };
+    !st.reorg.invalid.contains(hash.to_byte_array())
+        && !st.body.is_rejected(&hash)
+        && !hub.has_block(&hash)
 }
 
 /// Append stored work-path headers while the queue is under the soft cap.

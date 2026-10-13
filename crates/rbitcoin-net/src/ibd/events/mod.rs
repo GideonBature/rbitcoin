@@ -665,10 +665,13 @@ fn plan_header_reply(
         }
         super::header_walk::HeaderClass::WalkStore => headers.len(),
         super::header_walk::HeaderClass::Stray => {
-            if super::header_walk::suppress_competing_chain(st, hub, peer, &headers) {
+            let before = super::header_walk::candidate_tip(st);
+            if super::header_walk::suppress_competing_chain(st, hub, peer, &headers)
+                || super::header_walk::candidate_tip(st) == before
+            {
                 return HeaderPlan::Done;
             }
-            return HeaderPlan::Done;
+            headers.len()
         }
         super::header_walk::HeaderClass::Refill => {
             if super::header_walk::reject_refill_miss(st, hub, &headers) {
