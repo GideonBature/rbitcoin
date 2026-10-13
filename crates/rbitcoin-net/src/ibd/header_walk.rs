@@ -559,6 +559,23 @@ pub(crate) fn inv_challenge_due(st: &IbdWorkState) -> bool {
     st.header_walk.challenge.is_some() && !lane_fresh(&st.header_walk.walk)
 }
 
+/// The queue still has room, or a gap / look-ahead still needs headers.
+fn header_sync_open(st: &IbdWorkState, poll: &HeaderPollIn) -> bool {
+    poll.live < ORDERED_HEADERS_SOFT_CAP
+        || poll.need_ready_headroom
+        || wants_lookahead(st)
+        || walk_ahead_of_stored(st)
+}
+
+/// Something other than a full quiet queue is waiting on the next header.
+fn header_ask_due(st: &IbdWorkState, poll: &HeaderPollIn) -> bool {
+    poll.live < poll.min_cache
+        || poll.lag > 0
+        || poll.need_ready_headroom
+        || wants_lookahead(st)
+        || walk_ahead_of_stored(st)
+}
+
 /// Decide the main-loop header poll.
 ///
 /// A pending block-inv challenge is an ask even when the queue is at the
@@ -571,24 +588,17 @@ pub(crate) fn header_poll(st: &IbdWorkState, poll: HeaderPollIn) -> HeaderPoll {
     if st.headers_done || poll.live >= super::MAX_ORDERED_HEADERS {
         return HeaderPoll::Wait;
     }
-    let under_soft = poll.live < ORDERED_HEADERS_SOFT_CAP;
-    let gap = walk_ahead_of_stored(st);
-    if !(under_soft || poll.need_ready_headroom || wants_lookahead(st) || gap) {
+    if !header_sync_open(st, &poll) {
         return HeaderPoll::Wait;
     }
     if poll.live == 0 {
-        return if poll.fan == 0 && !gap {
+        return if poll.fan == 0 && !walk_ahead_of_stored(st) {
             HeaderPoll::LatchDone
         } else {
             HeaderPoll::Ask
         };
     }
-    if poll.live < poll.min_cache
-        || poll.lag > 0
-        || poll.need_ready_headroom
-        || wants_lookahead(st)
-        || gap
-    {
+    if header_ask_due(st, &poll) {
         return HeaderPoll::Ask;
     }
     HeaderPoll::Wait
