@@ -23,6 +23,56 @@ pub const VERIFY_TIP_BLOCKS: u32 = 6;
 /// Progress cadence while the open window walks confirmed heights.
 const TIP_REVALIDATE_STATUS_MS: u128 = 10_000;
 
+/// Start, 10s progress, and done lines for one tip-window walk.
+struct TipRevalidateLog {
+    started: std::time::Instant,
+    logged_at: std::time::Instant,
+    count: u64,
+    walked: u64,
+}
+
+impl TipRevalidateLog {
+    fn start(lo: u32, tip: u32) -> Self {
+        let count = u64::from(tip - lo) + 1;
+        rbitcoin_log::info!("store: tip revalidate {lo}..={tip} ({count} heights)");
+        let started = std::time::Instant::now();
+        Self {
+            started,
+            logged_at: started,
+            count,
+            walked: 0,
+        }
+    }
+
+    fn step(&mut self, height: u32) {
+        self.walked += 1;
+        if self.logged_at.elapsed().as_millis() >= TIP_REVALIDATE_STATUS_MS {
+            rbitcoin_log::info!(
+                "store: tip revalidate {}/{} height={height}",
+                self.walked,
+                self.count
+            );
+            self.logged_at = std::time::Instant::now();
+        }
+    }
+
+    fn done(&self, report: &TipRevalidateReport) {
+        let height = match report.tip_after {
+            Some(h) => h.to_string(),
+            None => "none".to_string(),
+        };
+        let ms = self.started.elapsed().as_millis();
+        if let Some(bad) = report.first_bad_height {
+            rbitcoin_log::info!(
+                "store: tip revalidate done height={height} ms={ms} bad={bad} reason={}",
+                report.first_bad_reason.unwrap_or("")
+            );
+        } else {
+            rbitcoin_log::info!("store: tip revalidate done height={height} ms={ms}");
+        }
+    }
+}
+
 /// Soft tip seal file under `store/` (not a SCHEMA_VERSION bump).
 pub const TIP_SEAL_NAME: &str = "tip_seal";
 
@@ -299,11 +349,7 @@ impl Store {
         let tx_count = self.txs.count();
         let mut last_good: Option<u32> = if lo == 0 { None } else { Some(lo - 1) };
         // Heights below the window are assumed good for shrink baseline when lo > 0.
-        let count = u64::from(tip.0 - lo) + 1;
-        let started = std::time::Instant::now();
-        rbitcoin_log::info!("store: tip revalidate {lo}..={} ({count} heights)", tip.0);
-        let mut logged_at = started;
-        let mut walked = 0u64;
+        let mut progress = TipRevalidateLog::start(lo, tip.0);
 
         for h in lo..=tip.0 {
             match self.check_confirmed_height(Height(h), tx_count, &mut report) {
@@ -314,11 +360,7 @@ impl Store {
                     break;
                 }
             }
-            walked += 1;
-            if logged_at.elapsed().as_millis() >= TIP_REVALIDATE_STATUS_MS {
-                rbitcoin_log::info!("store: tip revalidate {walked}/{count} height={h}");
-                logged_at = std::time::Instant::now();
-            }
+            progress.step(h);
         }
 
         if report.first_bad_height.is_some() {
@@ -331,19 +373,7 @@ impl Store {
             self.header_txs.flush()?;
         }
         let _ = self.publish_tip_seal();
-        let height = match report.tip_after {
-            Some(h) => h.to_string(),
-            None => "none".to_string(),
-        };
-        let ms = started.elapsed().as_millis();
-        if let Some(bad) = report.first_bad_height {
-            rbitcoin_log::info!(
-                "store: tip revalidate done height={height} ms={ms} bad={bad} reason={}",
-                report.first_bad_reason.unwrap_or("")
-            );
-        } else {
-            rbitcoin_log::info!("store: tip revalidate done height={height} ms={ms}");
-        }
+        progress.done(&report);
         Ok(report)
     }
 
@@ -881,11 +911,24 @@ mod tests {
         s.header_txs.flush().unwrap();
         s.txs.flush().unwrap();
 
+        rbitcoin_log::capture_logs(true);
         let r = s.revalidate_tip_window_n(6).unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
         assert_eq!(r.first_bad_reason, Some("merkle root mismatch"));
         assert!(r.bodies_cleared >= 1);
         assert!(r.tip_shrunk);
         assert!(s.confirmed.tip_height().is_none());
+        let text = logs
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("store: tip revalidate done height=none"),
+            "{text}"
+        );
+        assert!(text.contains("bad=0 reason=merkle root mismatch"), "{text}");
         assert!(!s.header_txs.has_body(g_fk).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
