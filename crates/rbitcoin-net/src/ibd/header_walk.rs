@@ -146,7 +146,7 @@ impl HeaderWalk {
         self.tip.height
     }
 
-    fn tip_hash(&self) -> Option<BlockHash> {
+    pub(crate) fn tip_hash(&self) -> Option<BlockHash> {
         self.tip.hash
     }
 
