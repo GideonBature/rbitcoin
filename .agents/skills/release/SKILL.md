@@ -37,6 +37,5 @@ then HTTPS-push the tag (a `GITHUB_TOKEN` tag push does not start
 `release.yml`).
 
 Which sequence to run (minor, patch, major) is the Playbooks section of
-[`docs/releases.md`](../../../docs/releases.md). Stop before tagging `v1.0.0`
-if [`docs/road-to-1.0.md`](../../../docs/road-to-1.0.md) still has an open
-promise.
+[`docs/releases.md`](../../../docs/releases.md). Do not tag `v1.0.0` until
+[`SECURITY.md`](../../../SECURITY.md) names a 1.0.x support window.

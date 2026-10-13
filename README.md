@@ -64,8 +64,9 @@ Core or Fulcrum replacement, not a soak badge. Run **signet first**, then
 mainnet with monitoring ([`OPERATOR.md`](./OPERATOR.md)). First hour on
 regtest (mine → Electrum → Esplora): [`docs/operator/operations.md`](./docs/operator/operations.md#first-hour-regtest).
 Finishing any one operator’s first full mainnet sync is **not** a gate for
-using or packaging this tree. 1.0 gates:
-[`docs/road-to-1.0.md`](./docs/road-to-1.0.md).
+using or packaging this tree. Ongoing test growth is
+[`docs/quality.md`](./docs/quality.md). A 1.0 tag waits on a support window
+in [`SECURITY.md`](./SECURITY.md).
 
 **0.8:** drop-in for **mempool/electrs or Blockstream electrs HTTP** (not
 address-prefix, not their `/api/v1/` Node process). Core RPC for that stack

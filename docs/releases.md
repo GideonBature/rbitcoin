@@ -26,7 +26,7 @@ Homes that must match on a ship commit: `Cargo.toml`
 `## [X.Y.Z]` with a **`### Highlights`** subsection (1–10 bullets,
 operator-facing, then the thanks paragraph when this release has one).
 `./scripts/release-gate.sh` checks the bullets. Narrative banners
-(README, SECURITY, `docs/road-to-1.0.md`, `docs/experimental-mainnet.md`)
+(README, SECURITY, `docs/experimental-mainnet.md`)
 are edited on the same bump PR; the scripts do not rewrite them.
 
 `./scripts/release-cut.sh` folds [`changelog.d/`](../changelog.d/) into
@@ -214,10 +214,9 @@ From current `origin/master` at `X.Y.99`:
 
 ### Major (`do a major release`)
 
-Same as minor with `--major`, **after** reading
-[`road-to-1.0.md`](./road-to-1.0.md). If any 1.0 promise is still open,
-**stop** and report; do not tag `v1.0.0` as a dry run. 1.0 also updates
-SECURITY support window and schema-freeze language.
+Same as minor with `--major`. Do not tag `v1.0.0` until
+[`SECURITY.md`](../SECURITY.md) names a 1.0.x support window. The same
+bump updates that window and the schema-freeze language.
 
 ---
 

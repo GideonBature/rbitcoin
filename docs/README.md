@@ -21,8 +21,7 @@ Planning a multi-step change: [`how-we-plan.md`](./how-we-plan.md).
 Workspace crate roles and dependency orientation: [`CRATES.md`](./CRATES.md).
 Home-node overlays and seqsigwit-window prune: [`operator/operations.md`](./operator/operations.md).
 Releases (tag / `vX.Y.x` / `.99`): [`releases.md`](./releases.md).
-1.0 product gates: [`road-to-1.0.md`](./road-to-1.0.md) (not the living
-quality backlog).
+Living quality backlog: [`quality.md`](./quality.md).
 
 Agent task router (not a second fact index): [`ORIENT.md`](./ORIENT.md).
 Process playbooks: [`.agents/skills/`](../.agents/skills/). Do not copy them
@@ -55,7 +54,6 @@ into `AGENTS.md`.
 | [`releases.md`](./releases.md) | Tag `vX.Y.Z`, `vX.Y.x` patch line, `.99` bump, Highlights / GitHub notes. |
 | [`code-shape.md`](./code-shape.md) | Control flow, types, naming, composition (CONTRIBUTING principle 10). Named extracts: quality.md **Q-61** (Completed). Clippy: no workspace `allow` list; leftover lints are site-local with a reason. |
 | [`quality.md`](./quality.md) | Living quality roadmap (Open + Won't-fix + Parked + Protect). |
-| [`road-to-1.0.md`](./road-to-1.0.md) | 1.0 product gates and milestone sequence. |
 | [`reproducible-builds.md`](./reproducible-builds.md) | Pinned Nix / musl byte-identity. |
 | [`rust-bitcoin-limitations.md`](./rust-bitcoin-limitations.md) | rust-bitcoin workarounds, and the upstream issue queue (user-facing bugs, node-only gaps, performance). |
 | [`mempool-fee-estimation.md`](./mempool-fee-estimation.md) | Fee estimator notes. |
