@@ -286,6 +286,12 @@ fn publish_status_snap(st: &IbdWorkState, hub: &ChainHub, board: &StatusBoard) {
         header_quiet: headers.quiet,
         wires,
     });
+    let walk_tip = if headers.origin {
+        st.header_walk.tip_hash().map(|hash| (hash, headers.height))
+    } else {
+        None
+    };
+    hub.note_ibd_header_tip(walk_tip);
 }
 
 #[allow(clippy::cognitive_complexity)] // IBD coordination: dial, confirm, headers, stall

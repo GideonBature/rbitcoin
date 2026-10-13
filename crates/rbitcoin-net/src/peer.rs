@@ -1958,7 +1958,7 @@ pub async fn peer_session_with(
 
 /// Tip locator for post-handshake `getheaders` (store chain; genesis fallback).
 pub(crate) fn tip_follow_locator(hub: &ChainHub) -> Vec<BlockHash> {
-    match hub.query.locator_hashes() {
+    let mut v = match hub.query.locator_hashes() {
         Ok(mut v) if !v.is_empty() => {
             if v.len() > MAX_LOCATOR_SZ {
                 v.truncate(MAX_LOCATOR_SZ);
@@ -1973,6 +1973,27 @@ pub(crate) fn tip_follow_locator(hub: &ChainHub) -> Vec<BlockHash> {
             v.push(BlockHash::from_byte_array([0u8; 32]));
             v
         }
+    };
+    prepend_ibd_header_tip(hub, &mut v);
+    v
+}
+
+/// During IBD the first locator hash is the header-walk tip. The confirmed
+/// chain stays behind it so a peer that does not have the walk tip can still
+/// find a common block.
+fn prepend_ibd_header_tip(hub: &ChainHub, loc: &mut Vec<BlockHash>) {
+    if !hub.in_ibd() {
+        return;
+    }
+    let Some((walk, _)) = hub.ibd_header_tip() else {
+        return;
+    };
+    if loc.first() == Some(&walk) {
+        return;
+    }
+    loc.insert(0, walk);
+    if loc.len() > MAX_LOCATOR_SZ {
+        loc.truncate(MAX_LOCATOR_SZ);
     }
 }
 
@@ -2058,7 +2079,11 @@ fn maybe_queue_initial_getheaders(
         .peer_hub()
         .is_some_and(|ph| ph.try_start_headers_sync(session, now, best_t));
     if started {
-        let h = hub.tip_height().unwrap_or(0);
+        let h = hub
+            .ibd_header_tip()
+            .filter(|_| hub.in_ibd())
+            .map(|(_, height)| height)
+            .unwrap_or_else(|| hub.tip_height().unwrap_or(0));
         rbitcoin_log::info!("{}", crate::chain::initial_getheaders_log(h, session.id));
         let _ = queue_getheaders(out, hub, Some(session), true, None);
     }

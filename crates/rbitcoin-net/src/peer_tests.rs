@@ -150,6 +150,34 @@ fn tip_follow_locator_includes_tip_after_genesis() {
 }
 
 #[test]
+fn ibd_connect_locator_starts_at_the_header_walk_tip() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ibd-walk-loc");
+    hub.ensure_genesis().unwrap();
+    assert!(hub.in_ibd(), "regtest genesis is older than 24h");
+    let confirmed = hub.tip_hash().unwrap();
+    let walk = BlockHash::from_byte_array([0x11; 32]);
+    hub.note_ibd_header_tip(Some((walk, 50)));
+    let loc = tip_follow_locator(&hub);
+    assert_eq!(
+        loc[0], walk,
+        "a connecting peer locates from the header walk"
+    );
+    assert!(
+        loc.iter().skip(1).any(|h| *h == confirmed),
+        "the confirmed chain stays in the locator as a fallback"
+    );
+
+    hub.set_max_tip_age_secs(u64::MAX);
+    assert!(!hub.in_ibd(), "a fresh tip leaves IBD");
+    let loc = tip_follow_locator(&hub);
+    assert_eq!(
+        loc[0], confirmed,
+        "tip-follow locates from the confirmed tip"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn headers_sync_locator_from_unknown_starts_at_that_hash() {
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("loc-unk");
     hub.ensure_genesis().unwrap();
