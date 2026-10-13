@@ -1587,6 +1587,114 @@ async fn below_floor_headers_do_not_walk_parents() {
     let _ = std::fs::remove_dir_all(src_dir);
 }
 
+/// A lagging height index is not connected. Filling that gap reads every
+/// missing header, so the peer and IBD checks must not do it.
+#[tokio::test]
+async fn connected_check_does_not_catch_up_the_height_index() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("idx-lag-conn");
+    hub.ensure_genesis().unwrap();
+    hub.generate_to_script(4, op_true(), vec![]).unwrap();
+    let tip = hub.tip_hash().unwrap();
+    assert!(hub.is_connected(&tip));
+    hub.query.invalidate_height_by_hash_index();
+    crate::chain::reset_header_store_counts();
+    let before = rbitcoin_query::header_lookup_count();
+    assert!(
+        !hub.is_connected(&tip),
+        "a hash above the indexed tip is not connected until the index catches up on its own"
+    );
+    let looked = rbitcoin_query::header_lookup_count().saturating_sub(before);
+    assert_eq!(
+        looked, 0,
+        "the connected check must not read headers to fill the index, looked={looked}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A header that does not connect through pending headers is still ignored
+/// while our chain is under the floor. Summing that path used to give up
+/// and read parent headers.
+#[tokio::test]
+async fn below_floor_disconnected_header_does_not_walk_parents() {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("below-floor-disc");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    hub.set_minimum_chain_work(Some(work_floor(0xff)));
+    assert!(!hub.meets_minimum_chain_work());
+    let peers = crate::peers::PeerHub::new();
+    let peer = live_peer(&peers, 18621, 61, false);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let orphan = regtest_header_chain(BlockHash::from_byte_array([0x11; 32]), 1);
+    crate::chain::reset_header_store_counts();
+    let before = rbitcoin_query::header_lookup_count();
+    push(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        NetworkMessage::Headers(orphan),
+    )
+    .await;
+    let looked = rbitcoin_query::header_lookup_count().saturating_sub(before);
+    assert_eq!(
+        looked, 0,
+        "a below-floor header with no pending parent must not read the store, looked={looked}"
+    );
+    assert_eq!(side_tips(&hub), 0);
+    assert!(asked_blocks(&mut out_rx).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Pending already holds the cap, and the next full batch still connects.
+/// That is 8_000 + 2_000 headers. The walk used to stop on the last step
+/// and then read parents.
+#[tokio::test]
+async fn full_pending_below_floor_does_not_walk_parents() {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("below-floor-cap");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    hub.set_minimum_chain_work(Some([0xff; 32]));
+    let peers = crate::peers::PeerHub::new();
+    let peer = live_peer(&peers, 18622, 62, false);
+    let (out_tx, _out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let batch = MAX_HEADERS_RESULTS as u32;
+    let mut prev = hub.tip_hash().unwrap();
+    for _ in 0..(MAX_PENDING_HEADERS as u32 / batch) {
+        let chain = regtest_header_chain(prev, batch);
+        prev = chain.last().unwrap().block_hash();
+        push(
+            &hub,
+            &out_tx,
+            &mut follow,
+            Some(peer.as_ref()),
+            NetworkMessage::Headers(chain),
+        )
+        .await;
+    }
+    assert_eq!(follow.pending_headers.len(), MAX_PENDING_HEADERS);
+    crate::chain::reset_header_store_counts();
+    let before = rbitcoin_query::header_lookup_count();
+    let chain = regtest_header_chain(prev, batch);
+    push(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        NetworkMessage::Headers(chain),
+    )
+    .await;
+    let looked = rbitcoin_query::header_lookup_count().saturating_sub(before);
+    assert_eq!(
+        looked, 0,
+        "a full pending map plus one batch must not read parent headers, looked={looked}"
+    );
+    assert_eq!(side_tips(&hub), 0, "the batch stays under the floor");
+    assert_eq!(follow.pending_headers.len(), MAX_PENDING_HEADERS);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Headers with real regtest proof-of-work, not accepted blocks. Accepting
 /// two thousand blocks is a full connect per height.
 fn regtest_header_chain(prev: BlockHash, n: u32) -> Vec<bitcoin::block::Header> {

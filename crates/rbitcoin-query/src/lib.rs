@@ -672,7 +672,7 @@ impl Query {
         }
     }
 
-    /// Drop path slots above `height`. Unknown work after a rewind does not skip.
+    /// Drop path slots above `height`. Work above the rewind is forgotten.
     pub fn clear_milestone_path_above(&self, height: u32) {
         let mut g = self.milestone_path_lock();
         g.by_height.retain(|h, _| *h <= height);

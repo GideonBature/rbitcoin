@@ -231,6 +231,23 @@ impl Query {
     /// Uses an in-process `hash → height` map (~60 MiB at mainnet tip). Any
     /// tip extend/shrink is incremental; a full `0..=tip` walk runs only on
     /// open or after [`Self::invalidate_height_by_hash_index`].
+    /// Confirmed height when the in-memory index already has this hash.
+    ///
+    /// A lagging index does not read headers and does not extend itself.
+    /// Hashes at or below the indexed tip still count. Anything the index
+    /// has not recorded is a miss.
+    pub fn published_height_of_hash(&self, hash: &[u8; 32]) -> Option<Height> {
+        let live = self.tip_height().map(|h| h.0);
+        self.with_height_index(|index| {
+            let height = index.map.get(hash).copied()?;
+            let indexed = index.tip?;
+            if live.is_some_and(|tip| indexed > tip) {
+                return None;
+            }
+            (height <= indexed).then_some(Height(height))
+        })
+    }
+
     pub fn height_of_hash(&self, hash: &[u8; 32]) -> Result<Option<Height>, QueryError> {
         let Some(tip) = self.tip_height() else {
             return Ok(None);

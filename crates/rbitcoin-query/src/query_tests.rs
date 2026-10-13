@@ -131,6 +131,26 @@ fn extend_refuses_a_height_the_store_already_left() {
 }
 
 #[test]
+fn published_height_does_not_fill_a_lagging_index() {
+    let (dir, q) = temp_query("pub-h-lag");
+    let hashes = h2h_pad_0_4(&q);
+    q.leave_height_index_gap_for_test(1);
+    let before = crate::chain_view::header_lookup_count();
+    assert_eq!(
+        q.published_height_of_hash(&hashes[1]),
+        Some(Height(1)),
+        "a hash at or below the indexed tip is still that height"
+    );
+    assert_eq!(q.published_height_of_hash(&hashes[4]), None);
+    assert_eq!(
+        crate::chain_view::header_lookup_count().saturating_sub(before),
+        0,
+        "a lagging index is not filled from this lookup"
+    );
+    let _ = dir;
+}
+
+#[test]
 fn height_index_catchup_does_not_hold_the_lock_across_header_reads() {
     let (dir, q) = temp_query("h2h-lock");
     let hashes = h2h_pad_0_4(&q);

@@ -44,8 +44,8 @@ use assign::{assign_work_ordered, bq_pipeline_saturated, AssignDepth};
 use cadence::IbdLoopCadence;
 use dial::{
     admit_cooldown_fallback, alive_dial_addrs, apply_dial_result, dial_batch, dial_blocked_addrs,
-    disconnect_relative_slow_block_peers, disconnect_stalled_block_peers, expire_addr_cooldown,
-    redial_want,
+    disconnect_relative_slow_block_peers, expire_addr_cooldown, record_stall_kick, redial_want,
+    release_peer_block_work,
 };
 use events::{
     apply_confirm_events, apply_peer_event, disconnect_all_peers, drain_ready_peer_and_body_events,
@@ -57,8 +57,8 @@ use exit::{
 };
 use peer_io::{empty_header_fk_bus, sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
 use progress::{
-    format_progress_line, ibd_pct, read_progress_published, work_chain_progress_at,
-    ProgressLineInput, TipRateTracker,
+    read_progress_published, spawn_status_thread, work_chain_progress_at, StatusBoard, StatusSnap,
+    TipRateTracker, WireWatch,
 };
 use published::spawn_header_thread;
 use state::IbdWorkState;
@@ -69,7 +69,7 @@ use crate::chain::ChainHub;
 use crate::codec::MAX_HEADERS_RESULTS;
 use crate::error::NetError;
 use bitcoin::p2p::Magic;
-use rbitcoin_log::{info, info_bold, warn};
+use rbitcoin_log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -256,7 +256,39 @@ impl Drop for PeerBookSession {
     }
 }
 
-#[allow(clippy::cognitive_complexity)] // IBD confirm OS pipeline
+fn publish_status_snap(st: &IbdWorkState, hub: &ChainHub, board: &StatusBoard) {
+    let headers = header_walk::header_status_view(st, hub);
+    let wires: Vec<WireWatch> = st
+        .slots
+        .iter()
+        .filter(|s| s.alive)
+        .map(|s| WireWatch {
+            cmd_tx: s.cmd_tx.clone(),
+            abort: s.task.abort_handle(),
+            in_flight: s.in_flight.len(),
+            getdata_wire: Arc::clone(&s.getdata_wire),
+            rate: s.rate,
+            alive: s.alive,
+            addr: s.addr,
+            bytes_rx: s.bytes_rx_total.load(Ordering::Relaxed),
+        })
+        .collect();
+    board.publish(StatusSnap {
+        peers: wires.len(),
+        horizon: headers.horizon,
+        hole: 0,
+        header_origin: headers.origin,
+        header_height: headers.height,
+        header_stored: headers.stored,
+        header_queue: headers.queue,
+        header_work_ok: headers.work_ok,
+        header_walk: headers.walk,
+        header_quiet: headers.quiet,
+        wires,
+    });
+}
+
+#[allow(clippy::cognitive_complexity)] // IBD coordination: dial, confirm, headers, stall
 pub async fn ibd_cancellable(
     hub: Arc<ChainHub>,
     magic: Magic,
@@ -379,7 +411,6 @@ pub async fn ibd_cancellable(
     let confirm_lag = Arc::new(AtomicU32::new(0));
     let mut last_progress = Instant::now();
     let mut last_status = Instant::now();
-    let mut last_sample_tip = start_tip;
     let mut tip_rate_tracker = TipRateTracker::new();
     tip_rate_tracker.push(Instant::now(), start_tip);
     let window = cfg.window;
@@ -467,9 +498,21 @@ pub async fn ibd_cancellable(
     let _ = header_tx.try_send(HeaderCmd::Reseed);
     let _ = header_tx.try_send(HeaderCmd::Ask);
 
+    let status_board = Arc::new(StatusBoard::new());
+    let (status_stop_tx, status_stop_rx) = std::sync::mpsc::channel();
+    let status_thread = spawn_status_thread(
+        Arc::clone(&status_board),
+        Arc::clone(&hub.query),
+        Arc::clone(&confirm_queues),
+        cfg.stall,
+        start_tip,
+        status_stop_rx,
+    );
+
     let mut loop_n = 0u32;
     let mut cadence = IbdLoopCadence::new();
     let mut halt_err: Option<String> = None;
+    let mut give_up: Option<&'static str> = None;
     loop {
         if cancelled() {
             warn!("ibd: cancel requested — stopping IBD");
@@ -656,15 +699,24 @@ pub async fn ibd_cancellable(
             if cadence.peer_slow_due(now_cadence) {
                 sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
                 let now = Instant::now();
-                let mut freed = disconnect_stalled_block_peers(
-                    &mut st.slots,
-                    &mut st.inflight,
-                    &mut st.body,
-                    &mut st.addr_cooldown,
-                    &mut st.addr_strikes,
-                    now,
-                    cfg.stall,
-                );
+                for addr in status_board.take_kicks() {
+                    record_stall_kick(&mut st.addr_cooldown, &mut st.addr_strikes, addr, now);
+                }
+                let finished: Vec<usize> = st
+                    .slots
+                    .iter()
+                    .filter(|s| s.alive && s.task.is_finished())
+                    .map(|s| s.id)
+                    .collect();
+                let mut freed = Vec::new();
+                for id in finished {
+                    freed.extend(release_peer_block_work(
+                        &mut st.slots,
+                        &mut st.inflight,
+                        &mut st.body,
+                        id,
+                    ));
+                }
                 freed.extend(disconnect_relative_slow_block_peers(
                     &mut st.slots,
                     &mut st.inflight,
@@ -803,7 +855,6 @@ pub async fn ibd_cancellable(
 
             if last_status.elapsed() >= Duration::from_secs(5) {
                 let now = Instant::now();
-                let window_secs = last_status.elapsed().as_secs_f64().max(0.001);
                 let scan_t0 = Instant::now();
                 let horizon = header_walk::peer_horizon(st);
                 let published = read_progress_published(&hub.query);
@@ -819,54 +870,23 @@ pub async fn ibd_cancellable(
                     .status_scan_ns
                     .fetch_add(scan_t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-                let tip_delta = prog.tip.saturating_sub(last_sample_tip);
-                let tip_rate = tip_delta as f64 / window_secs;
                 let peers_n = st.slots.iter().filter(|s| s.alive).count();
-                let (load_q, script_q, write_q) = confirm_queues.snap();
+                let (_load_q, script_q, write_q) = confirm_queues.snap();
                 let path_lo = published.tip.map(|t| t.saturating_add(1)).unwrap_or(0);
                 let inflight_h = {
                     let g = confirm_feed.inner.lock().unwrap();
                     g.inflight.clone()
                 };
                 let ready_n = confirm::confirm_ready_count(&hub.query, path_lo, &inflight_h);
-                let txs = published.txs;
-                let pct = ibd_pct(prog.tip, prog.headers);
                 let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
 
                 tip_rate_tracker.push(now, prog.tip);
-                let eta = tip_rate_tracker.eta_string(now, prog.tip, prog.headers);
                 let eta_rate = tip_rate_tracker.eta_rate(now);
                 let bq_soft_stop = rbitcoin_query::soft_confirm_window_n(eta_rate);
                 let _ = hub.query.block_queue_update_soft_pressure(eta_rate);
-
-                let conf_q = confirm::format_conf_q(
-                    load_q,
-                    script_q,
-                    write_q,
-                    confirm::load_queue_cap(),
-                    confirm::script_queue_cap(),
-                    confirm::write_queue_cap(),
-                );
-                let progress_line = format_progress_line(&ProgressLineInput {
-                    pct,
-                    tip: prog.tip,
-                    tip_rate,
-                    tip_hole: prog.tip_hole,
-                    peers: peers_n,
-                    conf_q,
-                    txs,
-                    horizon: prog.headers,
-                    eta,
-                    bq_bytes,
-                    bq_count,
-                    bq_soft_stop,
-                });
-                info_bold!("{progress_line}");
+                status_board.set_hole(prog.tip_hole);
                 header_walk::retire_adopt_if_confirmed(st, &hub);
-                header_walk::log_status(st, &hub, prog.headers);
                 let _ = std::io::Write::flush(&mut std::io::stderr());
-
-                last_sample_tip = prog.tip;
 
                 let peer_cap = peers_n.saturating_mul(cfg.per_peer);
                 let inflight_cap = cfg.window.min(peer_cap).max(1);
@@ -972,13 +992,13 @@ pub async fn ibd_cancellable(
                         accepted.load(Ordering::SeqCst),
                         dark_redial_empty
                     );
-                        return Err(NetError::Protocol(
-                            "all peers dead mid catch-up (not complete)",
-                        ));
+                        give_up = Some("all peers dead mid catch-up (not complete)");
+                        break;
                     }
                     AllPeersDead::WaitRedial => {}
                 }
             }
+            publish_status_snap(st, hub.as_ref(), &status_board);
         }
         let tick = tokio::time::sleep(Duration::from_millis(50));
         tokio::pin!(tick);
@@ -1083,6 +1103,8 @@ pub async fn ibd_cancellable(
     let cancelled_exit = cancelled();
     let t_teardown = Instant::now();
 
+    drop(status_stop_tx);
+    let _ = status_thread.join();
     drop(header_tx);
     {
         let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
@@ -1134,6 +1156,9 @@ pub async fn ibd_cancellable(
     );
     if let Some(msg) = halt_err {
         return Err(NetError::Consensus(msg));
+    }
+    if let Some(msg) = give_up {
+        return Err(NetError::Protocol(msg));
     }
     Ok(n)
 }

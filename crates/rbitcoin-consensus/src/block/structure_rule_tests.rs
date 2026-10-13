@@ -1857,7 +1857,7 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
     );
     assert!(
         run(q).is_empty(),
-        "header path through the anchor with enough work skips scripts"
+        "header path through the anchor skips scripts"
     );
     assert!(!crate::milestone::check_scripts(ms, q, 1, &bh));
     q.clear_milestone_path_above(0);

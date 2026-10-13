@@ -8,8 +8,8 @@ early production / high-scrutiny — see
 [`docs/experimental-mainnet.md`](../../docs/experimental-mainnet.md). Watch reorgs and disk
 headroom before any serious use. Default mainnet milestone is block **840000**
 (`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`): script/sig
-checks skip only when the header path contains that hash and chain work meets
-the minimum. Explicit `--milestone HEIGHT` is height-only. `--milestone 0` is
+checks skip only when the header path contains that hash and the block is
+the path hash at its height. Explicit `--milestone HEIGHT` is height-only. `--milestone 0` is
 full scripts. Signet’s default is **0** (every script, slower on purpose).
 
 Architecture and confirm pipeline: [`docs/architecture.md`](../../docs/architecture.md),
