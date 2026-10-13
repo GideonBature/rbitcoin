@@ -963,6 +963,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn progress_tick_logs_a_walk_and_a_quiet_header_line() {
+        let t0 = Instant::now();
+        let mut clock = super::StatusClock::new(0, t0);
+        let published = super::ProgressPublished {
+            tip: Some(10),
+            txs: 4,
+            sh_runs: 0,
+            owned: rbitcoin_query::ProcessOwnedSizes::default(),
+        };
+        let mut snap = super::StatusSnap {
+            peers: 1,
+            horizon: 100,
+            hole: 2,
+            header_origin: true,
+            header_height: 40,
+            header_stored: 30,
+            header_queue: 3,
+            header_work_ok: false,
+            header_walk: true,
+            header_quiet: false,
+            ..super::StatusSnap::default()
+        };
+        super::log_progress_tick(
+            &mut clock,
+            &snap,
+            &published,
+            (0, 0, 0),
+            1,
+            2,
+            t0 + Duration::from_secs(5),
+        );
+        assert!(!clock.saw_quiet, "a walking header line is not caught up");
+        snap.header_work_ok = true;
+        snap.header_walk = false;
+        snap.header_quiet = true;
+        super::log_progress_tick(
+            &mut clock,
+            &snap,
+            &published,
+            (0, 0, 0),
+            1,
+            2,
+            t0 + Duration::from_secs(10),
+        );
+        assert!(clock.saw_quiet, "the caught-up line fires once");
+        super::log_progress_tick(
+            &mut clock,
+            &snap,
+            &published,
+            (0, 0, 0),
+            1,
+            2,
+            t0 + Duration::from_secs(15),
+        );
+        assert!(
+            clock.saw_quiet,
+            "a second quiet tick does not clear the latch"
+        );
+        snap.header_quiet = false;
+        snap.header_origin = false;
+        let unpublished = super::ProgressPublished {
+            tip: None,
+            txs: 0,
+            sh_runs: 0,
+            owned: rbitcoin_query::ProcessOwnedSizes::default(),
+        };
+        super::log_progress_tick(
+            &mut clock,
+            &snap,
+            &unpublished,
+            (0, 0, 0),
+            0,
+            0,
+            t0 + Duration::from_secs(20),
+        );
+        assert!(
+            !clock.saw_quiet,
+            "leaving the walk clears the caught-up latch"
+        );
+    }
+
     #[tokio::test]
     async fn a_redial_of_a_kicked_addr_can_stall_again() {
         let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
