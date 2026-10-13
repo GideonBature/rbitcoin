@@ -857,7 +857,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         let headers_msg = out_rx.try_recv().unwrap().expect_msg();
         assert!(matches!(headers_msg, NetworkMessage::Headers(_)));
 
-        // Inv for unknown block → GetHeaders (never getdata without a header).
+        // Unknown block inv during IBD challenges the walk. It does not getheaders.
         let want_h = BlockHash::from_byte_array([0xee; 32]);
         handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(want_h)])),
@@ -868,16 +868,11 @@ fn handle_peer_frame_control_and_inv_paths() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap().expect_msg() {
-            NetworkMessage::GetHeaders(gh) => {
-                assert!(
-                    !gh.locator_hashes.is_empty() || gh.stop_hash == want_h,
-                    "unknown block inv must getheaders, locators={:?}",
-                    gh.locator_hashes
-                );
-            }
-            other => panic!("expected GetHeaders for unknown inv, got {other:?}"),
-        }
+        assert!(
+            out_rx.try_recv().is_err(),
+            "an unknown block inv during IBD must not getheaders"
+        );
+        assert!(hub.header_inv_challenge_pending());
 
         // Headers message inserts pending + issues getdata.
         let gen = hub

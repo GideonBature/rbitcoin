@@ -1012,6 +1012,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
     st.empty_header_streak = 0;
     st.ordered.clear();
     st.ordered_set.clear();
+    st.height_to_hash.clear();
     st.inflight.clear();
     for _ in 0..2 {
         apply_peer_event(
@@ -1034,6 +1035,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
     st.max_peer_height = 313_000;
     st.ordered.clear();
     st.ordered_set.clear();
+    st.height_to_hash.clear();
     st.inflight.clear();
     apply_peer_event(
         &mut st,
