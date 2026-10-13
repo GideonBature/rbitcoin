@@ -469,6 +469,35 @@ fn h2h_pad_0_4(q: &Query) -> Vec<[u8; 32]> {
     hashes
 }
 
+/// Open rebuilds the confirmed hash map from height 0. The walk names its
+/// window so a multi-minute restart is not a silent gap before spend replay.
+#[test]
+fn full_height_index_logs_the_walk() {
+    let (dir, q) = temp_query("h2h-log");
+    let hashes = h2h_pad_0_4(&q);
+    q.invalidate_height_by_hash_index();
+    rbitcoin_log::capture_logs(true);
+    q.ensure_height_by_hash_index(q.tip_height().unwrap())
+        .unwrap();
+    let logs = rbitcoin_log::take_logs();
+    rbitcoin_log::capture_logs(false);
+    let text = logs
+        .iter()
+        .map(|(_, line)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("query: height index 0..=4 (5 headers)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("query: height index done headers=5"),
+        "{text}"
+    );
+    assert_height(&q, &hashes[4], 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A concurrent disconnect can shrink `confirmed[]` between a reader's tip
 /// snapshot and its height-index walk. No single session interleaves that,
 /// so the stale-snapshot retry and the empty-chain arms stay a unit.

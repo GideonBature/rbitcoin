@@ -20,6 +20,9 @@ use std::path::Path;
 /// Core `-checkblocks` default: re-read the last N confirmed blocks at open.
 pub const VERIFY_TIP_BLOCKS: u32 = 6;
 
+/// Progress cadence while the open window walks confirmed heights.
+const TIP_REVALIDATE_STATUS_MS: u128 = 10_000;
+
 /// Soft tip seal file under `store/` (not a SCHEMA_VERSION bump).
 pub const TIP_SEAL_NAME: &str = "tip_seal";
 
@@ -296,6 +299,11 @@ impl Store {
         let tx_count = self.txs.count();
         let mut last_good: Option<u32> = if lo == 0 { None } else { Some(lo - 1) };
         // Heights below the window are assumed good for shrink baseline when lo > 0.
+        let count = u64::from(tip.0 - lo) + 1;
+        let started = std::time::Instant::now();
+        rbitcoin_log::info!("store: tip revalidate {lo}..={} ({count} heights)", tip.0);
+        let mut logged_at = started;
+        let mut walked = 0u64;
 
         for h in lo..=tip.0 {
             match self.check_confirmed_height(Height(h), tx_count, &mut report) {
@@ -305,6 +313,11 @@ impl Store {
                     report.first_bad_reason = Some(reason);
                     break;
                 }
+            }
+            walked += 1;
+            if logged_at.elapsed().as_millis() >= TIP_REVALIDATE_STATUS_MS {
+                rbitcoin_log::info!("store: tip revalidate {walked}/{count} height={h}");
+                logged_at = std::time::Instant::now();
             }
         }
 
@@ -318,6 +331,19 @@ impl Store {
             self.header_txs.flush()?;
         }
         let _ = self.publish_tip_seal();
+        let height = match report.tip_after {
+            Some(h) => h.to_string(),
+            None => "none".to_string(),
+        };
+        let ms = started.elapsed().as_millis();
+        if let Some(bad) = report.first_bad_height {
+            rbitcoin_log::info!(
+                "store: tip revalidate done height={height} ms={ms} bad={bad} reason={}",
+                report.first_bad_reason.unwrap_or("")
+            );
+        } else {
+            rbitcoin_log::info!("store: tip revalidate done height={height} ms={ms}");
+        }
         Ok(report)
     }
 
@@ -749,9 +775,25 @@ mod tests {
         s.flush_class_c_tip().unwrap();
         s.headers.flush().unwrap();
 
+        rbitcoin_log::capture_logs(true);
         let r = s.revalidate_tip_window_n(6).unwrap();
+        let logs = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
         assert!(r.is_clean(), "clean chain should not shrink: {r:?}");
         assert_eq!(s.confirmed.tip_height(), Some(Height(3)));
+        let text = logs
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("store: tip revalidate 0..=3 (4 heights)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("store: tip revalidate done height=3"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

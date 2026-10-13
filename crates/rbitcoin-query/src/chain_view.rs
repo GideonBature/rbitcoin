@@ -314,20 +314,41 @@ impl Query {
         }
     }
 
+    /// Same cadence as spend-annotation replay and tip revalidate.
+    const HEIGHT_INDEX_STATUS_MS: u128 = 10_000;
+
     fn extend_index_from_headers(
         &self,
         tip: Height,
         prev: Option<u32>,
     ) -> Result<Option<Height>, QueryError> {
         let start = prev.map(|height| height.saturating_add(1)).unwrap_or(0);
+        let full = prev.is_none();
+        let total = u64::from(tip.0.saturating_sub(start)) + 1;
+        let started = std::time::Instant::now();
+        if full {
+            rbitcoin_log::info!("query: height index {start}..={} ({total} headers)", tip.0);
+        }
         let mut rows = Vec::with_capacity((tip.0 - start) as usize + 1);
+        let mut logged_at = started;
         for height in start..=tip.0 {
             let Some((_, rec)) = self.header_at_height(Height(height))? else {
                 return self.stale_or_missing(height);
             };
             rows.push((rec.hash, height));
+            if full && logged_at.elapsed().as_millis() >= Self::HEIGHT_INDEX_STATUS_MS {
+                rbitcoin_log::info!("query: height index {}/{total} height={height}", rows.len());
+                logged_at = std::time::Instant::now();
+            }
         }
-        if self.extend_height_index(&rows, tip.0, prev, prev.is_none()) {
+        if self.extend_height_index(&rows, tip.0, prev, full) {
+            if full {
+                rbitcoin_log::info!(
+                    "query: height index done headers={} ms={}",
+                    rows.len(),
+                    started.elapsed().as_millis()
+                );
+            }
             if prev.is_none() {
                 crate::note_confirm(&self.confirm_stats().height_index_full_n, 1);
                 crate::note_confirm(
