@@ -24,6 +24,8 @@ struct LoadAheadState {
     last_loaded: Option<(u32, [u8; 32])>,
     /// Last applied [`Query::take_disconnect`] generation.
     disconnect_gen_seen: u64,
+    /// Blocks kept below the drain+fence snapshot around a 1 GiB accounted heap.
+    retain: InflightRetain,
 }
 
 impl LoadAheadState {
@@ -34,6 +36,7 @@ impl LoadAheadState {
             in_flight: rbitcoin_query::InFlight::new(),
             last_loaded: None,
             disconnect_gen_seen: 0,
+            retain: InflightRetain::default(),
         }
     }
 
@@ -45,11 +48,26 @@ impl LoadAheadState {
         }
     }
 
-    /// Drop packs whose height is below a lookup-wave drain+fence snapshot.
-    ///
-    /// Call after this load batch has finished its in-flight read (stamp).
-    fn drop_inflight_below(&mut self, hi: Option<u32>) {
-        self.in_flight.prune_below_height(hi);
+    /// Drop packs below the lookup wave's drain+fence snapshot, after that
+    /// batch's in-flight read. [`InflightRetain`] may keep a band under it.
+    fn drop_inflight_below(
+        &mut self,
+        hi: Option<u32>,
+        hub: &ChainHub,
+        queues: &ConfirmQueueDepths,
+    ) {
+        let (.., inflight_bytes) = self.in_flight.size_snapshot();
+        let pipe = queues.content_snap();
+        let wire = (pipe.load_wire_bytes as u64)
+            .saturating_add(pipe.script_wire_bytes as u64)
+            .saturating_add(pipe.write_wire_bytes as u64);
+        let accounted = AccountedHeap::from_hub(hub, inflight_bytes, wire).bytes();
+        let would_drop = self
+            .in_flight
+            .has_tagged_below(inflight_prune_height(hi, self.retain.extra()));
+        let extra = self.retain.observe(accounted, would_drop);
+        self.in_flight
+            .prune_below_height(inflight_prune_height(hi, extra));
         self.publish_mem_stats();
     }
 
@@ -806,6 +824,99 @@ pub(crate) const SCRIPT_QUEUE_CAP_DEFAULT: usize = 4;
 /// Default scripts→write depth: write is bursty (class_a head / tip flush); buffer
 /// script output so script thr does not stall on a full writeq.
 pub(crate) const WRITE_QUEUE_CAP_DEFAULT: usize = 14;
+
+/// Blocks added to or removed from the extra in-flight window per wave.
+pub(crate) const INFLIGHT_RETAIN_STEP: u32 = 64;
+/// Accounted-heap line. Under it the window can grow; over it the window shrinks.
+pub(crate) const INFLIGHT_RETAIN_OWNED_LIMIT: u64 = 1024 * 1024 * 1024;
+/// `height_by_hash` entry estimate from the old `ibd: sizes` accounted total.
+const H2H_ENTRY_BYTES: u64 = 48;
+/// Height-fence run estimate from that same total.
+const FENCE_RUN_BYTES: u64 = 16;
+
+/// Process heap the old `ibd: sizes` line called `accounted`.
+///
+/// Body queue, in-flight CreatePins, write-loc packs, the hash→height map,
+/// the height fence, confirm-queue wire, and the heap parts of fuse / MPHF /
+/// Class C. Mapped tables and allocator residue are not in this sum.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AccountedHeap {
+    pub bq_bytes: u64,
+    pub inflight_bytes: u64,
+    pub wloc_bytes: u64,
+    pub h2h_keys: u64,
+    pub fence_runs: u64,
+    pub wire_bytes: u64,
+    pub fuse8_bytes: u64,
+    pub mphf_g_bytes: u64,
+    pub mphf_occ_bytes: u64,
+    pub class_c_l2_bytes: u64,
+}
+
+impl AccountedHeap {
+    pub(crate) fn bytes(self) -> u64 {
+        self.bq_bytes
+            .saturating_add(self.inflight_bytes)
+            .saturating_add(self.wloc_bytes)
+            .saturating_add(self.h2h_keys.saturating_mul(H2H_ENTRY_BYTES))
+            .saturating_add(self.fence_runs.saturating_mul(FENCE_RUN_BYTES))
+            .saturating_add(self.wire_bytes)
+            .saturating_add(self.fuse8_bytes)
+            .saturating_add(self.mphf_g_bytes)
+            .saturating_add(self.mphf_occ_bytes)
+            .saturating_add(self.class_c_l2_bytes)
+    }
+
+    fn from_hub(hub: &ChainHub, inflight_bytes: u64, wire_bytes: u64) -> Self {
+        let owned = hub.query.process_owned_size_snapshot();
+        let (_stop, bq_bytes, _count) = hub.query.block_queue_stats();
+        let head = owned.head;
+        Self {
+            bq_bytes,
+            inflight_bytes,
+            wloc_bytes: owned.wloc_bytes,
+            h2h_keys: owned.h2h_keys as u64,
+            fence_runs: owned.fence_runs as u64,
+            wire_bytes,
+            fuse8_bytes: head.fuse8_bytes,
+            mphf_g_bytes: head.mphf_g_bytes,
+            mphf_occ_bytes: head.mphf_occ_bytes,
+            class_c_l2_bytes: head.class_c_l2_bytes,
+        }
+    }
+}
+
+/// Extra blocks kept below the drain+fence snapshot.
+///
+/// Under [`INFLIGHT_RETAIN_OWNED_LIMIT`], a wave that would drop packs keeps
+/// [`INFLIGHT_RETAIN_STEP`] more. Over the limit, each wave gives that many
+/// back. Exactly on the limit, the window holds.
+#[derive(Debug, Default)]
+pub(crate) struct InflightRetain {
+    extra: u32,
+}
+
+impl InflightRetain {
+    pub(crate) fn extra(&self) -> u32 {
+        self.extra
+    }
+
+    /// Record one wave. `would_drop` is the current window, before this step.
+    /// Returns the extra blocks to keep below the drain+fence snapshot.
+    pub(crate) fn observe(&mut self, accounted_bytes: u64, would_drop: bool) -> u32 {
+        if accounted_bytes > INFLIGHT_RETAIN_OWNED_LIMIT {
+            self.extra = self.extra.saturating_sub(INFLIGHT_RETAIN_STEP);
+        } else if accounted_bytes < INFLIGHT_RETAIN_OWNED_LIMIT && would_drop {
+            self.extra = self.extra.saturating_add(INFLIGHT_RETAIN_STEP);
+        }
+        self.extra
+    }
+}
+
+/// Drain+fence snapshot lowered by `extra` blocks. `None` still keeps every pack.
+pub(crate) fn inflight_prune_height(drain_hi: Option<u32>, extra: u32) -> Option<u32> {
+    drain_hi.map(|h| h.saturating_sub(extra))
+}
 
 /// One load-sized run produced by lookup (decoded wire + pres, height-ordered).
 pub(crate) struct LoadBatch {
@@ -2162,7 +2273,7 @@ pub(crate) fn spawn_confirm_engine(
                 if batch.is_empty() {
                     if drop_below.is_some() {
                         let t_prune = Instant::now();
-                        lookup_ahead.drop_inflight_below(drop_below);
+                        lookup_ahead.drop_inflight_below(drop_below, &hub_load, &queues_load);
                         confirm_thr_stats::add_load_prune(&stats, t_prune.elapsed());
                     }
                     continue;
@@ -2332,7 +2443,7 @@ pub(crate) fn spawn_confirm_engine(
                 }
                 if drop_below.is_some() {
                     let t_prune = Instant::now();
-                    lookup_ahead.drop_inflight_below(drop_below);
+                    lookup_ahead.drop_inflight_below(drop_below, &hub_load, &queues_load);
                     confirm_thr_stats::add_load_prune(&stats, t_prune.elapsed());
                 }
                 let pipe = lookup_ahead.pipeline_for(

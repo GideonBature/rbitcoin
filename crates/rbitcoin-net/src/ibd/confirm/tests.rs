@@ -1,9 +1,10 @@
 //! tests (peeled from ibd/confirm.rs).
 
 use super::{
-    format_conf_q, format_queue_depth, format_stamp_reject_missing_prevout,
-    stamp_reject_operator_msg, write_drain_max_parts, write_queue_cap, ConfirmFeed,
-    ConfirmQueueDepths, ConfirmRejectClass, RejectParent, CONFIRM_RUN_MAX_BLOCKS,
+    format_conf_q, format_queue_depth, format_stamp_reject_missing_prevout, inflight_prune_height,
+    stamp_reject_operator_msg, write_drain_max_parts, write_queue_cap, AccountedHeap, ConfirmFeed,
+    ConfirmQueueDepths, ConfirmRejectClass, InflightRetain, RejectParent, CONFIRM_RUN_MAX_BLOCKS,
+    INFLIGHT_RETAIN_OWNED_LIMIT, INFLIGHT_RETAIN_STEP,
 };
 
 #[test]
@@ -58,6 +59,75 @@ fn test_pin(id: u64) -> rbitcoin_query::CreatePin {
         },
         vec![OutputRecord::unspent(1, vec![0x51])],
     )
+}
+
+/// Under 1 GiB, grow one step only when the current prune would drop packs.
+/// Over 1 GiB, shrink one step. The same step either way. Exactly 1 GiB holds.
+#[test]
+fn owned_heap_steps_inflight_around_one_gib_only_when_a_prune_would_drop() {
+    let mut retain = InflightRetain::default();
+    let under = INFLIGHT_RETAIN_OWNED_LIMIT - 1;
+    let over = INFLIGHT_RETAIN_OWNED_LIMIT + 1;
+    assert_eq!(
+        retain.observe(under, false),
+        0,
+        "nothing to save does not extend the window"
+    );
+    assert_eq!(retain.observe(under, true), INFLIGHT_RETAIN_STEP);
+    assert_eq!(retain.observe(under, true), INFLIGHT_RETAIN_STEP * 2);
+    assert_eq!(
+        retain.observe(under, false),
+        INFLIGHT_RETAIN_STEP * 2,
+        "a prune that already keeps every pack does not extend"
+    );
+    assert_eq!(
+        retain.observe(INFLIGHT_RETAIN_OWNED_LIMIT, true),
+        INFLIGHT_RETAIN_STEP * 2,
+        "exactly 1 GiB holds the window"
+    );
+    assert_eq!(retain.observe(over, false), INFLIGHT_RETAIN_STEP);
+    assert_eq!(retain.observe(over, true), 0);
+    assert_eq!(
+        retain.observe(over, true),
+        0,
+        "the window does not go negative"
+    );
+    assert_eq!(
+        inflight_prune_height(Some(1_000), INFLIGHT_RETAIN_STEP * 2),
+        Some(1_000 - INFLIGHT_RETAIN_STEP * 2)
+    );
+
+    let mut flight = InFlight::new();
+    let pin = test_pin(1);
+    flight.note_pins([(Fk(1), &pin)], Some(900));
+    let at = inflight_prune_height(Some(1_000), 0);
+    assert!(
+        flight.has_tagged_below(at),
+        "the default prune would drop the pack at 900"
+    );
+    let kept = inflight_prune_height(Some(1_000), INFLIGHT_RETAIN_STEP * 2);
+    assert!(
+        !flight.has_tagged_below(kept),
+        "128 blocks of extra already covers height 900"
+    );
+    assert!(!flight.has_tagged_below(None));
+
+    let heap = AccountedHeap {
+        bq_bytes: 100,
+        inflight_bytes: 200,
+        wloc_bytes: 300,
+        h2h_keys: 2,
+        fence_runs: 3,
+        wire_bytes: 400,
+        fuse8_bytes: 5,
+        mphf_g_bytes: 6,
+        mphf_occ_bytes: 7,
+        class_c_l2_bytes: 8,
+    };
+    assert_eq!(
+        heap.bytes(),
+        100 + 200 + 300 + 2 * 48 + 3 * 16 + 400 + 5 + 6 + 7 + 8
+    );
 }
 
 /// Pack stays until a later wave snapshots drain+fence past its height (not pack height alone).
