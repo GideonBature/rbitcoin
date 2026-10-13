@@ -569,13 +569,17 @@ Policy lives in `rbitcoin-consensus::policy` and is **never** applied on block c
 **Every open:** the node (1) revalidates the last **N** confirmed heights
 (`--check-blocks`, default **six**: header `prev_fk`/hash chain, Class A range
 bounds, merkle from `txid.body`, those N runs all-strong; `0` walks from
-genesis) and may **shrink tip** or clear a bad body, then
-(2) one Class C complement repair (unstrong leftover 1s in fence holes / a
-short suffix — not a minute-long walk of every create). Look for
-`rbitcoin: class_c repair cleared=…` and `rbitcoin: tip revalidate …` on
-stderr. That is intentional `--check-blocks` + crash/race healing —
-not a full reindex. Widespread mid-chain header graph poison still means a
-clean datadir.
+genesis). A `spend_durable` marker widens any other window through every
+height above durable-through, which after a kill during IBD can be tens of
+thousands of blocks. The walk logs `store: tip revalidate <lo>..=<tip>` and
+a progress line every 10 seconds, and may **shrink tip** or clear a bad body.
+Then (2) one Class C complement repair (unstrong leftover 1s in fence holes / a
+short suffix — not a walk of every create), logged as
+`rbitcoin: class_c repair cleared=…`. Then (3) the confirmed hash → height
+map, logged as `query: height index` when the walk starts at genesis. A
+failed window still logs `rbitcoin: tip revalidate …`. That is intentional
+`--check-blocks` + crash/race healing — not a full reindex. Widespread
+mid-chain header graph poison still means a clean datadir.
 
 **Mempool recovery:** `{datadir}/mempool/` is a private sidecar (not Class A),
 schema **3**. Leftover schema **1** (pre-packed `fee‖weight‖bitcoin-serialize`)

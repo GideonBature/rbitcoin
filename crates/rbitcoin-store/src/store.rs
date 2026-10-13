@@ -1588,7 +1588,7 @@ impl Store {
             cleared = cleared.saturating_add(ones);
         }
         let ms = t0.elapsed().as_millis();
-        eprintln!("rbitcoin: class_c repair cleared={cleared} ranges={n_ranges} ms={ms}");
+        rbitcoin_log::info!("rbitcoin: class_c repair cleared={cleared} ranges={n_ranges} ms={ms}");
         Ok(cleared)
     }
 
@@ -3553,7 +3553,19 @@ mod tests {
         let dir = tmp();
         {
             let s = Store::create_tiny(&dir).unwrap();
+            rbitcoin_log::capture_logs(true);
             assert_eq!(s.repair_class_c_above_tip().unwrap(), 0);
+            let logs = rbitcoin_log::take_logs();
+            rbitcoin_log::capture_logs(false);
+            let text = logs
+                .iter()
+                .map(|(_, line)| line.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("rbitcoin: class_c repair cleared=0 ranges="),
+                "{text}"
+            );
             // Tip body 1..=2; orphans 5 and 10 (non-adjacent → two clear runs).
             s.confirmed.set(Height(0), Fk(1)).unwrap();
             s.header_txs.put_range(Fk(1), Fk(1), 2).unwrap();
