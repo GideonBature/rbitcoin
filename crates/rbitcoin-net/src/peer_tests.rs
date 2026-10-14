@@ -175,13 +175,34 @@ fn ibd_connect_does_not_start_headers_sync() {
     let session = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
     let (tx, mut rx) = mpsc::unbounded_channel();
     assert!(
-        !maybe_queue_initial_getheaders(&tx, &hub, &session),
-        "IBD does not start a follow-session headers sync"
+        maybe_queue_initial_getheaders(&tx, &hub, &session),
+        "IBD still asks the one headers peer for the stored tip"
     );
+    match rx.try_recv().unwrap().expect_msg() {
+        bitcoin::p2p::message::NetworkMessage::GetHeaders(gh) => {
+            assert!(
+                gh.locator_hashes.contains(&hub.tip_hash().unwrap()),
+                "the locator names the stored tip"
+            );
+        }
+        other => panic!("expected getheaders, got {other:?}"),
+    }
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+    let mut ver2 = ver.clone();
+    ver2.nonce = 2;
+    let session2 = peers.register(
+        addr2,
+        addr2,
+        &ver2,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
+    let (tx2, mut rx2) = mpsc::unbounded_channel();
     assert!(
-        rx.try_recv().is_err(),
-        "a connecting peer during IBD sends no getheaders"
+        !maybe_queue_initial_getheaders(&tx2, &hub, &session2),
+        "a second connecting peer does not start another headers sync"
     );
+    assert!(rx2.try_recv().is_err());
 
     hub.set_max_tip_age_secs(u64::MAX);
     assert!(!hub.in_ibd(), "a fresh tip leaves IBD");
@@ -241,8 +262,11 @@ fn ibd_unknown_block_inv_does_not_getheaders() {
     let unknown = BlockHash::from_byte_array([0x44; 32]);
     on_inv(&hub, &tx, &mut follow, None, &[Inventory::Block(unknown)]).unwrap();
     assert!(
-        rx.try_recv().is_err(),
-        "an unknown block inv during IBD does not getheaders on this session"
+        matches!(
+            rx.try_recv().unwrap().expect_msg(),
+            bitcoin::p2p::message::NetworkMessage::GetHeaders(_)
+        ),
+        "an unknown block inv during IBD still asks for headers"
     );
     assert!(
         hub.header_inv_challenge_pending(),

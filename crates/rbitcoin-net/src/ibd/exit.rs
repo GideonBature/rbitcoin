@@ -503,6 +503,7 @@ mod tests {
         // Empty-EOF at the most-work path: extra advertised height is not a
         // tip we chase (less-work high-height fork / bogus LastBlock).
         signet.headers_done = true;
+        signet.header_walk.prove_through(2000);
         assert!(
             ibd_caught_up(&signet, 2000),
             "headers_done at path HWM completes even if start_height is far ahead"
@@ -558,9 +559,15 @@ mod tests {
         }
         assert_eq!(header_lag_behind_peers(&st, 100), 5);
         assert!(
-            !super::should_unlatch_headers_done(&st, 100),
-            "lag>2 with no connecting hole is not a most-work tip we unlatch for"
+            super::should_unlatch_headers_done(&st, 100),
+            "an unproved latch asks again when a peer is more than two blocks ahead"
         );
+        st.header_walk.prove_through(100);
+        assert!(
+            !super::should_unlatch_headers_done(&st, 100),
+            "a proved walk does not chase a far start height"
+        );
+        st.header_walk = super::super::header_walk::HeaderWalk::default();
 
         st.max_peer_height = 100;
         assert_eq!(header_lag_behind_peers(&st, 100), 0);

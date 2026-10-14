@@ -200,6 +200,14 @@ impl HeaderWalk {
     pub(crate) fn indexes_through(&self, height: u32) -> bool {
         self.origin && self.tip.hash.is_some() && height > 0 && height <= self.tip.height
     }
+
+    /// Test stand-in for a walk that already proved the confirmed tip.
+    #[cfg(test)]
+    pub(crate) fn prove_through(&mut self, height: u32) {
+        self.origin = true;
+        self.proven = true;
+        self.tip.height = height;
+    }
 }
 
 pub(crate) struct OriginInput {
@@ -3523,8 +3531,8 @@ mod tests {
         };
         assert_eq!(
             front,
-            Some(second.block_hash()),
-            "a missing next header is asked from the walk tip, not the rewound queue"
+            Some(gen),
+            "a missing next header is asked from the stored tip, not the walk"
         );
         let other = if ask == 0 {
             rx1.try_recv()
@@ -3628,21 +3636,22 @@ mod tests {
             }
         }
         assert!(
-            fronts.contains(&second.block_hash()),
-            "the ask starts at the walk tip; the queue refill is the reseeded path: {fronts:?}"
+            fronts.contains(&stored),
+            "the ask starts at the stored tip so the missing header can be queued: {fronts:?}"
         );
     }
 
     #[test]
     fn missing_next_header_asks_from_the_stored_tip() {
-        let (_dir, hub, mut st, mut rxs, first, _tail) =
+        let (_dir, hub, mut st, mut rxs, first, tail) =
             walk_ahead_of_a_short_queue("header-walk-missing", 20_000, 1);
         st.height_to_hash.remove(&1);
+        assert_ne!(tail, first.block_hash());
         assert!(send_getheaders(&mut st, &hub).unwrap());
         assert_eq!(
             locator_front(&mut rxs[0]),
-            Some(first.block_hash()),
-            "a missing next header is asked from the walk tip, not the queue tail"
+            Some(tail),
+            "a missing next header is asked from the stored tip, not the walk"
         );
     }
 
@@ -3919,36 +3928,39 @@ mod tests {
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
         let good = mine(gen, 1);
+        let later = mine(good.block_hash(), 2);
         let miss = mine(gen, 9);
         let (s0, mut rx) = slot(0);
         let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
         let before = hub.query.store().header_count();
         assert!(send_getheaders(&mut st, &hub).unwrap());
         let _ = rx.try_recv();
-        apply(&mut st, &hub, 0, vec![good]);
-        assert_eq!(hub.query.store().header_count(), before + 1);
-        assert_eq!(st.header_walk.tip_hash(), Some(good.block_hash()));
+        apply(&mut st, &hub, 0, vec![good, later]);
+        assert_eq!(hub.query.store().header_count(), before + 2);
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
 
-        while st.ordered.len() >= ORDERED_HEADERS_SOFT_CAP {
-            let dropped = st.ordered.pop_front().unwrap();
-            st.ordered_set.remove(&dropped);
-        }
+        st.ordered.clear();
+        st.ordered_set.clear();
+        st.height_to_hash.remove(&1);
+        st.height_to_hash.remove(&2);
         assert!(send_getheaders(&mut st, &hub).unwrap());
         match rx.try_recv() {
             Ok(PeerCmd::GetHeaders { locator }) => {
                 assert_eq!(
                     locator[0],
-                    good.block_hash(),
-                    "look-ahead keeps the walk tip while peers are still ahead"
+                    gen,
+                    "an empty queue asks for the headers after the stored tip"
                 );
             }
             Ok(_) => panic!("expected getheaders"),
             Err(_) => panic!("peer was not asked for headers"),
         }
-
         apply(&mut st, &hub, 0, vec![good]);
-        assert_eq!(hub.query.store().header_count(), before + 1);
-        assert!(st.ordered_set.contains(&good.block_hash()));
+        assert!(
+            st.ordered_set.contains(&good.block_hash()),
+            "a header short of the next checkpoint still fills the queue"
+        );
+        assert_eq!(hub.query.store().header_count(), before + 2);
 
         let after = hub.query.store().header_count();
         apply(&mut st, &hub, 0, vec![miss]);
@@ -3958,7 +3970,7 @@ mod tests {
             "a lighter valid chain stays available for a later heavier extension"
         );
         assert!(st.slots[0].alive);
-        assert_eq!(st.header_walk.tip_hash(), Some(good.block_hash()));
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
         assert!(hub
             .query
             .get_header_by_hash(miss.block_hash().as_byte_array())
