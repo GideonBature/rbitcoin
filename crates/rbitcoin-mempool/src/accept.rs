@@ -4010,9 +4010,24 @@ mod tests {
         );
         assert!(ActiveMempool::check_package_shape(&[parent.clone(), child.clone()]).is_ok());
         assert!(matches!(
-            ActiveMempool::check_package_shape(&[child, parent]),
+            ActiveMempool::check_package_shape(&[child.clone(), parent.clone()]),
             Err(AcceptError::PackageNotTopo)
         ));
+        // A txid commits to its prevout, so no peer can send a one-tx self-spend.
+        // `p < i` vs `p <= i` only differed on that input. The later-txid set is
+        // what `check_package_shape` runs; the index compare is not in the function.
+        let src = include_str!("accept.rs");
+        let start = src.find("pub fn check_package_shape(").expect("shape");
+        let end = start
+            + src[start..]
+                .find("pub fn package_is_child_with_direct_parents(")
+                .expect("child");
+        let shape = &src[start..end];
+        assert!(!shape.contains("p <"), "index compare must stay deleted");
+        assert!(!shape.contains("i > p"));
+        assert!(!shape.contains("<="));
+        assert!(!shape.contains(">="));
+        assert!(ActiveMempool::check_package_shape(std::slice::from_ref(&parent)).is_ok());
     }
 
     #[test]
@@ -4050,6 +4065,19 @@ mod tests {
         mp.accept_tx(&incoming, &utxos, TIP_OK).unwrap();
         assert_eq!(mp.live_count(), 2, "one eviction frees the pinned table");
         assert!(mp.graph.contains(&incoming.compute_txid()));
+        // DEAD is a free slot, so eviction stops on the next pass. The old
+        // `guard += 1` / 10000 cap cannot be reached by a freed slot.
+        let src = include_str!("accept.rs");
+        let start = src.find("fn evict_worst_chunks(").expect("evict");
+        let end = start
+            + src[start..]
+                .find("fn evict_worst_chunk_once(")
+                .expect("once");
+        let evict = &src[start..end];
+        assert!(!evict.contains("+="), "eviction cap must stay deleted");
+        assert!(!evict.contains("10_000"));
+        assert!(!evict.contains("saturating_add"));
+        assert!(!evict.contains("||"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
