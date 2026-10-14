@@ -643,9 +643,10 @@ mod tests {
             "a seeded header on the stored path is on the milestone path"
         );
         assert!(
-            hub.milestone.skips_scripts(1, &first.to_byte_array(), |h| hub
-                .query
-                .milestone_header_at(h)),
+            hub.milestone
+                .skips_scripts(1, &first.to_byte_array(), |h| hub
+                    .query
+                    .milestone_header_at(h)),
             "script checks stay off for a stored header under the restored anchor"
         );
         assert_eq!(
