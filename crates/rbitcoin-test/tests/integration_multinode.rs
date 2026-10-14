@@ -190,11 +190,31 @@ fn llvm_cov_wall(default_secs: u64, llvm_secs: u64) -> Duration {
     }
 }
 
-fn ephemeral_addr() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
+fn any_port() -> SocketAddr {
+    "127.0.0.1:0".parse().unwrap()
+}
+
+/// The address `run_p2p` bound for `name`, from `{datadir}/run/{name}.addr`.
+/// A bind-then-drop reserve races another test onto the same port.
+async fn published_listener(datadir: &std::path::Path, name: &str) -> SocketAddr {
+    let path = datadir.join("run").join(format!("{name}.addr"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(addr) = text.trim().parse::<SocketAddr>() {
+                if addr.port() != 0 {
+                    return addr;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "bound {name} address was not published at {}",
+                path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn wait_listeners(addrs: &[SocketAddr]) {
@@ -3004,21 +3024,19 @@ async fn node_run_p2p_short() {
         let seed = start_node(&seed_dir).await;
         seed_chain(&seed, 3).await;
         let seed_addr = seed.local_addr;
-        let rpc_addr = ephemeral_addr();
-        let electrum_addr = ephemeral_addr();
-        let esplora_addr = ephemeral_addr();
+        let node_path = node_dir.path().to_path_buf();
 
         let mut cfg = NodeConfig::default()
             .with_datadir(node_dir.path())
             .with_network(Network::Regtest)
-            .with_p2p_listen("127.0.0.1:0".parse().unwrap())
+            .with_p2p_listen(any_port())
             .with_tiny_heads();
         cfg.listen.connect = vec![NetAddr::Ip(seed_addr)];
         cfg.listen.use_seeds = false;
-        cfg.listen.electrum = Some(electrum_addr);
-        cfg.listen.esplora = Some(rbitcoin_esplora::EsploraListen::Tcp(esplora_addr));
+        cfg.listen.electrum = Some(any_port());
+        cfg.listen.esplora = Some(rbitcoin_esplora::EsploraListen::Tcp(any_port()));
         cfg.shindex = true;
-        cfg.rpc.listen = Some(rpc_addr);
+        cfg.rpc.listen = Some(any_port());
         std::fs::write(node_dir.path().join("rpc.token"), "pass").unwrap();
         cfg.max_run_secs = Some(60);
         cfg.mempool.blocksonly = true;
@@ -3026,6 +3044,9 @@ async fn node_run_p2p_short() {
 
         let seed_peers = seed.peers.clone();
         let pin = tokio::spawn(async move {
+            let rpc_addr = published_listener(&node_path, "rpc").await;
+            let electrum_addr = published_listener(&node_path, "electrum").await;
+            let esplora_addr = published_listener(&node_path, "esplora").await;
             wait_listeners(&[rpc_addr, electrum_addr, esplora_addr]).await;
 
             let deadline = Instant::now() + Duration::from_secs(20);
