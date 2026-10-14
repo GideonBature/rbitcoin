@@ -4008,6 +4008,82 @@ mod tests {
             .is_none());
     }
 
+    /// A connected peer's start height is not a hole once the walk is proved
+    /// at the confirmed tip. A proved walk that is still above that tip is.
+    #[test]
+    fn proved_walk_at_the_tip_ignores_a_tall_peer() {
+        let (s0, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], None, Some(100));
+        st.max_peer_height = 50_000;
+        st.headers_done = true;
+        st.header_walk.prove_through(100);
+        assert!(
+            !super::super::exit::should_unlatch_headers_done(&st, 100),
+            "a proved walk at the confirmed tip does not chase a connected peer"
+        );
+        st.header_walk.prove_through(150);
+        assert!(
+            super::super::exit::should_unlatch_headers_done(&st, 100),
+            "a proved walk above the confirmed tip still opens an empty queue"
+        );
+    }
+
+    /// A batch that misses the checkpoint must not occupy the gap, and a
+    /// later batch that meets it must replace a short unproved queue.
+    #[test]
+    fn an_unproved_queue_does_not_hide_the_checkpoint() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-unproved");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let good = mine(gen, 1);
+        let later = mine(good.block_hash(), 2);
+        let miss = mine(gen, 9);
+        let miss2 = mine(miss.block_hash(), 8);
+        let (s0, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        apply(&mut st, &hub, 0, vec![good, later]);
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
+
+        st.ordered.clear();
+        st.ordered_set.clear();
+        st.height_to_hash.remove(&1);
+        st.height_to_hash.remove(&2);
+
+        apply(&mut st, &hub, 0, vec![miss, miss2]);
+        assert!(
+            !st.ordered_set.contains(&miss.block_hash()),
+            "a window that misses the checkpoint must not occupy the gap"
+        );
+        assert!(!st.ordered_set.contains(&miss2.block_hash()));
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
+
+        apply(&mut st, &hub, 0, vec![miss]);
+        assert!(
+            st.ordered_set.contains(&miss.block_hash()),
+            "a short refill still fills the queue before the next checkpoint"
+        );
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => {
+                assert!(
+                    locator.contains(&gen),
+                    "a peer that lacks the unproved tail must still be asked from the stored tip"
+                );
+            }
+            Ok(_) => panic!("expected getheaders"),
+            Err(_) => panic!("peer was not asked for headers"),
+        }
+        apply(&mut st, &hub, 0, vec![good, later]);
+        assert!(
+            st.ordered_set.contains(&good.block_hash()),
+            "a batch that meets the checkpoint replaces the unproved queue"
+        );
+        assert!(!st.ordered_set.contains(&miss.block_hash()));
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
+    }
+
     #[test]
     fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
         let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-6");
