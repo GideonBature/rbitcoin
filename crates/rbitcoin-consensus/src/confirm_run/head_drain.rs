@@ -1,6 +1,7 @@
 //! Process-wide `ibd-confirm-head` thread: write-behind `tx.head` insert.
 //!
-//! Confirm write overlaps this insert with structural + Class C. One inserter;
+//! Flag off overlaps this insert with structural, Class C, and annotate.
+//! `--datadir-hdd` starts the insert after annotate returns. One inserter;
 //! the thread stays up so each batch does not `thread::scope` spawn/teardown.
 
 use rbitcoin_store::StoreError;

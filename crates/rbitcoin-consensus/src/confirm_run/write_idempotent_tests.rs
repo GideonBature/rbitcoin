@@ -3405,3 +3405,91 @@ fn structural_run_clears_reused_scratch_between_batches() {
     assert_ne!(slots2.abs_edges[0].0, 999);
     let _ = std::fs::remove_dir_all(&path);
 }
+
+fn assert_spindle_schedule(trace: &[&str], hdd: bool, expect_class_a: bool) {
+    let head = trace
+        .iter()
+        .position(|e| *e == "head")
+        .unwrap_or_else(|| panic!("missing head: {trace:?}"));
+    let ann_end = trace
+        .iter()
+        .position(|e| *e == "ann-end")
+        .unwrap_or_else(|| panic!("missing ann-end: {trace:?}"));
+    let join = trace
+        .iter()
+        .position(|e| *e == "join")
+        .unwrap_or_else(|| panic!("missing join: {trace:?}"));
+    if hdd {
+        assert!(ann_end < head, "{trace:?}");
+    } else {
+        assert!(head < ann_end, "{trace:?}");
+        assert!(
+            !trace.iter().any(|e| *e == "hold" || *e == "release"),
+            "{trace:?}"
+        );
+    }
+    assert!(head < join, "{trace:?}");
+    let mut depth = 0i32;
+    for e in trace {
+        match *e {
+            "hold" => depth += 1,
+            "release" => depth -= 1,
+            "head" | "join" => assert_eq!(depth, 0, "{trace:?}"),
+            "class-a" | "ann-begin" | "ann-end" if hdd => assert!(depth > 0, "{trace:?}"),
+            _ => {}
+        }
+        assert!(depth >= 0, "{trace:?}");
+    }
+    assert_eq!(depth, 0, "{trace:?}");
+    if expect_class_a {
+        assert!(trace.contains(&"class-a"), "{trace:?}");
+    }
+}
+
+#[test]
+fn datadir_hdd_submits_head_after_annotate() {
+    use super::write::{spindle_trace_clear, spindle_trace_snapshot};
+    use super::{
+        confirm_scripts_phase, confirm_wire_load_from_plan, confirm_wire_lookup_stamp,
+        confirm_write_phase, finish_post_commit_hashes, ScriptPreverified,
+    };
+    use crate::accept_and_connect_block;
+    use crate::milestone::Milestone;
+    use crate::params::ChainParams;
+    use crate::regtest_pad::mine_empty_regtest;
+    use bitcoin::hashes::Hash;
+    use rbitcoin_primitives::{Fk, Height};
+    use std::sync::Arc;
+
+    for hdd in [false, true] {
+        let (path, q) = tmp_query();
+        q.store().set_datadir_hdd(hdd);
+        let params = ChainParams::regtest();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        let items = [(Height(1), Arc::new(b1.clone()), None)];
+        let stamped =
+            confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, None).expect("stamp");
+        let mat = confirm_wire_load_from_plan(
+            &q,
+            &params,
+            Milestone::NONE,
+            stamped,
+            None,
+            &ScriptPreverified::new(),
+        )
+        .expect("load");
+        let ok = confirm_scripts_phase(mat.batch).expect("scripts");
+        spindle_trace_clear();
+        confirm_write_phase(&q, &params, Milestone::NONE, ok.batch).expect("write");
+        assert_spindle_schedule(&spindle_trace_snapshot(), hdd, true);
+
+        let txid = b1.txdata[0].compute_txid().to_byte_array();
+        q.store().txs.head_note_pending(&[(txid, Fk(2))]);
+        spindle_trace_clear();
+        finish_post_commit_hashes(&q, &[(1, b1.block_hash().to_byte_array())]).expect("finish");
+        assert_spindle_schedule(&spindle_trace_snapshot(), hdd, false);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
