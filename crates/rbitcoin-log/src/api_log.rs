@@ -52,11 +52,7 @@ fn compact_params(params: &str) -> String {
     if params.len() <= PARAMS_MAX {
         return params.to_string();
     }
-    let mut end = PARAMS_MAX;
-    while end > 0 && !params.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &params[..end])
+    format!("{}…", &params[..char_floor(params, PARAMS_MAX)])
 }
 
 /// Record one Electrum / Esplora / RPC call.
@@ -113,11 +109,7 @@ fn logged_params(method: &str, params: &str) -> String {
 }
 
 fn char_floor(s: &str, max: usize) -> usize {
-    let mut end = max.min(s.len());
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
+    s.floor_char_boundary(max.min(s.len()))
 }
 
 /// Exclusive end of the slice to redact, covering each secret that starts
