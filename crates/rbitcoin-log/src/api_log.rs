@@ -252,6 +252,11 @@ mod tests {
         let c = compact_params(&long);
         assert!(c.ends_with('…'));
         assert!(c.len() < 400);
+        // 383 ASCII bytes, then a 3-byte character that straddles byte 384.
+        let mut straddling = "a".repeat(383);
+        straddling.push('€');
+        straddling.push_str("zzz");
+        assert_eq!(compact_params(&straddling), format!("{}…", "a".repeat(383)));
     }
 
     #[test]
@@ -284,6 +289,13 @@ mod tests {
             Some("unknown method: no.such"),
         );
         close_api_log();
+        let sealed = std::fs::metadata(&path).unwrap().len();
+        api_call("electrum", "127.0.0.1:1", "server.ping", "[]", 1, None);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            sealed,
+            "close stops the operator file"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -302,6 +314,25 @@ mod tests {
     }
 
     #[test]
+    fn init_api_log_creates_a_missing_parent() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "rbitcoin-api-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = root.join("nested").join("api.jsonl");
+        let _ = std::fs::remove_dir_all(&root);
+        init_api_log(&path).unwrap();
+        close_api_log();
+        assert!(path.is_file(), "operator path must exist");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn api_stderr_line_is_trace() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::capture_logs(true);
@@ -317,6 +348,8 @@ mod tests {
     #[test]
     fn json_escape_quotes() {
         assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(json_escape("\n\r\t"), "\\n\\r\\t");
+        assert_eq!(json_escape("\u{0001}"), "\\u0001");
     }
 
     #[test]

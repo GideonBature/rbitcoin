@@ -311,6 +311,11 @@ mod tests {
         // 2024-01-01 00:00:00 UTC
         let s = format_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(1_704_067_200));
         assert_eq!(s, "2024-01-01T00:00:00.000Z");
+        // February and December exercise the Hinnant month branches.
+        let s = format_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(31 * 86_400));
+        assert_eq!(s, "1970-02-01T00:00:00.000Z");
+        let s = format_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(364 * 86_400));
+        assert_eq!(s, "1970-12-31T00:00:00.000Z");
     }
 
     #[test]
@@ -421,5 +426,45 @@ mod tests {
         init(Level::Error);
         log_at_style(Level::Error, Style::Bold, format_args!("bold-err"));
         init(Level::Info);
+    }
+
+    // Operator stderr, not the capture buffer. A redirected fd is the log file
+    // an operator tails. Unix-only: the logger writes fd 2.
+    #[cfg(unix)]
+    unsafe extern "C" {
+        safe fn dup(fd: i32) -> i32;
+        safe fn dup2(oldfd: i32, newfd: i32) -> i32;
+        safe fn close(fd: i32) -> i32;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stderr_line_is_plain_when_not_a_terminal() {
+        let _g = lock_log_init();
+        init(Level::Error);
+        let path = std::env::temp_dir().join(format!(
+            "rbitcoin-log-stderr-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        use std::os::fd::AsRawFd;
+        let saved = dup(2);
+        assert!(saved >= 0);
+        assert_eq!(dup2(file.as_raw_fd(), 2), 2);
+        log_at_style(Level::Error, Style::Bold, format_args!("operator-line"));
+        log_at_style(Level::Info, Style::Plain, format_args!("hidden-info"));
+        let _ = io::stderr().flush();
+        assert_eq!(dup2(saved, 2), 2);
+        close(saved);
+        let body = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        init(Level::Info);
+        assert!(body.contains("operator-line"), "{body}");
+        assert!(!body.contains('\u{1b}'), "{body}");
+        assert!(!body.contains("hidden-info"), "{body}");
     }
 }
