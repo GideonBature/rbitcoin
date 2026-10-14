@@ -99,16 +99,21 @@ pub(crate) fn empty_path_header_fan(st: &IbdWorkState, tip_h: u32, alive: usize)
 
 /// Clear `headers_done` so empty-path `getheaders` can resume.
 ///
-/// Latch stops the tip storm. Unlatch only for a 1–2 block connecting-header
-/// hole. A far-ahead `max_peer_height` (less-work fork / bogus LastBlock) is
-/// not a most-work tip — do not unlatch and chase it.
+/// A proved walk at the confirmed tip does not chase a far
+/// `version.start_height`. A latch that never proved a walk does: the
+/// ordered queue is empty and a peer is ahead, including by more than two
+/// blocks. That is the regtest case where the latch fired before any peer
+/// had a chain.
 #[inline]
 pub(crate) fn should_unlatch_headers_done(st: &IbdWorkState, tip_h: u32) -> bool {
     if !st.headers_done || !st.ordered.is_empty() {
         return false;
     }
     let lag = header_lag_behind_peers(st, tip_h);
-    lag > 0 && lag <= 2 && !has_tip_plus_one(st, tip_h)
+    if lag == 0 || has_tip_plus_one(st, tip_h) {
+        return false;
+    }
+    !super::header_walk::headers_complete(st, tip_h)
 }
 
 /// Full `seed_work_path_from_store` (O(header_count) walk) while empty-lagging.
@@ -542,7 +547,8 @@ mod tests {
         assert!(!super::should_unlatch_headers_done(&at, 100));
     }
 
-    /// Unlatch only a 1–2 block connecting-header hole. lag>2 is not a chase.
+    /// An unproved empty queue unlatches for any real peer lead. A proved
+    /// walk does not chase a far start height.
     #[test]
     fn should_unlatch_headers_done() {
         use super::super::state::InflightReq;

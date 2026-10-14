@@ -2,10 +2,11 @@
 //!
 //! The ordered queue is a window over headers already written. One peer, the
 //! lowest time to a first block byte among peers that have not failed the
-//! walk, is asked for the header after the candidate. The locator starts at
-//! that tip, then a lighter fork still being weighed, then earlier
-//! checkpoints. Headers already written are appended locally while the queue
-//! is under [`ORDERED_HEADERS_SOFT_CAP`].
+//! walk, is asked for the next header that is not already stored. While the
+//! queue has room the locator starts at the stored tip, then the candidate,
+//! then a lighter fork, then earlier checkpoints, so the reply can be
+//! enqueued. A full queue asks from the candidate. Headers already written
+//! are appended locally while the queue is under [`ORDERED_HEADERS_SOFT_CAP`].
 //! An accepted batch is written and recorded as a checkpoint.
 //! Above the work floor, one short reply that leaves the candidate
 //! unextended retires that peer and the reservation moves. A full
@@ -1650,14 +1651,15 @@ pub(crate) fn reject_refill_miss(
         return false;
     };
     // A proven walk is the most-work header chain so far. A refill that
-    // disagrees with it is not allowed to erase that proof. Headers that
-    // have not met the next checkpoint are not on that chain yet, so they
-    // are not written. Below the floor the candidate is still a guess, and
+    // disagrees with it is not allowed to erase that proof. A short refill
+    // that continues this tail is still the download path: refusing it
+    // leaves the block queue empty until a later batch happens to reach the
+    // next checkpoint. Below the floor the candidate is still a guess, and
     // a contradictory refill replaces it.
     if st.header_walk.proven && !below_floor(hub, &st.header_walk.tip_work()) {
         return match path_agree(st, tail_h, headers) {
             PathAgree::Diverges => offer_alternate(st, hub, None, headers).unwrap_or(true),
-            PathAgree::Short => true,
+            PathAgree::Short => false,
             PathAgree::Checkpoint(_) => false,
         };
     }
@@ -1753,8 +1755,15 @@ pub(crate) fn proven_header_prefix(st: &IbdWorkState, hub: &ChainHub, headers: &
     };
     let stop = match path_agree(st, start_h, headers) {
         PathAgree::Checkpoint(stop) => stop,
-        // A queue refill that never meets a checkpoint is not an ancestor.
-        PathAgree::Short => return 0,
+        // Continues the stored tip and has not missed a checkpoint. The
+        // block queue needs these headers even when the next checkpoint is
+        // further than this reply.
+        PathAgree::Short => {
+            if stored_top_hash(st, hub) == Some(prev) {
+                return headers.len();
+            }
+            return 0;
+        }
         // A fork that is not the queue-tail refill stays in the header store.
         // The proven tail path already consumed its own divergent refill.
         PathAgree::Diverges => return headers.len(),
@@ -2137,15 +2146,37 @@ pub(crate) fn send_getheaders(
     arm_header_ask(st, hub)
 }
 
+/// Locator for one headers ask.
+///
+/// Bitcoin answers after the first locator hash the peer knows. While the
+/// queue can take headers, that hash is the stored tip. The candidate and
+/// its checkpoints follow, so a peer that does not have the stored tip can
+/// still extend the walk. A full queue is look-ahead and starts at the
+/// candidate.
+fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> Vec<BlockHash> {
+    let mut tips = Vec::new();
+    if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
+        if let Some(stored) = stored_top_hash(st, hub) {
+            tips.push(stored);
+        }
+    }
+    for hash in st.header_walk.locator_hashes() {
+        if !tips.contains(&hash) {
+            tips.push(hash);
+        }
+    }
+    if tips.is_empty() {
+        tips = super::path::work_path_tips(st);
+    }
+    tips
+}
+
 fn arm_header_ask(st: &mut IbdWorkState, hub: &ChainHub) -> Result<bool, crate::error::NetError> {
     if lane_fresh(&st.header_walk.walk) {
         return Ok(true);
     }
     let skip = expire_header_ask(st);
-    let mut tips = st.header_walk.locator_hashes();
-    if tips.is_empty() {
-        tips = super::path::work_path_tips(st);
-    }
+    let tips = header_ask_locator(st, hub);
     let above = path_top(st, hub).map(|(_, height)| height).unwrap_or(0);
     if let Some(peer) = take_challenge(st) {
         if ask_header_peer(st, hub, peer, &tips)? {
@@ -3947,8 +3978,7 @@ mod tests {
         match rx.try_recv() {
             Ok(PeerCmd::GetHeaders { locator }) => {
                 assert_eq!(
-                    locator[0],
-                    gen,
+                    locator[0], gen,
                     "an empty queue asks for the headers after the stored tip"
                 );
             }

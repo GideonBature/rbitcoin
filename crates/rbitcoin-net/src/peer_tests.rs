@@ -204,14 +204,31 @@ fn ibd_connect_does_not_start_headers_sync() {
     );
     assert!(rx2.try_recv().is_err());
 
-    hub.set_max_tip_age_secs(u64::MAX);
+    // Leaving IBD is a tip inside 24h, which is also when Core allows every
+    // connecting peer to start headers sync. The peer that already started
+    // during IBD does not start again.
+    let tip_time = u64::from(hub.tip_header().unwrap().time);
+    let fresh = tip_time.saturating_add(60);
+    peers.set_mock_now(fresh);
+    hub.clock.set_mock(i64::try_from(fresh).unwrap());
     assert!(!hub.in_ibd(), "a fresh tip leaves IBD");
+    let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8335);
+    let mut ver3 = ver.clone();
+    ver3.nonce = 3;
+    let session3 = peers.register(
+        addr3,
+        addr3,
+        &ver3,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
+    let (tx3, mut rx3) = mpsc::unbounded_channel();
     assert!(
-        maybe_queue_initial_getheaders(&tx, &hub, &session),
+        maybe_queue_initial_getheaders(&tx3, &hub, &session3),
         "after IBD a connecting peer still starts headers sync"
     );
     assert!(matches!(
-        rx.try_recv().unwrap().expect_msg(),
+        rx3.try_recv().unwrap().expect_msg(),
         bitcoin::p2p::message::NetworkMessage::GetHeaders(_)
     ));
     let _ = std::fs::remove_dir_all(dir);
@@ -881,7 +898,9 @@ fn handle_peer_frame_control_and_inv_paths() {
         let headers_msg = out_rx.try_recv().unwrap().expect_msg();
         assert!(matches!(headers_msg, NetworkMessage::Headers(_)));
 
-        // Unknown block inv during IBD challenges the walk. It does not getheaders.
+        // Unknown block inv during IBD challenges the walk and asks for
+        // headers. No session is attached, so the ask is the inv path's
+        // default. Drain it so the headers reply below is the next message.
         let want_h = BlockHash::from_byte_array([0xee; 32]);
         handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(want_h)])),
@@ -893,8 +912,11 @@ fn handle_peer_frame_control_and_inv_paths() {
         .await
         .unwrap();
         assert!(
-            out_rx.try_recv().is_err(),
-            "an unknown block inv during IBD must not getheaders"
+            matches!(
+                out_rx.try_recv().unwrap().expect_msg(),
+                NetworkMessage::GetHeaders(_)
+            ),
+            "an unknown block inv during IBD still asks for headers"
         );
         assert!(hub.header_inv_challenge_pending());
 
