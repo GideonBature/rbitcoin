@@ -1287,7 +1287,7 @@ impl Store {
             .get_spender_meta_at_abs_batch_backend(abs_offs, backend)
     }
 
-    /// Pure-write annotate with structural-known meta (no body pread).
+    /// Page-RMW annotate with structural-known meta.
     ///
     /// `abs_edges`: `(abs_off, create_tx_fk, vout, spending_tx_fk, spending_vin)`.
     /// `known`: parallel `(field, flags, vin)` from structural spentness.

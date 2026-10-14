@@ -1086,8 +1086,6 @@ pub fn with_thread_local<R>(
 pub const KIND_BULK_PREAD: u8 = 1;
 pub const KIND_PROBE: u8 = 3;
 pub const KIND_BULK_PWRITE: u8 = 4;
-pub const KIND_SPEND_META_READ: u8 = 5;
-pub const KIND_SPEND_META_WRITE: u8 = 6;
 pub const KIND_SPEND_PAGE_READ: u8 = 7;
 pub const KIND_SPEND_PAGE_WRITE: u8 = 8;
 /// SP-tweak machine: `txout.body` pread.
@@ -1294,8 +1292,6 @@ mod tests {
             KIND_BULK_PREAD,
             KIND_PROBE,
             KIND_BULK_PWRITE,
-            KIND_SPEND_META_READ,
-            KIND_SPEND_META_WRITE,
             KIND_SPEND_PAGE_READ,
             KIND_SPEND_PAGE_WRITE,
             KIND_SP_TXOUT,

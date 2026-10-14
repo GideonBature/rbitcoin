@@ -1782,11 +1782,12 @@ impl TxTable {
             .collect())
     }
 
-    /// Annotate spends at known absolute spender-meta offsets (confirm write).
+    /// Annotate spends at known absolute spender-meta offsets.
     ///
-    /// Prefer io_uring RMW ([`crate::spend_annotate_uring`]): pread 8 B → decide
-    /// sole / multi / promote → pwrite; `spent.ovf` appends run **inline** on
-    /// the read completion. Same abs serialized. Fallback: serial `pwrite` RMW.
+    /// One 4 KiB page RMW per page (uring, else the same groups via `pwrite`):
+    /// read the page, decide sole / multi / promote, write the page if dirty.
+    /// `POSIX_FADV_RANDOM` covers the sweep and restores `POSIX_FADV_NORMAL`
+    /// on every exit. `spent.ovf` appends run inline on the decision.
     ///
     /// Returns edges that still need a full cold path (OOB abs / deferred).
     /// Multi-list cases are handled here when uring/`pwrite` succeed (not returned).
@@ -1798,6 +1799,7 @@ impl TxTable {
         if abs_edges.is_empty() {
             return Ok(Vec::new());
         }
+        let _sweep = self.spent.advise_random_for_sweep();
         for &(_, _, _, sfk, _) in abs_edges {
             if sfk.is_null() {
                 return Err(StoreError::InvalidFk);
@@ -1818,58 +1820,16 @@ impl TxTable {
         self.put_spend_batch_by_abs_meta_pwrite(spenders, abs_edges)
     }
 
-    /// Serial `pwrite` RMW for [`Self::put_spend_batch_by_abs_meta`].
+    /// Page `pwrite` RMW for [`Self::put_spend_batch_by_abs_meta`].
     ///
-    /// Same slot bytes and cold list as the uring helper. An empty batch is
-    /// an empty cold list. Out-of-range offsets and failed reads or writes
-    /// are returned cold and do not change the slot.
+    /// Same slot bytes and cold list as the uring helper. Slots that share a
+    /// 4 KiB page are one read and one write.
     fn put_spend_batch_by_abs_meta_pwrite(
         &self,
         spenders: &crate::spender_table::SpenderTable,
         abs_edges: &[(u64, Fk, u32, Fk, u32)],
     ) -> Result<Vec<(Fk, u32, Fk, u32)>, StoreError> {
-        const META_LEN: u64 = OutputRecord::SPENT_SLOT_LEN as u64;
-        let body_pub = self.spent.body_published_len();
-        let mut cold: Vec<(Fk, u32, Fk, u32)> = Vec::new();
-        for &(abs, create_fk, vout, spend_fk, spend_vin) in abs_edges {
-            if abs.saturating_add(META_LEN) > body_pub {
-                cold.push((create_fk, vout, spend_fk, spend_vin));
-                continue;
-            }
-            let cur = self
-                .spent
-                .with_bytes_at_published(body_pub, abs, META_LEN, |raw| {
-                    let (flags, field, field_vin) = decode_spent_slot(raw)?;
-                    Ok((field, flags, field_vin))
-                });
-            let Ok((field, flags, field_vin)) = cur else {
-                cold.push((create_fk, vout, spend_fk, spend_vin));
-                continue;
-            };
-            let multi = flags & output_flags::MULTI_SPENDER != 0;
-            let (new_multi, new_field, new_vin) = if !multi && field.is_null() {
-                (false, spend_fk, spend_vin)
-            } else if !multi && field == spend_fk && field_vin == spend_vin {
-                continue;
-            } else if !multi {
-                let e1 = spenders.append(field, field_vin, Fk::NULL)?;
-                let e2 = spenders.append(spend_fk, spend_vin, e1)?;
-                (true, e2, 0)
-            } else {
-                let e = spenders.append(spend_fk, spend_vin, field)?;
-                (true, e, 0)
-            };
-            let new_flags = if new_multi {
-                flags | output_flags::MULTI_SPENDER
-            } else {
-                flags & !output_flags::MULTI_SPENDER
-            };
-            let meta = encode_spent_slot(new_flags, new_field, new_vin)?;
-            if self.spent.write_body_abs(abs, &meta).is_err() {
-                cold.push((create_fk, vout, spend_fk, spend_vin));
-            }
-        }
-        Ok(cold)
+        crate::spend_annotate_uring::annotate_unknown_pages_pwrite(self, spenders, abs_edges)
     }
 
     /// Bulk 8-byte spender meta reads at absolute `spent.body` file offsets.
@@ -1985,11 +1945,12 @@ impl TxTable {
         Ok(out)
     }
 
-    /// Pure-write spend annotate using structural-known meta (no body pread).
+    /// Page-RMW spend annotate using structural-known meta.
     ///
     /// `known[i]` is `(field, flags, vin)` at `abs_edges[i].0` from structural spentness.
-    /// Backend: `pwrite` or `uring`. Returns cold edges
-    /// (OOB) — production callers must treat non-empty as hard error.
+    /// Backend: `pwrite` or `uring`. Both read a 4 KiB page, poke the prepared
+    /// slots, and write the page. Returns cold edges (OOB) — production callers
+    /// must treat non-empty as hard error.
     pub fn put_spend_batch_by_abs_meta_known(
         &self,
         spenders: &crate::spender_table::SpenderTable,

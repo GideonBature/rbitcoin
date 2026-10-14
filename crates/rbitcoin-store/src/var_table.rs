@@ -575,10 +575,32 @@ impl VarTable {
         self.body.sync_data_only()
     }
 
+    /// `POSIX_FADV_RANDOM` until drop, then `POSIX_FADV_NORMAL`.
+    pub(crate) fn advise_random_for_sweep(&self) -> BodyAccessGuard<'_> {
+        #[cfg(target_os = "linux")]
+        self.body.advise_access(libc::POSIX_FADV_RANDOM);
+        BodyAccessGuard { body: &self.body }
+    }
+
     /// HWM + MS_ASYNC (no fdatasync) — host-friendly process exit.
     pub fn flush_async(&self) -> Result<(), StoreError> {
         self.body.flush_async()?;
         Ok(())
+    }
+}
+
+pub(crate) struct BodyAccessGuard<'a> {
+    body: &'a crate::file::TableFile,
+}
+
+impl Drop for BodyAccessGuard<'_> {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.body.advise_access(libc::POSIX_FADV_NORMAL);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self.body;
+        }
     }
 }
 
