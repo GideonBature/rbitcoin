@@ -31,6 +31,43 @@ fn missing_reject_parent_is_not_consensus_invalid() {
 }
 
 #[test]
+fn spindle_hold_blocks_lookup_and_load_bulk_reads() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("spindle-reader");
+    let query = std::sync::Arc::clone(&hub.query);
+    query.store().set_datadir_hdd(true);
+    let params = hub.params.clone();
+    let milestone = hub.milestone;
+    for which in [0, 1] {
+        super::CONFIRM_BULK_READS.store(0, Ordering::Relaxed);
+        let query_hold = std::sync::Arc::clone(&query);
+        let query_run = std::sync::Arc::clone(&query);
+        let params = params.clone();
+        std::thread::scope(|scope| {
+            let _hold = query_hold.store().spindle_hold();
+            scope.spawn(move || {
+                if which == 0 {
+                    let _ = super::lookup_bulk_wave(&query_run, &params, milestone, &[], 1, 1);
+                } else {
+                    let _ = super::load_bulk_stamp(&query_run, &params, milestone, &[], None);
+                }
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(
+                super::CONFIRM_BULK_READS.load(Ordering::Relaxed),
+                0,
+                "bulk read started while the spindle was held"
+            );
+            drop(_hold);
+        });
+        assert_eq!(super::CONFIRM_BULK_READS.load(Ordering::Relaxed), 1);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn index_startup_gap_matches_one_write_drain() {
     assert_eq!(
         rbitcoin_consensus::INDEX_STARTUP_GAP_HEIGHTS as usize,

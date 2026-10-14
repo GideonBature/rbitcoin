@@ -2326,7 +2326,7 @@ pub(crate) fn spawn_confirm_engine(
                         carried_header_fks,
                         carried_header_hashes,
                     );
-                    rbitcoin_consensus::confirm_wire_lookup_stamp(
+                    load_bulk_stamp(
                         &hub_load.query,
                         &hub_load.params,
                         hub_load.milestone,
@@ -2689,7 +2689,7 @@ pub(crate) fn spawn_confirm_engine(
                 let mut did = false;
                 if !wave_h.is_empty() {
                     let t_wave = Instant::now();
-                    match rbitcoin_consensus::confirm_bq_resolve_wave_capped(
+                    match lookup_bulk_wave(
                         &hub.query,
                         &hub.params,
                         hub.milestone,
@@ -2920,6 +2920,44 @@ pub(crate) fn offer_confirm_ready(
         noted += 1;
     }
     noted
+}
+
+#[cfg(test)]
+pub(super) static CONFIRM_BULK_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn note_confirm_bulk_read() {
+    #[cfg(test)]
+    CONFIRM_BULK_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// One lookup batch: wait out a rotating-media write burst, then identity / `create.loc`.
+pub(super) fn lookup_bulk_wave(
+    query: &rbitcoin_query::Query,
+    params: &rbitcoin_consensus::ChainParams,
+    milestone: rbitcoin_consensus::Milestone,
+    heights: &[u32],
+    max_blocks: usize,
+    max_inputs: u32,
+) -> Result<rbitcoin_consensus::BqResolveWave, rbitcoin_consensus::ConsensusError> {
+    query.store().spindle_wait();
+    note_confirm_bulk_read();
+    rbitcoin_consensus::confirm_bq_resolve_wave_capped(
+        query, params, milestone, heights, max_blocks, max_inputs,
+    )
+}
+
+/// One load batch: wait out a rotating-media write burst, then pin / stamp IO.
+pub(super) fn load_bulk_stamp(
+    query: &rbitcoin_query::Query,
+    params: &rbitcoin_consensus::ChainParams,
+    milestone: rbitcoin_consensus::Milestone,
+    blocks: &[rbitcoin_consensus::WireBlockIn],
+    pipeline: Option<&rbitcoin_consensus::WireLoadPipeline>,
+) -> Result<rbitcoin_consensus::PlanStampOutcome, rbitcoin_consensus::ConsensusError> {
+    query.store().spindle_wait();
+    note_confirm_bulk_read();
+    rbitcoin_consensus::confirm_wire_lookup_stamp(query, params, milestone, blocks, pipeline)
 }
 
 #[cfg(test)]
