@@ -100,10 +100,10 @@ pub(crate) fn empty_path_header_fan(st: &IbdWorkState, tip_h: u32, alive: usize)
 /// Clear `headers_done` so empty-path `getheaders` can resume.
 ///
 /// A proved walk at the confirmed tip does not chase a far
-/// `version.start_height`. A latch that never proved a walk does: the
-/// ordered queue is empty and a peer is ahead, including by more than two
-/// blocks. That is the regtest case where the latch fired before any peer
-/// had a chain.
+/// `version.start_height`, including one advertised by a connected peer.
+/// One or two missing connecting headers still open. A proved walk above
+/// the confirmed tip, or a latch that never proved a walk, opens for any
+/// peer lead.
 #[inline]
 pub(crate) fn should_unlatch_headers_done(st: &IbdWorkState, tip_h: u32) -> bool {
     if !st.headers_done || !st.ordered.is_empty() {
@@ -112,6 +112,9 @@ pub(crate) fn should_unlatch_headers_done(st: &IbdWorkState, tip_h: u32) -> bool
     let lag = header_lag_behind_peers(st, tip_h);
     if lag == 0 || has_tip_plus_one(st, tip_h) {
         return false;
+    }
+    if st.header_walk.proved_at_or_below(tip_h) {
+        return lag <= 2;
     }
     !super::header_walk::headers_complete(st, tip_h)
 }
