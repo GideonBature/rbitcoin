@@ -3055,7 +3055,12 @@ pub(crate) fn note_off_path(
     seen.len() > OFF_PATH_HEADER_BUDGET as usize
 }
 
-fn renote_stored_path(st: &IbdWorkState, hub: &ChainHub) {
+/// Note stored work-path headers on the milestone map.
+///
+/// Restart restores the anchor before the resume seed fills this map, so
+/// the seed calls this again. A height that links from the confirmed tip is
+/// on the path that reached the anchor.
+pub(crate) fn renote_stored_path(st: &IbdWorkState, hub: &ChainHub) {
     let mut height = hub.tip_height().unwrap_or(0);
     let mut prev = hub.tip_hash();
     while let Some(next_h) = height.checked_add(1) {
