@@ -86,6 +86,20 @@ mod tests {
     use crate::fee_est::{BLOCK_WEIGHT_WU, SECONDS_PER_BLOCK};
     use std::time::Duration;
 
+    /// Two admits, two seconds apart, at 10_000 WU. The rounded bucket rate is
+    /// the EMA a peer's fee estimate reads. Pure arithmetic: the half-life
+    /// blend is not a socket.
+    #[test]
+    fn two_admits_pin_the_bucket_ema() {
+        let t0 = Instant::now();
+        let mut m = FeeFlowMeter::new(t0);
+        m.note_admit(10_000, 1_000, t0 + Duration::from_secs(2));
+        m.note_admit(10_000, 1_000, t0 + Duration::from_secs(4));
+        let rates = m.admit_rates_wu_s(t0 + Duration::from_secs(4));
+        let bi = bucket_index(1_000);
+        assert_eq!(rates[bi], 91, "{rates:?}");
+    }
+
     #[test]
     fn admit_stream_raises_ema() {
         let t0 = Instant::now();

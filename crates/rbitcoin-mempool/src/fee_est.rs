@@ -363,9 +363,7 @@ pub fn depth_rate_sat_kvb(
 /// Enforce R(1) ≥ R(2) ≥ … in place (depths already sorted ascending).
 pub fn enforce_monotone_desc(rates: &mut [u64]) {
     for i in 1..rates.len() {
-        if rates[i] > rates[i - 1] {
-            rates[i] = rates[i - 1];
-        }
+        rates[i] = rates[i].min(rates[i - 1]);
     }
 }
 
@@ -790,6 +788,22 @@ mod tests {
         let mut r = [5_000u64, 6_000, 2_000, 3_000];
         enforce_monotone_desc(&mut r);
         assert_eq!(r, [5_000, 5_000, 2_000, 2_000]);
+        let mut flat = [4_000u64, 4_000, 1_000];
+        enforce_monotone_desc(&mut flat);
+        assert_eq!(flat, [4_000, 4_000, 1_000]);
+    }
+
+    #[test]
+    fn bucket_count_is_one_past_the_edges() {
+        assert_eq!(bucket_count(), FEE_BUCKET_EDGES_SAT_PER_KVB.len() + 1);
+    }
+
+    #[test]
+    fn percentile_sat_picks_the_ranked_index() {
+        assert_eq!(percentile_sat(vec![], 50), None);
+        assert_eq!(percentile_sat(vec![10, 40, 20, 30], 0), Some(10));
+        assert_eq!(percentile_sat(vec![10, 40, 20, 30], 50), Some(20));
+        assert_eq!(percentile_sat(vec![10, 40, 20, 30], 100), Some(40));
     }
 
     /// Geometric buckets: min relay through 1000 sat/vB, ~100 edges per decade.
