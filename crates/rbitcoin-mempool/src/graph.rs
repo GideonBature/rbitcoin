@@ -352,7 +352,7 @@ impl TxGraph {
             let rate = ch.fee_rate_sat_per_kvb();
             let take = match &best {
                 None => true,
-                Some((br, _)) => rate < *br,
+                Some((br, _)) => rate.cmp(br).is_lt(),
             };
             if take {
                 best = Some((rate, ch));
@@ -583,7 +583,10 @@ impl TxGraph {
         let mut old_reps = BTreeSet::new();
         for inp in &tx.input {
             let parent = inp.previous_output.txid;
-            if !self.created.contains(&inp.previous_output) || seen.contains(&parent) {
+            if !self.created.contains(&inp.previous_output) {
+                continue;
+            }
+            if seen.contains(&parent) {
                 continue;
             }
             if let Some(r) = self.component_rep(parent, &mut seen) {
@@ -889,12 +892,11 @@ impl TxGraph {
                     )
                 };
                 let key = (rate, mf, *t);
-                // Maximize rate, then fee; for equal, smaller txid for stability.
+                // Maximize rate, then fee. The walk is txid order, so an equal
+                // rate and fee keeps the lesser txid without a third compare.
                 let better = match &best_rate_fee_txid {
                     None => true,
-                    Some((br, bf, bt)) => {
-                        rate > *br || (rate == *br && (mf > *bf || (mf == *bf && t < bt)))
-                    }
+                    Some((br, bf, _)) => rate > *br || (rate == *br && mf > *bf),
                 };
                 if better {
                     best_rate_fee_txid = Some(key);
@@ -1857,21 +1859,35 @@ mod tests {
     #[test]
     fn rebuild_from_orders_parents_first() {
         let mut g = TxGraph::new();
-        let parent = make_tx(None, 1, 20);
-        let child = make_tx(Some((parent.compute_txid(), 0)), 1, 21);
-        // Deliberately child-first in input list.
+        // Both spenders sort before the parent. A readiness bug inserts them
+        // first, and `insert` backfills only the last tx recorded on that
+        // output, so one spender loses the parent edge.
+        let (parent, a, b) = (1..250u8)
+            .find_map(|seed| {
+                let parent = make_tx(None, 1, seed);
+                let pid = parent.compute_txid();
+                let a = make_tx(Some((pid, 0)), 1, seed.wrapping_add(1));
+                let b = make_tx(Some((pid, 0)), 1, seed.wrapping_add(2));
+                (a.compute_txid() < pid && b.compute_txid() < pid).then_some((parent, a, b))
+            })
+            .expect("two spender txids that sort before the parent");
+        let pid = parent.compute_txid();
         let items = vec![
-            (entry_for(&child, 10, 1), std::sync::Arc::new(child.clone())),
+            (entry_for(&a, 10, 1), std::sync::Arc::new(a.clone())),
+            (entry_for(&b, 10, 2), std::sync::Arc::new(b.clone())),
             (
                 entry_for(&parent, 10, 0),
                 std::sync::Arc::new(parent.clone()),
             ),
         ];
         g.rebuild_from(items);
-        assert!(g.contains(&parent.compute_txid()));
-        assert!(g.contains(&child.compute_txid()));
-        let c = g.cluster_of(&parent.compute_txid()).unwrap();
-        assert_eq!(c.members.len(), 2);
+        assert_eq!(g.cluster_of(&pid).unwrap().members.len(), 3);
+        for child in [&a, &b] {
+            assert!(
+                g.get(&child.compute_txid()).unwrap().parents.contains(&pid),
+                "rebuild links every spender after the parent is inserted"
+            );
+        }
     }
 
     /// Core `GetSigOpsAdjustedWeight`: `max(weight, sigop_cost × bytes_per_sigop)`.
@@ -2039,5 +2055,136 @@ mod tests {
         let room = MAX_CLUSTER_WEIGHT - raw;
         assert!(!g.cluster_would_exceed(&parents, 1, room));
         assert!(g.cluster_would_exceed(&parents, 1, room + 4));
+    }
+
+    #[test]
+    fn empty_graph_reports_the_cluster_weight_cap() {
+        let g = TxGraph::new();
+        assert!(g.is_empty());
+        assert_eq!(g.total_weight(), 0);
+        assert_eq!(g.cluster_weight_limit(), MAX_CLUSTER_WEIGHT);
+        let tx = make_tx(None, 1, 9);
+        let mut g = g;
+        g.insert(entry_for(&tx, 1, 0), &tx);
+        assert!(!g.is_empty());
+        assert!(g.total_weight() > 1);
+    }
+
+    /// Siblings in one cluster. Higher modified fee rate, then higher fee, then
+    /// the lesser txid. A negative modified fee stays behind a positive one.
+    #[test]
+    fn cluster_linearization_orders_rate_then_fee_then_txid() {
+        let mut g = TxGraph::new();
+        let parent = make_tx(None, 2, 1);
+        let pid = parent.compute_txid();
+        g.insert(entry_for(&parent, 100, 0), &parent);
+        let hi = make_tx(Some((pid, 0)), 1, 2);
+        let lo = make_tx(Some((pid, 1)), 1, 3);
+        let (hid, lid) = (hi.compute_txid(), lo.compute_txid());
+        g.insert(entry_for(&hi, 8_000, 1), &hi);
+        g.insert(entry_for(&lo, 1_000, 2), &lo);
+        let lin = g.cluster_of(&pid).unwrap().linearization;
+        assert_eq!(lin, vec![pid, hid, lid]);
+        assert_eq!(
+            g.worst_chunk().unwrap().1.txids,
+            vec![lid],
+            "the low-fee child is its own chunk behind the parent"
+        );
+
+        let mut g = TxGraph::new();
+        let parent = make_tx(None, 2, 4);
+        let pid = parent.compute_txid();
+        g.insert(entry_for(&parent, 100, 0), &parent);
+        let a = make_tx(Some((pid, 0)), 1, 5);
+        let b = make_tx(Some((pid, 1)), 1, 6);
+        let (aid, bid) = (a.compute_txid(), b.compute_txid());
+        g.insert(entry_for(&a, 2_000, 1), &a);
+        g.insert(entry_for(&b, 2_000, 2), &b);
+        let lin = g.cluster_of(&pid).unwrap().linearization;
+        let mut expect = [aid, bid];
+        expect.sort();
+        assert_eq!(lin, vec![pid, expect[0], expect[1]]);
+
+        let mut g = TxGraph::new();
+        let parent = make_tx(None, 2, 7);
+        let pid = parent.compute_txid();
+        g.insert(entry_for(&parent, 500, 0), &parent);
+        let pos = make_tx(Some((pid, 0)), 1, 8);
+        let neg = make_tx(Some((pid, 1)), 1, 9);
+        let (pos_id, neg_id) = (pos.compute_txid(), neg.compute_txid());
+        g.insert(entry_for(&pos, 1_000, 1), &pos);
+        g.insert(entry_for(&neg, 1_000, 2), &neg);
+        let lin = g
+            .cluster_of_delta(&pid, |t| if t == neg_id { -10_000 } else { 0 })
+            .unwrap()
+            .linearization;
+        assert_eq!(lin, vec![pid, pos_id, neg_id]);
+
+        // Same sat/kvB, higher fee must win even when its txid sorts later.
+        // A lower rate must not win on raw fee when its txid sorts later.
+        let eq = ranked_children(4_000, 77, 2_000, 37, |hi, lo| hi > lo);
+        assert_eq!(
+            rbitcoin_consensus::policy::fee_rate_sat_per_kvb(4_000, 77),
+            rbitcoin_consensus::policy::fee_rate_sat_per_kvb(2_000, 37)
+        );
+        assert_eq!(eq.linearization[1], eq.hi);
+        assert_eq!(eq.linearization[2], eq.lo);
+        let rate = ranked_children(1_000, 40, 50_000, 4_000, |hi_rate, lo_rate| {
+            hi_rate > lo_rate
+        });
+        assert!(
+            rbitcoin_consensus::policy::fee_rate_sat_per_kvb(1_000, 40)
+                > rbitcoin_consensus::policy::fee_rate_sat_per_kvb(50_000, 4_000)
+        );
+        assert_eq!(rate.linearization[1], rate.hi);
+        assert_eq!(rate.linearization[2], rate.lo);
+    }
+
+    struct Ranked {
+        hi: Txid,
+        lo: Txid,
+        linearization: Vec<Txid>,
+    }
+
+    /// Two children. `hi` is the one that must sort first. `want_hi_txid_after`
+    /// picks seeds until `hi`'s txid sorts after `lo`, so the walk sees `lo` first.
+    fn ranked_children(
+        hi_fee: u64,
+        hi_weight: u64,
+        lo_fee: u64,
+        lo_weight: u64,
+        want_hi_txid_after: impl Fn(Txid, Txid) -> bool,
+    ) -> Ranked {
+        for seed in 1..80u8 {
+            let parent = make_tx(None, 2, seed);
+            let pid = parent.compute_txid();
+            let a = make_tx(Some((pid, 0)), 1, seed.wrapping_add(1));
+            let b = make_tx(Some((pid, 1)), 1, seed.wrapping_add(2));
+            let (aid, bid) = (a.compute_txid(), b.compute_txid());
+            let (hi_tx, lo_tx, hi, lo) = if want_hi_txid_after(aid, bid) {
+                (a, b, aid, bid)
+            } else if want_hi_txid_after(bid, aid) {
+                (b, a, bid, aid)
+            } else {
+                continue;
+            };
+            let mut g = TxGraph::new();
+            g.insert(entry_for(&parent, 100, 0), &parent);
+            let mut he = entry_for(&hi_tx, hi_fee, 1);
+            he.weight = hi_weight;
+            he.sigop_cost = 0;
+            let mut le = entry_for(&lo_tx, lo_fee, 2);
+            le.weight = lo_weight;
+            le.sigop_cost = 0;
+            g.insert(he, &hi_tx);
+            g.insert(le, &lo_tx);
+            let linearization = g.cluster_of(&pid).unwrap().linearization;
+            return Ranked {
+                hi,
+                lo,
+                linearization,
+            };
+        }
+        panic!("no seed put the preferred txid second");
     }
 }
