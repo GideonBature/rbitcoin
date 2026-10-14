@@ -311,7 +311,7 @@ fn operator_usage() -> String {
     [--i2p-sam [HOST:PORT]] [--i2p-accept-incoming] \\\n\
     [--electrum-listen ADDR] [--esplora-listen ADDR] [--esplora-onion[=0|1]] [--health-listen [ADDR]] [--metrics] \\\n\
     [--sv2-tp-listen ADDR] [--sv2-tp-authority-sec KEY] [--sv2-tp-authority-sec-file PATH] [--sv2-tp-cert-validity SECS] [--sv2-tp-stale-grace SECS] [--sv2-tp-fee-delta SATS] [--sv2-tp-template-interval SECS] \\\n\
-    [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--electrum-max-subs N] [--esplora-block-template] \\\n\
+    [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--datadir-hdd] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--electrum-max-subs N] [--esplora-block-template] \\\n\
     [--rpc] [--rpc-listen [ADDR]] [--rest] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-work-queue N] \\\n\
     [--milestone HEIGHT] \\\n\
     [--max-outbound N] [--max-inbound N] \\\n\
@@ -379,6 +379,8 @@ Cold files: --datadir-cold PATH puts append-only IBD files under PATH/store\n\
   (seqsigwit, txstat, input, and blockfilter / sp_tweaks once enabled).\n\
   Default (flag omitted): those files live under --datadir. --prune-seqsigwit\n\
   is separate: it drops old seqsigwit and keeps a 288-height window on the hot store.\n\
+  --datadir-hdd says the main datadir is rotating media. The node does not probe the device.\n\
+  Default off keeps the SSD confirm schedule.\n\
 Conf: --conf FILE (snake_case key=value; CLI kebab overrides conf). See OPERATOR.md and docs/rpc.md.\n\
 Advanced debug/IO knobs remain RBITCOIN_* env (not required for normal sync; preserved if CLI omits).\n\
 IBD densify: up to 1024 concurrent getdata, max 16 in transit per peer.\n\
@@ -415,6 +417,7 @@ fn is_bool_key(key: &str) -> bool {
         "sh_index"
             | "block_filter_index"
             | "prune_seqsigwit"
+            | "datadir_hdd"
             | "sp_tweaks"
             | "esplora_block_template"
             | "esplora_onion"
@@ -638,6 +641,7 @@ mod tests {
             "--sh-index",
             "--block-filter-index",
             "--prune-seqsigwit",
+            "--datadir-hdd",
             "--prune-seqsigwit-ram-threshold-bytes",
             "--sp-tweaks",
             "--sp-tweaks-dust",
@@ -928,6 +932,11 @@ mod tests {
         ]);
         assert!(pruned.prune_seqsigwit);
         assert_eq!(pruned.prune_seqsigwit_ram_threshold_bytes, 4096);
+        assert!(!ready_config(["rbitcoin-node"]).datadir_hdd);
+        assert!(ready_config(["rbitcoin-node", "--datadir-hdd"]).datadir_hdd);
+        let mut hdd_conf = NodeConfig::default();
+        hdd_conf.apply_kv("datadir_hdd", "1").unwrap();
+        assert!(hdd_conf.datadir_hdd);
         for (argv, want) in [
             (&["--prefill-compact=0"][..], false),
             (&["--prefill-compact"], true),

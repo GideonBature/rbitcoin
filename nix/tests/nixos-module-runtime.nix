@@ -42,6 +42,7 @@ pkgs.testers.runNixOSTest {
         cjdns.reachable = true;
         health.enable = true;
         metrics = true;
+        datadirHdd = true;
         extraArgs = [
           "--max-outbound"
           "4"
@@ -73,6 +74,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("rbitcoin.service")
     machine.wait_until_succeeds("test -e /var/lib/rbitcoin-test/started")
     machine.succeed("grep -Fx -- '--datadir' /var/lib/rbitcoin-test/args")
+    machine.succeed("grep -Fx -- '--datadir-hdd' /var/lib/rbitcoin-test/args")
     machine.succeed("grep -Fx -- '/var/lib/rbitcoin-test' /var/lib/rbitcoin-test/args")
     machine.succeed("grep -Fx -- '--network' /var/lib/rbitcoin-test/args")
     machine.succeed("grep -Fx -- 'regtest' /var/lib/rbitcoin-test/args")
