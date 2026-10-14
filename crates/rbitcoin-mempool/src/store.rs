@@ -664,6 +664,18 @@ impl Mempool {
         self.grow_pinned = true;
     }
 
+    /// Tests set the logical slot cap. The slots image must already cover it.
+    #[cfg(test)]
+    pub(crate) fn testing_set_slot_cap(&mut self, cap: u32) {
+        let need = SLOTS_HEADER + (cap as usize) * SLOT_REC;
+        assert!(
+            cap >= 1 && self.slots.len() >= need,
+            "slot image is shorter than cap {cap}"
+        );
+        self.slots[8..12].copy_from_slice(&cap.to_le_bytes());
+        self.slot_cap = cap;
+    }
+
     /// Double slot capacity (up to [`MAX_SLOT_CAP`]) and extend the slots image with FREE records.
     pub fn grow_slots(&mut self) -> Result<(), MempoolError> {
         if self.grow_pinned || self.slot_cap >= MAX_SLOT_CAP {

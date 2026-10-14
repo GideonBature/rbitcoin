@@ -7,6 +7,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use rbitcoin_consensus::WireLoadPipeline;
 use rbitcoin_log::{debug, info, warn};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -543,32 +544,47 @@ fn reoffer_blocks_to_body_queue<'a>(
     offer_back(hub, prepare_offer_back(hub, items));
 }
 
-/// A cancelled write does not re-arm, and load must drop the plan it stamped
-/// for that wave. Every other class re-arms, which already bumps the generation.
-fn write_reject_drops_lookahead(rearmed: bool) -> bool {
-    !rearmed
+/// A stale load epoch offers the wave back. Already-connected hashes are
+/// dropped by [`prepare_offer_back`]; a second filter here cannot change
+/// the queue.
+fn reoffer_unconnected_bodies<'a>(hub: &ChainHub, items: impl IntoIterator<Item = OfferBack<'a>>) {
+    reoffer_blocks_to_body_queue(hub, items);
 }
 
-/// A retried, engine-faulted, or session-faulted script wave goes back with
-/// the batches dropped behind it. A one-block verdict drops its block.
-fn script_reject_requeues_wave(
+/// The script wave that goes back on the body queue. A one-block verdict
+/// drops its block. A retry, an engine fault, or a session fault keeps it.
+fn script_reject_wave<T>(
     retried: bool,
     session_fault: bool,
     class: ConfirmRejectClass,
-) -> bool {
-    retried || session_fault || class == ConfirmRejectClass::EngineFault
+    wave: &[T],
+) -> &[T] {
+    if retried || session_fault || class == ConfirmRejectClass::EngineFault {
+        wave
+    } else {
+        &[]
+    }
 }
 
-/// A stale load epoch returns a body to the queue only when this node has
-/// not connected that hash.
-fn stale_load_body_returns_to_queue(already_connected: bool) -> bool {
-    !already_connected
-}
-
-/// A pin-stage engine fault that is not a uring session fault is a stale
-/// plan and rewinds as a cascade. A session fault keeps the engine class.
-fn load_engine_fault_is_a_stale_plan(class: ConfirmRejectClass, session_fault: bool) -> bool {
-    class == ConfirmRejectClass::EngineFault && !session_fault
+fn rearm_script_reject(
+    hub: &ChainHub,
+    feed: &ConfirmFeed,
+    retried: bool,
+    session_fault: bool,
+    class: ConfirmRejectClass,
+    wave: &[(u32, BlockHash, &bitcoin::Block)],
+) {
+    let rearm = if retried {
+        ConfirmRejectClass::Cascade
+    } else {
+        class
+    };
+    rearm_after_reject(
+        hub,
+        feed,
+        rearm,
+        script_reject_wave(retried, session_fault, class, wave),
+    );
 }
 
 /// A write or scripts reject: lookup took the wave's bodies off the body
@@ -615,6 +631,20 @@ fn rearm_after_reject(
         feed.notify();
     }
     true
+}
+
+/// A cancelled write does not re-arm. Load then drops the plan it stamped
+/// for that wave. Every other class re-arms, which already bumps the generation.
+fn apply_write_reject(
+    hub: &ChainHub,
+    feed: &ConfirmFeed,
+    class: ConfirmRejectClass,
+    wave: &[(u32, BlockHash, &bitcoin::Block)],
+    reset_lookahead: &AtomicBool,
+) {
+    if !rearm_after_reject(hub, feed, class, wave) {
+        reset_lookahead.store(true, Ordering::Release);
+    }
 }
 
 /// The class a load reject of `wave` is rewound and sent with. A lone
@@ -667,6 +697,25 @@ fn load_fail_rewind_wave(
     hub.query.set_lookup_started_hi(hub.tip_height());
     offer_back(hub, prepared);
     feed.notify();
+}
+
+/// A pin-stage engine fault that is not a uring session fault is a stale
+/// plan and rewinds as a cascade. A session fault keeps the engine class.
+fn rewind_after_load_reject(
+    feed: &ConfirmFeed,
+    hub: &ChainHub,
+    lookup_ahead: &mut LoadAheadState,
+    first_h: u32,
+    class: ConfirmRejectClass,
+    session_fault: bool,
+    wave: &[OfferBack<'_>],
+) {
+    let rewind = if class == ConfirmRejectClass::EngineFault && !session_fault {
+        ConfirmRejectClass::Cascade
+    } else {
+        class
+    };
+    load_fail_rewind_wave(feed, hub, lookup_ahead, first_h, rewind, wave);
 }
 
 /// Peer id the wire was enqueued with: `sender` on [`ConfirmEvent::Reject`].
@@ -769,26 +818,31 @@ pub(crate) enum ConfirmEvent {
     },
 }
 
-/// True while the last progress publish is still inside the 5s operator window.
-fn confirm_progress_suppressed(elapsed: Duration) -> bool {
-    elapsed < Duration::from_secs(5)
+thread_local! {
+    static CONFIRM_PROGRESS_LAST: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-fn publish_confirm_progress(query: &rbitcoin_query::Query) {
-    use std::cell::Cell;
-    thread_local! {
-        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
-    }
-    let due = LAST.with(|cell| match cell.get() {
-        Some(t) if confirm_progress_suppressed(t.elapsed()) => false,
+#[cfg(test)]
+fn clear_confirm_progress_clock() {
+    CONFIRM_PROGRESS_LAST.with(|cell| cell.set(None));
+}
+
+/// Publish operator snapshots when `now` is at least 5s after the last publish.
+fn publish_confirm_progress_at(query: &rbitcoin_query::Query, now: Instant) {
+    let due = CONFIRM_PROGRESS_LAST.with(|cell| match cell.get() {
+        Some(t) if now.saturating_duration_since(t) < Duration::from_secs(5) => false,
         _ => {
-            cell.set(Some(Instant::now()));
+            cell.set(Some(now));
             true
         }
     });
     if due {
         query.publish_progress_snapshots();
     }
+}
+
+fn publish_confirm_progress(query: &rbitcoin_query::Query) {
+    publish_confirm_progress_at(query, Instant::now());
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
@@ -1516,6 +1570,35 @@ pub(crate) fn format_stamp_reject_missing_prevout(
 /// before, and scripts and write never wait on load.
 const PARENT_CHECK_WAIT: Duration = Duration::from_secs(10);
 
+thread_local! {
+    /// `Some` advances the parent-check deadline without sleeping. Unset uses
+    /// [`Instant::now`] and a 2ms sleep, which is the confirm thread.
+    static PARENT_CHECK_CLOCK: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+fn parent_now() -> Instant {
+    PARENT_CHECK_CLOCK.with(|cell| cell.get().unwrap_or_else(Instant::now))
+}
+
+#[cfg(test)]
+fn set_parent_check_clock(now: Option<Instant>) {
+    PARENT_CHECK_CLOCK.with(|cell| cell.set(now));
+}
+
+fn parent_check_wait_slice() {
+    let advanced = PARENT_CHECK_CLOCK.with(|cell| {
+        if let Some(t) = cell.get() {
+            cell.set(Some(t + Duration::from_millis(500)));
+            true
+        } else {
+            false
+        }
+    });
+    if !advanced {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// A fresh read of a lone block's parents after its load stamp missed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParentCheck {
@@ -1534,56 +1617,26 @@ enum ParentCheck {
 /// verdict needs the tip path's read: the block extends the tip, `tx.head`
 /// holds every connected create, a fresh TipOnly read still misses, and no
 /// disconnect ran from the wait through the read.
-fn parent_stamp_ready(on_tip: bool, covers_fence: bool) -> bool {
-    on_tip && covers_fence
-}
-
-fn parent_check_stopping(feed_stopped: bool, cancelled: bool) -> bool {
-    feed_stopped || cancelled
-}
-
-fn parent_check_deadline(now: Instant) -> Instant {
-    now + PARENT_CHECK_WAIT
-}
-
-fn parent_check_give_up(stopping: bool, now: Instant, deadline: Instant) -> bool {
-    stopping || now >= deadline
-}
-
-/// Timeout while the parent is the tip and confirm is still running: the
-/// pipeline missed the parent. A stop or a parent that is not the tip retries.
-fn parent_check_timeout_is_engine(on_tip: bool, feed_stopped: bool) -> bool {
-    on_tip && !feed_stopped
-}
-
-fn parent_check_read_untrusted(stopping: bool, ready: bool, disconnected: bool) -> bool {
-    stopping || !ready || disconnected
-}
-
 fn check_missing_parent(hub: &ChainHub, feed: &ConfirmFeed, block: &bitcoin::Block) -> ParentCheck {
     let prev = block.header.prev_blockhash;
     let mut disconnects = 0u64;
     let _ = hub.query.take_disconnect(&mut disconnects);
     let on_tip = || hub.tip_hash() == Some(prev);
-    let ready = || parent_stamp_ready(on_tip(), hub.query.head_covers_fence());
-    let stop = || parent_check_stopping(feed.stopped(), hub.query.confirm_cancelled());
-    let deadline = parent_check_deadline(Instant::now());
+    let ready = || on_tip() && hub.query.head_covers_fence();
+    let stop = || feed.stopped() || hub.query.confirm_cancelled();
+    let deadline = parent_now() + PARENT_CHECK_WAIT;
     while !ready() {
-        if parent_check_give_up(stop(), Instant::now(), deadline) {
-            return if parent_check_timeout_is_engine(on_tip(), feed.stopped()) {
+        if stop() || parent_now() >= deadline {
+            return if on_tip() && !feed.stopped() {
                 ParentCheck::Engine
             } else {
                 ParentCheck::OffTip
             };
         }
-        std::thread::sleep(Duration::from_millis(2));
+        parent_check_wait_slice();
     }
     let read = rbitcoin_consensus::parent_missing_from_chain(&hub.query, block, stop);
-    if parent_check_read_untrusted(
-        stop(),
-        ready(),
-        hub.query.take_disconnect(&mut disconnects).is_some(),
-    ) {
+    if stop() || !ready() || hub.query.take_disconnect(&mut disconnects).is_some() {
         return ParentCheck::OffTip;
     }
     match read {
@@ -2076,11 +2129,7 @@ pub(crate) fn spawn_confirm_engine(
                             .zip(failed.wire_blocks())
                             .map(|(&(h, ha), b)| (h, ha, b.as_ref()))
                             .collect();
-                        if write_reject_drops_lookahead(rearm_after_reject(
-                            &hub_wb, &feed_wb, class, &wave,
-                        )) {
-                            load_ahead_reset_wb.store(true, Ordering::Release);
-                        }
+                        apply_write_reject(&hub_wb, &feed_wb, class, &wave, &load_ahead_reset_wb);
                         confirm_thr_stats::add_write_work(&stats, t_rearm.elapsed());
                         let _ = emit_confirm_reject(
                             &event_tx_wb,
@@ -2171,21 +2220,18 @@ pub(crate) fn spawn_confirm_engine(
                     let retried = class.isolate_if_batched(meta.heights_hashes.len())
                         == ConfirmRejectClass::Cascade;
                     let t_rearm = Instant::now();
-                    let wave: Vec<(u32, BlockHash, &bitcoin::Block)> = if script_reject_requeues_wave(
-                        retried,
-                        session_fault,
-                        class,
-                    ) {
-                        std::iter::once(&meta)
-                            .chain(dropped)
-                            .flat_map(|m| m.heights_hashes.iter().zip(&m.wire_blocks))
-                            .map(|(&(h, raw), b)| (h, BlockHash::from_byte_array(raw), b.as_ref()))
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
+                    let full: Vec<(u32, BlockHash, &bitcoin::Block)> = std::iter::once(&meta)
+                        .chain(dropped)
+                        .flat_map(|m| m.heights_hashes.iter().zip(&m.wire_blocks))
+                        .map(|(&(h, raw), b)| (h, BlockHash::from_byte_array(raw), b.as_ref()))
+                        .collect();
                     if session_fault {
-                        requeue_on_uring_recover(&hub_sc, &feed_sc, "ibd-confirm-scripts", &wave);
+                        requeue_on_uring_recover(
+                            &hub_sc,
+                            &feed_sc,
+                            "ibd-confirm-scripts",
+                            script_reject_wave(retried, session_fault, class, &full),
+                        );
                         confirm_thr_stats::add_script_work(&stats, t_rearm.elapsed());
                         warn!("ibd: confirm scripts uring recover @ {}: {e}", meta.first_h);
                         return true;
@@ -2203,12 +2249,7 @@ pub(crate) fn spawn_confirm_engine(
                         .confirm_reject_stops
                         .fetch_add(1, Ordering::Relaxed);
                     warn!("ibd: confirm scripts reject @ {height} (batch first {hash}): {e}");
-                    let rearm = if retried {
-                        ConfirmRejectClass::Cascade
-                    } else {
-                        class
-                    };
-                    rearm_after_reject(&hub_sc, &feed_sc, rearm, &wave);
+                    rearm_script_reject(&hub_sc, &feed_sc, retried, session_fault, class, &full);
                     confirm_thr_stats::add_script_work(&stats, t_rearm.elapsed());
                     let _ = emit_confirm_reject(
                         &event_tx_sc,
@@ -2292,12 +2333,11 @@ pub(crate) fn spawn_confirm_engine(
                         "ibd: confirm load drop stale plan epoch={claim_epoch} live={}",
                         feed_load.epoch()
                     );
-                    reoffer_blocks_to_body_queue(
+                    reoffer_unconnected_bodies(
                         &hub_load,
-                        lb.items.iter().filter_map(|(h, raw, w)| {
+                        lb.items.iter().map(|(h, raw, w)| {
                             let hash = BlockHash::from_byte_array(*raw);
-                            stale_load_body_returns_to_queue(hub_load.has_block(&hash))
-                                .then_some((*h, hash, w.block.as_ref(), w.sender))
+                            (*h, hash, w.block.as_ref(), w.sender)
                         }),
                     );
                     feed_load.finish(lb.items.iter().map(|(h, _, _)| *h));
@@ -2622,17 +2662,13 @@ pub(crate) fn spawn_confirm_engine(
                         // A pin-stage invariant miss can be a stale-fk plan
                         // race, not a store fault: retry it one block at a
                         // time, as a cascade. A session fault is not a race.
-                        let rewind = if load_engine_fault_is_a_stale_plan(class, session_fault) {
-                            ConfirmRejectClass::Cascade
-                        } else {
-                            class
-                        };
-                        load_fail_rewind_wave(
+                        rewind_after_load_reject(
                             &feed_load,
                             &hub_load,
                             &mut lookup_ahead,
                             expect_h,
-                            rewind,
+                            class,
+                            session_fault,
                             &wave,
                         );
                         confirm_thr_stats::add_load_prune(&stats, t_rewind.elapsed());

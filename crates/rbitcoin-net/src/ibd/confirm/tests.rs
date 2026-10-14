@@ -2230,126 +2230,318 @@ fn reject_rearms_lookup_and_requeues_a_retried_wave() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The 5s cut is an instant boundary. A session cannot hit that instant, so
-/// this is the pure-arithmetic pin.
+/// A cancelled write drops the load plan. A retried or engine-fault script
+/// wave goes back on the body queue.
 #[test]
-fn confirm_progress_publishes_on_a_five_second_boundary() {
-    use super::confirm_progress_suppressed;
-    use std::time::Duration;
-    assert!(confirm_progress_suppressed(Duration::ZERO));
-    assert!(confirm_progress_suppressed(Duration::from_secs(4)));
-    assert!(confirm_progress_suppressed(Duration::from_millis(4_999)));
-    assert!(!confirm_progress_suppressed(Duration::from_secs(5)));
-    assert!(!confirm_progress_suppressed(Duration::from_secs(6)));
+fn write_cancel_and_script_reject_requeue() {
+    use super::{apply_write_reject, rearm_script_reject};
+    use rbitcoin_consensus::mine_empty_regtest;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("script-reject-requeue");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let b1 = mine_empty_regtest(tip, time + 600, 1);
+    let b2 = mine_empty_regtest(b1.block_hash(), time + 1200, 2);
+    let wave = [(1, b1.block_hash(), &b1), (2, b2.block_hash(), &b2)];
+
+    let reset = AtomicBool::new(false);
+    let feed = ConfirmFeed::new();
+    apply_write_reject(&hub, &feed, ConfirmRejectClass::Cancelled, &[], &reset);
+    assert!(
+        reset.load(Ordering::Acquire),
+        "a cancelled write drops the load plan"
+    );
+    let reset = AtomicBool::new(false);
+    apply_write_reject(
+        &hub,
+        &feed,
+        ConfirmRejectClass::ConsensusInvalid,
+        &wave[..1],
+        &reset,
+    );
+    assert!(
+        !reset.load(Ordering::Acquire),
+        "a consensus write re-arms and keeps the load plan"
+    );
+
+    let feed = ConfirmFeed::new();
+    rearm_script_reject(
+        &hub,
+        &feed,
+        true,
+        false,
+        ConfirmRejectClass::ConsensusInvalid,
+        &wave,
+    );
+    assert!(
+        hub.query.block_queue_has_height(1) && hub.query.block_queue_has_height(2),
+        "a retried script wave is back on the queue"
+    );
+    for ht in [1, 2] {
+        hub.query.block_queue_dequeue_height(ht).unwrap();
+    }
+    let feed = ConfirmFeed::new();
+    rearm_script_reject(
+        &hub,
+        &feed,
+        false,
+        false,
+        ConfirmRejectClass::EngineFault,
+        &wave,
+    );
+    assert!(
+        hub.query.block_queue_has_height(1) && hub.query.block_queue_has_height(2),
+        "an engine-fault script wave is back on the queue"
+    );
+    assert!(!feed.single_block());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Parent-stamp decisions a confirm thread takes. The 10s wait is the same
-/// kind of instant boundary as the progress publish: a session cannot sit
-/// on it, so the comparisons are pinned here.
+/// The 5s cut is the gap between two publishes on the confirm thread.
 #[test]
-fn parent_check_boundaries() {
-    use super::{
-        parent_check_deadline, parent_check_give_up, parent_check_read_untrusted,
-        parent_check_stopping, parent_check_timeout_is_engine, parent_stamp_ready,
-        PARENT_CHECK_WAIT,
+fn confirm_progress_publishes_on_a_five_second_boundary() {
+    use super::{clear_confirm_progress_clock, publish_confirm_progress_at};
+    use std::time::{Duration, Instant};
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("confirm-progress");
+    hub.ensure_genesis().unwrap();
+    clear_confirm_progress_clock();
+    rbitcoin_query::reset_progress_snapshot_counts();
+    let t0 = Instant::now() + Duration::from_secs(10_000);
+    publish_confirm_progress_at(&hub.query, t0);
+    assert_eq!(rbitcoin_query::progress_snapshot_counts().0, 1);
+    publish_confirm_progress_at(&hub.query, t0 + Duration::from_secs(4));
+    assert_eq!(
+        rbitcoin_query::progress_snapshot_counts().0,
+        1,
+        "four seconds does not publish again"
+    );
+    publish_confirm_progress_at(&hub.query, t0 + Duration::from_secs(5));
+    assert_eq!(
+        rbitcoin_query::progress_snapshot_counts().0,
+        2,
+        "five seconds publishes again"
+    );
+    clear_confirm_progress_clock();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn cover_parent_fence(hub: &crate::chain::ChainHub) {
+    let max = hub.query.store().fence_max_connected_fk();
+    if max > 0 {
+        hub.query.note_head_drain_fk(max);
+    }
+    assert!(
+        hub.query.head_covers_fence(),
+        "drain {} fence {}",
+        hub.query.head_drain_fk(),
+        hub.query.store().fence_max_connected_fk()
+    );
+}
+
+fn uncover_parent_fence(hub: &crate::chain::ChainHub) {
+    if !hub.query.head_covers_fence() {
+        return;
+    }
+    let store = hub.query.store();
+    let first = store.fence_max_connected_fk().saturating_add(10).max(1);
+    let header_fk = rbitcoin_primitives::Fk(first);
+    store
+        .header_txs
+        .put_range(header_fk, rbitcoin_primitives::Fk(first), 1)
+        .unwrap();
+    store
+        .height_fence_extend(rbitcoin_primitives::Height(50), header_fk)
+        .unwrap();
+    assert!(
+        !hub.query.head_covers_fence(),
+        "a fence run past the drain is not covered"
+    );
+}
+
+struct ParentClockGuard;
+impl Drop for ParentClockGuard {
+    fn drop(&mut self) {
+        super::set_parent_check_clock(None);
+    }
+}
+
+/// Parent stamp: off-tip waits out the deadline, a stop does not, an uncovered
+/// fence on the tip is an engine miss, and a disconnect during the read retries.
+#[test]
+fn parent_check_reads_the_tip() {
+    use super::{check_missing_parent, parent_now, set_parent_check_clock, ParentCheck};
+    use rbitcoin_consensus::mine_empty_regtest;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
     };
     use std::time::{Duration, Instant};
 
-    assert!(parent_stamp_ready(true, true));
-    assert!(!parent_stamp_ready(true, false));
-    assert!(!parent_stamp_ready(false, true));
-    assert!(!parent_stamp_ready(false, false));
-
-    assert!(parent_check_stopping(true, false));
-    assert!(parent_check_stopping(false, true));
-    assert!(!parent_check_stopping(false, false));
-
-    let now = Instant::now();
-    assert!(parent_check_deadline(now) > now);
-    assert_eq!(
-        parent_check_deadline(now).saturating_duration_since(now),
-        PARENT_CHECK_WAIT
+    let _guard = ParentClockGuard;
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("parent-check-read");
+    hub.ensure_genesis().unwrap();
+    cover_parent_fence(&hub);
+    let tip = hub.tip_hash().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let on_tip = mine_empty_regtest(tip, time + 600, 1);
+    let off = mine_empty_regtest(
+        bitcoin::BlockHash::from_byte_array([0x44; 32]),
+        time + 600,
+        1,
     );
-    assert!(parent_check_give_up(
-        true,
-        now,
-        now + Duration::from_secs(10)
-    ));
-    assert!(!parent_check_give_up(
-        false,
-        now,
-        now + Duration::from_secs(10)
-    ));
-    assert!(parent_check_give_up(false, now, now));
-    assert!(!parent_check_give_up(
-        false,
-        now,
-        now + Duration::from_millis(1)
-    ));
 
-    assert!(parent_check_timeout_is_engine(true, false));
-    assert!(!parent_check_timeout_is_engine(true, true));
-    assert!(!parent_check_timeout_is_engine(false, false));
-    assert!(!parent_check_timeout_is_engine(false, true));
+    let feed = ConfirmFeed::new();
+    feed.request_stop();
+    let start = Instant::now() + Duration::from_secs(3_600);
+    set_parent_check_clock(Some(start));
+    assert_eq!(check_missing_parent(&hub, &feed, &off), ParentCheck::OffTip);
+    assert!(
+        parent_now().saturating_duration_since(start) < Duration::from_secs(1),
+        "a stopped feed does not wait out the parent deadline"
+    );
+    set_parent_check_clock(Some(start));
+    assert_eq!(
+        check_missing_parent(&hub, &feed, &on_tip),
+        ParentCheck::OffTip,
+        "confirm is stopping, so a tip parent is a retry"
+    );
+    assert!(parent_now().saturating_duration_since(start) < Duration::from_secs(1));
 
-    assert!(parent_check_read_untrusted(true, true, false));
-    assert!(parent_check_read_untrusted(false, false, false));
-    assert!(parent_check_read_untrusted(false, true, true));
-    assert!(!parent_check_read_untrusted(false, true, false));
+    let feed = ConfirmFeed::new();
+    set_parent_check_clock(Some(start));
+    assert_eq!(
+        check_missing_parent(&hub, &feed, &off),
+        ParentCheck::OffTip,
+        "an off-tip parent retries after the deadline"
+    );
+    assert!(
+        parent_now().saturating_duration_since(start) >= Duration::from_secs(9),
+        "the off-tip wait runs to the deadline"
+    );
+
+    uncover_parent_fence(&hub);
+    set_parent_check_clock(Some(start));
+    assert_eq!(
+        check_missing_parent(&hub, &feed, &on_tip),
+        ParentCheck::Engine,
+        "the tip's parent is missing from tx.head after the deadline"
+    );
+    assert!(
+        parent_now().saturating_duration_since(start) >= Duration::from_secs(9),
+        "an uncovered fence waits out the deadline"
+    );
+
+    cover_parent_fence(&hub);
+    set_parent_check_clock(Some(start));
+    // A reorg during the tip-path read is a retry. The noter is the same
+    // `note_disconnect_height` a disconnect uses, already running before the
+    // read samples its generation.
+    let query = Arc::clone(&hub.query);
+    let stop_note = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop_note);
+    let noter = std::thread::spawn(move || {
+        while !flag.load(Ordering::Relaxed) {
+            query.note_disconnect_height(1);
+        }
+    });
+    let mut seen = 0u64;
+    let spun = Instant::now();
+    while hub.query.take_disconnect(&mut seen).is_none() {
+        assert!(
+            spun.elapsed() < Duration::from_secs(2),
+            "disconnect noter did not start"
+        );
+        std::thread::yield_now();
+    }
+    let mut saw = ParentCheck::Engine;
+    for _ in 0..8 {
+        saw = check_missing_parent(&hub, &feed, &on_tip);
+        if saw == ParentCheck::OffTip {
+            break;
+        }
+    }
+    stop_note.store(true, Ordering::Relaxed);
+    noter.join().expect("disconnect noter");
+    assert_eq!(
+        saw,
+        ParentCheck::OffTip,
+        "a disconnect during the parent read retries the block"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Write, script, and load reject predicates. Each arm is what the confirm
-/// threads do with a block the node has already fetched.
+/// A stale load offers a body the node has not connected and skips one it has.
 #[test]
-fn reject_wave_predicates() {
-    use super::{
-        load_engine_fault_is_a_stale_plan, script_reject_requeues_wave,
-        stale_load_body_returns_to_queue, write_reject_drops_lookahead, ConfirmRejectClass,
-    };
+fn unconnected_stale_body_returns_to_the_queue() {
+    use super::reoffer_unconnected_bodies;
+    use rbitcoin_consensus::mine_empty_regtest;
 
-    assert!(!write_reject_drops_lookahead(true));
-    assert!(write_reject_drops_lookahead(false));
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("stale-body");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let fresh = mine_empty_regtest(tip, time + 600, 1);
+    assert!(hub.has_block(&genesis.block_hash()));
+    assert!(!hub.has_block(&fresh.block_hash()));
+    reoffer_unconnected_bodies(
+        &hub,
+        [
+            (1, genesis.block_hash(), &genesis, None),
+            (2, fresh.block_hash(), &fresh, None),
+        ],
+    );
+    assert!(
+        !hub.query.block_queue_has_height(1),
+        "a connected body stays off the queue"
+    );
+    assert!(
+        hub.query.block_queue_has_height(2),
+        "an unconnected body is offered back"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
 
-    assert!(script_reject_requeues_wave(
-        true,
-        false,
-        ConfirmRejectClass::ConsensusInvalid
-    ));
-    assert!(script_reject_requeues_wave(
-        false,
-        true,
-        ConfirmRejectClass::ConsensusInvalid
-    ));
-    assert!(script_reject_requeues_wave(
-        false,
-        false,
-        ConfirmRejectClass::EngineFault
-    ));
-    assert!(!script_reject_requeues_wave(
-        false,
-        false,
-        ConfirmRejectClass::ConsensusInvalid
-    ));
+/// A lone consensus load reject drops the block. `&&` becoming `||` treats
+/// that reject as a cascade and puts the body back.
+#[test]
+fn load_consensus_rewind_drops_the_block() {
+    use super::{rewind_after_load_reject, ConfirmRejectClass, LoadAheadState};
+    use rbitcoin_consensus::mine_empty_regtest;
 
-    assert!(stale_load_body_returns_to_queue(false));
-    assert!(!stale_load_body_returns_to_queue(true));
-
-    assert!(load_engine_fault_is_a_stale_plan(
-        ConfirmRejectClass::EngineFault,
-        false
-    ));
-    assert!(!load_engine_fault_is_a_stale_plan(
-        ConfirmRejectClass::EngineFault,
-        true
-    ));
-    assert!(!load_engine_fault_is_a_stale_plan(
-        ConfirmRejectClass::Cascade,
-        false
-    ));
-    assert!(!load_engine_fault_is_a_stale_plan(
-        ConfirmRejectClass::Cascade,
-        true
-    ));
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("load-rewind");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let head = mine_empty_regtest(tip, time + 600, 1);
+    let feed = ConfirmFeed::new();
+    let mut st = LoadAheadState::new(&hub);
+    rewind_after_load_reject(
+        &feed,
+        &hub,
+        &mut st,
+        1,
+        ConfirmRejectClass::ConsensusInvalid,
+        false,
+        &[(1, head.block_hash(), &head, None)],
+    );
+    assert!(
+        !hub.query.block_queue_has_height(1),
+        "a one-block consensus reject drops the body"
+    );
+    assert!(!feed.single_block());
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A stopped confirm does not wait out the parent deadline. Off-tip and

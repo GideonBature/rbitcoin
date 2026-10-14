@@ -1189,7 +1189,7 @@ impl Query {
     }
 
     /// Record a tip shrink so load can drop in-flight layers for that height.
-    pub(crate) fn note_disconnect_height(&self, height: u32) {
+    pub fn note_disconnect_height(&self, height: u32) {
         self.disconnect_height
             .store(height, AtomicOrdering::Release);
         self.disconnect_gen.fetch_add(1, AtomicOrdering::Release);

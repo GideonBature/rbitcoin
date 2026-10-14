@@ -352,7 +352,7 @@ impl TxGraph {
             let rate = ch.fee_rate_sat_per_kvb();
             let take = match &best {
                 None => true,
-                Some((br, _)) => rate.cmp(br).is_lt(),
+                Some((br, _)) => rate < *br,
             };
             if take {
                 best = Some((rate, ch));
@@ -1854,6 +1854,65 @@ mod tests {
         assert!(g.remove(&child.compute_txid(), &child).is_some());
         let (rep4, _) = g.worst_chunk().expect("split back to dear");
         assert_eq!(rep4, dear_id);
+    }
+
+    /// Fee 1 at vsize 501 and vsize 999 both floor to 1 sat/kvB. Chunkify
+    /// still splits them when the lighter tx is linearized first. Strict `<`
+    /// keeps that earlier chunk; `<=` replaces it with the later one.
+    #[test]
+    fn floored_rate_tie_keeps_the_earlier_chunk() {
+        let mut g = TxGraph::new();
+        let (parent, light_tx, heavy_tx) = (1..250u8)
+            .find_map(|seed| {
+                let parent = make_tx(None, 2, seed);
+                let pid = parent.compute_txid();
+                let a = make_tx(Some((pid, 0)), 1, seed.wrapping_add(1));
+                let b = make_tx(Some((pid, 1)), 1, seed.wrapping_add(3));
+                let (light_tx, heavy_tx) = if a.compute_txid() < b.compute_txid() {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                (light_tx.compute_txid() != heavy_tx.compute_txid())
+                    .then_some((parent, light_tx, heavy_tx))
+            })
+            .expect("two distinct child txids");
+        let mut pe = entry_for(&parent, 10_000, 0);
+        pe.weight = 100;
+        pe.sigop_cost = 0;
+        g.insert(pe, &parent);
+        let mut le = entry_for(&light_tx, 1, 1);
+        le.weight = 2001;
+        le.sigop_cost = 0;
+        g.insert(le, &light_tx);
+        let mut he = entry_for(&heavy_tx, 1, 2);
+        he.weight = 3993;
+        he.sigop_cost = 0;
+        g.insert(he, &heavy_tx);
+        let light_id = light_tx.compute_txid();
+        let heavy_id = heavy_tx.compute_txid();
+        let cluster = g.cluster_of(&light_id).expect("cluster");
+        let child_chunks: Vec<&Chunk> = cluster
+            .chunks
+            .iter()
+            .filter(|c| c.fee_rate_sat_per_kvb() == 1)
+            .collect();
+        assert_eq!(
+            child_chunks.len(),
+            2,
+            "equal floored rates stay two chunks: {:?}",
+            cluster
+                .chunks
+                .iter()
+                .map(|c| (c.fee_rate_sat_per_kvb(), c.txids.clone()))
+                .collect::<Vec<_>>()
+        );
+        let (_rep, worst) = g.worst_chunk().expect("worst");
+        assert_eq!(
+            worst.txids,
+            vec![light_id],
+            "the earlier rate-1 chunk is worst; <= would keep {heavy_id}"
+        );
     }
 
     #[test]

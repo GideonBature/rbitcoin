@@ -729,8 +729,7 @@ impl ActiveMempool {
             return Ok(None);
         }
         let cap = self.store.meta().slot_cap;
-        let quarter = cap / 4;
-        if dead >= quarter || (live > 0 && dead >= live) || (live == 0 && dead > 0) {
+        if dead * 4 >= cap || (live > 0 && dead >= live) || (live == 0 && dead > 0) {
             return Ok(Some(self.compact()?));
         }
         Ok(None)
@@ -1345,14 +1344,12 @@ impl ActiveMempool {
         until: EvictUntil,
     ) -> Result<Vec<Txid>, AcceptError> {
         let mut gone = Vec::new();
-        let mut guard = 0u32;
         loop {
             match until {
                 EvictUntil::FreeSlot => {
-                    if self.store.has_free_slot() || guard >= 10_000 {
+                    if self.store.has_free_slot() {
                         break;
                     }
-                    guard = guard.saturating_add(1);
                 }
                 EvictUntil::WeightBudget => {
                     if self.graph.total_weight() <= self.max_weight {
@@ -1405,7 +1402,6 @@ impl ActiveMempool {
             });
         }
         let mut seen = BTreeSet::new();
-        let mut pkg_ids = BTreeSet::new();
         for tx in txs {
             if tx.is_coinbase() {
                 return Err(AcceptError::Coinbase);
@@ -1414,19 +1410,17 @@ impl ActiveMempool {
             if !seen.insert(id) {
                 return Err(AcceptError::Duplicate(id));
             }
-            pkg_ids.insert(id);
         }
-        for (i, tx) in txs.iter().enumerate() {
+        // `seen` still holds this tx and every tx after it. An input that
+        // names one of those txids spends a parent that is not earlier in
+        // the package, including a tx that spends its own txid.
+        for tx in txs {
             for inp in &tx.input {
-                let parent = inp.previous_output.txid;
-                if pkg_ids.contains(&parent) {
-                    let parent_pos = txs.iter().position(|t| t.compute_txid() == parent);
-                    match parent_pos {
-                        Some(p) if i > p => {}
-                        _ => return Err(AcceptError::PackageNotTopo),
-                    }
+                if seen.contains(&inp.previous_output.txid) {
+                    return Err(AcceptError::PackageNotTopo);
                 }
             }
+            seen.remove(&tx.compute_txid());
         }
         Ok(())
     }
@@ -3902,6 +3896,52 @@ mod tests {
         let (_f, live, dead) = mp.store.slot_stats();
         assert_eq!((live, dead), (0, 1));
         assert!(mp.maybe_compact().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Quarter of a cap of 4 is one dead slot, still under the live count.
+        // `dead * 4 >= cap` compacts; `dead / 4 >= cap` does not.
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 90_000, 80_000, 70_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut slots = Vec::new();
+        for (op, value) in ops.iter().zip([90_000, 80_000, 70_000, 60_000]) {
+            slots.push(
+                mp.accept_tx(&spend_tx(*op, value), &utxos, TIP_OK)
+                    .unwrap()
+                    .slot,
+            );
+        }
+        mp.store.testing_pin_full_slot_table();
+        mp.store.mark_slot_dead(slots[0]).unwrap();
+        let (_f, live, dead) = mp.store.slot_stats();
+        assert_eq!((mp.store.meta().slot_cap, live, dead), (4, 3, 1));
+        assert!(
+            mp.maybe_compact().unwrap().is_some(),
+            "one dead slot is a quarter of a 4-slot table"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Cap 5, one dead, three live: `dead * 4 >= cap` is false and dead is
+        // still under live. `dead + 4 >= cap` would compact.
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 90_000, 80_000, 70_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut slots = Vec::new();
+        for (op, value) in ops.iter().zip([90_000, 80_000, 70_000, 60_000]) {
+            slots.push(
+                mp.accept_tx(&spend_tx(*op, value), &utxos, TIP_OK)
+                    .unwrap()
+                    .slot,
+            );
+        }
+        mp.store.testing_set_slot_cap(5);
+        mp.store.mark_slot_dead(slots[0]).unwrap();
+        let (_f, live, dead) = mp.store.slot_stats();
+        assert_eq!((mp.store.meta().slot_cap, live, dead), (5, 3, 1));
+        assert!(
+            mp.maybe_compact().unwrap().is_none(),
+            "one dead slot is under a quarter of a 5-slot table and under the live count"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
