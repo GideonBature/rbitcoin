@@ -138,7 +138,7 @@ RAM fence (~15 MiB at 1M blocks), not a file.
 
 | Path | Env | Syscalls |
 |------|-----|----------|
-| Pin outs / body pipeline | `RBITCOIN_IO` | uring/pread on **`txout.body` FD** (Full also zips `seqsigwit`) |
+| Pin outs / body pipeline | `RBITCOIN_IO` | uring/pread on **`txout.body` FD** (Full also zips `seqsigwit`). `group_body_peeks` also merges a hole of at most 64 KiB when the span stays at most 256 KiB. |
 | Head-resolve identity | `RBITCOIN_IO` | uring/pread on **`txid.body`** (not a packed body prefix) |
 | Spend-meta 8 B peeks | `RBITCOIN_IO` | uring/pread on **`spent.body` FD** |
 | Spend annotate | `RBITCOIN_IO` | 4 KiB page RMW on **`spent.body`** (uring or pwrite, depth 128, one in-flight RMW per page). The sweep sets `POSIX_FADV_RANDOM` and restores `POSIX_FADV_NORMAL` on exit. Unknown meta decides sole / multi / promote inside the same page groups. |
