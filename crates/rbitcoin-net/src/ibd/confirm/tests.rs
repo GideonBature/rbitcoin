@@ -2376,10 +2376,7 @@ impl Drop for ParentClockGuard {
 fn parent_check_reads_the_tip() {
     use super::{check_missing_parent, parent_now, set_parent_check_clock, ParentCheck};
     use rbitcoin_consensus::mine_empty_regtest;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     let _guard = ParentClockGuard;
@@ -2440,40 +2437,31 @@ fn parent_check_reads_the_tip() {
 
     cover_parent_fence(&hub);
     set_parent_check_clock(Some(start));
-    // A reorg during the tip-path read is a retry. The noter is the same
-    // `note_disconnect_height` a disconnect uses, already running before the
-    // read samples its generation.
-    let query = Arc::clone(&hub.query);
-    let stop_note = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stop_note);
-    let noter = std::thread::spawn(move || {
-        while !flag.load(Ordering::Relaxed) {
-            query.note_disconnect_height(1);
-        }
-    });
-    let mut seen = 0u64;
-    let spun = Instant::now();
-    while hub.query.take_disconnect(&mut seen).is_none() {
+    // The parent read waits on the HDD spindle, after it has sampled the
+    // disconnect generation. A reorg noted while that read is parked is a retry.
+    hub.query.store().set_datadir_hdd(true);
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let hold = hub.query.store().spindle_hold();
+        scope.spawn(|| {
+            let _ = tx.send(check_missing_parent(&hub, &feed, &on_tip));
+        });
+        std::thread::sleep(Duration::from_millis(200));
         assert!(
-            spun.elapsed() < Duration::from_secs(2),
-            "disconnect noter did not start"
+            rx.try_recv().is_err(),
+            "the parent read did not wait for the spindle"
         );
-        std::thread::yield_now();
-    }
-    let mut saw = ParentCheck::Engine;
-    for _ in 0..8 {
-        saw = check_missing_parent(&hub, &feed, &on_tip);
-        if saw == ParentCheck::OffTip {
-            break;
-        }
-    }
-    stop_note.store(true, Ordering::Relaxed);
-    noter.join().expect("disconnect noter");
-    assert_eq!(
-        saw,
-        ParentCheck::OffTip,
-        "a disconnect during the parent read retries the block"
-    );
+        hub.query.note_disconnect_height(1);
+        drop(hold);
+        let saw = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("parent read did not finish after the spindle");
+        assert_eq!(
+            saw,
+            ParentCheck::OffTip,
+            "a disconnect during the parent read retries the block"
+        );
+    });
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -1635,6 +1635,8 @@ fn check_missing_parent(hub: &ChainHub, feed: &ConfirmFeed, block: &bitcoin::Blo
         }
         parent_check_wait_slice();
     }
+    // Same HDD gate as lookup and load: this read scans `tx.head`.
+    hub.query.store().spindle_wait();
     let read = rbitcoin_consensus::parent_missing_from_chain(&hub.query, block, stop);
     if stop() || !ready() || hub.query.take_disconnect(&mut disconnects).is_some() {
         return ParentCheck::OffTip;
