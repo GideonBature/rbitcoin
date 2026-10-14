@@ -111,8 +111,11 @@ fn owned_heap_steps_inflight_around_one_gib_only_when_a_prune_would_drop() {
         0,
         "nothing to save does not extend the window"
     );
+    assert_eq!(INFLIGHT_RETAIN_OWNED_LIMIT, 1_073_741_824);
     assert_eq!(retain.observe(under, true), INFLIGHT_RETAIN_STEP);
+    assert_eq!(retain.extra(), INFLIGHT_RETAIN_STEP);
     assert_eq!(retain.observe(under, true), INFLIGHT_RETAIN_STEP * 2);
+    assert_eq!(retain.extra(), INFLIGHT_RETAIN_STEP * 2);
     assert_eq!(
         retain.observe(under, false),
         INFLIGHT_RETAIN_STEP * 2,
@@ -2168,6 +2171,22 @@ fn reject_rearms_lookup_and_requeues_a_retried_wave() {
     );
     assert!(!feed.single_block());
 
+    let feed = ConfirmFeed::new();
+    hub.query.set_lookup_taken_hi(Some(2));
+    assert!(rearm_after_reject(
+        &hub,
+        &feed,
+        ConfirmRejectClass::Cascade,
+        &wave[..1],
+    ));
+    assert!(
+        !feed.single_block(),
+        "a one-block retry is already one block"
+    );
+    if hub.query.block_queue_has_height(1) {
+        hub.query.block_queue_dequeue_height(1).unwrap();
+    }
+
     for class in [
         ConfirmRejectClass::Cascade,
         ConfirmRejectClass::ConsensusInvalid,
@@ -2207,6 +2226,164 @@ fn reject_rearms_lookup_and_requeues_a_retried_wave() {
     assert!(
         hub.query.block_queue_has_height(1) && hub.query.block_queue_has_height(2),
         "engine fault: the wave is back on the queue"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The 5s cut is an instant boundary. A session cannot hit that instant, so
+/// this is the pure-arithmetic pin.
+#[test]
+fn confirm_progress_publishes_on_a_five_second_boundary() {
+    use super::confirm_progress_suppressed;
+    use std::time::Duration;
+    assert!(confirm_progress_suppressed(Duration::ZERO));
+    assert!(confirm_progress_suppressed(Duration::from_secs(4)));
+    assert!(confirm_progress_suppressed(Duration::from_millis(4_999)));
+    assert!(!confirm_progress_suppressed(Duration::from_secs(5)));
+    assert!(!confirm_progress_suppressed(Duration::from_secs(6)));
+}
+
+/// Parent-stamp decisions a confirm thread takes. The 10s wait is the same
+/// kind of instant boundary as the progress publish: a session cannot sit
+/// on it, so the comparisons are pinned here.
+#[test]
+fn parent_check_boundaries() {
+    use super::{
+        parent_check_deadline, parent_check_give_up, parent_check_read_untrusted,
+        parent_check_stopping, parent_check_timeout_is_engine, parent_stamp_ready,
+        PARENT_CHECK_WAIT,
+    };
+    use std::time::{Duration, Instant};
+
+    assert!(parent_stamp_ready(true, true));
+    assert!(!parent_stamp_ready(true, false));
+    assert!(!parent_stamp_ready(false, true));
+    assert!(!parent_stamp_ready(false, false));
+
+    assert!(parent_check_stopping(true, false));
+    assert!(parent_check_stopping(false, true));
+    assert!(!parent_check_stopping(false, false));
+
+    let now = Instant::now();
+    assert!(parent_check_deadline(now) > now);
+    assert_eq!(
+        parent_check_deadline(now).saturating_duration_since(now),
+        PARENT_CHECK_WAIT
+    );
+    assert!(parent_check_give_up(
+        true,
+        now,
+        now + Duration::from_secs(10)
+    ));
+    assert!(!parent_check_give_up(
+        false,
+        now,
+        now + Duration::from_secs(10)
+    ));
+    assert!(parent_check_give_up(false, now, now));
+    assert!(!parent_check_give_up(
+        false,
+        now,
+        now + Duration::from_millis(1)
+    ));
+
+    assert!(parent_check_timeout_is_engine(true, false));
+    assert!(!parent_check_timeout_is_engine(true, true));
+    assert!(!parent_check_timeout_is_engine(false, false));
+    assert!(!parent_check_timeout_is_engine(false, true));
+
+    assert!(parent_check_read_untrusted(true, true, false));
+    assert!(parent_check_read_untrusted(false, false, false));
+    assert!(parent_check_read_untrusted(false, true, true));
+    assert!(!parent_check_read_untrusted(false, true, false));
+}
+
+/// Write, script, and load reject predicates. Each arm is what the confirm
+/// threads do with a block the node has already fetched.
+#[test]
+fn reject_wave_predicates() {
+    use super::{
+        load_engine_fault_is_a_stale_plan, script_reject_requeues_wave,
+        stale_load_body_returns_to_queue, write_reject_drops_lookahead, ConfirmRejectClass,
+    };
+
+    assert!(!write_reject_drops_lookahead(true));
+    assert!(write_reject_drops_lookahead(false));
+
+    assert!(script_reject_requeues_wave(
+        true,
+        false,
+        ConfirmRejectClass::ConsensusInvalid
+    ));
+    assert!(script_reject_requeues_wave(
+        false,
+        true,
+        ConfirmRejectClass::ConsensusInvalid
+    ));
+    assert!(script_reject_requeues_wave(
+        false,
+        false,
+        ConfirmRejectClass::EngineFault
+    ));
+    assert!(!script_reject_requeues_wave(
+        false,
+        false,
+        ConfirmRejectClass::ConsensusInvalid
+    ));
+
+    assert!(stale_load_body_returns_to_queue(false));
+    assert!(!stale_load_body_returns_to_queue(true));
+
+    assert!(load_engine_fault_is_a_stale_plan(
+        ConfirmRejectClass::EngineFault,
+        false
+    ));
+    assert!(!load_engine_fault_is_a_stale_plan(
+        ConfirmRejectClass::EngineFault,
+        true
+    ));
+    assert!(!load_engine_fault_is_a_stale_plan(
+        ConfirmRejectClass::Cascade,
+        false
+    ));
+    assert!(!load_engine_fault_is_a_stale_plan(
+        ConfirmRejectClass::Cascade,
+        true
+    ));
+}
+
+/// A stopped confirm does not wait out the parent deadline. Off-tip and
+/// on-tip both retry.
+#[test]
+fn stopped_parent_check_is_off_tip() {
+    use super::{check_missing_parent, ParentCheck};
+    use rbitcoin_consensus::mine_empty_regtest;
+    use std::time::{Duration, Instant};
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("parent-check-stop");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let time = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .header
+        .time;
+    let on_tip = mine_empty_regtest(tip, time + 600, 1);
+    let off = mine_empty_regtest(
+        bitcoin::BlockHash::from_byte_array([0x44; 32]),
+        time + 600,
+        1,
+    );
+    let feed = ConfirmFeed::new();
+    feed.request_stop();
+    let t0 = Instant::now();
+    assert_eq!(check_missing_parent(&hub, &feed, &off), ParentCheck::OffTip);
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "a stopped feed does not wait out the parent deadline"
+    );
+    assert_eq!(
+        check_missing_parent(&hub, &feed, &on_tip),
+        ParentCheck::OffTip,
+        "confirm is stopping, so a tip parent is a retry"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

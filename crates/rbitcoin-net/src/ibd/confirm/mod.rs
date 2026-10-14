@@ -543,6 +543,34 @@ fn reoffer_blocks_to_body_queue<'a>(
     offer_back(hub, prepare_offer_back(hub, items));
 }
 
+/// A cancelled write does not re-arm, and load must drop the plan it stamped
+/// for that wave. Every other class re-arms, which already bumps the generation.
+fn write_reject_drops_lookahead(rearmed: bool) -> bool {
+    !rearmed
+}
+
+/// A retried, engine-faulted, or session-faulted script wave goes back with
+/// the batches dropped behind it. A one-block verdict drops its block.
+fn script_reject_requeues_wave(
+    retried: bool,
+    session_fault: bool,
+    class: ConfirmRejectClass,
+) -> bool {
+    retried || session_fault || class == ConfirmRejectClass::EngineFault
+}
+
+/// A stale load epoch returns a body to the queue only when this node has
+/// not connected that hash.
+fn stale_load_body_returns_to_queue(already_connected: bool) -> bool {
+    !already_connected
+}
+
+/// A pin-stage engine fault that is not a uring session fault is a stale
+/// plan and rewinds as a cascade. A session fault keeps the engine class.
+fn load_engine_fault_is_a_stale_plan(class: ConfirmRejectClass, session_fault: bool) -> bool {
+    class == ConfirmRejectClass::EngineFault && !session_fault
+}
+
 /// A write or scripts reject: lookup took the wave's bodies off the body
 /// queue. Re-arm lookup at the tip, which bumps the generation so load
 /// drops its look-ahead plan before the next wave. When the wave is retried
@@ -741,13 +769,18 @@ pub(crate) enum ConfirmEvent {
     },
 }
 
+/// True while the last progress publish is still inside the 5s operator window.
+fn confirm_progress_suppressed(elapsed: Duration) -> bool {
+    elapsed < Duration::from_secs(5)
+}
+
 fn publish_confirm_progress(query: &rbitcoin_query::Query) {
     use std::cell::Cell;
     thread_local! {
         static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
     }
     let due = LAST.with(|cell| match cell.get() {
-        Some(t) if t.elapsed() < Duration::from_secs(5) => false,
+        Some(t) if confirm_progress_suppressed(t.elapsed()) => false,
         _ => {
             cell.set(Some(Instant::now()));
             true
@@ -827,8 +860,8 @@ pub(crate) const WRITE_QUEUE_CAP_DEFAULT: usize = 14;
 
 /// Blocks added to or removed from the extra in-flight window per wave.
 pub(crate) const INFLIGHT_RETAIN_STEP: u32 = 64;
-/// Accounted-heap line. Under it the window can grow; over it the window shrinks.
-pub(crate) const INFLIGHT_RETAIN_OWNED_LIMIT: u64 = 1024 * 1024 * 1024;
+/// Accounted-heap line (1 GiB). Under it the window can grow; over it the window shrinks.
+pub(crate) const INFLIGHT_RETAIN_OWNED_LIMIT: u64 = 1 << 30;
 /// `height_by_hash` entry estimate from the old `ibd: sizes` accounted total.
 const H2H_ENTRY_BYTES: u64 = 48;
 /// Height-fence run estimate from that same total.
@@ -1501,17 +1534,43 @@ enum ParentCheck {
 /// verdict needs the tip path's read: the block extends the tip, `tx.head`
 /// holds every connected create, a fresh TipOnly read still misses, and no
 /// disconnect ran from the wait through the read.
+fn parent_stamp_ready(on_tip: bool, covers_fence: bool) -> bool {
+    on_tip && covers_fence
+}
+
+fn parent_check_stopping(feed_stopped: bool, cancelled: bool) -> bool {
+    feed_stopped || cancelled
+}
+
+fn parent_check_deadline(now: Instant) -> Instant {
+    now + PARENT_CHECK_WAIT
+}
+
+fn parent_check_give_up(stopping: bool, now: Instant, deadline: Instant) -> bool {
+    stopping || now >= deadline
+}
+
+/// Timeout while the parent is the tip and confirm is still running: the
+/// pipeline missed the parent. A stop or a parent that is not the tip retries.
+fn parent_check_timeout_is_engine(on_tip: bool, feed_stopped: bool) -> bool {
+    on_tip && !feed_stopped
+}
+
+fn parent_check_read_untrusted(stopping: bool, ready: bool, disconnected: bool) -> bool {
+    stopping || !ready || disconnected
+}
+
 fn check_missing_parent(hub: &ChainHub, feed: &ConfirmFeed, block: &bitcoin::Block) -> ParentCheck {
     let prev = block.header.prev_blockhash;
     let mut disconnects = 0u64;
     let _ = hub.query.take_disconnect(&mut disconnects);
     let on_tip = || hub.tip_hash() == Some(prev);
-    let ready = || on_tip() && hub.query.head_covers_fence();
-    let stop = || feed.stopped() || hub.query.confirm_cancelled();
-    let deadline = Instant::now() + PARENT_CHECK_WAIT;
+    let ready = || parent_stamp_ready(on_tip(), hub.query.head_covers_fence());
+    let stop = || parent_check_stopping(feed.stopped(), hub.query.confirm_cancelled());
+    let deadline = parent_check_deadline(Instant::now());
     while !ready() {
-        if stop() || Instant::now() >= deadline {
-            return if on_tip() && !feed.stopped() {
+        if parent_check_give_up(stop(), Instant::now(), deadline) {
+            return if parent_check_timeout_is_engine(on_tip(), feed.stopped()) {
                 ParentCheck::Engine
             } else {
                 ParentCheck::OffTip
@@ -1520,7 +1579,11 @@ fn check_missing_parent(hub: &ChainHub, feed: &ConfirmFeed, block: &bitcoin::Blo
         std::thread::sleep(Duration::from_millis(2));
     }
     let read = rbitcoin_consensus::parent_missing_from_chain(&hub.query, block, stop);
-    if stop() || !ready() || hub.query.take_disconnect(&mut disconnects).is_some() {
+    if parent_check_read_untrusted(
+        stop(),
+        ready(),
+        hub.query.take_disconnect(&mut disconnects).is_some(),
+    ) {
         return ParentCheck::OffTip;
     }
     match read {
@@ -2013,7 +2076,9 @@ pub(crate) fn spawn_confirm_engine(
                             .zip(failed.wire_blocks())
                             .map(|(&(h, ha), b)| (h, ha, b.as_ref()))
                             .collect();
-                        if !rearm_after_reject(&hub_wb, &feed_wb, class, &wave) {
+                        if write_reject_drops_lookahead(rearm_after_reject(
+                            &hub_wb, &feed_wb, class, &wave,
+                        )) {
                             load_ahead_reset_wb.store(true, Ordering::Release);
                         }
                         confirm_thr_stats::add_write_work(&stats, t_rearm.elapsed());
@@ -2106,10 +2171,11 @@ pub(crate) fn spawn_confirm_engine(
                     let retried = class.isolate_if_batched(meta.heights_hashes.len())
                         == ConfirmRejectClass::Cascade;
                     let t_rearm = Instant::now();
-                    let wave: Vec<(u32, BlockHash, &bitcoin::Block)> = if retried
-                        || session_fault
-                        || class == ConfirmRejectClass::EngineFault
-                    {
+                    let wave: Vec<(u32, BlockHash, &bitcoin::Block)> = if script_reject_requeues_wave(
+                        retried,
+                        session_fault,
+                        class,
+                    ) {
                         std::iter::once(&meta)
                             .chain(dropped)
                             .flat_map(|m| m.heights_hashes.iter().zip(&m.wire_blocks))
@@ -2230,7 +2296,7 @@ pub(crate) fn spawn_confirm_engine(
                         &hub_load,
                         lb.items.iter().filter_map(|(h, raw, w)| {
                             let hash = BlockHash::from_byte_array(*raw);
-                            (!hub_load.has_block(&hash))
+                            stale_load_body_returns_to_queue(hub_load.has_block(&hash))
                                 .then_some((*h, hash, w.block.as_ref(), w.sender))
                         }),
                     );
@@ -2556,7 +2622,7 @@ pub(crate) fn spawn_confirm_engine(
                         // A pin-stage invariant miss can be a stale-fk plan
                         // race, not a store fault: retry it one block at a
                         // time, as a cascade. A session fault is not a race.
-                        let rewind = if class == ConfirmRejectClass::EngineFault && !session_fault {
+                        let rewind = if load_engine_fault_is_a_stale_plan(class, session_fault) {
                             ConfirmRejectClass::Cascade
                         } else {
                             class
@@ -2697,7 +2763,10 @@ pub(crate) fn spawn_confirm_engine(
                         max_blocks,
                         max_inputs,
                     ) {
-                        Ok(wave) if !wave.items.is_empty() || wave.undecodable.is_some() => {
+                        Ok(wave) if wave.items.is_empty() && wave.undecodable.is_none() => {
+                            lookup_faults.on_success();
+                        }
+                        Ok(wave) => {
                             lookup_faults.on_success();
                             did = true;
                             if let Some((h, hash)) = wave.undecodable {
@@ -2791,9 +2860,6 @@ pub(crate) fn spawn_confirm_engine(
                                 confirm_thr_stats::add_lookup_send_wait(&stats, t_send.elapsed());
                             }
                             feed.notify();
-                        }
-                        Ok(_) => {
-                            lookup_faults.on_success();
                         }
                         Err(e) => {
                             if e.is_uring_session_fault() {
