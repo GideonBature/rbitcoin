@@ -2040,15 +2040,17 @@ pub(crate) fn should_poll_peer_headers(hub: &ChainHub, best_known: Option<BlockH
     )
 }
 
-/// Start Core initial headers-sync on this session if we are allowed to.
+/// Start Core's single initial headers sync on this session.
+///
+/// The header walk does not see this session. Skipping the ask while the
+/// tip is older than 24 hours left regtest peers with an empty block queue.
+/// [`crate::peers::PeerHub::try_start_headers_sync`] still allows one peer
+/// until the tip is caught up.
 fn maybe_queue_initial_getheaders(
     out: &mpsc::UnboundedSender<PeerOut>,
     hub: &ChainHub,
     session: &crate::peers::LivePeer,
 ) -> bool {
-    if hub.in_ibd() {
-        return false;
-    }
     if session.conn_type == crate::peers::PeerConnType::AddrFetch {
         return false;
     }
@@ -3488,7 +3490,6 @@ fn on_inv_block_needs_headers(
     }
     if hub.in_ibd() {
         hub.note_header_inv_challenge();
-        return false;
     }
     session.is_none_or(|s| {
         s.peer_hub()

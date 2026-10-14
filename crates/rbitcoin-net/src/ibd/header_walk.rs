@@ -2,10 +2,11 @@
 //!
 //! The ordered queue is a window over headers already written. One peer, the
 //! lowest time to a first block byte among peers that have not failed the
-//! walk, is asked for the header after the candidate. The locator starts at
-//! that tip, then a lighter fork still being weighed, then earlier
-//! checkpoints. Headers already written are appended locally while the queue
-//! is under [`ORDERED_HEADERS_SOFT_CAP`].
+//! walk, is asked for the next header that is not already stored. While the
+//! queue has room the locator starts at the stored tip, then the candidate,
+//! then a lighter fork, then earlier checkpoints, so the reply can be
+//! enqueued. A full queue asks from the candidate. Headers already written
+//! are appended locally while the queue is under [`ORDERED_HEADERS_SOFT_CAP`].
 //! An accepted batch is written and recorded as a checkpoint.
 //! Above the work floor, one short reply that leaves the candidate
 //! unextended retires that peer and the reservation moves. A full
@@ -135,6 +136,11 @@ impl HeaderWalk {
         self.tip.height
     }
 
+    /// The walk has met the work floor and is not past `tip_h`.
+    pub(crate) fn proved_at_or_below(&self, tip_h: u32) -> bool {
+        self.proven && self.tip.height <= tip_h
+    }
+
     pub(crate) fn tip_hash(&self) -> Option<BlockHash> {
         self.tip.hash
     }
@@ -199,6 +205,14 @@ impl HeaderWalk {
     /// `height` is on the candidate and past the queue, so hygiene keeps it.
     pub(crate) fn indexes_through(&self, height: u32) -> bool {
         self.origin && self.tip.hash.is_some() && height > 0 && height <= self.tip.height
+    }
+
+    /// Test stand-in for a walk that already proved the confirmed tip.
+    #[cfg(test)]
+    pub(crate) fn prove_through(&mut self, height: u32) {
+        self.origin = true;
+        self.proven = true;
+        self.tip.height = height;
     }
 }
 
@@ -707,7 +721,7 @@ pub(crate) fn suppress_competing_chain(
     // Treating it as one would evict a real fork that has less work so far.
     if st.header_walk.proven && !below && candidate_prev(st, prev) {
         if let Some(start_h) = height_of(st, hub, prev) {
-            if matches!(path_agree(st, start_h, headers), PathAgree::Short) {
+            if matches!(path_agree(st, start_h, headers, true), PathAgree::Short) {
                 return true;
             }
         }
@@ -1632,32 +1646,108 @@ pub(crate) fn reject_refill_miss(
     {
         return false;
     }
-    let Some(tail) = st.ordered.back().copied() else {
-        return false;
-    };
-    if headers[0].prev_blockhash != tail {
+    let prev = headers[0].prev_blockhash;
+    // A proven walk is the most-work header chain so far. A refill that
+    // disagrees with its next checkpoint is not the download path. A short
+    // refill that has not reached that checkpoint still is: refusing it
+    // leaves the block queue empty. A later batch from the same anchor that
+    // does meet the checkpoint replaces that unproved queue.
+    if let Some(tail) = st.ordered.back().copied() {
+        if prev != tail {
+            return replace_unproved_queue(st, hub, prev, headers);
+        }
+        let Some(&tail_h) = st.hash_height.get(&tail) else {
+            return false;
+        };
+        return judge_refill(st, hub, tail_h, headers);
+    }
+    if !proved_above_floor(st, hub) || hub.tip_hash() != Some(prev) {
         return false;
     }
-    let Some(&tail_h) = st.hash_height.get(&tail) else {
+    let Some(tip_h) = hub.tip_height() else {
         return false;
     };
-    // A proven walk is the most-work header chain so far. A refill that
-    // disagrees with it is not allowed to erase that proof. Headers that
-    // have not met the next checkpoint are not on that chain yet, so they
-    // are not written. Below the floor the candidate is still a guess, and
-    // a contradictory refill replaces it.
-    if st.header_walk.proven && !below_floor(hub, &st.header_walk.tip_work()) {
-        return match path_agree(st, tail_h, headers) {
+    judge_refill(st, hub, tip_h, headers)
+}
+
+fn proved_above_floor(st: &IbdWorkState, hub: &ChainHub) -> bool {
+    st.header_walk.proven && !below_floor(hub, &st.header_walk.tip_work())
+}
+
+fn judge_refill(st: &mut IbdWorkState, hub: &ChainHub, start_h: u32, headers: &[Header]) -> bool {
+    if proved_above_floor(st, hub) {
+        return match path_agree(st, start_h, headers, true) {
             PathAgree::Diverges => offer_alternate(st, hub, None, headers).unwrap_or(true),
-            PathAgree::Short => true,
-            PathAgree::Checkpoint(_) => false,
+            PathAgree::Short | PathAgree::Checkpoint(_) => false,
         };
     }
-    if !refill_misses_checkpoint(st, tail_h, headers) {
+    if !refill_misses_checkpoint(st, start_h, headers) {
         return false;
     }
-    rewind_above(st, hub, tail_h);
+    rewind_above(st, hub, start_h);
     false
+}
+
+/// Queue that continues the stored tip but has not met the next checkpoint.
+/// The hash is the proved parent those headers extend.
+fn unproved_anchor(st: &IbdWorkState, hub: &ChainHub) -> Option<(BlockHash, u32)> {
+    let front = st.ordered.front().copied()?;
+    let front_h = st.hash_height.get(&front).copied()?;
+    let reached = st.ordered.iter().any(|hash| {
+        st.hash_height.get(hash).is_some_and(|ht| {
+            st.header_walk
+                .checkpoints
+                .iter()
+                .any(|c| *ht >= c.height && c.height >= front_h)
+        })
+    });
+    if reached {
+        return None;
+    }
+    if let Some(cp) = st
+        .header_walk
+        .checkpoints
+        .iter()
+        .filter(|c| c.height < front_h)
+        .max_by_key(|c| c.height)
+    {
+        return Some((cp.hash, cp.height));
+    }
+    let tip_h = hub.tip_height()?;
+    if front_h == tip_h.saturating_add(1) {
+        return Some((hub.tip_hash()?, tip_h));
+    }
+    None
+}
+
+/// A batch from the proved anchor under an unproved queue.
+///
+/// True when the reply was consumed. A batch that meets the next checkpoint
+/// clears that queue so the caller can write it. A short guess does not
+/// replace the one already queued. A checkpoint miss is a competing chain.
+fn replace_unproved_queue(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    prev: BlockHash,
+    headers: &[Header],
+) -> bool {
+    if !proved_above_floor(st, hub) {
+        return false;
+    }
+    let Some((anchor, anchor_h)) = unproved_anchor(st, hub) else {
+        return false;
+    };
+    if prev != anchor {
+        return false;
+    }
+    match path_agree(st, anchor_h, headers, false) {
+        PathAgree::Checkpoint(_) => {
+            drop_queue_above(st, anchor_h, &HashSet::new());
+            false
+        }
+        PathAgree::Diverges => offer_alternate(st, hub, None, headers).unwrap_or(true),
+        PathAgree::Short => true,
+    }
 }
 
 /// A checkpoint this batch meets is an ancestor of the milestone walk.
@@ -1679,7 +1769,9 @@ fn candidate_prev(st: &IbdWorkState, prev: BlockHash) -> bool {
             .is_some_and(|h| st.height_to_hash.get(h) == Some(&prev))
 }
 
-fn path_agree(st: &IbdWorkState, start_h: u32, headers: &[Header]) -> PathAgree {
+/// `slots` is false when an unproved queue already occupies `height_to_hash`.
+/// The next checkpoint is the proof, not that guess.
+fn path_agree(st: &IbdWorkState, start_h: u32, headers: &[Header], slots: bool) -> PathAgree {
     let Some(first) = headers.first() else {
         return PathAgree::Short;
     };
@@ -1704,12 +1796,14 @@ fn path_agree(st: &IbdWorkState, start_h: u32, headers: &[Header]) -> PathAgree 
                 return PathAgree::Diverges;
             }
             agreed = Some(height);
-        } else if let Some(want) = st.height_to_hash.get(&height) {
-            if *want != hash {
-                return PathAgree::Diverges;
+        } else if slots {
+            if let Some(want) = st.height_to_hash.get(&height) {
+                if *want != hash {
+                    return PathAgree::Diverges;
+                }
+            } else if agreed.is_some() {
+                break;
             }
-        } else if agreed.is_some() {
-            break;
         }
         prev = hash;
     }
@@ -1743,10 +1837,17 @@ pub(crate) fn proven_header_prefix(st: &IbdWorkState, hub: &ChainHub, headers: &
     let Some(start_h) = height_of(st, hub, prev) else {
         return headers.len();
     };
-    let stop = match path_agree(st, start_h, headers) {
+    let stop = match path_agree(st, start_h, headers, true) {
         PathAgree::Checkpoint(stop) => stop,
-        // A queue refill that never meets a checkpoint is not an ancestor.
-        PathAgree::Short => return 0,
+        // Continues the stored tip and has not missed a checkpoint. The
+        // block queue needs these headers even when the next checkpoint is
+        // further than this reply.
+        PathAgree::Short => {
+            if stored_top_hash(st, hub) == Some(prev) {
+                return headers.len();
+            }
+            return 0;
+        }
         // A fork that is not the queue-tail refill stays in the header store.
         // The proven tail path already consumed its own divergent refill.
         PathAgree::Diverges => return headers.len(),
@@ -2129,15 +2230,42 @@ pub(crate) fn send_getheaders(
     arm_header_ask(st, hub)
 }
 
+/// Locator for one headers ask.
+///
+/// Bitcoin answers after the first locator hash the peer knows. While the
+/// queue can take headers, that hash is the stored tip. An unproved queue
+/// also names the proved anchor under it, so a peer that does not have the
+/// guess still sends the gap. The candidate and its checkpoints follow. A
+/// full queue is look-ahead and starts at the candidate.
+fn header_ask_locator(st: &IbdWorkState, hub: &ChainHub) -> Vec<BlockHash> {
+    let mut tips = Vec::new();
+    if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP {
+        if let Some(stored) = stored_top_hash(st, hub) {
+            tips.push(stored);
+        }
+        if let Some((anchor, _)) = unproved_anchor(st, hub) {
+            if !tips.contains(&anchor) {
+                tips.push(anchor);
+            }
+        }
+    }
+    for hash in st.header_walk.locator_hashes() {
+        if !tips.contains(&hash) {
+            tips.push(hash);
+        }
+    }
+    if tips.is_empty() {
+        tips = super::path::work_path_tips(st);
+    }
+    tips
+}
+
 fn arm_header_ask(st: &mut IbdWorkState, hub: &ChainHub) -> Result<bool, crate::error::NetError> {
     if lane_fresh(&st.header_walk.walk) {
         return Ok(true);
     }
     let skip = expire_header_ask(st);
-    let mut tips = st.header_walk.locator_hashes();
-    if tips.is_empty() {
-        tips = super::path::work_path_tips(st);
-    }
+    let tips = header_ask_locator(st, hub);
     let above = path_top(st, hub).map(|(_, height)| height).unwrap_or(0);
     if let Some(peer) = take_challenge(st) {
         if ask_header_peer(st, hub, peer, &tips)? {
@@ -3523,8 +3651,8 @@ mod tests {
         };
         assert_eq!(
             front,
-            Some(second.block_hash()),
-            "a missing next header is asked from the walk tip, not the rewound queue"
+            Some(gen),
+            "a missing next header is asked from the stored tip, not the walk"
         );
         let other = if ask == 0 {
             rx1.try_recv()
@@ -3628,21 +3756,22 @@ mod tests {
             }
         }
         assert!(
-            fronts.contains(&second.block_hash()),
-            "the ask starts at the walk tip; the queue refill is the reseeded path: {fronts:?}"
+            fronts.contains(&stored),
+            "the ask starts at the stored tip so the missing header can be queued: {fronts:?}"
         );
     }
 
     #[test]
     fn missing_next_header_asks_from_the_stored_tip() {
-        let (_dir, hub, mut st, mut rxs, first, _tail) =
+        let (_dir, hub, mut st, mut rxs, first, tail) =
             walk_ahead_of_a_short_queue("header-walk-missing", 20_000, 1);
         st.height_to_hash.remove(&1);
+        assert_ne!(tail, first.block_hash());
         assert!(send_getheaders(&mut st, &hub).unwrap());
         assert_eq!(
             locator_front(&mut rxs[0]),
-            Some(first.block_hash()),
-            "a missing next header is asked from the walk tip, not the queue tail"
+            Some(tail),
+            "a missing next header is asked from the stored tip, not the walk"
         );
     }
 
@@ -3919,36 +4048,38 @@ mod tests {
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
         let good = mine(gen, 1);
+        let later = mine(good.block_hash(), 2);
         let miss = mine(gen, 9);
         let (s0, mut rx) = slot(0);
         let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
         let before = hub.query.store().header_count();
         assert!(send_getheaders(&mut st, &hub).unwrap());
         let _ = rx.try_recv();
-        apply(&mut st, &hub, 0, vec![good]);
-        assert_eq!(hub.query.store().header_count(), before + 1);
-        assert_eq!(st.header_walk.tip_hash(), Some(good.block_hash()));
+        apply(&mut st, &hub, 0, vec![good, later]);
+        assert_eq!(hub.query.store().header_count(), before + 2);
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
 
-        while st.ordered.len() >= ORDERED_HEADERS_SOFT_CAP {
-            let dropped = st.ordered.pop_front().unwrap();
-            st.ordered_set.remove(&dropped);
-        }
+        st.ordered.clear();
+        st.ordered_set.clear();
+        st.height_to_hash.remove(&1);
+        st.height_to_hash.remove(&2);
         assert!(send_getheaders(&mut st, &hub).unwrap());
         match rx.try_recv() {
             Ok(PeerCmd::GetHeaders { locator }) => {
                 assert_eq!(
-                    locator[0],
-                    good.block_hash(),
-                    "look-ahead keeps the walk tip while peers are still ahead"
+                    locator[0], gen,
+                    "an empty queue asks for the headers after the stored tip"
                 );
             }
             Ok(_) => panic!("expected getheaders"),
             Err(_) => panic!("peer was not asked for headers"),
         }
-
         apply(&mut st, &hub, 0, vec![good]);
-        assert_eq!(hub.query.store().header_count(), before + 1);
-        assert!(st.ordered_set.contains(&good.block_hash()));
+        assert!(
+            st.ordered_set.contains(&good.block_hash()),
+            "a header short of the next checkpoint still fills the queue"
+        );
+        assert_eq!(hub.query.store().header_count(), before + 2);
 
         let after = hub.query.store().header_count();
         apply(&mut st, &hub, 0, vec![miss]);
@@ -3958,12 +4089,88 @@ mod tests {
             "a lighter valid chain stays available for a later heavier extension"
         );
         assert!(st.slots[0].alive);
-        assert_eq!(st.header_walk.tip_hash(), Some(good.block_hash()));
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
         assert!(hub
             .query
             .get_header_by_hash(miss.block_hash().as_byte_array())
             .unwrap()
             .is_none());
+    }
+
+    /// A connected peer's start height is not a hole once the walk is proved
+    /// at the confirmed tip. A proved walk that is still above that tip is.
+    #[test]
+    fn proved_walk_at_the_tip_ignores_a_tall_peer() {
+        let (s0, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], None, Some(100));
+        st.max_peer_height = 50_000;
+        st.headers_done = true;
+        st.header_walk.prove_through(100);
+        assert!(
+            !super::super::exit::should_unlatch_headers_done(&st, 100),
+            "a proved walk at the confirmed tip does not chase a connected peer"
+        );
+        st.header_walk.prove_through(150);
+        assert!(
+            super::super::exit::should_unlatch_headers_done(&st, 100),
+            "a proved walk above the confirmed tip still opens an empty queue"
+        );
+    }
+
+    /// A batch that misses the checkpoint must not occupy the gap, and a
+    /// later batch that meets it must replace a short unproved queue.
+    #[test]
+    fn an_unproved_queue_does_not_hide_the_checkpoint() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-unproved");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let good = mine(gen, 1);
+        let later = mine(good.block_hash(), 2);
+        let miss = mine(gen, 9);
+        let miss2 = mine(miss.block_hash(), 8);
+        let (s0, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        apply(&mut st, &hub, 0, vec![good, later]);
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
+
+        st.ordered.clear();
+        st.ordered_set.clear();
+        st.height_to_hash.remove(&1);
+        st.height_to_hash.remove(&2);
+
+        apply(&mut st, &hub, 0, vec![miss, miss2]);
+        assert!(
+            !st.ordered_set.contains(&miss.block_hash()),
+            "a window that misses the checkpoint must not occupy the gap"
+        );
+        assert!(!st.ordered_set.contains(&miss2.block_hash()));
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
+
+        apply(&mut st, &hub, 0, vec![miss]);
+        assert!(
+            st.ordered_set.contains(&miss.block_hash()),
+            "a short refill still fills the queue before the next checkpoint"
+        );
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => {
+                assert!(
+                    locator.contains(&gen),
+                    "a peer that lacks the unproved tail must still be asked from the stored tip"
+                );
+            }
+            Ok(_) => panic!("expected getheaders"),
+            Err(_) => panic!("peer was not asked for headers"),
+        }
+        apply(&mut st, &hub, 0, vec![good, later]);
+        assert!(
+            st.ordered_set.contains(&good.block_hash()),
+            "a batch that meets the checkpoint replaces the unproved queue"
+        );
+        assert!(!st.ordered_set.contains(&miss.block_hash()));
+        assert_eq!(st.header_walk.tip_hash(), Some(later.block_hash()));
     }
 
     #[test]

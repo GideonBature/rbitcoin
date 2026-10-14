@@ -99,16 +99,24 @@ pub(crate) fn empty_path_header_fan(st: &IbdWorkState, tip_h: u32, alive: usize)
 
 /// Clear `headers_done` so empty-path `getheaders` can resume.
 ///
-/// Latch stops the tip storm. Unlatch only for a 1–2 block connecting-header
-/// hole. A far-ahead `max_peer_height` (less-work fork / bogus LastBlock) is
-/// not a most-work tip — do not unlatch and chase it.
+/// A proved walk at the confirmed tip does not chase a far
+/// `version.start_height`, including one advertised by a connected peer.
+/// One or two missing connecting headers still open. A proved walk above
+/// the confirmed tip, or a latch that never proved a walk, opens for any
+/// peer lead.
 #[inline]
 pub(crate) fn should_unlatch_headers_done(st: &IbdWorkState, tip_h: u32) -> bool {
     if !st.headers_done || !st.ordered.is_empty() {
         return false;
     }
     let lag = header_lag_behind_peers(st, tip_h);
-    lag > 0 && lag <= 2 && !has_tip_plus_one(st, tip_h)
+    if lag == 0 || has_tip_plus_one(st, tip_h) {
+        return false;
+    }
+    if st.header_walk.proved_at_or_below(tip_h) {
+        return lag <= 2;
+    }
+    !super::header_walk::headers_complete(st, tip_h)
 }
 
 /// Full `seed_work_path_from_store` (O(header_count) walk) while empty-lagging.
@@ -503,6 +511,7 @@ mod tests {
         // Empty-EOF at the most-work path: extra advertised height is not a
         // tip we chase (less-work high-height fork / bogus LastBlock).
         signet.headers_done = true;
+        signet.header_walk.prove_through(2000);
         assert!(
             ibd_caught_up(&signet, 2000),
             "headers_done at path HWM completes even if start_height is far ahead"
@@ -541,7 +550,8 @@ mod tests {
         assert!(!super::should_unlatch_headers_done(&at, 100));
     }
 
-    /// Unlatch only a 1–2 block connecting-header hole. lag>2 is not a chase.
+    /// An unproved empty queue unlatches for any real peer lead. A proved
+    /// walk does not chase a far start height.
     #[test]
     fn should_unlatch_headers_done() {
         use super::super::state::InflightReq;
@@ -558,9 +568,15 @@ mod tests {
         }
         assert_eq!(header_lag_behind_peers(&st, 100), 5);
         assert!(
-            !super::should_unlatch_headers_done(&st, 100),
-            "lag>2 with no connecting hole is not a most-work tip we unlatch for"
+            super::should_unlatch_headers_done(&st, 100),
+            "an unproved latch asks again when a peer is more than two blocks ahead"
         );
+        st.header_walk.prove_through(100);
+        assert!(
+            !super::should_unlatch_headers_done(&st, 100),
+            "a proved walk does not chase a far start height"
+        );
+        st.header_walk = super::super::header_walk::HeaderWalk::default();
 
         st.max_peer_height = 100;
         assert_eq!(header_lag_behind_peers(&st, 100), 0);
