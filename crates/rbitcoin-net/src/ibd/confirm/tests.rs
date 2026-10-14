@@ -32,7 +32,7 @@ fn missing_reject_parent_is_not_consensus_invalid() {
 
 #[test]
 fn spindle_hold_blocks_lookup_and_load_bulk_reads() {
-    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::time::Duration;
 
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("spindle-reader");
@@ -41,13 +41,14 @@ fn spindle_hold_blocks_lookup_and_load_bulk_reads() {
     let params = hub.params.clone();
     let milestone = hub.milestone;
     for which in [0, 1] {
-        super::CONFIRM_BULK_READS.store(0, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
         let query_hold = std::sync::Arc::clone(&query);
         let query_run = std::sync::Arc::clone(&query);
         let params = params.clone();
         std::thread::scope(|scope| {
             let _hold = query_hold.store().spindle_hold();
             scope.spawn(move || {
+                super::set_bulk_read_note(Some(tx));
                 if which == 0 {
                     let _ = super::lookup_bulk_wave(&query_run, &params, milestone, &[], 1, 1);
                 } else {
@@ -55,14 +56,14 @@ fn spindle_hold_blocks_lookup_and_load_bulk_reads() {
                 }
             });
             std::thread::sleep(Duration::from_millis(300));
-            assert_eq!(
-                super::CONFIRM_BULK_READS.load(Ordering::Relaxed),
-                0,
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "bulk read started while the spindle was held"
             );
             drop(_hold);
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("bulk read did not pass the spindle after release");
         });
-        assert_eq!(super::CONFIRM_BULK_READS.load(Ordering::Relaxed), 1);
     }
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -2923,12 +2923,26 @@ pub(crate) fn offer_confirm_ready(
 }
 
 #[cfg(test)]
-pub(super) static CONFIRM_BULK_READS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static BULK_READ_NOTE: std::cell::Cell<Option<std::sync::mpsc::Sender<()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The calling thread's bulk-read signal. Other confirm tests share this process.
+#[cfg(test)]
+pub(super) fn set_bulk_read_note(tx: Option<std::sync::mpsc::Sender<()>>) {
+    BULK_READ_NOTE.with(|slot| slot.set(tx));
+}
 
 fn note_confirm_bulk_read() {
     #[cfg(test)]
-    CONFIRM_BULK_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BULK_READ_NOTE.with(|slot| {
+        let tx = slot.take();
+        if let Some(ref tx) = tx {
+            let _ = tx.send(());
+        }
+        slot.set(tx);
+    });
 }
 
 /// One lookup batch: wait out a rotating-media write burst, then identity / `create.loc`.
