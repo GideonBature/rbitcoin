@@ -583,6 +583,8 @@ pub struct TxTable {
     rebuild_seal_bits: u32,
     rebuild_workers: usize,
     prune_seqsigwit_mode: std::sync::atomic::AtomicBool,
+    /// `--datadir-hdd`: Class A body stems are one pwrite wave each.
+    datadir_hdd: std::sync::atomic::AtomicBool,
     /// Per-fk packed `txout` decodes for an outs reader
     /// ([`Self::get_meta_and_outputs`], and [`Self::get`] through it), the
     /// decode the mempool and block-proposal pins count. [`Self::get_full`] is
@@ -910,6 +912,7 @@ impl TxTable {
             rebuild_seal_bits: seal_bits,
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(false),
+            datadir_hdd: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1142,6 +1145,7 @@ impl TxTable {
             rebuild_seal_bits: seal_bits,
             rebuild_workers: workers,
             prune_seqsigwit_mode: std::sync::atomic::AtomicBool::new(prune_seqsigwit_mode),
+            datadir_hdd: std::sync::atomic::AtomicBool::new(false),
         };
         match input_open_tail(t.input.count(), n_bodies, t.seqsigwit.count()) {
             InputOpenTail::Backfill { from } => {
@@ -1215,6 +1219,15 @@ impl TxTable {
 
     pub fn set_prune_seqsigwit_mode(&self, on: bool) {
         self.prune_seqsigwit_mode
+            .store(on, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn datadir_hdd(&self) -> bool {
+        self.datadir_hdd.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn set_datadir_hdd(&self, on: bool) {
+        self.datadir_hdd
             .store(on, std::sync::atomic::Ordering::Release);
     }
 
@@ -2591,10 +2604,10 @@ impl TxTable {
         }
 
         if self.prune_seqsigwit_mode() {
-            crate::var_table::write_prepared_bodies_one_wave(&[
-                (&self.body, &p_out),
-                (&self.spent, &p_sp),
-            ])?;
+            crate::var_table::write_prepared_bodies_one_wave(
+                &[(&self.body, &p_out), (&self.spent, &p_sp)],
+                self.datadir_hdd(),
+            )?;
             self.create_loc.append(&recs)?;
             let fks = self.body.finish_prepared(p_out)?;
             let fks_sp = self.spent.finish_prepared(p_sp)?;
@@ -2612,11 +2625,14 @@ impl TxTable {
         else {
             return Err(StoreError::Corrupt("Class A seqsigwit prepare empty"));
         };
-        crate::var_table::write_prepared_bodies_one_wave(&[
-            (&self.body, &p_out),
-            (&self.seqsigwit, &p_in),
-            (&self.spent, &p_sp),
-        ])?;
+        crate::var_table::write_prepared_bodies_one_wave(
+            &[
+                (&self.body, &p_out),
+                (&self.seqsigwit, &p_in),
+                (&self.spent, &p_sp),
+            ],
+            self.datadir_hdd(),
+        )?;
         self.create_loc.append(&recs)?;
         self.seqsigwit_loc
             .append(&p_in.starts, &p_in.aligned_lens())?;

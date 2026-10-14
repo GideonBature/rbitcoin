@@ -271,13 +271,29 @@ impl VarTable {
     }
 }
 
-/// Submit several prepared Class A body blobs as **one** `pwrite_batch` wave.
+/// Wave ranges over a non-empty Class A stem list.
 ///
-/// Publish order is still body → loc → HWM: callers must [`VarTable::finish_prepared`]
-/// after this returns. Falls back to per-stem [`VarTable::write_body_blob_bulk`]
-/// if the batched submit is short or fails.
+/// Callers pass stems in append order (`txout`, `seqsigwit` when present,
+/// `spent`). `serial` is `--datadir-hdd`: one stem per wave. Otherwise one wave.
+pub(crate) fn class_a_body_waves(serial: bool, n_stems: usize) -> Vec<std::ops::Range<usize>> {
+    if n_stems == 0 {
+        return Vec::new();
+    }
+    if serial {
+        return (0..n_stems).map(|i| i..i + 1).collect();
+    }
+    std::iter::once(0..n_stems).collect()
+}
+
+/// Submit prepared Class A body blobs.
+///
+/// `serial` (`--datadir-hdd`) is one `pwrite_batch` per stem. Otherwise every
+/// stem is one wave. Publish order is still body → loc → HWM: callers must
+/// [`VarTable::finish_prepared`] after this returns. Falls back to per-stem
+/// [`VarTable::write_body_blob_bulk`] if a wave is short or fails.
 pub(crate) fn write_prepared_bodies_one_wave(
     jobs: &[(&VarTable, &PreparedAppend)],
+    serial: bool,
 ) -> Result<(), StoreError> {
     if jobs.is_empty() {
         return Ok(());
@@ -303,11 +319,17 @@ pub(crate) fn write_prepared_bodies_one_wave(
         });
     }
     if !ops.is_empty() {
-        bulk_io::pwrite_batch(&mut ops);
-        let all_ok = ops
-            .iter()
-            .zip(jobs.iter().filter(|(_, p)| !p.body_blob.is_empty()))
-            .all(|(op, (_, prep))| op.result >= 0 && (op.result as usize) == prep.body_blob.len());
+        let mut all_ok = true;
+        for wave in class_a_body_waves(serial, ops.len()) {
+            bulk_io::pwrite_batch(&mut ops[wave.start..wave.end]);
+            let wave_ok = ops[wave.start..wave.end]
+                .iter()
+                .all(|op| op.result >= 0 && (op.result as usize) == op.buf.len());
+            if !wave_ok {
+                all_ok = false;
+                break;
+            }
+        }
         if !all_ok {
             for (table, prep) in jobs {
                 table.write_body_blob_bulk(prep.start, &prep.body_blob)?;
@@ -564,6 +586,21 @@ impl VarTable {
 mod tests {
     use super::*;
     use rbitcoin_primitives::TableKind;
+
+    #[test]
+    fn class_a_body_waves_serial_is_one_stem_each() {
+        assert_eq!(
+            class_a_body_waves(false, 0),
+            Vec::<std::ops::Range<usize>>::new()
+        );
+        assert_eq!(class_a_body_waves(false, 3), vec![0..3]);
+        assert_eq!(
+            class_a_body_waves(true, 0),
+            Vec::<std::ops::Range<usize>>::new()
+        );
+        assert_eq!(class_a_body_waves(true, 2), vec![0..1, 1..2]);
+        assert_eq!(class_a_body_waves(true, 3), vec![0..1, 1..2, 2..3]);
+    }
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use std::sync::{Arc, Barrier};
     use std::thread;

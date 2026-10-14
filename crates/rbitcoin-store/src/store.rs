@@ -899,6 +899,15 @@ impl Store {
         self.txs.set_prune_seqsigwit_mode(on);
     }
 
+    /// Main datadir is rotating media (`--datadir-hdd`). Default off.
+    pub fn datadir_hdd(&self) -> bool {
+        self.txs.datadir_hdd()
+    }
+
+    pub fn set_datadir_hdd(&self, on: bool) {
+        self.txs.set_datadir_hdd(on);
+    }
+
     pub fn clear_durable_seqsigwit(&self) -> Result<(), StoreError> {
         self.txs.clear_durable_seqsigwit()
     }
