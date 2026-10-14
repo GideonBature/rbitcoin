@@ -9,36 +9,24 @@ thread_local! {
         RefCell::new(super::phases::StructuralReuse::default());
 }
 
-fn spindle_mark(_ev: &'static str) {
-    #[cfg(test)]
-    {
-        spindle_trace()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(_ev);
-    }
+#[cfg(test)]
+thread_local! {
+    static SPINDLE_TRACE: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(test)]
-fn spindle_trace() -> &'static std::sync::Mutex<Vec<&'static str>> {
-    static TRACE: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    &TRACE
+fn spindle_mark(_ev: &'static str) {
+    #[cfg(test)]
+    SPINDLE_TRACE.with(|trace| trace.borrow_mut().push(_ev));
 }
 
 #[cfg(test)]
 pub(super) fn spindle_trace_clear() {
-    spindle_trace()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clear();
+    SPINDLE_TRACE.with(|trace| trace.borrow_mut().clear());
 }
 
 #[cfg(test)]
 pub(super) fn spindle_trace_snapshot() -> Vec<&'static str> {
-    spindle_trace()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
+    SPINDLE_TRACE.with(|trace| trace.borrow().clone())
 }
 
 struct SpindleScope<'a> {
