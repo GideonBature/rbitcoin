@@ -269,6 +269,11 @@ impl Mempool {
         Ok(())
     }
 
+    /// Two slot records share one `pwrite` when the next record starts where the last ended.
+    fn adjacent_slot_records(prev_end: usize, off: usize) -> bool {
+        prev_end == off
+    }
+
     /// `pwrite` LIVE rows whose payload starts at or past `old_persisted`.
     ///
     /// Adjacent new slots are one write. Does not rewrite the rest of the table.
@@ -286,7 +291,7 @@ impl Mempool {
             }
             let rec_end = off + SLOT_REC;
             if let Some((_, end)) = ranges.last_mut() {
-                if *end == off {
+                if Self::adjacent_slot_records(*end, off) {
                     *end = rec_end;
                     continue;
                 }
@@ -323,7 +328,7 @@ impl Mempool {
         vins: &[VinAux],
     ) -> Result<u32, MempoolError> {
         let payload = encode_packed_live(tx, txid, wtxid, fee_sat, weight, Some(sigop_cost), vins)?;
-        if payload.len() > u32::MAX as usize {
+        if u32::try_from(payload.len()).is_err() {
             return Err(MempoolError::Corrupt("tx body too large"));
         }
         let payload_len = payload.len();
@@ -1567,11 +1572,35 @@ pub(crate) mod tests {
         let t2 = Txid::from_byte_array([0x02; 32]);
         mp.append_live_tx(&raw, &t2, &raw.compute_wtxid(), 2, 400, 0, &[])
             .unwrap();
+        let t3 = Txid::from_byte_array([0x03; 32]);
+        mp.append_live_tx(&raw, &t3, &raw.compute_wtxid(), 3, 400, 0, &[])
+            .unwrap();
+        // A byte just past the new slot records. A widened record range rewrites it.
+        let past = SLOTS_HEADER + 3 * SLOT_REC;
+        {
+            let mut slots = OpenOptions::new()
+                .write(true)
+                .open(dir.join("slots"))
+                .unwrap();
+            slots.seek(SeekFrom::Start(past as u64)).unwrap();
+            slots.write_all(&[0xab]).unwrap();
+            slots.sync_all().unwrap();
+        }
+        // Cap the walk at the live rows so a divided slot offset cannot alias
+        // slot 1 from an index thousands of rows later.
+        mp.testing_pin_full_slot_table();
         mp.set_now_ms(PERSIST_INTERVAL_MS * 2);
         mp.persist_due().unwrap();
+        let on_disk = fs::read(dir.join("slots")).unwrap();
+        assert_eq!(
+            on_disk[past], 0xab,
+            "persist must not rewrite the slot past the new records"
+        );
+        assert_eq!(on_disk[SLOTS_HEADER + SLOT_REC], SLOT_LIVE);
+        assert_eq!(on_disk[SLOTS_HEADER + 2 * SLOT_REC], SLOT_LIVE);
         drop(mp);
         let mp = Mempool::open_or_create(&dir).unwrap();
-        assert_eq!(mp.load_live_txs().unwrap().len(), 2);
+        assert_eq!(mp.load_live_txs().unwrap().len(), 3);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1879,6 +1908,86 @@ pub(crate) mod tests {
             Err(MempoolError::BadSchema(4)) => {}
             Ok(_) => panic!("expected BadSchema(4), got Ok"),
             Err(e) => panic!("expected BadSchema(4), got {e}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_dirty_keeps_a_second_interval_from_rewriting_meta() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        mp.set_now_ms(0);
+        let tid = Txid::from_byte_array([0x71; 32]);
+        put_live(&mut mp, &tid, 1, 400);
+        mp.set_now_ms(PERSIST_INTERVAL_MS);
+        mp.persist_due().unwrap();
+        let syncs = mp.meta_syncs();
+        mp.set_now_ms(PERSIST_INTERVAL_MS * 2);
+        mp.persist_due().unwrap();
+        assert_eq!(
+            mp.meta_syncs(),
+            syncs,
+            "a clean pool does not fsync meta again"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adjacent_slot_records_touch_when_the_next_starts_at_the_end() {
+        assert!(Mempool::adjacent_slot_records(64, 64));
+        assert!(!Mempool::adjacent_slot_records(64, 112));
+    }
+
+    #[test]
+    fn abandon_live_clears_every_slot_on_reopen() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        put_live(&mut mp, &Txid::from_byte_array([0x81; 32]), 1, 400);
+        put_live(&mut mp, &Txid::from_byte_array([0x82; 32]), 1, 400);
+        mp.flush().unwrap();
+        // Two live rows and a cap of 2: slot 1 is only reached by `slot * SLOT_REC`.
+        mp.testing_pin_full_slot_table();
+        assert_eq!(mp.abandon_live().unwrap(), 2);
+        drop(mp);
+        let mp = Mempool::open_or_create(&dir).unwrap();
+        assert_eq!(mp.live_count(), 0);
+        assert!(mp.load_live_txs().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slot_stats_counts_free_live_and_dead() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        let cap = mp.meta().slot_cap;
+        let slot = put_live(&mut mp, &Txid::from_byte_array([0x91; 32]), 1, 400);
+        let (free, live, dead) = mp.slot_stats();
+        assert_eq!((free, live, dead), (cap - 1, 1, 0));
+        mp.mark_slot_dead(slot).unwrap();
+        let (free, live, dead) = mp.slot_stats();
+        assert_eq!((free, live, dead), (cap - 1, 0, 1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_rejects_a_live_slot_whose_body_range_is_not_in_the_file() {
+        let dir = tmp_dir();
+        let mut mp = Mempool::open_or_create(&dir).unwrap();
+        put_live(&mut mp, &Txid::from_byte_array([0xa1; 32]), 1, 400);
+        let off = SLOTS_HEADER;
+        // A prefix-sized span inside the file is a copy, not a range error.
+        mp.slots[off + 12..off + 16].copy_from_slice(&(BODY_TX_PREFIX as u32).to_le_bytes());
+        let (n, _) = mp.compact().unwrap();
+        assert_eq!(n, 1);
+
+        put_live(&mut mp, &Txid::from_byte_array([0xa2; 32]), 1, 400);
+        let off = SLOTS_HEADER;
+        let logical = mp.body_logical_len().unwrap();
+        let past = (logical as u32).saturating_add(8);
+        mp.slots[off + 12..off + 16].copy_from_slice(&past.to_le_bytes());
+        match mp.compact() {
+            Err(MempoolError::Corrupt("live slot body range")) => {}
+            other => panic!("expected live slot body range, got {other:?}"),
         }
         let _ = fs::remove_dir_all(&dir);
     }
