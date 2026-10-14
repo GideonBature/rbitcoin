@@ -157,6 +157,9 @@ fn install_resume(
         t0.elapsed()
     );
     plant_valid_tip_child(st, hub);
+    // The anchor was restored before these rows were queued. Note the linked
+    // prefix so script checks turn back off.
+    super::header_walk::renote_stored_path(st, hub);
 }
 
 /// If tip+1 is missing or invalid, plant a known valid sibling/child of tip.
@@ -573,6 +576,83 @@ mod tests {
         seed_work_path_from_store(&mut st2, &hub);
         // Resume path after tip may be empty (no headers beyond tip).
         assert!(!st2.headers_done); // always left open for peer tip
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Stored headers ahead of the tip are the milestone path. A restart
+    /// that already restored the anchor must note them so script checks stay
+    /// off while those blocks confirm.
+    #[test]
+    fn resume_seed_notes_stored_headers_on_the_milestone_path() {
+        use super::seed_work_path_from_store;
+        use bitcoin::block::{Header, Version};
+        use bitcoin::{BlockHash, CompactTarget};
+        use rbitcoin_consensus::{Milestone, MilestoneAnchor};
+
+        let (dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("path-seed-milestone");
+        hub.ensure_genesis().unwrap();
+        let anchor = BlockHash::from_byte_array([0xab; 32]);
+        hub.milestone = Milestone {
+            height: 100,
+            anchor: Some(MilestoneAnchor {
+                hash: anchor,
+                min_work_be: [0u8; 32],
+            }),
+        };
+        hub.query.note_milestone_header(
+            100,
+            anchor.to_byte_array(),
+            [0u8; 32],
+            bitcoin::Work::from_be_bytes([0u8; 32]),
+            None,
+        );
+
+        let mut prev = hub.tip_hash().unwrap();
+        let mut first = None;
+        for n in 1u32..=2 {
+            let mut header = Header {
+                version: Version::from_consensus(4),
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([n as u8; 32]),
+                time: 1_600_000_000 + n,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: n,
+            };
+            rbitcoin_consensus::grind_regtest_pow(&mut header);
+            hub.ensure_header(&header).unwrap();
+            if first.is_none() {
+                first = Some(header.block_hash());
+            }
+            prev = header.block_hash();
+        }
+        let first = first.unwrap();
+        assert!(
+            hub.query.milestone_header_at(1).is_none(),
+            "the anchor note alone does not record the stored child"
+        );
+
+        let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+        seed_work_path_from_store(&mut st, &hub);
+        assert!(
+            st.hash_height.contains_key(&first),
+            "resume seed queued the stored header"
+        );
+        assert_eq!(
+            hub.query.milestone_header_at(1),
+            Some(first.to_byte_array()),
+            "a seeded header on the stored path is on the milestone path"
+        );
+        assert!(
+            hub.milestone.skips_scripts(1, &first.to_byte_array(), |h| hub
+                .query
+                .milestone_header_at(h)),
+            "script checks stay off for a stored header under the restored anchor"
+        );
+        assert_eq!(
+            hub.query.milestone_header_at(100),
+            Some(anchor.to_byte_array()),
+            "noting the queue keeps the restored anchor"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
