@@ -150,30 +150,119 @@ fn tip_follow_locator_includes_tip_after_genesis() {
 }
 
 #[test]
-fn ibd_connect_locator_starts_at_the_header_walk_tip() {
-    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ibd-walk-loc");
+fn ibd_connect_does_not_start_headers_sync() {
+    use bitcoin::p2p::address::Address;
+    use bitcoin::p2p::message_network::VersionMessage;
+    use bitcoin::p2p::ServiceFlags;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ibd-no-sync");
     hub.ensure_genesis().unwrap();
     assert!(hub.in_ibd(), "regtest genesis is older than 24h");
-    let confirmed = hub.tip_hash().unwrap();
-    let walk = BlockHash::from_byte_array([0x11; 32]);
-    hub.note_ibd_header_tip(Some((walk, 50)));
-    let loc = tip_follow_locator(&hub);
-    assert_eq!(
-        loc[0], walk,
-        "a connecting peer locates from the header walk"
+    let peers = crate::peers::PeerHub::new();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let ver = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        timestamp: 0,
+        receiver: Address::new(&addr, ServiceFlags::NONE),
+        sender: Address::new(&addr, ServiceFlags::NONE),
+        nonce: 1,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let session = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    assert!(
+        !maybe_queue_initial_getheaders(&tx, &hub, &session),
+        "IBD does not start a follow-session headers sync"
     );
     assert!(
-        loc.iter().skip(1).any(|h| *h == confirmed),
-        "the confirmed chain stays in the locator as a fallback"
+        rx.try_recv().is_err(),
+        "a connecting peer during IBD sends no getheaders"
     );
 
     hub.set_max_tip_age_secs(u64::MAX);
     assert!(!hub.in_ibd(), "a fresh tip leaves IBD");
-    let loc = tip_follow_locator(&hub);
-    assert_eq!(
-        loc[0], confirmed,
-        "tip-follow locates from the confirmed tip"
+    assert!(
+        maybe_queue_initial_getheaders(&tx, &hub, &session),
+        "after IBD a connecting peer still starts headers sync"
     );
+    assert!(matches!(
+        rx.try_recv().unwrap().expect_msg(),
+        bitcoin::p2p::message::NetworkMessage::GetHeaders(_)
+    ));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ignored_full_header_batch_does_not_page() {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::CompactTarget;
+    use bitcoin::TxMerkleNode;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ibd-no-page");
+    hub.ensure_genesis().unwrap();
+    hub.set_minimum_chain_work(Some([0xff; 32]));
+    let mut prev = hub.tip_hash().unwrap();
+    let mut headers = Vec::with_capacity(MAX_HEADERS_RESULTS);
+    for i in 0..MAX_HEADERS_RESULTS {
+        let hdr = Header {
+            version: Version::TWO,
+            prev_blockhash: prev,
+            merkle_root: TxMerkleNode::from_byte_array([i as u8; 32]),
+            time: 1_700_000_000 + i as u32,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: i as u32,
+        };
+        prev = hdr.block_hash();
+        headers.push(hdr);
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    on_headers(&hub, &tx, &mut follow, None, &headers).unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "an ignored 2,000-header batch does not ask for the next page"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ibd_unknown_block_inv_does_not_getheaders() {
+    use bitcoin::p2p::message_blockdata::Inventory;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ibd-no-inv");
+    hub.ensure_genesis().unwrap();
+    assert!(hub.in_ibd());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let unknown = BlockHash::from_byte_array([0x44; 32]);
+    on_inv(&hub, &tx, &mut follow, None, &[Inventory::Block(unknown)]).unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "an unknown block inv during IBD does not getheaders on this session"
+    );
+    assert!(
+        hub.header_inv_challenge_pending(),
+        "an unknown block inv during IBD challenges the header walk"
+    );
+
+    hub.set_max_tip_age_secs(u64::MAX);
+    assert!(!hub.in_ibd());
+    on_inv(
+        &hub,
+        &tx,
+        &mut follow,
+        None,
+        &[Inventory::Block(BlockHash::from_byte_array([0x45; 32]))],
+    )
+    .unwrap();
+    assert!(matches!(
+        rx.try_recv().unwrap().expect_msg(),
+        bitcoin::p2p::message::NetworkMessage::GetHeaders(_)
+    ));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -768,7 +857,7 @@ fn handle_peer_frame_control_and_inv_paths() {
         let headers_msg = out_rx.try_recv().unwrap().expect_msg();
         assert!(matches!(headers_msg, NetworkMessage::Headers(_)));
 
-        // Inv for unknown block → GetHeaders (never getdata without a header).
+        // Unknown block inv during IBD challenges the walk. It does not getheaders.
         let want_h = BlockHash::from_byte_array([0xee; 32]);
         handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(want_h)])),
@@ -779,16 +868,11 @@ fn handle_peer_frame_control_and_inv_paths() {
         )
         .await
         .unwrap();
-        match out_rx.try_recv().unwrap().expect_msg() {
-            NetworkMessage::GetHeaders(gh) => {
-                assert!(
-                    !gh.locator_hashes.is_empty() || gh.stop_hash == want_h,
-                    "unknown block inv must getheaders, locators={:?}",
-                    gh.locator_hashes
-                );
-            }
-            other => panic!("expected GetHeaders for unknown inv, got {other:?}"),
-        }
+        assert!(
+            out_rx.try_recv().is_err(),
+            "an unknown block inv during IBD must not getheaders"
+        );
+        assert!(hub.header_inv_challenge_pending());
 
         // Headers message inserts pending + issues getdata.
         let gen = hub

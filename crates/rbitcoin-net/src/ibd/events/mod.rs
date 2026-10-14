@@ -213,8 +213,7 @@ fn try_enqueue_ordered_header(
     if !st.is_on_path(&hash, ht) || st.ordered.len() >= MAX_ORDERED_HEADERS {
         return false;
     }
-    // Look-ahead checkpoints stay off the queue. The queue refills only until
-    // the soft cap, along the candidate.
+    // The queue is a window over headers already written. Stop at the soft cap.
     if st.header_walk.has_checkpoints() && st.ordered.len() >= ORDERED_HEADERS_SOFT_CAP {
         return false;
     }
@@ -656,17 +655,23 @@ fn plan_header_reply(
     let mut headers = headers;
     let keep = match class {
         super::header_walk::HeaderClass::WalkAbsorb => {
-            if super::header_walk::absorb_lookahead(st, hub, peer, ask, &headers) {
+            let before = super::header_walk::candidate_tip(st);
+            if super::header_walk::absorb_lookahead(st, hub, peer, ask, &headers)
+                && super::header_walk::candidate_tip(st) == before
+            {
                 return HeaderPlan::Done;
             }
             headers.len()
         }
         super::header_walk::HeaderClass::WalkStore => headers.len(),
         super::header_walk::HeaderClass::Stray => {
-            if super::header_walk::suppress_competing_chain(st, hub, peer, &headers) {
+            let before = super::header_walk::candidate_tip(st);
+            if super::header_walk::suppress_competing_chain(st, hub, peer, &headers)
+                || super::header_walk::candidate_tip(st) == before
+            {
                 return HeaderPlan::Done;
             }
-            return HeaderPlan::Done;
+            headers.len()
         }
         super::header_walk::HeaderClass::Refill => {
             if super::header_walk::reject_refill_miss(st, hub, &headers) {

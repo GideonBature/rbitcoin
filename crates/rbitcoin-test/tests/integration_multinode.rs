@@ -325,6 +325,9 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         let peer_dir = TempDir::new().unwrap();
         let dummy_dir = TempDir::new().unwrap();
         let seed = start_node(&seed_dir).await;
+        // The stall timer is the post-IBD headers sync. A stale genesis tip
+        // would still be in IBD, and a connecting peer would not start it.
+        seed.hub.set_max_tip_age_secs(u64::MAX);
 
         let mut book = AddrMan::new();
         for i in 0..5_000u32 {
@@ -2026,6 +2029,9 @@ async fn tip_follow_getheaders_catches_missed_blocks() {
         }
         assert_eq!(peer.query.tip_height(), Some(Height(5)));
         assert_eq!(seed.query.tip_height(), Some(Height(9)));
+        // The mined chain is still old, so the tip-age check would keep IBD
+        // and skip connect-time getheaders. This gap fill is the post-IBD ask.
+        peer.hub.set_max_tip_age_secs(u64::MAX);
 
         peer.follow_from(seed.local_addr).await.expect("follow");
         peer.wait_tip_hash(last, Duration::from_secs(15))

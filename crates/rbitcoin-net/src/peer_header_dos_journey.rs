@@ -1716,10 +1716,10 @@ fn regtest_header_chain(prev: BlockHash, n: u32) -> Vec<bitcoin::block::Header> 
     out
 }
 
-/// More than one below-floor batch is required before minimum chain work.
-/// The node keeps asking, then stores the chain once the pending path crosses.
+/// A full batch under minimum chain work is ignored and not paged.
+/// The next header, sent on its own, is stored once the path crosses the floor.
 #[tokio::test]
-async fn below_floor_full_batch_continues_until_the_floor() {
+async fn below_floor_full_batch_does_not_page() {
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("below-floor-full");
     let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
     hub.ensure_genesis().unwrap();
@@ -1738,7 +1738,6 @@ async fn below_floor_full_batch_continues_until_the_floor() {
     assert!(below < floor, "the full batch is still under the next header");
     hub.set_minimum_chain_work(Some(floor));
     let first = chain[..n as usize].to_vec();
-    let last = first.last().unwrap().block_hash();
     let peer = live_peer(&peers, 18611, 51, false);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();
@@ -1758,12 +1757,10 @@ async fn below_floor_full_batch_continues_until_the_floor() {
             locators.push(gh.locator_hashes);
         }
     }
-    assert_eq!(
-        locators.len(),
-        1,
-        "a full below-floor batch asks for the next"
+    assert!(
+        locators.is_empty(),
+        "a refused below-floor batch does not ask for the next page"
     );
-    assert_eq!(locators[0].first().copied(), Some(last));
     push(
         &hub,
         &out_tx,
