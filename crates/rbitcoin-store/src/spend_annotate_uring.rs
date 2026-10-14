@@ -1,17 +1,9 @@
 //! Completion-driven io_uring RMW for Class A spender-meta annotation.
 //!
-//! Hot path: known absolute offset of the 8-byte `(flags:u8, spender_field:u56)`
-//! in `spent.body`. Machine:
-//!
-//! 1. Submit pread of 8 B  
-//! 2. On read: decide sole / multi / promote / idempotent  
-//!    - multi or promote: **inline** [`SpenderTable::append`] (needs read
-//!      result; same-outpoint edges are serialized so list order is stable)  
-//! 3. Submit pwrite of updated 8 B  
-//! 4. On write: free the slot and arm more work  
-//!
-//! At most one in-flight RMW per absolute offset (reorg double-annotate on the
-//! same outpoint is serialized). Falls back to the caller on uring setup failure.
+//! Unknown meta reads a 4 KiB page, decides sole / multi / promote for every
+//! slot on that page, then writes the page. Known meta pokes prepared 8-byte
+//! slots into the same page RMW. Queue depth stays 128 pages. One in-flight
+//! RMW per page. Falls back to the caller on uring setup failure.
 
 use crate::compact::output_flags;
 use crate::error::StoreError;
@@ -19,24 +11,33 @@ use crate::io_handle::IoHandle;
 use crate::spender_table::SpenderTable;
 use crate::tx_table::{decode_spent_slot, encode_spent_slot, OutputRecord, TxTable};
 use crate::uring_session::{self, UringSession};
-use crate::{U64Map, U64Set};
 use rbitcoin_primitives::Fk;
 use std::collections::VecDeque;
 
 const META_LEN: usize = OutputRecord::SPENT_SLOT_LEN;
 const MAX_SLOTS: usize = 128;
+
+#[cfg(test)]
+pub(crate) static SPEND_ANNOTATE_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static SPEND_ANNOTATE_WRITES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn note_spend_read_for_test() {
+    #[cfg(test)]
+    SPEND_ANNOTATE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn note_spend_write_for_test() {
+    #[cfg(test)]
+    SPEND_ANNOTATE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
 type SpentAbsWrite = (u64, Fk, u32, Fk, u32, [u8; META_LEN]);
 
 enum Phase {
     Reading,
     Writing,
-}
-
-struct Slot {
-    edge_i: usize,
-    phase: Phase,
-    /// Read buffer / write payload (8-byte spent slot).
-    buf: [u8; META_LEN],
 }
 
 /// Annotate spends at absolute meta offsets via io_uring RMW.
@@ -75,51 +76,188 @@ pub fn put_spend_batch_by_abs_meta_uring(
         return Ok(cold);
     }
 
+    let groups = group_edges_by_spent_page(&work, body_pub);
+    let extra = annotate_unknown_pages_uring(spenders, &groups, body_fd, &body_path)?;
+    cold.extend(extra);
+    Ok(cold)
+}
+
+struct EdgePage {
+    off: u64,
+    len: usize,
+    edges: Vec<(u64, Fk, u32, Fk, u32)>,
+}
+
+fn group_edges_by_spent_page(edges: &[(u64, Fk, u32, Fk, u32)], body_pub: u64) -> Vec<EdgePage> {
+    let mut sorted = edges.to_vec();
+    sorted.sort_by_key(|e| e.0);
+    let mut groups = Vec::new();
+    let mut cur_lo = 0u64;
+    let mut cur_hi = 0u64;
+    let mut cur: Vec<(u64, Fk, u32, Fk, u32)> = Vec::new();
+    let flush =
+        |groups: &mut Vec<EdgePage>, lo: u64, hi: u64, cur: Vec<(u64, Fk, u32, Fk, u32)>| {
+            if cur.is_empty() {
+                return;
+            }
+            let Some((off, len)) = clip_spent_page_window(lo, hi, body_pub) else {
+                return;
+            };
+            groups.push(EdgePage {
+                off,
+                len,
+                edges: cur,
+            });
+        };
+    for e in sorted {
+        let (lo, hi) = spent_meta_page_span(e.0);
+        if cur.is_empty() {
+            cur_lo = lo;
+            cur_hi = hi;
+            cur.push(e);
+            continue;
+        }
+        if lo < cur_hi {
+            cur_hi = cur_hi.max(hi);
+            cur.push(e);
+        } else {
+            flush(&mut groups, cur_lo, cur_hi, std::mem::take(&mut cur));
+            cur_lo = lo;
+            cur_hi = hi;
+            cur.push(e);
+        }
+    }
+    flush(&mut groups, cur_lo, cur_hi, cur);
+    groups
+}
+
+fn poke_edge_page(
+    buf: &mut [u8],
+    off: u64,
+    edges: &[(u64, Fk, u32, Fk, u32)],
+    spenders: &SpenderTable,
+    cold: &mut Vec<(Fk, u32, Fk, u32)>,
+) -> Result<bool, StoreError> {
+    let mut dirty = false;
+    for &(abs, cfk, vout, sfk, vin) in edges {
+        let i = abs.saturating_sub(off) as usize;
+        if i.saturating_add(META_LEN) > buf.len() {
+            cold.push((cfk, vout, sfk, vin));
+            continue;
+        }
+        let Ok((flags, field, field_vin)) = decode_spent_slot(&buf[i..i + META_LEN]) else {
+            cold.push((cfk, vout, sfk, vin));
+            continue;
+        };
+        match decide_annotate(field, flags, field_vin, sfk, vin, spenders)? {
+            AnnotateOp::Skip => {}
+            AnnotateOp::Write(meta) => {
+                buf[i..i + META_LEN].copy_from_slice(&meta);
+                dirty = true;
+            }
+        }
+    }
+    Ok(dirty)
+}
+
+pub(crate) fn annotate_unknown_pages_pwrite(
+    txs: &TxTable,
+    spenders: &SpenderTable,
+    edges: &[(u64, Fk, u32, Fk, u32)],
+) -> Result<Vec<(Fk, u32, Fk, u32)>, StoreError> {
+    let body_pub = txs.spent.body_published_len();
+    let mut cold = Vec::new();
+    let mut live = Vec::new();
+    for &e in edges {
+        if e.3.is_null() {
+            return Err(StoreError::InvalidFk);
+        }
+        if e.0.saturating_add(META_LEN as u64) > body_pub {
+            cold.push((e.1, e.2, e.3, e.4));
+        } else {
+            live.push(e);
+        }
+    }
+    for g in group_edges_by_spent_page(&live, body_pub) {
+        note_spend_read_for_test();
+        let mut buf = vec![0u8; g.len];
+        if txs
+            .spent
+            .read_prefix_at_published(body_pub, g.off, g.len as u64, &mut buf)
+            .is_err()
+        {
+            for e in &g.edges {
+                cold.push((e.1, e.2, e.3, e.4));
+            }
+            continue;
+        }
+        if poke_edge_page(&mut buf, g.off, &g.edges, spenders, &mut cold)? {
+            note_spend_write_for_test();
+            if txs.spent.write_body_abs(g.off, &buf).is_err() {
+                for e in &g.edges {
+                    cold.push((e.1, e.2, e.3, e.4));
+                }
+            }
+        }
+    }
+    Ok(cold)
+}
+
+fn annotate_unknown_pages_uring(
+    spenders: &SpenderTable,
+    groups: &[EdgePage],
+    body_fd: IoHandle,
+    body_path: &std::path::Path,
+) -> Result<Vec<(Fk, u32, Fk, u32)>, StoreError> {
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    struct PageSlot {
+        group_i: usize,
+        phase: Phase,
+        buf: Vec<u8>,
+        dirty: bool,
+    }
     uring_session::with_thread_local(uring_session::DEFAULT_ENTRIES, |session| {
         session.begin_batch()?;
         let epoch = session.epoch();
-        let mut pending: VecDeque<usize> = (0..work.len()).collect();
-        let mut abs_busy: U64Set = U64Set::default();
-        let mut abs_wait: U64Map<VecDeque<usize>> = U64Map::default();
-
-        let mut free_slots: Vec<usize> = (0..MAX_SLOTS).collect();
-        let mut slots: Vec<Option<Slot>> = (0..MAX_SLOTS).map(|_| None).collect();
+        let mut pending: VecDeque<usize> = (0..groups.len()).collect();
+        let nslots = MAX_SLOTS.min(groups.len().max(1));
+        let mut free_slots: Vec<usize> = (0..nslots).collect();
+        let mut slots: Vec<Option<PageSlot>> = (0..nslots).map(|_| None).collect();
         let mut session = session.drain_guard();
         let mut in_flight = 0usize;
+        let mut cold = Vec::new();
 
         let arm = |session: &mut UringSession,
                    free_slots: &mut Vec<usize>,
-                   slots: &mut [Option<Slot>],
+                   slots: &mut [Option<PageSlot>],
                    pending: &mut VecDeque<usize>,
-                   abs_busy: &mut U64Set,
-                   abs_wait: &mut U64Map<VecDeque<usize>>,
-                   work: &[(u64, Fk, u32, Fk, u32)],
+                   groups: &[EdgePage],
                    in_flight: &mut usize,
                    body_fd: IoHandle|
          -> Result<(), StoreError> {
-            while *in_flight < MAX_SLOTS && session.free_sq() > 0 && !free_slots.is_empty() {
-                let edge_i = if let Some(ei) = next_ready(pending, abs_busy, abs_wait, work) {
-                    ei
-                } else {
+            while *in_flight < slots.len() && session.free_sq() > 0 && !free_slots.is_empty() {
+                let Some(gi) = pending.pop_front() else {
                     break;
                 };
-                let abs = work[edge_i].0;
-                abs_busy.insert(abs);
                 let slot = free_slots.pop().unwrap();
-                slots[slot] = Some(Slot {
-                    edge_i,
+                slots[slot] = Some(PageSlot {
+                    group_i: gi,
                     phase: Phase::Reading,
-                    buf: [0u8; META_LEN],
+                    buf: vec![0u8; groups[gi].len],
+                    dirty: false,
                 });
                 {
                     let s = slots[slot].as_mut().unwrap();
                     let ud = uring_session::pack_ud(
-                        uring_session::KIND_SPEND_META_READ,
+                        uring_session::KIND_SPEND_PAGE_READ,
                         epoch,
                         slot as u32,
                     );
-                    // SAFETY: `s.buf` lives until this meta-read wave drains.
-                    unsafe { session.push_pread(body_fd, abs, &mut s.buf, ud) }?;
+                    note_spend_read_for_test();
+                    // SAFETY: `s.buf` lives until this page-read wave drains.
+                    unsafe { session.push_pread(body_fd, groups[gi].off, &mut s.buf, ud) }?;
                 }
                 *in_flight += 1;
             }
@@ -131,9 +269,7 @@ pub fn put_spend_batch_by_abs_meta_uring(
             &mut free_slots,
             &mut slots,
             &mut pending,
-            &mut abs_busy,
-            &mut abs_wait,
-            &work,
+            groups,
             &mut in_flight,
             body_fd,
         )?;
@@ -146,7 +282,6 @@ pub fn put_spend_batch_by_abs_meta_uring(
                 session.submit_and_wait_one()?;
                 continue;
             }
-
             for (ud, res) in cqes {
                 let (kind, _ep, slot) = uring_session::unpack_ud(ud);
                 let slot = slot as usize;
@@ -157,125 +292,76 @@ pub fn put_spend_batch_by_abs_meta_uring(
                     .take()
                     .ok_or(StoreError::Corrupt("spend annotate empty slot"))?;
                 let expect = match st.phase {
-                    Phase::Reading => uring_session::KIND_SPEND_META_READ,
-                    Phase::Writing => uring_session::KIND_SPEND_META_WRITE,
+                    Phase::Reading => uring_session::KIND_SPEND_PAGE_READ,
+                    Phase::Writing => uring_session::KIND_SPEND_PAGE_WRITE,
                 };
                 if kind != expect {
                     return Err(StoreError::Corrupt("spend annotate bad user_data"));
                 }
                 in_flight = in_flight.saturating_sub(1);
-                let edge_i = st.edge_i;
-                let (abs, _create_fk, _vout, spend_fk, spend_vin) = work[edge_i];
-
+                let gi = st.group_i;
                 match st.phase {
                     Phase::Reading => {
-                        if let Err(e) = uring_session::require_full_cqe(res, META_LEN, &body_path) {
+                        let want = st.buf.len();
+                        if let Err(e) = uring_session::require_full_cqe(res, want, body_path) {
                             free_slots.push(slot);
-                            abs_busy.remove(&abs);
                             return Err(e);
                         }
-
-                        let (flags0, field, field_vin) = decode_spent_slot(&st.buf)?;
-                        match decide_annotate(
-                            field, flags0, field_vin, spend_fk, spend_vin, spenders,
-                        )? {
-                            AnnotateOp::Skip => {
-                                free_slots.push(slot);
-                                abs_busy.remove(&abs);
-                                if let Some(q) = abs_wait.get_mut(&abs) {
-                                    if let Some(next_ei) = q.pop_front() {
-                                        pending.push_front(next_ei);
-                                    }
-                                    if q.is_empty() {
-                                        abs_wait.remove(&abs);
-                                    }
-                                }
-                                continue;
-                            }
-                            AnnotateOp::Write(meta) => {
-                                st.buf = meta;
-                            }
+                        st.dirty = poke_edge_page(
+                            &mut st.buf,
+                            groups[gi].off,
+                            &groups[gi].edges,
+                            spenders,
+                            &mut cold,
+                        )?;
+                        if !st.dirty {
+                            free_slots.push(slot);
+                            continue;
                         }
                         st.phase = Phase::Writing;
-                        // Keep slot occupied for write buffer stability.
                         slots[slot] = Some(st);
                         {
                             let s = slots[slot].as_mut().unwrap();
                             let ud = uring_session::pack_ud(
-                                uring_session::KIND_SPEND_META_WRITE,
+                                uring_session::KIND_SPEND_PAGE_WRITE,
                                 epoch,
                                 slot as u32,
                             );
-                            // SAFETY: `s.buf` lives until this meta-write wave drains.
-                            unsafe { session.push_pwrite(body_fd, abs, &s.buf, ud) }?;
+                            note_spend_write_for_test();
+                            // SAFETY: `s.buf` lives until this page-write wave drains.
+                            unsafe { session.push_pwrite(body_fd, groups[gi].off, &s.buf, ud) }?;
                         }
                         in_flight += 1;
                     }
                     Phase::Writing => {
-                        if let Err(e) = uring_session::require_full_cqe(res, META_LEN, &body_path) {
+                        let want = st.buf.len();
+                        if let Err(e) = uring_session::require_full_cqe(res, want, body_path) {
                             free_slots.push(slot);
-                            abs_busy.remove(&abs);
                             return Err(e);
                         }
                         free_slots.push(slot);
-                        abs_busy.remove(&abs);
-                        if let Some(q) = abs_wait.get_mut(&abs) {
-                            if let Some(next_ei) = q.pop_front() {
-                                pending.push_front(next_ei);
-                            }
-                            if q.is_empty() {
-                                abs_wait.remove(&abs);
-                            }
-                        }
                     }
                 }
             }
-
             arm(
                 &mut session,
                 &mut free_slots,
                 &mut slots,
                 &mut pending,
-                &mut abs_busy,
-                &mut abs_wait,
-                &work,
+                groups,
                 &mut in_flight,
                 body_fd,
             )?;
             session.sync_submission();
             let _ = session.submit();
         }
-
-        while let Some(ei) = pending.pop_front() {
-            let (_, cfk, vout, sfk, vin) = work[ei];
-            cold.push((cfk, vout, sfk, vin));
-        }
-        for q in abs_wait.into_values() {
-            for ei in q {
-                let (_, cfk, vout, sfk, vin) = work[ei];
-                cold.push((cfk, vout, sfk, vin));
+        while let Some(gi) = pending.pop_front() {
+            for e in &groups[gi].edges {
+                cold.push((e.1, e.2, e.3, e.4));
             }
         }
-
         Ok(cold)
     })?
-}
-
-/// Pick next edge that can start: abs not busy, or from wait queues.
-fn next_ready(
-    pending: &mut VecDeque<usize>,
-    abs_busy: &U64Set,
-    abs_wait: &mut U64Map<VecDeque<usize>>,
-    work: &[(u64, Fk, u32, Fk, u32)],
-) -> Option<usize> {
-    while let Some(ei) = pending.pop_front() {
-        let abs = work[ei].0;
-        if !abs_busy.contains(&abs) {
-            return Some(ei);
-        }
-        abs_wait.entry(abs).or_default().push_back(ei);
-    }
-    None
 }
 
 /// Resolve pure-write annotate backend from env hierarchy.
@@ -483,6 +569,8 @@ pub fn put_spend_batch_by_abs_meta_known(
         return Ok(cold);
     }
 
+    // Random advice for this sweep only. Drop restores NORMAL, including on error.
+    let _sweep = txs.spent.advise_random_for_sweep();
     match backend {
         crate::io_backend::WriteIoBackend::Uring => {
             put_spend_batch_pure_write_uring(txs, &writes, cold)
@@ -1056,6 +1144,38 @@ mod tests {
         let bulk = t.get_spender_meta_at_abs_batch(&[abs0, abs2]).unwrap();
         assert_eq!(bulk[0].unwrap().0, Fk(3));
         assert_eq!(bulk[1].unwrap().0, Fk(4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_meta_annotate_is_one_rmw_per_page() {
+        let (dir, t, spenders) = temp_table();
+        let (fk, off, _len) = put_n_outs(&t, 520, 0x44);
+        let a0 = crate::spent_abs(off, 0);
+        let a1 = crate::spent_abs(off, 1);
+        let a2 = crate::spent_abs(off, 510);
+        assert_eq!(a0 / 4096, a1 / 4096);
+        assert_ne!(a0 / 4096, a2 / 4096);
+        SPEND_ANNOTATE_READS.store(0, Ordering::Relaxed);
+        SPEND_ANNOTATE_WRITES.store(0, Ordering::Relaxed);
+        let edges = [
+            (a0, fk, 0u32, Fk(10), 1u32),
+            (a1, fk, 1u32, Fk(11), 2u32),
+            (a2, fk, 510u32, Fk(12), 3u32),
+        ];
+        assert!(t
+            .put_spend_batch_by_abs_meta(&spenders, &edges)
+            .unwrap()
+            .is_empty());
+        assert_eq!(SPEND_ANNOTATE_READS.load(Ordering::Relaxed), 2);
+        assert_eq!(SPEND_ANNOTATE_WRITES.load(Ordering::Relaxed), 2);
+        let (off, len) = t.spent_range(fk).unwrap();
+        let (m0, f0, v0) = t.get_output_spender_meta_at(off, len, 0).unwrap();
+        let (m1, f1, v1) = t.get_output_spender_meta_at(off, len, 1).unwrap();
+        let (m2, f2, v2) = t.get_output_spender_meta_at(off, len, 510).unwrap();
+        assert!(!m0 && f0 == Fk(10) && v0 == 1);
+        assert!(!m1 && f1 == Fk(11) && v1 == 2);
+        assert!(!m2 && f2 == Fk(12) && v2 == 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -9,6 +9,65 @@ thread_local! {
         RefCell::new(super::phases::StructuralReuse::default());
 }
 
+#[cfg(test)]
+thread_local! {
+    static SPINDLE_TRACE: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+}
+
+fn spindle_mark(_ev: &'static str) {
+    #[cfg(test)]
+    SPINDLE_TRACE.with(|trace| trace.borrow_mut().push(_ev));
+}
+
+#[cfg(test)]
+pub(super) fn spindle_trace_clear() {
+    SPINDLE_TRACE.with(|trace| trace.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(super) fn spindle_trace_snapshot() -> Vec<&'static str> {
+    SPINDLE_TRACE.with(|trace| trace.borrow().clone())
+}
+
+struct SpindleScope<'a> {
+    _hold: rbitcoin_store::SpindleHold<'a>,
+    armed: bool,
+}
+
+impl Drop for SpindleScope<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            spindle_mark("release");
+        }
+    }
+}
+
+fn hold_spindle(query: &Query) -> SpindleScope<'_> {
+    let armed = query.store().datadir_hdd();
+    let scope = SpindleScope {
+        _hold: query.store().spindle_hold(),
+        armed,
+    };
+    if armed {
+        spindle_mark("hold");
+    }
+    scope
+}
+
+fn submit_queued<'a>(
+    query: &'a Query,
+    queued: Vec<([u8; 32], rbitcoin_primitives::Fk)>,
+) -> super::head_drain::HeadDrainHandle<'a> {
+    spindle_mark("head");
+    let t_head = std::time::Instant::now();
+    let drain = super::head_drain::submit_head_insert(query.store(), queued);
+    let head_sub_ns = t_head.elapsed().as_nanos() as u64;
+    if head_sub_ns > 0 {
+        rbitcoin_query::note_confirm(&query.confirm_stats().write_head_sub_ns, head_sub_ns);
+    }
+    drain
+}
+
 pub(super) fn write_height_needed(tip: Option<u32>, height: u32) -> bool {
     match tip {
         None => true,
@@ -99,9 +158,13 @@ fn apply_archive_plan(
     let packed_pins: Vec<rbitcoin_query::CreatePin> = std::mem::take(&mut plan.batch_pin);
     ns.plan_take_ns = t_take.elapsed().as_nanos() as u64;
     let t_ca = Instant::now();
-    let (committed, loc) = query
-        .archive_commit_plan_defer_head_parents(plan)
-        .map_err(ConsensusError::from)?;
+    let (committed, loc) = {
+        let _gate = hold_spindle(query);
+        spindle_mark("class-a");
+        query
+            .archive_commit_plan_defer_head_parents(plan)
+            .map_err(ConsensusError::from)?
+    };
     ns.class_a_ns = t_ca.elapsed().as_nanos() as u64;
     if !committed {
         return Ok(ns);
@@ -211,15 +274,16 @@ fn write_phase(
         rbitcoin_query::note_confirm(&query.confirm_stats().write_create_map_ns, create_map_ns);
     }
 
-    // Drain write-behind tx.head overlapping structural + Class C (one inserter).
-    let t_head = Instant::now();
+    // Flag off: tx.head insert overlaps structural, Class C, and annotate.
+    // Flag on: the keys stay in this Vec until annotate returns, then insert.
     let queued = query.store().txs.take_pending_queued();
     let drain_max_fk = queued.iter().filter_map(|(_, fk)| fk.get()).max();
-    let drain = super::head_drain::submit_head_insert(query.store(), queued);
-    let head_sub_ns = t_head.elapsed().as_nanos() as u64;
-    if head_sub_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().write_head_sub_ns, head_sub_ns);
-    }
+    let mut queued = Some(queued);
+    let early_drain = if query.store().datadir_hdd() {
+        None
+    } else {
+        Some(submit_queued(query, queued.take().unwrap()))
+    };
 
     let overlap = (|| -> Result<_, ConsensusError> {
         // Local Instant totals (not atomic deltas) — sample_and_reset races mid-batch.
@@ -268,7 +332,13 @@ fn write_phase(
             rbitcoin_query::note_confirm(&query.confirm_stats().blockfilter_ns, idx_put_ns);
         }
 
-        let spend_ann_ns = post_commit(query, &slots)?;
+        let spend_ann_ns = {
+            let _gate = hold_spindle(query);
+            spindle_mark("ann-begin");
+            let ns = post_commit(query, &slots)?;
+            spindle_mark("ann-end");
+            ns
+        };
         if let Some(token) = pending_token {
             query.store().clear_spend_annotate_pending(token);
         }
@@ -285,6 +355,12 @@ fn write_phase(
         ))
     })();
 
+    let drain = if let Some(drain) = early_drain {
+        drain
+    } else {
+        submit_queued(query, queued.take().unwrap_or_default())
+    };
+    spindle_mark("join");
     let t_join = Instant::now();
     let (drain_res, restore) = drain.join_restore();
     let drain_join_ns = t_join.elapsed().as_nanos() as u64;
@@ -345,25 +421,44 @@ pub fn finish_post_commit_hashes(
         return Ok(());
     }
     let drain_max_fk = queued.iter().filter_map(|(_, fk)| fk.get()).max();
-    let drain = if queued.is_empty() {
+    let mut queued = Some(queued);
+    let early_drain = if query.store().datadir_hdd() || queued.as_ref().unwrap().is_empty() {
         None
     } else {
-        Some(super::head_drain::submit_head_insert(query.store(), queued))
+        Some(submit_queued(query, queued.take().unwrap()))
     };
 
-    let annotate_res = (|| -> Result<(), ConsensusError> {
-        if !query.spend_index_enabled() {
-            return Ok(());
+    let annotate_res = {
+        let _gate = hold_spindle(query);
+        spindle_mark("ann-begin");
+        let res = (|| -> Result<(), ConsensusError> {
+            if !query.spend_index_enabled() {
+                return Ok(());
+            }
+            let mut slots = crate::block::AnnotateSlots::default();
+            for &(height, hash) in items {
+                annotate_slots_from_connected_hash(query, height, &hash, &mut slots)?;
+            }
+            post_commit(query, &slots)?;
+            Ok(())
+        })();
+        spindle_mark("ann-end");
+        res
+    };
+
+    let drain = if let Some(drain) = early_drain {
+        Some(drain)
+    } else {
+        let batch = queued.take().unwrap_or_default();
+        if batch.is_empty() {
+            None
+        } else {
+            Some(submit_queued(query, batch))
         }
-        let mut slots = crate::block::AnnotateSlots::default();
-        for &(height, hash) in items {
-            annotate_slots_from_connected_hash(query, height, &hash, &mut slots)?;
-        }
-        post_commit(query, &slots)?;
-        Ok(())
-    })();
+    };
 
     if let Some(drain) = drain {
+        spindle_mark("join");
         let (drain_res, restore) = drain.join_restore();
         if drain_res.is_err() {
             query.store().txs.head_note_pending(&restore);

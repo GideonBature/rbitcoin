@@ -314,6 +314,8 @@ pub struct NodeConfig {
     pub block_filter_index: bool,
     /// Drop Class A seqsigwit below a 288-height watermark (`NETWORK_LIMITED`).
     pub prune_seqsigwit: bool,
+    /// Main datadir is rotating media (`--datadir-hdd`). Default off.
+    pub datadir_hdd: bool,
     /// RAM cap for the prune witness window. `0` keeps nothing in RAM.
     pub prune_seqsigwit_ram_threshold_bytes: u64,
     /// Persist / serve BIP-352 tweaks from `sp_tweaks.*`. Default **off**.
@@ -415,6 +417,7 @@ impl Default for NodeConfig {
             shindex: false,
             block_filter_index: false,
             prune_seqsigwit: false,
+            datadir_hdd: false,
             prune_seqsigwit_ram_threshold_bytes: 256 * 1024 * 1024,
             sptweaks: false,
             sptweaks_dust: rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST,
@@ -1100,6 +1103,10 @@ impl NodeConfig {
             "prune_seqsigwit" => {
                 self.prune_seqsigwit = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf prune_seqsigwit: {e}")))?;
+            }
+            "datadir_hdd" => {
+                self.datadir_hdd = parse_conf_bool(val)
+                    .map_err(|e| NodeError::Config(format!("conf datadir_hdd: {e}")))?;
             }
             "prune_seqsigwit_ram_threshold_bytes" => {
                 self.prune_seqsigwit_ram_threshold_bytes = val.parse().map_err(|e| {

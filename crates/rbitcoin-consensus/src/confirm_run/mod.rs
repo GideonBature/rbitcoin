@@ -56,8 +56,8 @@ mod scripts;
 mod write;
 
 pub use bq_resolve::{
-    confirm_bq_resolve_wave_capped, take_wave_items_for_load, BQ_RESOLVE_WAVE_MAX_BLOCKS,
-    BQ_RESOLVE_WAVE_MAX_INPUTS,
+    confirm_bq_resolve_wave_capped, take_wave_items_for_load, BqResolveWave,
+    BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
 };
 #[cfg(test)]
 use head_drain::{submit_head_drain, submit_head_insert, HEAD_DRAIN_THREAD_NAME};

@@ -324,6 +324,14 @@ pub struct Store {
     /// Even while confirmed spentness is stable. Odd while a confirm annotate
     /// or a disconnect is publishing a change.
     utxo_view: std::sync::atomic::AtomicU64,
+    /// Confirm readers wait here while a `--datadir-hdd` write holds the spindle.
+    /// Flag off never locks, so [`Self::spindle_wait`] returns immediately.
+    spindle: std::sync::Mutex<()>,
+}
+
+/// Held across one rotating-media write burst. Drop releases [`Store::spindle_wait`].
+pub struct SpindleHold<'a> {
+    _guard: Option<std::sync::MutexGuard<'a, ()>>,
 }
 
 /// Holds [`Store::utxo_view`] odd until drop.
@@ -422,6 +430,7 @@ impl Store {
             spend_reorg_gen: std::sync::atomic::AtomicU64::new(0),
             utxo_view: std::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
+            spindle: std::sync::Mutex::new(()),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -484,6 +493,7 @@ impl Store {
             spend_reorg_gen: std::sync::atomic::AtomicU64::new(0),
             utxo_view: std::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
+            spindle: std::sync::Mutex::new(()),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -899,6 +909,35 @@ impl Store {
         self.txs.set_prune_seqsigwit_mode(on);
     }
 
+    /// Main datadir is rotating media (`--datadir-hdd`). Default off.
+    pub fn datadir_hdd(&self) -> bool {
+        self.txs.datadir_hdd()
+    }
+
+    pub fn set_datadir_hdd(&self, on: bool) {
+        self.txs.set_datadir_hdd(on);
+    }
+
+    /// Block lookup and load while this guard is alive, when `--datadir-hdd` is set.
+    /// Flag off returns a guard that does not take the lock.
+    pub fn spindle_hold(&self) -> SpindleHold<'_> {
+        if !self.datadir_hdd() {
+            return SpindleHold { _guard: None };
+        }
+        SpindleHold {
+            _guard: Some(self.spindle.lock().unwrap_or_else(|p| p.into_inner())),
+        }
+    }
+
+    /// Wait until the write thread drops [`Self::spindle_hold`]. No-op when the flag is off.
+    /// The write thread must not call this.
+    pub fn spindle_wait(&self) {
+        if !self.datadir_hdd() {
+            return;
+        }
+        let _guard = self.spindle.lock().unwrap_or_else(|p| p.into_inner());
+    }
+
     pub fn clear_durable_seqsigwit(&self) -> Result<(), StoreError> {
         self.txs.clear_durable_seqsigwit()
     }
@@ -1278,7 +1317,7 @@ impl Store {
             .get_spender_meta_at_abs_batch_backend(abs_offs, backend)
     }
 
-    /// Pure-write annotate with structural-known meta (no body pread).
+    /// Page-RMW annotate with structural-known meta.
     ///
     /// `abs_edges`: `(abs_off, create_tx_fk, vout, spending_tx_fk, spending_vin)`.
     /// `known`: parallel `(field, flags, vin)` from structural spentness.
@@ -2144,6 +2183,35 @@ mod tests {
         s.scripthash
             .put_create_batch_append(std::slice::from_ref(&rec), &mut heads)
             .unwrap();
+    }
+
+    #[test]
+    fn spindle_wait_blocks_only_while_datadir_hdd_is_held() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = tmp();
+        let store = Store::create_tiny(&dir).unwrap();
+        for hdd in [false, true] {
+            store.set_datadir_hdd(hdd);
+            let (tx, rx) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let _hold = store.spindle_hold();
+                scope.spawn(|| {
+                    store.spindle_wait();
+                    let _ = tx.send(());
+                });
+                let early = rx.recv_timeout(Duration::from_millis(300));
+                drop(_hold);
+                if hdd {
+                    assert!(early.is_err(), "wait returned while the hold was alive");
+                    rx.recv_timeout(Duration::from_secs(2))
+                        .expect("waiter finishes after the hold drops");
+                } else {
+                    early.expect("flag off does not block");
+                }
+            });
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

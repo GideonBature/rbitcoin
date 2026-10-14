@@ -46,6 +46,7 @@ let
           };
           cjdns.reachable = true;
           pruneSeqSigWit = true;
+          datadirHdd = true;
           p2p = {
             address = "127.0.0.1";
             openFirewall = true;
@@ -315,6 +316,10 @@ assert builtins.match ".*--i2p-accept-incoming.*" execStart != null;
 assert builtins.match ".*--listen-onion.*" execStart != null;
 assert builtins.match ".*--cjdns-reachable.*" execStart != null;
 assert builtins.match ".*--prune-seqsigwit.*" execStart != null;
+assert builtins.match ".*--datadir-hdd.*" execStart != null;
+assert builtins.match ".*--datadir-hdd.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
 assert builtins.match ".*--health-listen 127.0.0.1:9332.*" execStart != null;
 assert builtins.match ".*--metrics.*" execStart != null;
 assert builtins.match ".*--health-listen.*" (

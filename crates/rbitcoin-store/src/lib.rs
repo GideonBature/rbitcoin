@@ -105,7 +105,7 @@ pub use spend_annotate_uring::spend_ann_backend;
 pub use spend_durable::{
     elapsed_after_checkpoint, spend_sync_due, SPEND_DURABLE_INTERVAL_MS, SPEND_DURABLE_NAME,
 };
-pub use store::{keep_unspent_vout_subsequence, Store, StoreLayout};
+pub use store::{keep_unspent_vout_subsequence, SpindleHold, Store, StoreLayout};
 pub use store_secret::StoreSecret;
 pub use tx_table::HeadResizeSizeSnapshot;
 pub use tx_table::{

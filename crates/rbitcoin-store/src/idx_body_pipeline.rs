@@ -77,8 +77,11 @@ pub struct IdxBodyIoStats {
 }
 
 const BODY_OS_PAGE: u64 = crate::tx_table::BODY_PAGE_SIZE;
-/// Cap a coalesced span at two OS pages (one straddle). Do not chain into SH-sized reads.
+/// Cap a page-straddle coalesce at two OS pages. Do not chain into SH-sized reads.
 const BODY_GROUP_MAX_PAGES: u64 = 2;
+/// Also merge a run whose hole is at most this and whose span stays within [`BODY_GROUP_MAX_SPAN`].
+const BODY_GROUP_MAX_HOLE: u64 = 64 * 1024;
+const BODY_GROUP_MAX_SPAN: u64 = 256 * 1024;
 const OUTS_META_GUESS: u64 = 4;
 /// Kind + 5-byte amount uleb + P2TR payload (not RAW/OP_RETURN fat scripts).
 const OUTS_GUESS_PER_VOUT: u64 = 38;
@@ -110,9 +113,11 @@ pub(crate) fn outs_first_wave_len(off: u64, full_len: u64, need_vouts: &[u32]) -
 
 /// Offset-sorted `[off, off+len)` windows → `(page_off, span_len, window indices)`.
 ///
-/// Jobs that share an OS page (or a two-page straddle) become one SQE. Adjacent
-/// disjoint pages stay split. A singleton group preads the job window; only a
-/// merged group uses a page-span bounce buffer.
+/// Jobs that share an OS page, straddle two pages, or leave a hole of at most
+/// 64 KiB become one SQE while the merged span stays at most 256 KiB. A wider
+/// hole or a longer span stays split. Do not chain into SH-sized reads. A
+/// singleton group preads the job window; only a merged group uses a page-span
+/// bounce buffer.
 fn group_body_peeks(windows: &[(u64, u64)]) -> Vec<(u64, u64, Vec<usize>)> {
     let mut groups = Vec::new();
     if windows.is_empty() {
@@ -134,9 +139,15 @@ fn group_body_peeks(windows: &[(u64, u64)]) -> Vec<(u64, u64, Vec<usize>)> {
     for (i, &(off, len)) in windows.iter().enumerate().skip(1) {
         let (plo, phi) = pages(off, len);
         let new_hi = ghi.max(phi);
-        if plo <= ghi && new_hi.saturating_sub(glo) < BODY_GROUP_MAX_PAGES {
+        let new_end = max_end.max(off.saturating_add(len));
+        let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
+        let span = new_end.saturating_sub(page_off);
+        let hole = off.saturating_sub(max_end);
+        let page_merge = plo <= ghi && new_hi.saturating_sub(glo) < BODY_GROUP_MAX_PAGES;
+        let gap_merge = hole <= BODY_GROUP_MAX_HOLE && span <= BODY_GROUP_MAX_SPAN;
+        if page_merge || gap_merge {
             ghi = new_hi;
-            max_end = max_end.max(off.saturating_add(len));
+            max_end = new_end;
             continue;
         }
         let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
@@ -437,6 +448,30 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let t = TxTable::create_tiny(&dir).unwrap();
         (dir, t)
+    }
+
+    #[test]
+    fn group_body_peeks_merges_a_small_hole_inside_the_span_cap() {
+        let page = BODY_OS_PAGE;
+        let hole = 8 * 1024;
+        let a = (page, 32u64);
+        let b_off = a.0 + a.1 + hole;
+        let grouped = group_body_peeks(&[a, (b_off, 32)]);
+        assert_eq!(grouped.len(), 1, "8 KiB hole");
+        assert_eq!(grouped[0].2, vec![0, 1]);
+
+        let over = 64 * 1024 + 1;
+        let split = group_body_peeks(&[a, (a.0 + a.1 + over, 32)]);
+        assert_eq!(split.len(), 2, "hole just over 64 KiB");
+
+        let big = 200 * 1024;
+        let wide = group_body_peeks(&[(0, big), (big + hole, 80 * 1024)]);
+        assert!(big + hole + 80 * 1024 > 256 * 1024);
+        assert_eq!(wide.len(), 2, "span past 256 KiB");
+
+        let straddle = group_body_peeks(&[(page - 8, 16), (page + 100, 16)]);
+        assert_eq!(straddle.len(), 1, "two-page straddle");
+        assert_eq!(straddle[0].2, vec![0, 1]);
     }
 
     fn stamp_txout(t: &TxTable, jobs: &mut [IdxBodyJob]) {

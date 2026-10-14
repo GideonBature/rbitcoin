@@ -1665,6 +1665,7 @@ fn apply_startup_index_mode(
     config: &NodeConfig,
     taproot_height: u32,
 ) -> Result<(), NodeError> {
+    query.store().set_datadir_hdd(config.datadir_hdd);
     query.set_sh_index_enabled(config.shindex);
     query.set_block_filter_index(config.block_filter_index)?;
     query.set_max_sh_creates(config.max_sh_creates);
@@ -3044,6 +3045,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn startup_sets_datadir_hdd_on_the_store() {
+        let dir = scratch_dir("datadir-hdd");
+        let q = Query::open_or_create_tiny(&dir).unwrap();
+        assert!(!q.store().datadir_hdd());
+        let cfg = NodeConfig {
+            datadir_hdd: true,
+            ..NodeConfig::default()
+        };
+        apply_startup_index_mode(&q, &cfg, 0).unwrap();
+        assert!(q.store().datadir_hdd());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A pack-marked head whose inclusion floor is behind the tip must not open

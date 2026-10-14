@@ -1,0 +1,3 @@
+Added
+
+- **`--datadir-hdd` marks the main datadir as rotating media.** Default off. The node does not probe the block device. When set, each Class A body stem (`txout`, `seqsigwit`, `spent`) is its own pwrite wave, and the confirm write thread holds the spindle across those pwrites and across the spend-annotate sweep. `tx.head` insert starts after annotate returns. Lookup and load wait before each bulk read. Script threads, RPC, scripthash extract, and the index builder do not. NixOS `services.rbitcoin.datadirHdd` passes the flag. Spend annotate is a 4 KiB page read-modify-write on every device, with `POSIX_FADV_RANDOM` for that sweep only. Pin reads on every device also coalesce a hole of at most 64 KiB when the merged span stays at most 256 KiB.

@@ -826,6 +826,23 @@ impl TableFile {
         Ok(f(&buf))
     }
 
+    /// `posix_fadvise` for the whole file. Linux best-effort; other OS no-op.
+    /// Whole-file advice. Linux only; other hosts have no `posix_fadvise`.
+    #[cfg(target_os = "linux")]
+    pub fn advise_access(&self, advice: libc::c_int) {
+        use std::os::unix::io::AsRawFd;
+        let file = self.file.lock().unwrap();
+        let fd = file.as_raw_fd();
+        let rc = unsafe { libc::posix_fadvise(fd, 0, 0, advice) };
+        if rc != 0 {
+            rbitcoin_log::trace!(
+                "store: posix_fadvise failed path={}: {}",
+                self.path.display(),
+                std::io::Error::from_raw_os_error(rc)
+            );
+        }
+    }
+
     pub fn advise_dont_need(&self, offset: u64, len: u64) {
         if len == 0 {
             return;

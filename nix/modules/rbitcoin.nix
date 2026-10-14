@@ -112,6 +112,7 @@ let
   ++ optional cfg.cjdns.reachable "--cjdns-reachable"
   ++ optional cfg.esplora.hiddenService "--esplora-onion"
   ++ optional cfg.pruneSeqSigWit "--prune-seqsigwit"
+  ++ optional cfg.datadirHdd "--datadir-hdd"
   ++ optional (cfg.milestone != null) "--milestone"
   ++ optional (cfg.milestone != null) (toString cfg.milestone)
   ++ lib.optionals cfg.sv2.tp.enable [
@@ -220,6 +221,15 @@ in
       type = types.bool;
       default = false;
       description = "Drop Class A seqsigwit below tip-288 heights and advertise NETWORK_LIMITED. Not Core -prune of headers/txout.";
+    };
+
+    datadirHdd = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Pass `--datadir-hdd`. The main datadir is on rotating media.
+        The module does not probe the block device. Default off keeps the SSD confirm schedule.
+      '';
     };
 
     environment = mkOption {
