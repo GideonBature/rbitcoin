@@ -1515,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_stalled_keeps_the_set_when_every_peer_is_quiet() {
+    fn disconnect_stalled_drops_one_when_every_peer_is_quiet() {
         let a = addr(16);
         let b = addr(17);
         let mut sa = dummy_slot(10, a, true);
@@ -1541,8 +1541,41 @@ mod tests {
             Duration::from_secs(30),
             60_000,
         );
-        assert!(cooldown.is_empty());
-        assert_eq!(inflight.len(), 2);
+        assert_eq!(cooldown.len(), 1, "one quiet peer per pass, so give-up stays reachable");
+        assert_eq!(inflight.len(), 1);
+        assert!(cooldown.contains_key(&a) ^ cooldown.contains_key(&b));
+    }
+
+    #[test]
+    fn disconnect_stalled_ignores_silence_without_getdata() {
+        let idle_addr = addr(21);
+        let quiet_addr = addr(22);
+        let mut idle = dummy_slot(14, idle_addr, true);
+        let mut quiet = dummy_slot(15, quiet_addr, true);
+        let hq = hash_byte(0x22);
+        put_on_wire(&mut quiet, hq, 0);
+        idle.rate.note_rx(0);
+        quiet.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(hq, super::super::state::InflightReq::new(15));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [idle, quiet],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert!(
+            !cooldown.contains_key(&idle_addr),
+            "no assigned getdata is not a quiet peer"
+        );
+        assert!(cooldown.contains_key(&quiet_addr));
+        assert!(inflight.is_empty());
     }
 
     #[test]
@@ -1617,10 +1650,10 @@ mod tests {
         assert_eq!(median_u64(&[1, 2, 3]), 2);
         assert_eq!(relative_slow_min_samples(0), RELATIVE_SLOW_MIN_SAMPLES);
 
-        // All-zero bps → none (stall owns silence).
+        // All-zero bps → none (the stall pass owns a set with no block bytes).
         let zeros: Vec<_> = (0..8).map(|i| samp(i, 0, true)).collect();
         assert_eq!(relative_slow_pick(&zeros, 8), None);
-        // Zero bps is dropped; remaining pack is not an 8-sample set.
+        // A peer with inflight work and no block bytes is the outlier.
         let zero_and_fast = [
             samp(0, 0, true),
             samp(1, 2_000_000, true),
@@ -1631,7 +1664,7 @@ mod tests {
             samp(6, 1_880_000, true),
             samp(7, 1_920_000, true),
         ];
-        assert_eq!(relative_slow_pick(&zero_and_fast, 8), None);
+        assert_eq!(relative_slow_pick(&zero_and_fast, 8), Some(0));
 
         // Equal worst bps → lower peer_id wins.
         let tie = [
