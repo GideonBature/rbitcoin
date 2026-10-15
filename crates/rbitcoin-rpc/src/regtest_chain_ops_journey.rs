@@ -126,6 +126,7 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_submitpackage_sigop_vsize(&ctx, &mut cbs);
     chain_ops_big_sigops_cluster(&ctx, &mut cbs);
     chain_ops_prioritise(&ctx, &mut cbs);
+    chain_ops_template_orders_rate_then_fee(&ctx, &mut cbs);
     let fee_block = chain_ops_generateblock_and_parent_first(&ctx, &mut cbs);
     chain_ops_proposal_spends(&ctx, &mut cbs);
     chain_ops_submit_repeated_txids(&ctx, &hub, &mut cbs);
@@ -1388,6 +1389,159 @@ fn chain_ops_prioritise(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
 
 fn true_spk() -> ScriptBuf {
     ScriptBuf::from_bytes(vec![0x51])
+}
+
+fn gbt_txids(ctx: &RpcContext) -> Vec<String> {
+    let tmpl = dispatch(ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    tmpl["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["txid"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn assert_template_before(ids: &[String], earlier: &str, later: &str) {
+    let a = ids.iter().position(|t| t == earlier);
+    let b = ids.iter().position(|t| t == later);
+    assert!(
+        a.is_some() && b.is_some() && a.unwrap() < b.unwrap(),
+        "{earlier} before {later} in {ids:?}"
+    );
+}
+
+fn op_true_child(parent: &Transaction, vout: u32, fee: u64, nonce: u32) -> Transaction {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: parent.compute_txid(),
+                vout,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::from_consensus(0x8000_0000 | nonce),
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: parent.output[vout as usize].value - Amount::from_sat(fee),
+            script_pubkey: true_spk(),
+        }],
+    }
+}
+
+fn send_tx(ctx: &RpcContext, tx: &Transaction) -> String {
+    dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(tx))])
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// `getblocktemplate` lists a cluster in linearization order: higher rate,
+/// then higher fee, then the lesser txid. A negative `prioritisetransaction`
+/// drops that child from the template.
+fn chain_ops_template_orders_rate_then_fee(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
+    let h = cbs.take();
+    let cb = generated_coinbase_value(ctx, h);
+    let each = (cb - 10_000) / 2;
+    let parent = parent_paying(ctx, h, each, true_spk(), true_spk());
+    send_tx(ctx, &parent);
+    let (hi_rate, lo_rate) = (1..400u32)
+        .find_map(|n| {
+            let hi = op_true_child(&parent, 0, 8_000, n);
+            let lo = op_true_child(&parent, 1, 1_000, n + 400);
+            (hi.compute_txid() > lo.compute_txid()).then_some((hi, lo))
+        })
+        .expect("higher-fee child txid after the lower-fee child");
+    assert_eq!(hi_rate.weight(), lo_rate.weight());
+    let hi_rate_id = send_tx(ctx, &hi_rate);
+    let lo_rate_id = send_tx(ctx, &lo_rate);
+    let ids = gbt_txids(ctx);
+    assert_template_before(&ids, &hi_rate_id, &lo_rate_id);
+    chain_ops_mine_pool_empty(ctx);
+
+    let h = cbs.take();
+    let cb = generated_coinbase_value(ctx, h);
+    let each = (cb - 10_000) / 2;
+    let parent = parent_paying(ctx, h, each, true_spk(), true_spk());
+    send_tx(ctx, &parent);
+    let a = op_true_child(&parent, 0, 2_000, 1);
+    let b = op_true_child(&parent, 1, 2_000, 2);
+    assert_eq!(a.weight(), b.weight());
+    let a_id = send_tx(ctx, &a);
+    let b_id = send_tx(ctx, &b);
+    let (lesser, greater) = if a.compute_txid() < b.compute_txid() {
+        (a_id, b_id)
+    } else {
+        (b_id, a_id)
+    };
+    let ids = gbt_txids(ctx);
+    assert_template_before(&ids, &lesser, &greater);
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(lesser.clone()), json!(0), json!(-2_001)],
+    )
+    .unwrap();
+    let ids = gbt_txids(ctx);
+    assert!(
+        !ids.iter().any(|t| t == &lesser),
+        "a negative fee delta leaves the template: {ids:?}"
+    );
+    assert!(ids.iter().any(|t| t == &greater), "{ids:?}");
+    dispatch(
+        ctx,
+        "prioritisetransaction",
+        vec![json!(lesser), json!(0), json!(2_001)],
+    )
+    .unwrap();
+    chain_ops_mine_pool_empty(ctx);
+
+    // 400_000 sat at vsize 2000 and 200_000 sat at vsize 1000 floor to the
+    // same sat/kvB. The higher fee is the later txid, so the fee compare is
+    // what puts it first in the template.
+    let h = cbs.take();
+    let cb = generated_coinbase_value(ctx, h);
+    let each = (cb - 10_000) / 2;
+    let hi_lens = p2wsh_item_lens(2_000);
+    let lo_lens = p2wsh_item_lens(1_000);
+    let hi_proto = p2wsh_with_lens(bitcoin::OutPoint::null(), each, 400_000, 1, &hi_lens);
+    let lo_proto = p2wsh_with_lens(bitcoin::OutPoint::null(), each, 200_000, 1, &lo_lens);
+    assert_eq!(
+        rbitcoin_consensus::policy::fee_rate_sat_per_kvb(400_000, hi_proto.weight().to_wu()),
+        rbitcoin_consensus::policy::fee_rate_sat_per_kvb(200_000, lo_proto.weight().to_wu()),
+    );
+    let parent = parent_paying(ctx, h, each, p2wsh_spk(&hi_proto), p2wsh_spk(&lo_proto));
+    let pid = parent.compute_txid();
+    send_tx(ctx, &parent);
+    let (hi, lo) = (1..400u32)
+        .find_map(|n| {
+            let hi = p2wsh_with_lens(
+                bitcoin::OutPoint { txid: pid, vout: 0 },
+                each,
+                400_000,
+                n,
+                &hi_lens,
+            );
+            let lo = p2wsh_with_lens(
+                bitcoin::OutPoint { txid: pid, vout: 1 },
+                each,
+                200_000,
+                n + 400,
+                &lo_lens,
+            );
+            (hi.compute_txid() > lo.compute_txid()).then_some((hi, lo))
+        })
+        .expect("higher-fee txid after the lower-fee sibling");
+    let hi_id = send_tx(ctx, &hi);
+    let lo_id = send_tx(ctx, &lo);
+    let ids = gbt_txids(ctx);
+    assert_template_before(&ids, &hi_id, &lo_id);
+    chain_ops_mine_pool_empty(ctx);
 }
 
 fn chain_ops_generateblock_and_parent_first(ctx: &RpcContext, cbs: &mut TrueCoinbases) -> u32 {

@@ -52,11 +52,7 @@ fn compact_params(params: &str) -> String {
     if params.len() <= PARAMS_MAX {
         return params.to_string();
     }
-    let mut end = PARAMS_MAX;
-    while end > 0 && !params.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &params[..end])
+    format!("{}…", &params[..char_floor(params, PARAMS_MAX)])
 }
 
 /// Record one Electrum / Esplora / RPC call.
@@ -113,11 +109,7 @@ fn logged_params(method: &str, params: &str) -> String {
 }
 
 fn char_floor(s: &str, max: usize) -> usize {
-    let mut end = max.min(s.len());
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
+    s.floor_char_boundary(max.min(s.len()))
 }
 
 /// Exclusive end of the slice to redact, covering each secret that starts
@@ -246,15 +238,6 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn compact_params_truncates() {
-        assert_eq!(compact_params("[]"), "[]");
-        let long = "x".repeat(500);
-        let c = compact_params(&long);
-        assert!(c.ends_with('…'));
-        assert!(c.len() < 400);
-    }
-
-    #[test]
     fn api_log_file_records_json_line() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = std::env::temp_dir().join(format!(
@@ -283,7 +266,21 @@ mod tests {
             1,
             Some("unknown method: no.such"),
         );
+        // 383 ASCII bytes, then a 3-byte character that straddles byte 384.
+        // The operator file keeps the char-safe prefix and drops the tail.
+        let mut straddling = "a".repeat(383);
+        straddling.push('€');
+        straddling.push_str("zzz");
+        api_call("rpc", "-", "long.params", &straddling, 2, None);
+        api_call("rpc", "-", "odd.params", "a\"b\\c\n\r\t\u{0001}", 3, None);
         close_api_log();
+        let sealed = std::fs::metadata(&path).unwrap().len();
+        api_call("electrum", "127.0.0.1:1", "server.ping", "[]", 1, None);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            sealed,
+            "close stops the operator file"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -299,6 +296,29 @@ mod tests {
         assert!(body.contains("\"ok\":true"));
         assert!(body.contains("\"ok\":false"));
         assert!(body.contains("unknown method"));
+        assert!(body.contains(&format!("\"params\":\"{}…\"", "a".repeat(383))));
+        assert!(!body.contains('€'), "{body}");
+        assert!(!body.contains("zzz"), "{body}");
+        assert!(body.contains(r#""params":"a\"b\\c\n\r\t\u0001""#), "{body}");
+    }
+
+    #[test]
+    fn init_api_log_creates_a_missing_parent() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "rbitcoin-api-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let path = root.join("nested").join("api.jsonl");
+        let _ = std::fs::remove_dir_all(&root);
+        init_api_log(&path).unwrap();
+        close_api_log();
+        assert!(path.is_file(), "operator path must exist");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -312,11 +332,6 @@ mod tests {
         assert_eq!(*level, crate::Level::Trace, "{msg}");
         assert!(msg.contains("api: electrum"), "{msg}");
         assert!(msg.contains("server.ping"), "{msg}");
-    }
-
-    #[test]
-    fn json_escape_quotes() {
-        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
     }
 
     #[test]

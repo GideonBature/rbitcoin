@@ -1344,14 +1344,12 @@ impl ActiveMempool {
         until: EvictUntil,
     ) -> Result<Vec<Txid>, AcceptError> {
         let mut gone = Vec::new();
-        let mut guard = 0u32;
         loop {
             match until {
                 EvictUntil::FreeSlot => {
-                    if self.store.has_free_slot() || guard >= 10_000 {
+                    if self.store.has_free_slot() {
                         break;
                     }
-                    guard += 1;
                 }
                 EvictUntil::WeightBudget => {
                     if self.graph.total_weight() <= self.max_weight {
@@ -1404,7 +1402,6 @@ impl ActiveMempool {
             });
         }
         let mut seen = BTreeSet::new();
-        let mut pkg_ids = BTreeSet::new();
         for tx in txs {
             if tx.is_coinbase() {
                 return Err(AcceptError::Coinbase);
@@ -1413,19 +1410,17 @@ impl ActiveMempool {
             if !seen.insert(id) {
                 return Err(AcceptError::Duplicate(id));
             }
-            pkg_ids.insert(id);
         }
-        for (i, tx) in txs.iter().enumerate() {
+        // `seen` still holds this tx and every tx after it. An input that
+        // names one of those txids spends a parent that is not earlier in
+        // the package, including a tx that spends its own txid.
+        for tx in txs {
             for inp in &tx.input {
-                let parent = inp.previous_output.txid;
-                if pkg_ids.contains(&parent) {
-                    let parent_pos = txs.iter().position(|t| t.compute_txid() == parent);
-                    match parent_pos {
-                        Some(p) if p < i => {}
-                        _ => return Err(AcceptError::PackageNotTopo),
-                    }
+                if seen.contains(&inp.previous_output.txid) {
+                    return Err(AcceptError::PackageNotTopo);
                 }
             }
+            seen.remove(&tx.compute_txid());
         }
         Ok(())
     }
@@ -2157,9 +2152,7 @@ pub fn rbf_pays_for_replacement(
 /// Integer form: `new_fee * DEN * direct_vsize ≥ direct_fee * NUM * new_vsize`
 /// with `NUM/DEN = 5/4`.
 pub fn pure_rbfr_pays(new_fee: u64, new_weight: u64, direct_fee: u64, direct_weight: u64) -> bool {
-    if new_weight == 0 || direct_weight == 0 {
-        return false;
-    }
+    // `(weight + 3) / 4` is 0 only at weight 0, so the vsize check is the zero guard.
     let new_v = policy::get_virtual_size(new_weight);
     let old_v = policy::get_virtual_size(direct_weight);
     if new_v == 0 || old_v == 0 {
@@ -2225,6 +2218,26 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(op, coin(txout.clone()));
         (op, txout, MapUtxoProvider { map })
+    }
+
+    /// Several chain coins in one map. `chain_utxo` always uses vout 0, so a
+    /// second call is the same outpoint.
+    fn chain_coins(values: &[u64]) -> (Vec<OutPoint>, MapUtxoProvider) {
+        let mut map = HashMap::new();
+        let mut ops = Vec::with_capacity(values.len());
+        for (i, &value) in values.iter().enumerate() {
+            let op = OutPoint {
+                txid: Txid::from_byte_array([0xab; 32]),
+                vout: i as u32,
+            };
+            let txout = TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            };
+            map.insert(op, coin(txout));
+            ops.push(op);
+        }
+        (ops, MapUtxoProvider { map })
     }
 
     /// Finding 011: duplicate inputs rejected before fee accounting.
@@ -3082,6 +3095,8 @@ mod tests {
         // old fee 1000 @ 4000 WU → need new ≥ 1250 same weight.
         assert!(pure_rbfr_pays(1_250, 4000, 1_000, 4000));
         assert!(!pure_rbfr_pays(1_249, 4000, 1_000, 4000));
+        assert!(!pure_rbfr_pays(1_250, 0, 1_000, 4000));
+        assert!(!pure_rbfr_pays(1_250, 4000, 1_000, 0));
         // Higher rate, lower absolute fee vs a fat conflict set still passes pure RBFR
         // (BIP125 would fail): direct 1000@4000, conflict set pretends 50k@40k.
         assert!(!rbf_pays_for_replacement(2_000, 4000, 50_000, 40_000));
@@ -3815,6 +3830,241 @@ mod tests {
             }
         }
         panic!("no locktime put the child txid first");
+    }
+
+    #[test]
+    fn relay_floor_generation_and_sidecar_persist_are_the_stored_values() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 90_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        assert_eq!(
+            mp.min_relay_sat_kvb(),
+            rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB
+        );
+        mp.set_min_relay_sat_kvb(50_000);
+        assert_eq!(mp.min_relay_sat_kvb(), 50_000);
+        mp.store.set_now_ms(0);
+        mp.flush().unwrap();
+        mp.flush().unwrap();
+        assert_eq!(mp.generation(), 2);
+        let txid = tx.compute_txid();
+        mp.accept_tx(&tx, &utxos, TIP_OK).unwrap();
+        mp.store.set_now_ms(crate::store::PERSIST_INTERVAL_MS);
+        mp.persist_due().unwrap();
+        drop(mp);
+        let mp = ActiveMempool::open_or_create(&dir).unwrap();
+        assert_eq!(mp.live_count(), 1, "persist_due wrote {txid}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 90_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.store.set_now_ms(0);
+        mp.accept_tx(&tx, &utxos, TIP_OK).unwrap();
+        mp.store.set_now_ms(crate::store::PERSIST_INTERVAL_MS);
+        mp.persist_if_dirty().unwrap();
+        drop(mp);
+        let mp = ActiveMempool::open_or_create(&dir).unwrap();
+        assert_eq!(mp.live_count(), 1, "persist_if_dirty wrote the admit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Dead-slot quarter of the slot cap. Compacting or not leaves the same
+    /// live txs a client reads back. A session runs this when dead slots
+    /// reach a quarter of the table; the pin uses a 4-slot and a 5-slot cap
+    /// because the default table never gets there in a journey.
+    #[test]
+    fn maybe_compact_runs_when_dead_catches_live_or_nothing_live_remains() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 80_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let _a = mp
+            .accept_tx(&spend_tx(ops[0], 90_000), &utxos, TIP_OK)
+            .unwrap();
+        let b = mp
+            .accept_tx(&spend_tx(ops[1], 70_000), &utxos, TIP_OK)
+            .unwrap();
+        mp.store.mark_slot_dead(b.slot).unwrap();
+        let (_f, live, dead) = mp.store.slot_stats();
+        assert_eq!((live, dead), (1, 1));
+        assert!(mp.maybe_compact().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let a = mp.accept_tx(&spend_tx(op, 90_000), &utxos, TIP_OK).unwrap();
+        mp.store.mark_slot_dead(a.slot).unwrap();
+        let (_f, live, dead) = mp.store.slot_stats();
+        assert_eq!((live, dead), (0, 1));
+        assert!(mp.maybe_compact().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Quarter of a cap of 4 is one dead slot, still under the live count.
+        // `dead * 4 >= cap` compacts; `dead / 4 >= cap` does not.
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 90_000, 80_000, 70_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut slots = Vec::new();
+        for (op, value) in ops.iter().zip([90_000, 80_000, 70_000, 60_000]) {
+            slots.push(
+                mp.accept_tx(&spend_tx(*op, value), &utxos, TIP_OK)
+                    .unwrap()
+                    .slot,
+            );
+        }
+        mp.store.testing_pin_full_slot_table();
+        mp.store.mark_slot_dead(slots[0]).unwrap();
+        let (_f, live, dead) = mp.store.slot_stats();
+        assert_eq!((mp.store.meta().slot_cap, live, dead), (4, 3, 1));
+        assert!(
+            mp.maybe_compact().unwrap().is_some(),
+            "one dead slot is a quarter of a 4-slot table"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Cap 5, one dead, three live: `dead * 4 >= cap` is false and dead is
+        // still under live. `dead + 4 >= cap` would compact.
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 90_000, 80_000, 70_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let mut slots = Vec::new();
+        for (op, value) in ops.iter().zip([90_000, 80_000, 70_000, 60_000]) {
+            slots.push(
+                mp.accept_tx(&spend_tx(*op, value), &utxos, TIP_OK)
+                    .unwrap()
+                    .slot,
+            );
+        }
+        mp.store.testing_set_slot_cap(5);
+        mp.store.mark_slot_dead(slots[0]).unwrap();
+        let (_f, live, dead) = mp.store.slot_stats();
+        assert_eq!((mp.store.meta().slot_cap, live, dead), (5, 3, 1));
+        assert!(
+            mp.maybe_compact().unwrap().is_none(),
+            "one dead slot is under a quarter of a 5-slot table and under the live count"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Prepare/commit gap. A second `sendrawtransaction` takes `accept_tx`,
+    /// not a `PreparedAdmit` another thread already committed. The hub hits
+    /// this when the tx lands between prepare and commit.
+    #[test]
+    fn duplicate_commit_after_prepare_is_duplicate() {
+        let dir = tmp_dir();
+        let (op, _, utxos) = chain_utxo(100_000);
+        let tx = spend_tx(op, 90_000);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let prep = mp
+            .prepare_admit(&tx, &utxos, TIP_OK, 0, false, None)
+            .unwrap();
+        mp.accept_tx(&tx, &utxos, TIP_OK).unwrap();
+        let err = mp.commit_after_script(&tx, prep).unwrap_err();
+        assert!(matches!(err, AcceptError::Duplicate(_)), "got {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Core `IsChildWithParents` for `submitpackage` when
+    /// `RBITCOIN_RPC_PACKAGE_DIALECT` is on. Setting that variable in a test
+    /// races every other package RPC in the process, so this stays on the
+    /// function the RPC calls. A session with the flag rejects a package
+    /// whose last tx does not spend every other member.
+    #[test]
+    fn package_direct_parents_require_the_child_to_spend_each_member() {
+        let (op, _, _) = chain_utxo(100_000);
+        let parent = spend_tx(op, 90_000);
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            80_000,
+        );
+        assert!(!ActiveMempool::package_is_child_with_direct_parents(
+            std::slice::from_ref(&parent)
+        ));
+        assert!(ActiveMempool::package_is_child_with_direct_parents(&[
+            parent.clone(),
+            child.clone()
+        ]));
+        assert!(!ActiveMempool::package_is_child_with_direct_parents(&[
+            child, parent
+        ]));
+        // The index compare is gone. A one-tx self-spend is not a peer
+        // message, because the txid commits to the prevout. `seen.contains`
+        // is what `testmempoolaccept` rejects.
+        let src = include_str!("accept.rs");
+        let start = src.find("pub fn check_package_shape(").expect("shape");
+        let end = start
+            + src[start..]
+                .find("pub fn package_is_child_with_direct_parents(")
+                .expect("child");
+        let shape = &src[start..end];
+        assert!(!shape.contains("p <"), "index compare must stay deleted");
+        assert!(!shape.contains("i > p"));
+        assert!(!shape.contains("<="));
+        assert!(!shape.contains(">="));
+    }
+
+    /// Recent-reject and extra-txn maps. No RPC returns them. A later peer
+    /// announcement of the same invalid txid consults the map instead of
+    /// re-running script.
+    #[test]
+    fn recent_rejects_keep_every_id_under_the_cap() {
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let a = Txid::from_byte_array([0x11; 32]);
+        let b = Txid::from_byte_array([0x22; 32]);
+        mp.note_invalid(a);
+        mp.note_invalid(b);
+        assert!(mp.recent_invalid.contains(&a));
+        assert!(mp.recent_invalid.contains(&b));
+        let (op, _, _) = chain_utxo(50_000);
+        let t1 = spend_tx(op, 40_000);
+        let (op2, _, _) = chain_utxo(40_000);
+        let t2 = spend_tx(op2, 30_000);
+        mp.note_extra(&t1);
+        mp.note_extra(&t2);
+        assert!(mp.extra_by_txid(t1.compute_txid()).is_some());
+        assert!(mp.extra_by_txid(t2.compute_txid()).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Free-slot eviction. A session reaches it only when the slot table is
+    /// at `MAX_SLOT_CAP` (1_048_576) and every row is live. The pin pretends
+    /// the table is already there. Weight-budget eviction is the full-pool
+    /// journey; this is the slot-table stop.
+    #[test]
+    fn a_full_pinned_slot_table_evicts_one_chunk_then_stops() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 90_000, 80_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let cheap = spend_tx(ops[0], 70_000);
+        let mid = spend_tx(ops[1], 60_000);
+        let incoming = spend_tx(ops[2], 50_000);
+        mp.accept_tx(&cheap, &utxos, TIP_OK).unwrap();
+        mp.accept_tx(&mid, &utxos, TIP_OK).unwrap();
+        mp.store.testing_pin_full_slot_table();
+        mp.accept_tx(&incoming, &utxos, TIP_OK).unwrap();
+        assert_eq!(mp.live_count(), 2, "one eviction frees the pinned table");
+        assert!(mp.graph.contains(&incoming.compute_txid()));
+        // DEAD is a free slot, so eviction stops on the next pass. The old
+        // `guard += 1` / 10000 cap cannot be reached by a freed slot.
+        let src = include_str!("accept.rs");
+        let start = src.find("fn evict_worst_chunks(").expect("evict");
+        let end = start
+            + src[start..]
+                .find("fn evict_worst_chunk_once(")
+                .expect("once");
+        let evict = &src[start..end];
+        assert!(!evict.contains("+="), "eviction cap must stay deleted");
+        assert!(!evict.contains("10_000"));
+        assert!(!evict.contains("saturating_add"));
+        assert!(!evict.contains("||"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     include!("accept_life_journey.rs");

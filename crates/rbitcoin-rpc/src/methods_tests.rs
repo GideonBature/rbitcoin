@@ -2477,6 +2477,7 @@ fn mempool_under_pressure() {
     use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
 
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    pressure_same_rate_evicts_the_lighter_chunk(&ctx);
     let spk = ScriptBuf::from_bytes(vec![0x51]);
     let (parent_hex, parent) = spend_generated_coinbase(&ctx, 1, 50_0000_0000 - 1_000, spk.clone());
     let child = child_of(&parent, 1_000);
@@ -2599,6 +2600,182 @@ fn mempool_under_pressure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fee 501 at vsize 5000 and 5001 both floor to 100 sat/kvB and both clear
+/// min relay. The lighter txid is linearized first, so the two children stay
+/// two chunks. A weight cap that fits the parent and the heavier child drops
+/// the lighter one. `<=` in the worst-chunk walk would drop the heavier one.
+fn pressure_same_rate_evicts_the_lighter_chunk(ctx: &RpcContext) {
+    chain_ops_mine_pool_empty(ctx);
+    let tip = dispatch(ctx, "getblockcount", vec![])
+        .unwrap()
+        .as_u64()
+        .unwrap();
+    if tip < 105 {
+        dispatch(ctx, "generate", vec![json!(105 - tip)]).unwrap();
+    }
+    let mp = ctx.mempool.as_ref().unwrap();
+    mp.set_max_weight(300_000_000);
+    let cb = generated_coinbase_value(ctx, 4);
+    let each = (cb - 10_000) / 2;
+    let light_lens = p2wsh_item_lens(5_000);
+    let heavy_lens = p2wsh_item_lens(5_001);
+    let light_proto = p2wsh_with_lens(bitcoin::OutPoint::null(), each, 501, 1, &light_lens);
+    let heavy_proto = p2wsh_with_lens(bitcoin::OutPoint::null(), each, 501, 1, &heavy_lens);
+    let parent = parent_paying(
+        ctx,
+        4,
+        each,
+        p2wsh_spk(&light_proto),
+        p2wsh_spk(&heavy_proto),
+    );
+    let pid = parent.compute_txid();
+    dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&parent))]).unwrap();
+    let (light, heavy) = (1..400u32)
+        .find_map(|n| {
+            let light = p2wsh_with_lens(
+                bitcoin::OutPoint { txid: pid, vout: 0 },
+                each,
+                501,
+                n,
+                &light_lens,
+            );
+            let heavy = p2wsh_with_lens(
+                bitcoin::OutPoint { txid: pid, vout: 1 },
+                each,
+                501,
+                n + 400,
+                &heavy_lens,
+            );
+            (light.compute_txid() < heavy.compute_txid()).then_some((light, heavy))
+        })
+        .expect("a lighter txid before the heavier sibling");
+    assert_eq!(
+        rbitcoin_consensus::policy::fee_rate_sat_per_kvb(501, light.weight().to_wu()),
+        rbitcoin_consensus::policy::fee_rate_sat_per_kvb(501, heavy.weight().to_wu()),
+    );
+    dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&light))]).unwrap();
+    dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&heavy))]).unwrap();
+    let probe_cb = generated_coinbase_value(ctx, 5);
+    let (probe_hex, probe) = spend_generated_coinbase(ctx, 5, probe_cb - 20_000, true_spk());
+    mp.set_max_weight(parent.weight().to_wu() + heavy.weight().to_wu() + probe.weight().to_wu());
+    dispatch(ctx, "sendrawtransaction", vec![json!(probe_hex)]).unwrap();
+    let raw = dispatch(ctx, "getrawmempool", vec![]).unwrap();
+    let listed = |tx: &Transaction| {
+        let want = tx.compute_txid().to_string();
+        raw.as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str() == Some(want.as_str()))
+    };
+    assert!(listed(&parent), "parent stays");
+    assert!(listed(&heavy), "heavier sibling stays");
+    assert!(
+        !listed(&light),
+        "the earlier equal-rate chunk is the one evicted"
+    );
+    assert!(listed(&probe), "the arriving tx stays");
+    chain_ops_mine_pool_empty(ctx);
+    mp.set_max_weight(300_000_000);
+}
+
+fn p2wsh_script(n_drops: usize) -> ScriptBuf {
+    let mut bytes = vec![0x75u8; n_drops];
+    bytes.push(0x51);
+    ScriptBuf::from_bytes(bytes)
+}
+
+fn witness_script(tx: &Transaction) -> ScriptBuf {
+    let last = tx.input[0].witness.iter().last().expect("witness script");
+    ScriptBuf::from_bytes(last.to_vec())
+}
+
+fn p2wsh_spk(tx: &Transaction) -> ScriptBuf {
+    ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::hash(witness_script(tx).as_bytes()))
+}
+
+/// Witness-item lengths for a P2WSH `OP_DROP`…`OP_TRUE` spend of `target_vsize`.
+/// Stack items stay at or under 520 bytes. The shape does not depend on the prevout.
+fn p2wsh_item_lens(target_vsize: u64) -> Vec<usize> {
+    let mut lens = Vec::new();
+    loop {
+        let tx = p2wsh_with_lens(bitcoin::OutPoint::null(), 1_000_000, 1, 1, &lens);
+        let vsize = rbitcoin_consensus::policy::get_virtual_size(tx.weight().to_wu());
+        if vsize == target_vsize {
+            return lens;
+        }
+        assert!(
+            vsize < target_vsize,
+            "vsize {vsize} overshot {target_vsize}"
+        );
+        if lens.last().copied().unwrap_or(520) >= 520 {
+            lens.push(1);
+        } else {
+            *lens.last_mut().unwrap() += 1;
+        }
+        assert!(
+            lens.len() < 180,
+            "witness pad did not reach vsize {target_vsize}"
+        );
+    }
+}
+
+/// P2WSH `OP_DROP`…`OP_TRUE` spend. `lens` is from [`p2wsh_item_lens`].
+fn p2wsh_with_lens(
+    prev: bitcoin::OutPoint,
+    value_in: u64,
+    fee: u64,
+    nonce: u32,
+    lens: &[usize],
+) -> Transaction {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Sequence, TxIn, TxOut, Witness};
+    let script = p2wsh_script(lens.len());
+    let mut stack: Vec<Vec<u8>> = lens.iter().copied().map(|n| vec![0u8; n]).collect();
+    stack.push(script.to_bytes());
+    let refs: Vec<&[u8]> = stack.iter().map(Vec::as_slice).collect();
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: prev,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::from_consensus(0x8000_0000 | nonce),
+            witness: Witness::from_slice(&refs),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(value_in - fee),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
+
+fn parent_paying(
+    ctx: &RpcContext,
+    height: u32,
+    each: u64,
+    script0: ScriptBuf,
+    script1: ScriptBuf,
+) -> Transaction {
+    use bitcoin::TxOut;
+    let (_, proto) = spend_generated_coinbase(ctx, height, 1, ScriptBuf::from_bytes(vec![0x51]));
+    Transaction {
+        version: proto.version,
+        lock_time: proto.lock_time,
+        input: proto.input,
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(each),
+                script_pubkey: script0,
+            },
+            TxOut {
+                value: Amount::from_sat(each),
+                script_pubkey: script1,
+            },
+        ],
+    }
+}
+
 #[test]
 fn pressure_tiny_weight() {
     use bitcoin::absolute::LockTime;
@@ -2673,10 +2850,12 @@ fn pressure_tiny_weight() {
 
 fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
     use bitcoin::consensus::encode::serialize;
-    let (chain_hex, chain_parent) =
-        spend_generated_coinbase(ctx, 2, 50_0000_0000 - 1_000, spk.clone());
-    let chain_child = child_of(&chain_parent, 1_000);
-    let chain_grand = child_of(&chain_child, 1_000);
+    // Parent and child are under the relay floor. The grandchild pays for
+    // the chain. A package walk that stops at the direct parent does not
+    // admit them.
+    let (chain_hex, chain_parent) = spend_generated_coinbase(ctx, 2, 50_0000_0000 - 1, spk.clone());
+    let chain_child = child_of(&chain_parent, 1);
+    let chain_grand = child_of(&chain_child, 80_000);
     let chain_child_hex = hex_encode(serialize(&chain_child));
     let chain = dispatch(
         ctx,
@@ -2689,11 +2868,10 @@ fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
     )
     .unwrap();
     assert_eq!(chain["package_msg"], "success", "{chain}");
-    assert!(ctx
-        .mempool
-        .as_ref()
-        .unwrap()
-        .contains(&chain_parent.compute_txid()));
+    let admitted = ctx.mempool.as_ref().unwrap();
+    assert!(admitted.contains(&chain_parent.compute_txid()), "{chain}");
+    assert!(admitted.contains(&chain_child.compute_txid()), "{chain}");
+    assert!(admitted.contains(&chain_grand.compute_txid()), "{chain}");
     let pair = dispatch(
         ctx,
         "submitpackage",

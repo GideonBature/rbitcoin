@@ -14,7 +14,7 @@ use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witne
 use rbitcoin_primitives::{read_compact_size, write_compact_size, Fk};
 use rbitcoin_store::OutputRecord;
 
-const VIN_SEQ_FINAL: u8 = 1 << 0;
+const VIN_SEQ_FINAL: u8 = 1;
 const VIN_EMPTY_SCRIPT: u8 = 1 << 1;
 const VIN_EMPTY_WITNESS: u8 = 1 << 2;
 const VIN_HAS_CREATE_FK: u8 = 1 << 3;
@@ -352,6 +352,101 @@ mod tests {
         assert_eq!(serialize(&got.tx), raw, "consensus serialize pin");
         assert_eq!(got.vins[0].script_hash, Some(sh));
         assert_eq!(got.vins[0].create_fk, Some(Fk(42)));
+        // SEQ_FINAL | EMPTY_SCRIPT | CREATE_FK | SCRIPT_HASH. Witness is present.
+        assert_eq!(packed[98], 0b0001_1011, "vin flags {:08b}", packed[98]);
+    }
+
+    /// Vin flag bits and a script or witness that ends the record. Encode and
+    /// decode share the constants, so a reopen of a tx this process wrote
+    /// still round-trips if a bit number changes. The byte is the schema an
+    /// older mempool file uses.
+    #[test]
+    fn packed_vin_flags_and_exact_tail_roundtrip() {
+        let mut bare = sample_tx(false);
+        bare.input[0].witness = Witness::new();
+        let txid = bare.compute_txid();
+        let wtxid = bare.compute_wtxid();
+        let packed = encode_packed_live(&bare, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap();
+        // SEQ_FINAL | EMPTY_SCRIPT | EMPTY_WITNESS, no aux. The witness/script
+        // tails are absent, so this pins the three flag bits an operator reload reads.
+        assert_eq!(packed[98], 0b0000_0111, "vin flags {:08b}", packed[98]);
+        let got = decode_packed_live(&packed).unwrap();
+        assert_eq!(serialize(&got.tx), serialize(&bare));
+
+        bare.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+        bare.input[0].sequence = Sequence::ZERO;
+        let txid = bare.compute_txid();
+        let wtxid = bare.compute_wtxid();
+        let packed = encode_packed_live(&bare, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap();
+        // Non-empty script, empty witness, non-final sequence: only EMPTY_WITNESS.
+        assert_eq!(packed[98], 0b0000_0100, "vin flags {:08b}", packed[98]);
+        let got = decode_packed_live(&packed).unwrap();
+        assert_eq!(got.tx.input[0].script_sig.as_bytes(), &[0x51]);
+        assert_eq!(serialize(&got.tx), serialize(&bare));
+
+        // No outputs: the script or the witness is the last byte of the vin
+        // slice, so `end == buf.len()` is a real record and one byte short is not.
+        let script_tail = encode_tail(true, false);
+        assert!(decode_packed_live(&script_tail).is_ok());
+        let mut torn = script_tail.clone();
+        torn.pop();
+        assert!(matches!(
+            decode_packed_live(&torn),
+            Err(MempoolError::Corrupt("packed script"))
+        ));
+        let witness_tail = encode_tail(false, true);
+        assert!(decode_packed_live(&witness_tail).is_ok());
+        let mut torn = witness_tail;
+        torn.pop();
+        assert!(matches!(
+            decode_packed_live(&torn),
+            Err(MempoolError::Corrupt("packed witness"))
+        ));
+    }
+
+    /// One input, no outputs. `script` puts a one-byte scriptSig last; otherwise
+    /// a one-byte witness item is last.
+    fn encode_tail(script: bool, witness: bool) -> Vec<u8> {
+        let mut tx = sample_tx(false);
+        tx.output.clear();
+        tx.input[0].witness = Witness::new();
+        tx.input[0].script_sig = ScriptBuf::new();
+        tx.input[0].sequence = Sequence::ZERO;
+        if script {
+            tx.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+        }
+        if witness {
+            let mut w = Witness::new();
+            w.push([0x51]);
+            tx.input[0].witness = w;
+        }
+        let (txid, wtxid) = (tx.compute_txid(), tx.compute_wtxid());
+        encode_packed_live(&tx, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap()
+    }
+
+    /// Input and output counts past 100_000. A live mempool tx cannot be that
+    /// large. Opening a torn `tx.body` hits this decoder and must not allocate.
+    #[test]
+    fn packed_live_rejects_only_past_the_count_cap() {
+        let tx = sample_tx(false);
+        let (txid, wtxid) = (tx.compute_txid(), tx.compute_wtxid());
+        let seed = encode_packed_live(&tx, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap();
+        let with_counts = |n_in: u64, n_out: u64| {
+            let mut buf = seed[..96].to_vec();
+            write_compact_size(&mut buf, n_in);
+            write_compact_size(&mut buf, n_out);
+            buf
+        };
+        let counts = |buf: &[u8]| {
+            matches!(
+                decode_packed_live(buf),
+                Err(MempoolError::Corrupt("packed live counts"))
+            )
+        };
+        assert!(counts(&with_counts(100_001, 0)));
+        assert!(counts(&with_counts(0, 100_001)));
+        assert!(!counts(&with_counts(100_000, 0)));
+        assert!(!counts(&with_counts(0, 100_000)));
     }
 
     #[test]

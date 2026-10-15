@@ -583,7 +583,10 @@ impl TxGraph {
         let mut old_reps = BTreeSet::new();
         for inp in &tx.input {
             let parent = inp.previous_output.txid;
-            if !self.created.contains(&inp.previous_output) || seen.contains(&parent) {
+            if !self.created.contains(&inp.previous_output) {
+                continue;
+            }
+            if seen.contains(&parent) {
                 continue;
             }
             if let Some(r) = self.component_rep(parent, &mut seen) {
@@ -889,12 +892,11 @@ impl TxGraph {
                     )
                 };
                 let key = (rate, mf, *t);
-                // Maximize rate, then fee; for equal, smaller txid for stability.
+                // Maximize rate, then fee. The walk is txid order, so an equal
+                // rate and fee keeps the lesser txid without a third compare.
                 let better = match &best_rate_fee_txid {
                     None => true,
-                    Some((br, bf, bt)) => {
-                        rate > *br || (rate == *br && (mf > *bf || (mf == *bf && t < bt)))
-                    }
+                    Some((br, bf, _)) => rate > *br || (rate == *br && mf > *bf),
                 };
                 if better {
                     best_rate_fee_txid = Some(key);
@@ -1857,21 +1859,35 @@ mod tests {
     #[test]
     fn rebuild_from_orders_parents_first() {
         let mut g = TxGraph::new();
-        let parent = make_tx(None, 1, 20);
-        let child = make_tx(Some((parent.compute_txid(), 0)), 1, 21);
-        // Deliberately child-first in input list.
+        // Both spenders sort before the parent. A readiness bug inserts them
+        // first, and `insert` backfills only the last tx recorded on that
+        // output, so one spender loses the parent edge.
+        let (parent, a, b) = (1..250u8)
+            .find_map(|seed| {
+                let parent = make_tx(None, 1, seed);
+                let pid = parent.compute_txid();
+                let a = make_tx(Some((pid, 0)), 1, seed.wrapping_add(1));
+                let b = make_tx(Some((pid, 0)), 1, seed.wrapping_add(2));
+                (a.compute_txid() < pid && b.compute_txid() < pid).then_some((parent, a, b))
+            })
+            .expect("two spender txids that sort before the parent");
+        let pid = parent.compute_txid();
         let items = vec![
-            (entry_for(&child, 10, 1), std::sync::Arc::new(child.clone())),
+            (entry_for(&a, 10, 1), std::sync::Arc::new(a.clone())),
+            (entry_for(&b, 10, 2), std::sync::Arc::new(b.clone())),
             (
                 entry_for(&parent, 10, 0),
                 std::sync::Arc::new(parent.clone()),
             ),
         ];
         g.rebuild_from(items);
-        assert!(g.contains(&parent.compute_txid()));
-        assert!(g.contains(&child.compute_txid()));
-        let c = g.cluster_of(&parent.compute_txid()).unwrap();
-        assert_eq!(c.members.len(), 2);
+        assert_eq!(g.cluster_of(&pid).unwrap().members.len(), 3);
+        for child in [&a, &b] {
+            assert!(
+                g.get(&child.compute_txid()).unwrap().parents.contains(&pid),
+                "rebuild links every spender after the parent is inserted"
+            );
+        }
     }
 
     /// Core `GetSigOpsAdjustedWeight`: `max(weight, sigop_cost × bytes_per_sigop)`.
@@ -2039,5 +2055,20 @@ mod tests {
         let room = MAX_CLUSTER_WEIGHT - raw;
         assert!(!g.cluster_would_exceed(&parents, 1, room));
         assert!(g.cluster_would_exceed(&parents, 1, room + 4));
+    }
+
+    /// Empty-pool cluster cap. `getmempoolinfo` on an empty pool does not
+    /// report this constant. The first admit compares the new tx against it.
+    #[test]
+    fn empty_graph_reports_the_cluster_weight_cap() {
+        let g = TxGraph::new();
+        assert!(g.is_empty());
+        assert_eq!(g.total_weight(), 0);
+        assert_eq!(g.cluster_weight_limit(), MAX_CLUSTER_WEIGHT);
+        let tx = make_tx(None, 1, 9);
+        let mut g = g;
+        g.insert(entry_for(&tx, 1, 0), &tx);
+        assert!(!g.is_empty());
+        assert!(g.total_weight() > 1);
     }
 }
