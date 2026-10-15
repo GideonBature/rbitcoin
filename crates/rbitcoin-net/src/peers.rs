@@ -1615,6 +1615,16 @@ impl PeerHub {
     /// Core sets `NET_I2P` reachable only when `-i2psam` is configured.
     pub fn set_i2p_reachable(&self, on: bool) {
         self.i2p_reachable.store(on, Ordering::Relaxed);
+        let am = self
+            .addrman
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(am) = am {
+            am.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_i2p_reachable(on);
+        }
     }
 
     pub fn set_pruned(&self, on: bool) {
@@ -1696,24 +1706,28 @@ impl PeerHub {
     }
 
     /// Attach the process addrman so inbound GetAddr can sample peers.
+    ///
+    /// Copies the I2P reachability bit onto that book. `learn_addrv2` stores
+    /// only rows the book will dial.
     pub fn set_addrman(&self, am: std::sync::Arc<Mutex<crate::seeds::AddrMan>>) {
+        let on = self.i2p_reachable.load(Ordering::Relaxed);
+        am.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_i2p_reachable(on);
         *self.addrman.lock().unwrap_or_else(|e| e.into_inner()) = Some(am);
     }
 
-    /// Learn IPv4/IPv6/Tor v3/I2P rows from BIP155 `addrv2`.
+    /// Learn IPv4/IPv6/Tor v3/I2P/CJDNS rows from BIP155 `addrv2`.
+    ///
+    /// Rows for a net this process cannot dial are not stored. Relaying the
+    /// message is separate and does not consult the book.
     pub fn learn_addrv2(&self, list: &[bitcoin::p2p::address::AddrV2Message]) {
         let g = self.addrman.lock().unwrap_or_else(|e| e.into_inner());
         let Some(am) = g.as_ref() else {
             return;
         };
-        let i2p_ok = self.i2p_reachable.load(Ordering::Relaxed);
         let mut book = am.lock().unwrap_or_else(|e| e.into_inner());
         for a in list {
-            // No `-i2psam`: relay the addrv2 row, do not store it. Core
-            // `p2p_addrv2_relay` expects `getnodeaddresses network=i2p` empty.
-            if matches!(a.addr, bitcoin::p2p::address::AddrV2::I2p(_)) && !i2p_ok {
-                continue;
-            }
             if let Some(addr) = crate::NetAddr::from_addrv2(a) {
                 book.add_learned_addr(addr, crate::seeds::MAX_ADDR_MAN);
             }

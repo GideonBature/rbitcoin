@@ -147,6 +147,8 @@ pub(crate) struct PeerSlot {
     pub solicited_bytes: Arc<AtomicU64>,
     /// Mono ms of the last solicited block the reader accepted.
     pub solicited_ms: Arc<AtomicU64>,
+    /// Mono ms of the last socket read, including pings. Quiet stall only.
+    pub any_rx_ms: Arc<AtomicU64>,
     /// Getdata queued on this peer and not yet written, plus the last write time.
     pub getdata_wire: Arc<GetdataWire>,
     /// Peer's `version.start_height` (best-effort network tip signal).
@@ -223,25 +225,26 @@ impl GetdataWire {
     }
 }
 
-/// True when this peer owes a block that is already on the wire and neither
-/// that write nor a later requested block is inside `stall_ms`.
-///
-/// An empty window is not a stall. A window whose every hash is still sitting
-/// in the writer is not a stall: the peer has not been asked yet.
-pub(crate) fn getdata_on_wire_stalled(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
+/// Getdata is already on the socket. An empty window, or a window whose
+/// hashes are still in the writer, has not asked the peer yet.
+fn asked_on_wire(slot: &PeerSlot) -> bool {
     let outstanding = slot.in_flight.len();
-    if outstanding == 0 {
-        return false;
-    }
-    if slot.getdata_wire.unwritten() >= outstanding {
-        return false;
-    }
-    let mut rate = slot.rate;
-    let written = slot.getdata_wire.written_ms();
-    if written > rate.work_started_ms {
-        rate.work_started_ms = written;
-    }
-    rate.stalled(now_ms, stall_ms, true)
+    outstanding > 0 && slot.getdata_wire.unwritten() < outstanding
+}
+
+/// True when this peer owes a block that is already on the wire and no
+/// solicited block progress has arrived inside `stall_ms`.
+///
+/// A getdata write does not move the clock. Socket bytes that are not a
+/// requested block do not either.
+pub(crate) fn getdata_on_wire_stalled(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
+    asked_on_wire(slot) && slot.rate.stalled(now_ms, stall_ms, true)
+}
+
+/// True when getdata is on the wire and this peer has sent no bytes at all
+/// inside `stall_ms`. A peer with nothing assigned is not quiet.
+pub(crate) fn getdata_on_wire_quiet(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
+    asked_on_wire(slot) && slot.rate.quiet(now_ms, stall_ms, true)
 }
 
 /// In-flight light decodes (inv, addr, tx, cmpct) per IBD peer. Not a knob.
@@ -391,7 +394,13 @@ pub(crate) fn sample_peer_rates(slots: &mut [PeerSlot], now_ms: u64) {
         if !s.alive {
             continue;
         }
-        // Read-time credit. Decoys stay in `bytes_rx_total` and do not move this.
+        let total = s.bytes_rx_total.load(Ordering::Relaxed);
+        let any = s.any_rx_ms.load(Ordering::Relaxed);
+        if any > s.rate.any_rx_ms {
+            s.rate.any_rx_ms = any;
+        }
+        let progress_before = s.rate.progress_ms;
+        // Solicited block accept time. Pings stay on `any_rx_ms`.
         let mark = s.solicited_ms.load(Ordering::Relaxed);
         if mark > s.rate.progress_ms {
             s.rate.progress_ms = mark;
@@ -402,12 +411,17 @@ pub(crate) fn sample_peer_rates(slots: &mut [PeerSlot], now_ms: u64) {
         }
         let bytes = s.solicited_bytes.load(Ordering::Relaxed);
         s.rate.sample(now_ms, bytes, !s.in_flight.is_empty());
+        if s.rate.progress_ms > progress_before {
+            s.rate.note_bytes_at_progress(total);
+        }
     }
 }
 
 pub(crate) fn note_block_progress(slots: &mut [PeerSlot], peer: usize) {
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         s.rate.note_rx(ibd_mono_ms());
+        s.rate
+            .note_bytes_at_progress(s.bytes_rx_total.load(Ordering::Relaxed));
     }
 }
 
@@ -415,6 +429,8 @@ pub(crate) fn note_block_rx(slots: &mut [PeerSlot], peer: usize, wire_bytes: usi
     if let Some(s) = slots.iter_mut().find(|s| s.id == peer) {
         let now = ibd_mono_ms();
         s.rate.note_rx(now);
+        s.rate
+            .note_bytes_at_progress(s.bytes_rx_total.load(Ordering::Relaxed));
         if wire_bytes > 0 && s.first_data_ms == 0 {
             s.first_data_ms = now;
         }
@@ -441,9 +457,17 @@ impl LightDecodes {
     }
 }
 
-fn note_read_progress(bytes_io: &AtomicU64, prog_mark: &mut usize, buffered: usize) {
+fn note_read_progress(
+    bytes_io: &AtomicU64,
+    rx_ms: &AtomicU64,
+    prog_mark: &mut usize,
+    buffered: usize,
+) {
     let delta = buffered.saturating_sub(*prog_mark);
-    note_stream_bytes(bytes_io, delta as u64);
+    if delta > 0 {
+        note_stream_bytes(bytes_io, delta as u64);
+        rx_ms.store(ibd_mono_ms(), Ordering::Relaxed);
+    }
     *prog_mark = buffered;
 }
 
@@ -668,6 +692,7 @@ async fn read_ibd_peer(
     bytes_io: Arc<AtomicU64>,
     requested: Arc<Mutex<HashSet<BlockHash>>>,
     solicited_bytes: Arc<AtomicU64>,
+    any_rx_ms: Arc<AtomicU64>,
     solicited_ms: Arc<AtomicU64>,
     light_decode: Arc<Semaphore>,
 ) {
@@ -689,7 +714,7 @@ async fn read_ibd_peer(
         let frame = read_v2_frame_with_progress(
             &mut reader,
             magic,
-            |buffered| note_read_progress(&bytes_io, &mut prog_mark, buffered),
+            |buffered| note_read_progress(&bytes_io, &any_rx_ms, &mut prog_mark, buffered),
             |n| decoy_hook(&mut ctx.rate, &mut ctx.ban_score, n),
         )
         .await;
@@ -812,6 +837,7 @@ pub(crate) async fn spawn_peer(
     )
     .await?;
     let peer_height = u32::try_from(ver.start_height).unwrap_or(0);
+    let connected_ms = ibd_mono_ms();
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<PeerCmd>();
     // Reader → writer for pongs (must not write on the read task — that would
@@ -820,10 +846,12 @@ pub(crate) async fn spawn_peer(
     let bytes_rx_total = Arc::new(AtomicU64::new(0));
     let bytes_io = Arc::clone(&bytes_rx_total);
     let (requested, solicited_bytes, solicited_ms) = solicit_track();
+    let any_rx_ms = Arc::new(AtomicU64::new(0));
     let getdata_wire = GetdataWire::new();
     let wire_w = Arc::clone(&getdata_wire);
     let req_r = Arc::clone(&requested);
     let sol_bytes_r = Arc::clone(&solicited_bytes);
+    let any_rx_r = Arc::clone(&any_rx_ms);
     let sol_ms_r = Arc::clone(&solicited_ms);
     let light_decode = Arc::new(Semaphore::new(LIGHT_DECODE_PERMITS));
 
@@ -857,6 +885,7 @@ pub(crate) async fn spawn_peer(
             bytes_io,
             req_r,
             sol_bytes_r,
+            any_rx_r,
             sol_ms_r,
             light_decode,
         ));
@@ -886,12 +915,17 @@ pub(crate) async fn spawn_peer(
         requested,
         solicited_bytes,
         solicited_ms,
+        any_rx_ms,
         getdata_wire,
         peer_height,
-        connected_ms: ibd_mono_ms(),
+        connected_ms,
         first_data_ms: 0,
         bytes_rx_total,
-        rate: PeerRate::default(),
+        rate: {
+            let mut rate = PeerRate::default();
+            rate.note_connected(connected_ms);
+            rate
+        },
         alive: true,
         task,
     })
@@ -985,6 +1019,7 @@ mod tests {
             requested: Arc::new(Mutex::new(HashSet::new())),
             solicited_bytes: Arc::new(AtomicU64::new(0)),
             solicited_ms: Arc::new(AtomicU64::new(0)),
+            any_rx_ms: Arc::new(AtomicU64::new(0)),
             getdata_wire: GetdataWire::new(),
             peer_height: 100,
             connected_ms: 1,
@@ -1127,6 +1162,23 @@ mod tests {
     }
 
     #[test]
+    fn socket_bytes_refresh_the_quiet_clock_only() {
+        let mut slot = dummy_slot(4);
+        let hash = BlockHash::from_byte_array([4u8; 32]);
+        slot.in_flight.insert(hash);
+        slot.rate.note_connected(0);
+        while ibd_mono_ms() == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut mark = 0usize;
+        note_read_progress(&slot.bytes_rx_total, &slot.any_rx_ms, &mut mark, 32);
+        sample_peer_rates(std::slice::from_mut(&mut slot), 5_000);
+        assert!(slot.rate.any_rx_ms > 0);
+        assert_eq!(slot.rate.progress_ms, 0);
+        assert_eq!(slot.solicited_ms.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn light_decode_permit_does_not_wait() {
         let sem = Arc::new(Semaphore::new(1));
         let first = try_light_decode_permit(&sem);
@@ -1222,14 +1274,20 @@ mod tests {
     fn read_progress_counts_the_delta_from_the_mark() {
         let bytes = AtomicU64::new(0);
         let mut mark = 0usize;
-        note_read_progress(&bytes, &mut mark, 10);
-        note_read_progress(&bytes, &mut mark, 25);
+        let rx_ms = AtomicU64::new(0);
+        // The process clock starts at 0. Wait so a stamp is distinguishable.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        note_read_progress(&bytes, &rx_ms, &mut mark, 10);
+        note_read_progress(&bytes, &rx_ms, &mut mark, 25);
         assert_eq!(bytes.load(Ordering::Relaxed), 25);
         assert_eq!(mark, 25);
+        assert!(rx_ms.load(Ordering::Relaxed) > 0);
+        let stamped = rx_ms.load(Ordering::Relaxed);
         // The reader stores the latest buffered size, even when it shrinks.
-        note_read_progress(&bytes, &mut mark, 4);
+        note_read_progress(&bytes, &rx_ms, &mut mark, 4);
         assert_eq!(bytes.load(Ordering::Relaxed), 25);
         assert_eq!(mark, 4);
+        assert_eq!(rx_ms.load(Ordering::Relaxed), stamped);
     }
 
     #[test]

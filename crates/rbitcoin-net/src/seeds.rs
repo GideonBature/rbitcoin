@@ -311,6 +311,10 @@ pub struct AddrMan {
     asmap: Option<Arc<AsMap>>,
     last_attempt: HashMap<NetAddr, Instant>,
     only_net: Vec<OnlyNet>,
+    /// `--proxy` or `--onion`. Default off: an onion row is not a peer.
+    onion_reachable: bool,
+    /// `--i2p-sam`. Default off.
+    i2p_reachable: bool,
     cjdns_reachable: bool,
 }
 
@@ -336,24 +340,49 @@ impl AddrMan {
 
     pub fn set_only_net(&mut self, only: Vec<OnlyNet>) {
         self.only_net = only;
+        self.retain_dialable();
+    }
+
+    pub fn set_onion_reachable(&mut self, on: bool) {
+        self.onion_reachable = on;
+        self.retain_dialable();
+    }
+
+    pub fn set_i2p_reachable(&mut self, on: bool) {
+        self.i2p_reachable = on;
+        self.retain_dialable();
     }
 
     pub fn set_cjdns_reachable(&mut self, on: bool) {
         self.cjdns_reachable = on;
-    }
-
-    fn allowed(&self, addr: NetAddr) -> bool {
-        addr_allowed(addr, &self.only_net)
+        self.retain_dialable();
     }
 
     fn dialable(&self, addr: NetAddr) -> bool {
-        if matches!(addr, NetAddr::Cjdns { .. }) && !self.cjdns_reachable {
+        if !addr_allowed(addr, &self.only_net) {
             return false;
         }
-        self.allowed(addr)
+        match addr {
+            NetAddr::Ip(_) => true,
+            NetAddr::Onion { .. } => self.onion_reachable,
+            NetAddr::I2p { .. } => self.i2p_reachable,
+            NetAddr::Cjdns { .. } => self.cjdns_reachable,
+        }
     }
 
-    /// Like [`Self::take_dial_candidates`] plus onion rows when `--only-net` allows them.
+    fn retain_dialable(&mut self) {
+        let gone: Vec<NetAddr> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|a| !self.dialable(*a))
+            .collect();
+        for addr in gone {
+            self.evict_one(addr);
+        }
+    }
+
+    /// Like [`Self::take_dial_candidates`] plus onion and I2P rows this process can dial.
     pub fn take_dial_candidates_net(
         &self,
         max: usize,
@@ -428,7 +457,7 @@ impl AddrMan {
     }
 
     pub fn add_addr(&mut self, addr: NetAddr) {
-        if !self.allowed(addr) {
+        if !self.dialable(addr) {
             return;
         }
         if self.by_addr.contains_key(&addr) {
@@ -443,14 +472,27 @@ impl AddrMan {
 
     /// Insert or keep existing; never clears known flags when already present.
     ///
-    /// Uncapped so `load` can keep tried-first then trim. `merge_from` trims.
+    /// Uncapped so `merge_from` can union then trim. A row this process cannot
+    /// dial is dropped. [`Self::load`] restores the file, then the caller sets
+    /// reachability.
     pub fn add_with_flags(&mut self, addr: SocketAddr, flags: PeerFlags) {
         self.add_with_flags_addr(NetAddr::from_socket(addr), flags);
     }
 
     pub fn add_with_flags_addr(&mut self, addr: NetAddr, flags: PeerFlags) {
+        if !self.dialable(addr) {
+            if self.by_addr.contains_key(&addr) {
+                self.evict_one(addr);
+            }
+            return;
+        }
+        self.remember(addr, flags);
+    }
+
+    /// Insert without a reachability check. [`Self::load`] restores the file,
+    /// then the caller sets which nets this process can dial.
+    fn remember(&mut self, addr: NetAddr, flags: PeerFlags) {
         if let Some(f) = self.by_addr.get_mut(&addr) {
-            // Union: remember the best information we have.
             f.0 |= flags.0;
             return;
         }
@@ -468,7 +510,7 @@ impl AddrMan {
     }
 
     pub fn add_learned_addr(&mut self, addr: NetAddr, cap: usize) -> bool {
-        if !self.allowed(addr) {
+        if !self.dialable(addr) {
             return false;
         }
         if self.by_addr.contains_key(&addr) || cap == 0 {
@@ -548,8 +590,7 @@ impl AddrMan {
 
     /// Merge another book into this one (flag bits OR'd for shared addrs).
     ///
-    /// `add_with_flags` is uncapped so `load` can keep tried-first then trim.
-    /// This path is not load: trim after the union.
+    /// Rows this process cannot dial are left out. Trim after the union.
     pub fn merge_from(&mut self, other: &AddrMan) {
         for e in other.entries() {
             self.add_with_flags_addr(e.addr, e.flags);
@@ -920,7 +961,7 @@ impl AddrMan {
                     )
                 })?
             };
-            am.add_with_flags_addr(addr, PeerFlags(flags_u));
+            am.remember(addr, PeerFlags(flags_u));
         }
         if !saw_magic && am.is_empty() {
             // Empty or comment-only without magic — treat as empty book.
@@ -1670,5 +1711,104 @@ mod tests {
         assert!(loaded.entry(&addr(4)).is_some());
         assert!(loaded.flags(&addr(4)).has_connected());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn onion() -> NetAddr {
+        "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
+            .parse()
+            .unwrap()
+    }
+
+    fn i2p() -> NetAddr {
+        NetAddr::I2p {
+            dest: [7u8; 32],
+            port: 8333,
+        }
+    }
+
+    fn cjdns() -> NetAddr {
+        NetAddr::Cjdns {
+            ip: "fc00::1".parse().unwrap(),
+            port: 8333,
+        }
+    }
+
+    #[test]
+    fn add_with_flags_drops_a_net_only_net_excludes() {
+        let mut am = AddrMan::new();
+        am.set_only_net(vec![OnlyNet::Onion]);
+        am.set_onion_reachable(true);
+        am.add_with_flags_addr(NetAddr::from_socket(addr(1)), PeerFlags::empty());
+        assert!(
+            am.is_empty(),
+            "a peers-file merge must not keep clearnet in an onion-only book"
+        );
+    }
+
+    #[test]
+    fn learned_cjdns_stays_out_until_the_node_can_dial_it() {
+        let mut am = AddrMan::new();
+        assert!(!am.add_learned_addr(cjdns(), 8));
+        assert!(am.is_empty());
+        am.set_cjdns_reachable(true);
+        assert!(am.add_learned_addr(cjdns(), 8));
+    }
+
+    #[test]
+    fn onion_and_i2p_stay_out_until_this_process_can_dial_them() {
+        let mut am = AddrMan::new();
+        am.add_addr(onion());
+        assert!(!am.add_learned_addr(i2p(), 8));
+        am.add_with_flags_addr(onion(), PeerFlags::empty());
+        assert!(
+            am.is_empty(),
+            "no SOCKS and no SAM means those rows are not peers"
+        );
+        am.set_onion_reachable(true);
+        am.add_addr(onion());
+        assert!(am.entries().iter().any(|e| e.addr == onion()));
+        am.set_i2p_reachable(true);
+        assert!(am.add_learned_addr(i2p(), 8));
+    }
+
+    #[test]
+    fn turning_a_net_off_drops_rows_already_in_the_book() {
+        let mut am = AddrMan::new();
+        am.set_onion_reachable(true);
+        am.set_i2p_reachable(true);
+        am.set_cjdns_reachable(true);
+        am.add_addr(onion());
+        am.add_addr(i2p());
+        am.add_addr(cjdns());
+        am.add(addr(1));
+        assert_eq!(am.len(), 4);
+        am.set_only_net(vec![OnlyNet::Onion]);
+        assert_eq!(
+            am.len(),
+            1,
+            "only-net must drop rows this process will not dial"
+        );
+        assert!(am.entries().iter().all(|e| e.addr == onion()));
+        am.set_onion_reachable(false);
+        assert!(
+            am.is_empty(),
+            "clearing SOCKS drops onion rows already stored"
+        );
+    }
+
+    #[test]
+    fn full_clearnet_batch_does_not_reserve_an_unreachable_overlay() {
+        let mut am = AddrMan::new();
+        for i in 1..=8u8 {
+            am.add(addr(i));
+        }
+        am.add_addr(onion());
+        am.add_addr(i2p());
+        let got = am.take_dial_candidates_net(8, &HashSet::new(), &[]);
+        assert_eq!(got.len(), 8, "{got:?}");
+        assert!(
+            got.iter().all(|a| matches!(a, NetAddr::Ip(_))),
+            "an onion this process cannot dial must not take a clearnet slot: {got:?}"
+        );
     }
 }

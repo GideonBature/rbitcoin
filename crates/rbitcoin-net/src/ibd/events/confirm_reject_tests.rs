@@ -545,6 +545,7 @@ fn apply_peer_event_body_and_control_surface() {
             requested: super::super::peer_io::solicit_track().0,
             solicited_bytes: super::super::peer_io::solicit_track().1,
             solicited_ms: super::super::peer_io::solicit_track().2,
+            any_rx_ms: Arc::new(AtomicU64::new(0)),
             getdata_wire: super::super::peer_io::GetdataWire::new(),
             peer_height: 10,
             connected_ms: 1,
@@ -756,8 +757,14 @@ fn apply_peer_event_body_and_control_surface() {
             .unwrap();
     inject_learned_addrs(&mut book, &[onion], local, 1);
     assert!(
+        book.entries().iter().all(|e| e.addr != onion),
+        "IBD must not store an onion this process cannot dial"
+    );
+    book.set_onion_reachable(true);
+    inject_learned_addrs(&mut book, &[onion], local, 1);
+    assert!(
         book.entries().iter().any(|e| e.addr == onion),
-        "IBD addrv2 onion must enter the dial book"
+        "IBD addrv2 onion enters the book once SOCKS is configured"
     );
 
     // Dead releases work and reopens its heights for densify.
@@ -847,6 +854,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             requested: super::super::peer_io::solicit_track().0,
             solicited_bytes: super::super::peer_io::solicit_track().1,
             solicited_ms: super::super::peer_io::solicit_track().2,
+            any_rx_ms: Arc::new(AtomicU64::new(0)),
             getdata_wire: super::super::peer_io::GetdataWire::new(),
             peer_height: 5,
             connected_ms: 1,
@@ -3766,6 +3774,7 @@ fn coord_loop_body_and_reject_do_not_read_headers() {
             requested: super::super::peer_io::solicit_track().0,
             solicited_bytes: super::super::peer_io::solicit_track().1,
             solicited_ms: super::super::peer_io::solicit_track().2,
+            any_rx_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             getdata_wire: super::super::peer_io::GetdataWire::new(),
             peer_height: 5,
             connected_ms: 1,

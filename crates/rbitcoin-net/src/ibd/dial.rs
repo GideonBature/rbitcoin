@@ -1,7 +1,7 @@
 //! Peer dial, header request, stall disconnect / cooldown.
 
 use super::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSinks, PeerSlot};
-use super::rate::RELSLOW_ACTIVE_MS;
+use super::rate::{PROGRESS_STEP, RELSLOW_ACTIVE_MS};
 use crate::chain::ChainHub;
 use crate::error::NetError;
 use crate::peers::{trying_connection_log, PeerConnType};
@@ -78,14 +78,15 @@ pub(crate) fn median_u64(sorted: &[u64]) -> u64 {
 /// Pure relative-slow pick: at most one peer id that is a clear quarter-median
 /// outlier with inflight work. Empty when pack is tight, thin, or no outlier.
 ///
-/// `bps == 0` is ignored (absolute stall owns silence).
-/// Gate A: `median <= min * CLUSTER_SPREAD` on progressing samples → none.
+/// `bps == 0` with inflight work is a peer that has not delivered block bytes.
+/// It can be the outlier next to peers that have. An all-zero set returns
+/// none; the stall pass owns that set.
+/// Gate A: `median <= min * CLUSTER_SPREAD` on the samples → none.
 /// Gate B: `bps * OUTLIER_RATIO <= median` and `has_inflight` → worst bps.
 pub(crate) fn relative_slow_pick(
     samples: &[RelativeSlowSample],
     min_samples: usize,
 ) -> Option<usize> {
-    let samples: Vec<&RelativeSlowSample> = samples.iter().filter(|s| s.bps > 0).collect();
     if samples.len() < min_samples {
         return None;
     }
@@ -164,7 +165,15 @@ pub(crate) fn mature_relative_slow_samples(
             continue;
         };
         if bps == 0 {
-            continue;
+            // Chat with getdata outstanding is a real zero. A body still
+            // arriving, or a peer with nothing assigned, is not.
+            let streaming = s
+                .bytes_rx_total
+                .load(Ordering::Relaxed)
+                .saturating_sub(s.rate.bytes_at_progress);
+            if s.in_flight.is_empty() || streaming >= PROGRESS_STEP {
+                continue;
+            }
         }
         out.push(RelativeSlowSample {
             peer_id: s.id,
@@ -650,13 +659,21 @@ pub(crate) fn note_misbehavior_dead(
     }
 }
 
-/// One stall rule: if a peer has block getdata already on the socket and no
-/// **block** progress for `stall`, disconnect it and free its work.
+/// Disconnect at most one peer that has block getdata already on the socket
+/// and is not delivering.
 ///
-/// The window opens when that getdata is written, including when the peer
-/// already had other hashes outstanding. Hashes still queued in the writer
-/// do not start it. Progress is a requested block, a decode failure, or
-/// `notfound`. Headers, pings, and an empty window do not count.
+/// Quiet means no socket bytes at all for `stall`. A peer with nothing
+/// assigned is not quiet. One quiet peer is disconnected even when every
+/// on-wire peer is quiet, so a silent set cannot hold the slots forever.
+///
+/// A peer that keeps sending but has no block progress, and has not moved
+/// a body-sized chunk of the stream since that progress, is withholding.
+/// That peer is left alone while anyone else is delivering blocks. When
+/// every on-wire peer is withholding, one is disconnected.
+///
+/// The window opens when getdata is written. Hashes still queued in the
+/// writer do not start it. A later getdata write does not refresh either
+/// clock. Headers and pings are socket bytes, not block progress.
 ///
 /// Stalled addresses enter a cooldown so redial does not immediately re-open
 /// the same host under a new peer id (log spam + wasted slots).
@@ -698,34 +715,65 @@ pub(crate) fn disconnect_stalled_block_peers_at(
     stall: Duration,
     now_ms: u64,
 ) -> Vec<bitcoin::BlockHash> {
-    let mut freed = Vec::new();
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;
-    let stalled_peers: Vec<(usize, usize, SocketAddr, u64)> = slots
-        .iter()
-        .filter(|s| s.alive && !s.in_flight.is_empty())
-        .filter(|s| super::peer_io::getdata_on_wire_stalled(s, now_ms, stall_ms))
-        .map(|s| {
-            (
-                s.id,
-                s.in_flight.len(),
-                s.addr,
-                s.bytes_rx_total.load(Ordering::Relaxed),
-            )
-        })
-        .collect();
-    for (id, n_work, addr, stream) in stalled_peers {
-        let cool = record_stall_kick(addr_cooldown, addr_strikes, addr, now);
-        warn!(
-            "ibd: peer[{id}] {addr} stalled (no block progress for {stall:?}, {n_work} in-flight, stream={stream}) — disconnect + reassign (cooldown {cool:?})"
-        );
-        if let Some(s) = slots.iter_mut().find(|s| s.id == id) {
-            let _ = s.cmd_tx.send(PeerCmd::Shutdown);
-            s.task.abort();
+    let mut on_wire = 0usize;
+    let mut quiet: Vec<(usize, usize, SocketAddr, u64)> = Vec::new();
+    let mut withholding: Vec<(usize, usize, SocketAddr, u64)> = Vec::new();
+    for s in slots.iter() {
+        if !s.alive || s.in_flight.is_empty() {
+            continue;
         }
-        freed.extend(release_peer_block_work(slots, inflight, body, id));
+        if s.getdata_wire.unwritten() >= s.in_flight.len() {
+            continue;
+        }
+        on_wire += 1;
+        let row = (
+            s.id,
+            s.in_flight.len(),
+            s.addr,
+            s.bytes_rx_total.load(Ordering::Relaxed),
+        );
+        if super::peer_io::getdata_on_wire_quiet(s, now_ms, stall_ms) {
+            quiet.push(row);
+        } else if withholding_blocks(s, now_ms, stall_ms) {
+            withholding.push(row);
+        }
     }
+    let picked = if !quiet.is_empty() {
+        Some(("quiet", quiet.remove(0)))
+    } else if on_wire > 0 && withholding.len() == on_wire {
+        Some(("no block bytes", withholding.remove(0)))
+    } else {
+        None
+    };
+    let Some((why, (id, n_work, addr, stream))) = picked else {
+        return Vec::new();
+    };
+    let mut freed = Vec::new();
+    let cool = record_stall_kick(addr_cooldown, addr_strikes, addr, now);
+    warn!(
+        "ibd: peer[{id}] {addr} {why} ({stall:?}, {n_work} in-flight, stream={stream}) — disconnect + reassign (cooldown {cool:?})"
+    );
+    if let Some(s) = slots.iter_mut().find(|s| s.id == id) {
+        let _ = s.cmd_tx.send(PeerCmd::Shutdown);
+        s.task.abort();
+    }
+    freed.extend(release_peer_block_work(slots, inflight, body, id));
     freed
+}
+
+/// Getdata is on the wire, block progress is stale, and the stream has not
+/// moved a body-sized chunk since that progress.
+fn withholding_blocks(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
+    if !super::peer_io::getdata_on_wire_stalled(slot, now_ms, stall_ms) {
+        return false;
+    }
+    let streamed = slot
+        .bytes_rx_total
+        .load(Ordering::Relaxed)
+        .saturating_sub(slot.rate.bytes_at_progress);
+    streamed < PROGRESS_STEP
 }
 
 /// Disconnect at most one **clear quarter-median outlier** (warm-up + cluster gate
@@ -835,7 +883,7 @@ mod tests {
     use bitcoin::hashes::Hash;
     use bitcoin::BlockHash;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn addr(o: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, o)), 8333)
@@ -870,6 +918,7 @@ mod tests {
             requested: solicit_track().0,
             solicited_bytes: solicit_track().1,
             solicited_ms: solicit_track().2,
+            any_rx_ms: Arc::new(AtomicU64::new(0)),
             getdata_wire: super::super::peer_io::GetdataWire::new(),
             peer_height: 0,
             connected_ms: 0,
@@ -1441,6 +1490,265 @@ mod tests {
         assert!(inflight.contains_key(&h));
     }
 
+    fn hash_byte(b: u8) -> BlockHash {
+        BlockHash::from_byte_array([b; 32])
+    }
+
+    /// One requested hash is on the wire as of `written_ms`.
+    fn put_on_wire(slot: &mut PeerSlot, hash: BlockHash, written_ms: u64) {
+        slot.in_flight.insert(hash);
+        slot.getdata_wire.queue(1);
+        slot.getdata_wire.wrote(1, written_ms);
+    }
+
+    #[test]
+    fn disconnect_stalled_later_getdata_does_not_refresh_silence() {
+        let a = addr(14);
+        let mut slot = dummy_slot(8, a, true);
+        let h = hash_byte(0x14);
+        put_on_wire(&mut slot, h, 40_000);
+        slot.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(h, super::super::state::InflightReq::new(8));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            50_000,
+        );
+        assert!(cooldown.contains_key(&a));
+        assert!(inflight.is_empty());
+    }
+
+    #[test]
+    fn disconnect_stalled_skips_getdata_still_in_the_writer() {
+        let a = addr(15);
+        let mut slot = dummy_slot(9, a, true);
+        let h = hash_byte(0x15);
+        slot.in_flight.insert(h);
+        slot.getdata_wire.queue(1);
+        slot.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(h, super::super::state::InflightReq::new(9));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            90_000,
+        );
+        assert!(!cooldown.contains_key(&a));
+        assert!(inflight.contains_key(&h));
+    }
+
+    #[test]
+    fn disconnect_stalled_drops_one_when_every_peer_is_quiet() {
+        let a = addr(16);
+        let b = addr(17);
+        let mut sa = dummy_slot(10, a, true);
+        let mut sb = dummy_slot(11, b, true);
+        let ha = hash_byte(0x16);
+        let hb = hash_byte(0x17);
+        put_on_wire(&mut sa, ha, 0);
+        put_on_wire(&mut sb, hb, 0);
+        sa.rate.note_rx(0);
+        sb.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(ha, super::super::state::InflightReq::new(10));
+        inflight.insert(hb, super::super::state::InflightReq::new(11));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [sa, sb],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert_eq!(
+            cooldown.len(),
+            1,
+            "one quiet peer per pass, so give-up stays reachable"
+        );
+        assert_eq!(inflight.len(), 1);
+        assert!(cooldown.contains_key(&a) ^ cooldown.contains_key(&b));
+    }
+
+    #[test]
+    fn disconnect_stalled_ignores_silence_without_getdata() {
+        let idle_addr = addr(21);
+        let quiet_addr = addr(22);
+        let mut idle = dummy_slot(14, idle_addr, true);
+        let mut quiet = dummy_slot(15, quiet_addr, true);
+        let hq = hash_byte(0x22);
+        put_on_wire(&mut quiet, hq, 0);
+        idle.rate.note_rx(0);
+        quiet.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(hq, super::super::state::InflightReq::new(15));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [idle, quiet],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert!(
+            !cooldown.contains_key(&idle_addr),
+            "no assigned getdata is not a quiet peer"
+        );
+        assert!(cooldown.contains_key(&quiet_addr));
+        assert!(inflight.is_empty());
+    }
+
+    #[test]
+    fn disconnect_stalled_drops_only_the_quiet_peer() {
+        let quiet_addr = addr(18);
+        let live_addr = addr(19);
+        let mut quiet = dummy_slot(12, quiet_addr, true);
+        let mut live = dummy_slot(13, live_addr, true);
+        let hq = hash_byte(0x18);
+        let hl = hash_byte(0x19);
+        put_on_wire(&mut quiet, hq, 0);
+        put_on_wire(&mut live, hl, 0);
+        quiet.rate.note_rx(0);
+        live.rate.note_rx(50_000);
+        let mut inflight = HashMap::new();
+        inflight.insert(hq, super::super::state::InflightReq::new(12));
+        inflight.insert(hl, super::super::state::InflightReq::new(13));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [quiet, live],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert!(cooldown.contains_key(&quiet_addr));
+        assert!(!cooldown.contains_key(&live_addr));
+        assert!(!inflight.contains_key(&hq));
+        assert!(inflight.contains_key(&hl));
+    }
+
+    #[test]
+    fn disconnect_stalled_drops_one_when_every_peer_chats_without_blocks() {
+        let a = addr(23);
+        let b = addr(24);
+        let mut sa = dummy_slot(16, a, true);
+        let mut sb = dummy_slot(17, b, true);
+        let ha = hash_byte(0x23);
+        let hb = hash_byte(0x24);
+        put_on_wire(&mut sa, ha, 0);
+        put_on_wire(&mut sb, hb, 0);
+        sa.rate.note_rx(0);
+        sb.rate.note_rx(0);
+        sa.rate.note_any_rx(50_000);
+        sb.rate.note_any_rx(50_000);
+        sa.bytes_rx_total.store(100, Ordering::Relaxed);
+        sb.bytes_rx_total.store(100, Ordering::Relaxed);
+        let mut inflight = HashMap::new();
+        inflight.insert(ha, super::super::state::InflightReq::new(16));
+        inflight.insert(hb, super::super::state::InflightReq::new(17));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [sa, sb],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert_eq!(cooldown.len(), 1);
+        assert_eq!(inflight.len(), 1);
+    }
+
+    #[test]
+    fn disconnect_stalled_keeps_a_chatter_beside_a_block_sender() {
+        let chat_addr = addr(25);
+        let live_addr = addr(26);
+        let mut chat = dummy_slot(18, chat_addr, true);
+        let mut live = dummy_slot(19, live_addr, true);
+        let hc = hash_byte(0x25);
+        let hl = hash_byte(0x26);
+        put_on_wire(&mut chat, hc, 0);
+        put_on_wire(&mut live, hl, 0);
+        chat.rate.note_rx(0);
+        chat.rate.note_any_rx(50_000);
+        chat.bytes_rx_total.store(80, Ordering::Relaxed);
+        live.rate.note_rx(50_000);
+        let mut inflight = HashMap::new();
+        inflight.insert(hc, super::super::state::InflightReq::new(18));
+        inflight.insert(hl, super::super::state::InflightReq::new(19));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [chat, live],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert!(cooldown.is_empty());
+        assert_eq!(inflight.len(), 2);
+    }
+
+    #[test]
+    fn disconnect_stalled_keeps_a_peer_still_sending_a_block() {
+        let a = addr(27);
+        let mut slot = dummy_slot(20, a, true);
+        let h = hash_byte(0x27);
+        put_on_wire(&mut slot, h, 0);
+        slot.rate.note_rx(0);
+        slot.rate.note_any_rx(50_000);
+        slot.bytes_rx_total
+            .store(super::super::rate::PROGRESS_STEP, Ordering::Relaxed);
+        let mut inflight = HashMap::new();
+        inflight.insert(h, super::super::state::InflightReq::new(20));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert!(cooldown.is_empty());
+        assert!(inflight.contains_key(&h));
+    }
+
     #[test]
     fn disconnect_stalled_releases_and_cools_addr() {
         let now = Instant::now();
@@ -1480,10 +1788,10 @@ mod tests {
         assert_eq!(median_u64(&[1, 2, 3]), 2);
         assert_eq!(relative_slow_min_samples(0), RELATIVE_SLOW_MIN_SAMPLES);
 
-        // All-zero bps → none (stall owns silence).
+        // All-zero bps → none (the stall pass owns a set with no block bytes).
         let zeros: Vec<_> = (0..8).map(|i| samp(i, 0, true)).collect();
         assert_eq!(relative_slow_pick(&zeros, 8), None);
-        // Zero bps is dropped; remaining pack is not an 8-sample set.
+        // A peer with inflight work and no block bytes is the outlier.
         let zero_and_fast = [
             samp(0, 0, true),
             samp(1, 2_000_000, true),
@@ -1494,7 +1802,7 @@ mod tests {
             samp(6, 1_880_000, true),
             samp(7, 1_920_000, true),
         ];
-        assert_eq!(relative_slow_pick(&zero_and_fast, 8), None);
+        assert_eq!(relative_slow_pick(&zero_and_fast, 8), Some(0));
 
         // Equal worst bps → lower peer_id wins.
         let tie = [
