@@ -829,6 +829,31 @@ mod tests {
         );
         assert_eq!(exact.len(), 2);
         assert!(exact.total_weight() <= cap);
+
+        // Dropping only the oldest still leaves the new tx over the cap.
+        let mut twice = Orphanage::with_limits(cap, 100_000);
+        let mut oldest = orphan_of_weight(parent, 50_000);
+        oldest.lock_time = LockTime::from_height(1).unwrap();
+        let oldest_id = oldest.compute_txid();
+        let mut second = orphan_of_weight(parent, 300_000);
+        second.lock_time = LockTime::from_height(2).unwrap();
+        let second_id = second.compute_txid();
+        let mut incoming = orphan_of_weight(parent, 200_000);
+        incoming.lock_time = LockTime::from_height(3).unwrap();
+        assert!(twice.insert_from_at(oldest, miss_one_parent(parent), None, 0));
+        assert!(twice.insert_from_at(second, miss_one_parent(parent), None, 0));
+        assert_eq!(twice.total_weight(), 350_000);
+        assert!(twice.total_weight().saturating_add(200_000) > cap);
+        assert!(300_000u64.saturating_add(200_000) > cap);
+        assert!(
+            twice.insert_from_at(incoming.clone(), miss_one_parent(parent), None, 0),
+            "the weight cap evicts until the incoming orphan fits"
+        );
+        assert_eq!(twice.len(), 1);
+        assert_eq!(twice.total_weight(), incoming.weight().to_wu());
+        assert!(twice.contains(&incoming.compute_txid()));
+        assert!(!twice.contains(&oldest_id));
+        assert!(!twice.contains(&second_id));
     }
 
     fn miss_one_parent(parent: Txid) -> BTreeSet<Txid> {
