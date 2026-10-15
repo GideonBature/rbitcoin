@@ -832,19 +832,16 @@ fn pin_disconnect_to_genesis_reconnect_and_tip_shrink(
         "poison at n-3 shrinks to last good n-4"
     );
     pin_megakey_block_disconnect(&q, tip, hashes[tip.0 as usize]);
-    let tip_now = q.tip_height().unwrap();
-    let tip_hash = q.header_at_height(tip_now).unwrap().unwrap().1.hash;
-    let (sh, kept) = pin_megakey_suffix_disconnect(&q, tip_now, tip_hash);
+    let sh = rbitcoin_store::script_hash(&[0x99]);
     let store = td.store_path();
     let expect_tip = q.tip_height();
     q.flush().unwrap();
     drop(q);
     let q = Query::open_or_create_tiny(&store).unwrap();
     assert_eq!(q.tip_height(), expect_tip, "tip changed on reopen");
-    assert_eq!(
-        q.scripthash_history(&sh).unwrap().len(),
-        kept,
-        "reopen keeps the megakey suffix disconnect"
+    assert!(
+        q.scripthash_history(&sh).unwrap().is_empty(),
+        "reopen keeps the disconnected megakey gone"
     );
 }
 
@@ -938,7 +935,8 @@ fn pin_disconnect_logs_and_rewinds_ibd_marks(q: &Query, top: u32, top_hash: &[u8
 
 /// 257 creates of one script in one block make its scripthash head an
 /// extent. Disconnecting that block unlinks every create and truncates the
-/// tweak index with it.
+/// tweak index with it. A multi-page suffix is a store test: building it
+/// here means archiving thousands of transactions.
 fn pin_megakey_block_disconnect(q: &Query, tip: Height, tip_hash: [u8; 32]) {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{script_hash, InputRecord, OutputRecord, ShHeadValue};
@@ -1012,95 +1010,6 @@ fn pin_megakey_block_disconnect(q: &Query, tip: Height, tip_hash: [u8; 32]) {
     );
     assert_eq!(q.sptweaks_next_height(), Some(Height(h)));
     assert!(q.load_thin_tweaks(Height(h)).unwrap().is_none());
-}
-
-/// One script fills more than one extent page. Disconnecting the next block
-/// drops only that block's creates.
-fn pin_megakey_suffix_disconnect(q: &Query, tip: Height, tip_hash: [u8; 32]) -> ([u8; 32], usize) {
-    use rbitcoin_query::TxApply;
-    use rbitcoin_store::{script_hash, InputRecord, OutputRecord, ShHeadValue};
-
-    let hot = vec![0x9au8];
-    let sh = script_hash(&hot);
-    let keep = 5_000u32;
-    let drop_n = 40u32;
-    // Tip revalidate accepts one coinbase, then real prevouts. Every later
-    // tx spends the same already-confirmed output. The check only requires
-    // that parent to exist.
-    let parent_fk = q.block_tx_fks(tip).unwrap()[0];
-    let mut parent_txid = [0u8; 32];
-    parent_txid[0..4].copy_from_slice(&tip.0.to_le_bytes());
-    parent_txid[31] = 0xcb;
-    let mut prev_hash = tip_hash;
-    let mut prev_fk = q.tip_header_fk().unwrap().unwrap();
-    for (block_i, n_tx) in [(0u32, keep), (1, drop_n)] {
-        let h = tip.0 + 1 + block_i;
-        let txs: Vec<TxApply> = (0..n_tx)
-            .map(|i| {
-                let mut txid = [0x4c; 32];
-                txid[0..4].copy_from_slice(&h.to_le_bytes());
-                txid[4..8].copy_from_slice(&i.to_le_bytes());
-                txid[8] = block_i as u8;
-                let (prev_txid, parent) = if i == 0 {
-                    ([0u8; 32], rbitcoin_store::InputParent::Coinbase)
-                } else {
-                    (
-                        parent_txid,
-                        rbitcoin_store::InputParent::Prevout {
-                            create_fk: parent_fk,
-                            vout: 0,
-                        },
-                    )
-                };
-                TxApply {
-                    tx: TxRecord {
-                        txid,
-                        version: 1,
-                        locktime: 0,
-                        input_start_fk: Fk::NULL,
-                        input_count: 1,
-                        output_start_fk: Fk::NULL,
-                        output_count: 1,
-                    },
-                    inputs: vec![InputRecord {
-                        prev_txid,
-                        parent,
-                        sequence: u32::MAX,
-                        script_sig: vec![i as u8, (i >> 8) as u8],
-                        witness: vec![],
-                    }],
-                    outputs: vec![OutputRecord::unspent(1, hot.clone())],
-                }
-            })
-            .collect();
-        let txids: Vec<[u8; 32]> = txs.iter().map(|tx| tx.tx.txid).collect();
-        let merkle = rbitcoin_store::merkle_root_from_txids(&txids);
-        let header = HeaderRecord {
-            prev_fk,
-            version: 1,
-            timestamp: h,
-            bits: 1,
-            nonce: 9 + block_i,
-            merkle_root: merkle,
-            hash: rbitcoin_store::block_header_hash(1, &prev_hash, &merkle, h, 1, 9 + block_i),
-            size: 0,
-            weight: 0,
-        };
-        prev_fk = q.connect_block(Height(h), &header, &txs).unwrap();
-        prev_hash = header.hash;
-    }
-    match q.store().scripthash.head_value(&sh).unwrap().unwrap() {
-        ShHeadValue::Extent { .. } => {}
-        other => panic!("expected a multi-page extent, got {other:?}"),
-    }
-    assert_eq!(
-        q.scripthash_history(&sh).unwrap().len(),
-        (keep + drop_n) as usize
-    );
-    q.disconnect_tip().unwrap();
-    assert_eq!(q.tip_height(), Some(Height(tip.0 + 1)));
-    assert_eq!(q.scripthash_history(&sh).unwrap().len(), keep as usize);
-    (sh, keep as usize)
 }
 
 fn copy_flat_dir(from: &std::path::Path, to: &std::path::Path) {
