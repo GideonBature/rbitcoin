@@ -1601,8 +1601,11 @@ impl CatchUp {
 /// proxy seed fetch, is not a finished catch-up. A book that was already
 /// empty, with nothing in flight, keeps the serve-only path.
 pub(crate) fn catch_up_without_targets(awaiting_dialable: bool) -> CatchUp {
-    let _ = awaiting_dialable;
-    CatchUp::complete()
+    if awaiting_dialable {
+        CatchUp::Incomplete
+    } else {
+        CatchUp::complete()
+    }
 }
 
 pub(crate) fn catch_up_after_ok(accepted: u32, tip: u32, shutdown: bool) -> CatchUp {
