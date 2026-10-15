@@ -12,7 +12,8 @@ use crate::scripthash_materialize::{
 use crate::scripthash_mphf::{mix_key16, MphfHead};
 use crate::scripthash_pages::{
     sh_page_as_array, sh_page_as_array_mut, sh_page_extent, sh_page_set_extent,
-    SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
+    sh_page_set_extent_creates, sh_page_set_next, SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_OFF_N_FKS,
+    SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -2260,6 +2261,172 @@ fn append_accepts_linked_tail_below_the_extent() {
     );
     put_create(&t, rec(sh, n as u64 + 2, 0));
     assert_eq!(t.entries(&sh).unwrap().len(), n + 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn zero_n_fks(body: &crate::file::TableFile, off: u64) {
+    let mut page = [0u8; SH_PAGE_SIZE];
+    body.read_at(off, &mut page).unwrap();
+    page[SH_PAGE_OFF_N_FKS..SH_PAGE_OFF_N_FKS + 2].copy_from_slice(&0u16.to_le_bytes());
+    body.write_at(off, &page).unwrap();
+}
+
+/// A head page emptied before the predecessor is rewritten is still the tail.
+/// Unlink walks it and drops the suffix from the page that still holds creates.
+#[test]
+fn extent_empty_head_unlink_walks_to_the_predecessor() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3b;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let (base, last, _) = extent_meta(&t, &sh);
+    assert_ne!(last, base, "the head page must have a predecessor");
+    zero_n_fks(t.body(), last);
+    let before = t.entries(&sh).unwrap();
+    assert!(!before.is_empty(), "the predecessor still holds creates");
+    let drop_fk = before.last().unwrap().0;
+    assert!(t.unlink_create(&sh, drop_fk, 0).unwrap());
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), before.len() - 1);
+    assert!(got.iter().all(|e| e.0 != drop_fk));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(drop_fk.0 - 1)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tail's creates are gone and the only earlier page is empty, so the key goes.
+#[test]
+fn extent_empty_predecessor_drops_the_key() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3c;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let (base, last, _) = extent_meta(&t, &sh);
+    assert_ne!(last, base);
+    zero_n_fks(t.body(), base);
+    let tail = t.entries(&sh).unwrap();
+    assert!(!tail.is_empty());
+    assert!(tail.iter().all(|e| e.0 .0 > 1));
+    let mut remove: Vec<Fk> = tail.iter().map(|e| e.0).collect();
+    remove.push(Fk(1));
+    assert!(t.unlink_creates(&sh, &remove).unwrap());
+    assert!(t.entries(&sh).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty one-page extent has no create to drop.
+#[test]
+fn extent_empty_only_page_unlink_is_absent() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3d;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let (base, last, pages) = extent_meta(&t, &sh);
+    assert_eq!(pages, 1);
+    assert_eq!(last, base);
+    zero_n_fks(t.body(), last);
+    assert!(!t.unlink_create(&sh, Fk(1), 0).unwrap());
+    assert!(t.entries(&sh).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A page that still names a successor is not the tail.
+#[test]
+fn append_rejects_a_page_that_still_has_a_successor() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3e;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last, &mut page).unwrap();
+    sh_page_set_next(sh_page_as_array_mut(&mut page).unwrap(), last).unwrap();
+    t.body().write_at(last, &page).unwrap();
+    let err = t
+        .put_create_batch_append(&[rec(sh, n + 1, 0)], &mut HashMap::new())
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("scripthash extent last page is not the extent tail"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A zero creates counter is recounted from the pages before the new create lands.
+#[test]
+fn append_recounts_when_the_creates_counter_is_zero() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3f;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last, &mut page).unwrap();
+    sh_page_set_extent_creates(sh_page_as_array_mut(&mut page).unwrap(), 0);
+    t.body().write_at(last, &page).unwrap();
+    put_create(&t, rec(sh, n + 1, 0));
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize + 1);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n + 1)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty tail whose creates counter is also zero still accepts one create.
+#[test]
+fn append_accepts_an_empty_tail_with_a_zero_creates_counter() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x40;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    zero_n_fks(t.body(), last);
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last, &mut page).unwrap();
+    sh_page_set_extent_creates(sh_page_as_array_mut(&mut page).unwrap(), 0);
+    t.body().write_at(last, &page).unwrap();
+    put_create(&t, rec(sh, n + 1, 0));
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0, Fk(n + 1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

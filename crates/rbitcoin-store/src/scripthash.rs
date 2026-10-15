@@ -19,9 +19,9 @@ use crate::scripthash_mphf::{mix_key16, MphfHead};
 use crate::scripthash_overflow::wipe_legacy_fullsize_overflow;
 use crate::scripthash_pages::{
     sh_page_as_array, sh_page_chunk_ranges, sh_page_decode_slice_into, sh_page_extent,
-    sh_page_first_off, sh_page_init_empty, sh_page_is_last, sh_page_last_fk, sh_page_next,
-    sh_page_pack_extent_last_fks, sh_page_pack_fks, sh_page_set_last, sh_page_set_next,
-    sh_page_try_append, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
+    sh_page_first_off, sh_page_is_last, sh_page_last_fk, sh_page_next,
+    sh_page_pack_extent_last_fks, sh_page_pack_fks, sh_page_set_next, sh_page_try_append,
+    SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
 use crate::scripthash_slabs::{
     decode_slab_payload_into, encode_slab_payload_into, slab_class_for_n_fks_with_slack,
@@ -1993,8 +1993,7 @@ impl ScriptHashTable {
                 Ok(new_val)
             }
             ShHeadValue::Extent { last_page } => {
-                let first = paged_first_from_last(body, *last_page)?;
-                let last = self.append_fks_to_pages(body, alloc, first, *last_page, new_ents)?;
+                let last = self.append_fks_to_pages(body, alloc, *last_page, new_ents)?;
                 Ok(ShHeadValue::extent(last))
             }
         }
@@ -2118,11 +2117,14 @@ impl ScriptHashTable {
     }
 
     /// Append `tail` FKs onto an existing chain ending at `last_page`.
+    ///
+    /// The last page is ver=2 with no successor. A zero creates counter is
+    /// recounted from the pages. A ver=1 tail is not produced here: the
+    /// extent check already rejected it.
     fn append_fks_to_pages(
         &self,
         body: &TableFile,
         alloc: &mut AllocState,
-        first_page: u64,
         last_page: u64,
         tail: &[Fk],
     ) -> Result<u64, StoreError> {
@@ -2132,31 +2134,18 @@ impl ScriptHashTable {
         let mut last = last_page;
         let mut page = [0u8; SH_PAGE_SIZE];
         body.read_at(last, &mut page)?;
-        if sh_page_extent(&page)?.is_none() {
+        let Some((base, mut n)) = sh_page_extent(&page)? else {
             return Err(StoreError::Corrupt("scripthash extent last page not ver=2"));
-        }
+        };
         // A low freelist tail and an inflated extent_n both sit below the
-        // stamped geometric end. The tail is the page with no successor.
-        if sh_page_next(&page)? != 0 {
+        // stamped geometric end. The tail is the page marked last.
+        if !sh_page_is_last(&page)? {
             return Err(StoreError::Corrupt(
                 "scripthash extent last page is not the extent tail",
             ));
         }
         let mut creates = crate::scripthash_pages::sh_page_extent_creates(&page);
-        let mut extent = sh_page_extent(&page)?;
-        let chain_first = {
-            let f = if sh_page_is_last(&page)? {
-                sh_page_first_off(&page)?
-            } else {
-                0
-            };
-            if f == 0 {
-                first_page
-            } else {
-                f
-            }
-        };
-        if creates == 0 && extent.is_some() {
+        if creates == 0 {
             let existing = self.collect_entries_from(body, &ShHeadValue::extent(last_page))?;
             creates = u32::try_from(existing.len()).unwrap_or(u32::MAX);
         }
@@ -2165,19 +2154,12 @@ impl ScriptHashTable {
                 let new_off = self.alloc_page(body, alloc)?;
                 sh_page_set_next(&mut page, new_off)?;
                 body.write_at(last, &page)?;
-                if let Some((base, n)) = extent {
-                    let glued = new_off == base.saturating_add(u64::from(n) * SH_PAGE_SIZE as u64);
-                    let new_n = if glued { n.saturating_add(1) } else { n };
-                    sh_page_pack_extent_last_fks(&mut page, &[fk.0], base, new_n, 0)?;
-                    if creates > 0 {
-                        creates = creates.saturating_add(1);
-                        crate::scripthash_pages::sh_page_set_extent_creates(&mut page, creates);
-                    }
-                    extent = Some((base, new_n));
-                } else {
-                    sh_page_init_empty(&mut page);
-                    sh_page_set_last(&mut page, chain_first)?;
-                    assert!(sh_page_try_append(&mut page, *fk)?);
+                let glued = new_off == base.saturating_add(u64::from(n) * SH_PAGE_SIZE as u64);
+                n = if glued { n.saturating_add(1) } else { n };
+                sh_page_pack_extent_last_fks(&mut page, &[fk.0], base, n, 0)?;
+                if creates > 0 {
+                    creates = creates.saturating_add(1);
+                    crate::scripthash_pages::sh_page_set_extent_creates(&mut page, creates);
                 }
                 last = new_off;
             } else if creates > 0 {
