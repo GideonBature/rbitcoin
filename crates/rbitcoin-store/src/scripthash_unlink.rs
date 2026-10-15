@@ -316,12 +316,7 @@ impl ScriptHashTable {
             return Ok(());
         };
         let mut alloc = alloc_mu.lock().unwrap();
-        restore_page(body, &rec)?;
-        if let Some(word) = &rec.word {
-            self.restore_head_word(word)?;
-        }
-        clear_undo_keep_image(body, &alloc)?;
-        self.free_slab(body, &mut alloc, SH_PAGE_SLAB_CLASS, rec.image)?;
+        self.rollback_undo(body, &mut alloc, &rec)?;
         write_alloc_header(body, &alloc)?;
         body.sync_data_only()?;
         Ok(())

@@ -1958,6 +1958,101 @@ fn extent_suffix_batch_unlink_stays_within_two_pages() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A torn tail on the ingest home restores the page and the ingest head word.
+#[test]
+fn extent_ingest_torn_tail_restores_on_open() {
+    let dir = tmp();
+    let sh = script_hash(&[0x36]);
+    let n = 300u64;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+        t.put_create_batch_append(&many, &mut HashMap::new())
+            .unwrap();
+        assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::Ingest));
+        t.test_tear_extent_tail(&sh).unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A torn tail on a sealed overflow file, and again after L1 promote.
+#[test]
+fn extent_sealed_ovf_torn_tail_restores_on_open() {
+    let dir = tmp();
+    let n = 300u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x37;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let sh_main = script_hash(&[0x10]);
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh_main, &[Fk(1)]);
+        seal_session(&t, 0, session);
+        let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+        t.put_create_batch_append(&many, &mut HashMap::new())
+            .unwrap();
+        for i in 0..210u32 {
+            let filler = script_hash(&[0xa4, (i & 0xff) as u8, (i >> 8) as u8, 0x04]);
+            put_create(&t, rec(filler, 5000 + u64::from(i), 0));
+        }
+        assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::SealedOvf));
+        t.test_tear_extent_tail(&sh).unwrap();
+        t.flush().unwrap();
+    }
+    {
+        let t = ScriptHashTable::open_tiny(&dir).unwrap();
+        assert_eq!(t.entries(&sh).unwrap().len(), n as usize);
+        for i in 0..210u32 {
+            let filler = script_hash(&[0xa5, (i & 0xff) as u8, (i >> 8) as u8, 0x05]);
+            put_create(&t, rec(filler, 8000 + u64::from(i), 0));
+        }
+        t.compact_sealed_ovf().unwrap();
+        assert!(t.ovf_l1.lock().unwrap().is_some());
+        assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::SealedOvf));
+        t.test_tear_extent_tail(&sh).unwrap();
+        t.flush().unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dropping a linked tail page finds the previous page by walking `next`.
+#[test]
+fn extent_linked_tail_unlink_walks_to_the_extent() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX - 1;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x38;
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
+    let mut sh_gap = [0u8; 32];
+    sh_gap[0] = 0x38;
+    sh_gap[1] = 0x01;
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    push_chain(&mut session, sh_gap, &[Fk(1), Fk(2)]);
+    seal_session(&t, 0, session);
+    let (base, last0, n0) = extent_meta(&t, &sh);
+    assert_eq!(n0, 2);
+    put_create(&t, rec(sh, n as u64 + 1, 0));
+    let (_, last1, _) = extent_meta(&t, &sh);
+    assert_ne!(last1, base + u64::from(n0 - 1) * SH_PAGE_SIZE as u64);
+    assert_ne!(last1, last0);
+    assert!(t.unlink_create(&sh, Fk(n as u64 + 1), 0).unwrap());
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n as u64)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A torn tail write rolls back to the pre-unlink page on open.
 #[test]
 fn extent_torn_tail_restores_on_open() {
