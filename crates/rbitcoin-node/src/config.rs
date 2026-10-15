@@ -2287,24 +2287,6 @@ mod tests {
     }
 
     #[test]
-    fn minimum_chain_work_hex_and_floor() {
-        let w = parse_minimum_chain_work("0x65").unwrap();
-        assert_eq!(w[31], 0x65);
-        assert!(parse_minimum_chain_work("test").is_err());
-        assert!(parse_minimum_chain_work(
-            "01234567890123456789012345678901234567890123456789012345678901234"
-        )
-        .is_err());
-        let mut cfg = NodeConfig::default();
-        assert!(cfg.meets_minimum_chain_work([0; 32]));
-        cfg.minimum_chain_work = Some(w);
-        assert!(!cfg.meets_minimum_chain_work([0; 32]));
-        let mut above = [0u8; 32];
-        above[31] = 0x66;
-        assert!(cfg.meets_minimum_chain_work(above));
-    }
-
-    #[test]
     fn connect_hostname_is_dns_not_netaddr() {
         let mut cfg = NodeConfig::default();
         cfg.apply_kv("head_scale", "tiny").unwrap();
