@@ -311,6 +311,10 @@ pub struct AddrMan {
     asmap: Option<Arc<AsMap>>,
     last_attempt: HashMap<NetAddr, Instant>,
     only_net: Vec<OnlyNet>,
+    /// `--proxy` or `--onion`. Default off: an onion row is not a peer.
+    onion_reachable: bool,
+    /// `--i2p-sam`. Default off.
+    i2p_reachable: bool,
     cjdns_reachable: bool,
 }
 
@@ -338,8 +342,24 @@ impl AddrMan {
         self.only_net = only;
     }
 
+    pub fn set_onion_reachable(&mut self, on: bool) {
+        self.onion_reachable = on;
+    }
+
+    pub fn set_i2p_reachable(&mut self, on: bool) {
+        self.i2p_reachable = on;
+    }
+
     pub fn set_cjdns_reachable(&mut self, on: bool) {
         self.cjdns_reachable = on;
+    }
+
+    fn onion_reachable(&self) -> bool {
+        self.onion_reachable
+    }
+
+    fn i2p_reachable(&self) -> bool {
+        self.i2p_reachable
     }
 
     fn allowed(&self, addr: NetAddr) -> bool {
@@ -1670,5 +1690,99 @@ mod tests {
         assert!(loaded.entry(&addr(4)).is_some());
         assert!(loaded.flags(&addr(4)).has_connected());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn onion() -> NetAddr {
+        "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
+            .parse()
+            .unwrap()
+    }
+
+    fn i2p() -> NetAddr {
+        NetAddr::I2p {
+            dest: [7u8; 32],
+            port: 8333,
+        }
+    }
+
+    fn cjdns() -> NetAddr {
+        NetAddr::Cjdns {
+            ip: "fc00::1".parse().unwrap(),
+            port: 8333,
+        }
+    }
+
+    #[test]
+    fn add_with_flags_drops_a_net_only_net_excludes() {
+        let mut am = AddrMan::new();
+        am.set_only_net(vec![OnlyNet::Onion]);
+        am.set_onion_reachable(true);
+        am.add_with_flags_addr(NetAddr::from_socket(addr(1)), PeerFlags::empty());
+        assert!(
+            am.is_empty(),
+            "a peers-file merge must not keep clearnet in an onion-only book"
+        );
+    }
+
+    #[test]
+    fn learned_cjdns_stays_out_until_the_node_can_dial_it() {
+        let mut am = AddrMan::new();
+        assert!(!am.add_learned_addr(cjdns(), 8));
+        assert!(am.is_empty());
+        am.set_cjdns_reachable(true);
+        assert!(am.add_learned_addr(cjdns(), 8));
+    }
+
+    #[test]
+    fn onion_and_i2p_stay_out_until_this_process_can_dial_them() {
+        let mut am = AddrMan::new();
+        assert!(!am.onion_reachable());
+        assert!(!am.i2p_reachable());
+        am.add_addr(onion());
+        assert!(!am.add_learned_addr(i2p(), 8));
+        am.add_with_flags_addr(onion(), PeerFlags::empty());
+        assert!(
+            am.is_empty(),
+            "no SOCKS and no SAM means those rows are not peers"
+        );
+        am.set_onion_reachable(true);
+        am.add_addr(onion());
+        assert!(am.entries().iter().any(|e| e.addr == onion()));
+        am.set_i2p_reachable(true);
+        assert!(am.add_learned_addr(i2p(), 8));
+    }
+
+    #[test]
+    fn turning_a_net_off_drops_rows_already_in_the_book() {
+        let mut am = AddrMan::new();
+        am.set_onion_reachable(true);
+        am.set_i2p_reachable(true);
+        am.set_cjdns_reachable(true);
+        am.add_addr(onion());
+        am.add_addr(i2p());
+        am.add_addr(cjdns());
+        am.add(addr(1));
+        assert_eq!(am.len(), 4);
+        am.set_only_net(vec![OnlyNet::Onion]);
+        assert_eq!(am.len(), 1, "only-net must drop rows this process will not dial");
+        assert!(am.entries().iter().all(|e| e.addr == onion()));
+        am.set_onion_reachable(false);
+        assert!(am.is_empty(), "clearing SOCKS drops onion rows already stored");
+    }
+
+    #[test]
+    fn full_clearnet_batch_does_not_reserve_an_unreachable_overlay() {
+        let mut am = AddrMan::new();
+        for i in 1..=8u8 {
+            am.add(addr(i));
+        }
+        am.add_addr(onion());
+        am.add_addr(i2p());
+        let got = am.take_dial_candidates_net(8, &HashSet::new(), &[]);
+        assert_eq!(got.len(), 8, "{got:?}");
+        assert!(
+            got.iter().all(|a| matches!(a, NetAddr::Ip(_))),
+            "an onion this process cannot dial must not take a clearnet slot: {got:?}"
+        );
     }
 }
