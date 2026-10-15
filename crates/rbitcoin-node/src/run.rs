@@ -681,8 +681,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
-    let awaiting_dialable =
-        addrman.is_empty() && (reachability_removed_rows || proxy_seeds_queued);
+    let awaiting_dialable = addrman.is_empty() && (reachability_removed_rows || proxy_seeds_queued);
     let mut rpc_handle: Option<RpcHandle> = None;
     status.enter(Phase::CatchUp);
     let catch_up = run_ibd_or_skip(
@@ -1735,6 +1734,7 @@ fn apply_startup_index_mode(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 async fn run_ibd_or_skip(
     node: &P2PNode,
     ibd_targets: &[rbitcoin_net::NetAddr],
