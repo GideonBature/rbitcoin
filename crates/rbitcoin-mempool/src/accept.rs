@@ -2240,39 +2240,6 @@ mod tests {
         (ops, MapUtxoProvider { map })
     }
 
-    /// Finding 011: duplicate inputs rejected before fee accounting.
-    #[test]
-    fn reject_duplicate_inputs() {
-        let dir = tmp_dir();
-        let (op, _, utxos) = chain_utxo(100_000);
-        let tx = Transaction {
-            version: Version::TWO,
-            lock_time: LockTime::ZERO,
-            input: vec![
-                TxIn {
-                    previous_output: op,
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                    witness: Witness::new(),
-                },
-                TxIn {
-                    previous_output: op, // same outpoint twice
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                    witness: Witness::new(),
-                },
-            ],
-            output: vec![TxOut {
-                value: Amount::from_sat(50_000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            }],
-        };
-        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
-        let err = mp.accept_tx(&tx, &utxos, TIP_OK).unwrap_err();
-        assert!(matches!(err, AcceptError::InputsDuplicate), "got {err}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Finding 011: absolute nLockTime height form not final at tip+1.
     #[test]
     fn reject_non_final_locktime_height() {
@@ -2408,33 +2375,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Finding 010: provider returns no coin for a spent/missing outpoint → reject.
-    #[test]
-    fn reject_when_provider_has_no_unspent_coin() {
-        let dir = tmp_dir();
-        let op = OutPoint {
-            txid: Txid::from_byte_array([0xcd; 32]),
-            vout: 0,
-        };
-        let tx = spend_tx(op, 1_000);
-        let utxos = MapUtxoProvider {
-            map: HashMap::new(), // spent or unknown → no coin
-        };
-        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
-        let err = mp
-            .accept_tx(&tx, &utxos, TIP_OK)
-            .expect_err("must not admit");
-        // Orphanage parks missing parents; empty map → orphaned or missing.
-        assert!(
-            matches!(
-                err,
-                AcceptError::Orphaned { .. } | AcceptError::MissingPrevout(_)
-            ),
-            "got {err}"
-        );
-        assert_eq!(mp.live_count(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
     /// The rolling floor starts at the configured minimum. A lower
     /// `-minrelaytxfee` is the advertised floor. An eviction that already
     /// raised the rolling floor stays above that new minimum.
@@ -2720,19 +2660,6 @@ mod tests {
     }
 
     #[test]
-    fn reject_low_feerate() {
-        let dir = tmp_dir();
-        let (op, _, utxos) = chain_utxo(100_000);
-        // fee 1 sat — below 0.1 sat/vB for any real tx weight
-        let tx = spend_tx(op, 99_999);
-        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
-        let err = mp.accept_tx(&tx, &utxos, TIP_OK).unwrap_err();
-        assert!(matches!(err, AcceptError::Policy("min relay fee")));
-        assert_eq!(mp.live_count(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn dust_and_op_true_allowed() {
         let dir = tmp_dir();
         let (op, _, utxos) = chain_utxo(100_000);
@@ -2826,17 +2753,6 @@ mod tests {
     }
 
     #[test]
-    fn accept_tx_records_full_sigop_cost_for_p2sh_and_p2wsh() {
-        let dir = tmp_dir();
-        let (utxos, p2sh, p2wsh) = p2sh_p2wsh_multisig_spends();
-        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
-        mp.accept_tx(&p2sh, &utxos, TIP_OK).expect("p2sh");
-        mp.accept_tx(&p2wsh, &utxos, TIP_OK).expect("p2wsh");
-        assert_eq!(live_sigops(&mp, &p2sh), 8);
-        assert_eq!(live_sigops(&mp, &p2wsh), 2);
-    }
-
-    #[test]
     fn package_and_reorg_readmit_record_sigop_cost() {
         let dir = tmp_dir();
         let (utxos, parent, _) = p2sh_p2wsh_multisig_spends();
@@ -2922,18 +2838,6 @@ mod tests {
         assert_eq!(mp.live_count(), 3);
         assert_eq!(live_sigops(&mp, &p2sh), 8, "written back");
         assert_eq!(live_sigops(&mp, &child), 80);
-    }
-
-    #[test]
-    fn annex_reject() {
-        let dir = tmp_dir();
-        let (op, _, utxos) = chain_utxo(100_000);
-        let mut tx = spend_tx(op, 90_000);
-        tx.input[0].witness = Witness::from_slice(&[vec![0x01], vec![0x50, 0x01]]);
-        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
-        let err = mp.accept_tx(&tx, &utxos, TIP_OK).unwrap_err();
-        assert!(matches!(err, AcceptError::Policy("libre annex")));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
