@@ -615,12 +615,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     };
     let asmap = load_asmap(config.datadir.path(), config.asmap.as_deref());
     addrman.set_asmap(asmap.clone());
+    let len_before_reach = addrman.len();
     // Reachability before `--only-net`, so a sweep does not drop a net this
     // process can dial and then forget the rows.
     addrman.set_onion_reachable(config.listen.proxy.is_some() || config.listen.onion.is_some());
     addrman.set_i2p_reachable(config.listen.i2p_sam.is_some());
     addrman.set_cjdns_reachable(config.listen.cjdns_reachable);
     addrman.set_only_net(config.listen.only_net.clone());
+    let reachability_removed_rows = addrman.len() < len_before_reach;
     node.peers
         .set_cjdns_reachable(config.listen.cjdns_reachable);
     node.peers.set_pruned(config.prune_seqsigwit);
@@ -636,6 +638,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     for c in &dns_resolved {
         addrman.add_addr(*c);
     }
+    let mut proxy_seeds_queued = false;
     if should_resolve_default_seeds(&config) {
         info!(
             "ibd: resolving DNS/fixed seeds for {}…",
@@ -649,6 +652,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             addrman.len()
         );
     } else if config.listen.proxy.is_some() && config.listen.use_seeds {
+        proxy_seeds_queued = true;
         let n = queue_proxy_seed_addrfetch(&node.peers, config.network);
         info!("ibd: SOCKS proxy set — queued {n} seed hostnames via SOCKS addrfetch");
     } else if config.signet_challenge.is_some()
@@ -677,6 +681,8 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
+    let awaiting_dialable =
+        addrman.is_empty() && (reachability_removed_rows || proxy_seeds_queued);
     let mut rpc_handle: Option<RpcHandle> = None;
     status.enter(Phase::CatchUp);
     let catch_up = run_ibd_or_skip(
@@ -687,6 +693,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         &mut addrman,
         &peers_path,
         &shutdown,
+        awaiting_dialable,
     )
     .await;
 
@@ -1588,6 +1595,16 @@ impl CatchUp {
     }
 }
 
+/// No outbound targets.
+///
+/// An empty book that this process just swept, or that is still waiting on
+/// proxy seed fetch, is not a finished catch-up. A book that was already
+/// empty, with nothing in flight, keeps the serve-only path.
+pub(crate) fn catch_up_without_targets(awaiting_dialable: bool) -> CatchUp {
+    let _ = awaiting_dialable;
+    CatchUp::complete()
+}
+
 pub(crate) fn catch_up_after_ok(accepted: u32, tip: u32, shutdown: bool) -> CatchUp {
     if shutdown || (tip == 0 && accepted == 0) {
         CatchUp::Incomplete
@@ -1723,10 +1740,19 @@ async fn run_ibd_or_skip(
     addrman: &mut AddrMan,
     peers_path: &std::path::Path,
     shutdown: &Shutdown,
+    awaiting_dialable: bool,
 ) -> CatchUp {
     if ibd_targets.is_empty() {
-        info!("ibd: no outbound peers; serving only (use --connect or seeds)");
-        return CatchUp::complete();
+        let catch_up = catch_up_without_targets(awaiting_dialable);
+        if catch_up.is_complete() {
+            info!("ibd: no outbound peers; serving only (use --connect or seeds)");
+        } else {
+            warn!(
+                "ibd: no dialable address yet — catch-up stays open \
+                 (reachability sweep or seed fetch still in flight)"
+            );
+        }
+        return catch_up;
     }
     if shutdown.requested() {
         return CatchUp::Incomplete;
@@ -2745,6 +2771,15 @@ mod tests {
         assert!(CatchUp::complete().is_complete());
         assert!(!CatchUp::complete().dial_failed_all());
         assert!(!CatchUp::Incomplete.is_complete());
+    }
+
+    #[test]
+    fn empty_targets_stay_open_until_a_dialable_address_exists() {
+        assert!(catch_up_without_targets(false).is_complete());
+        assert!(
+            !catch_up_without_targets(true).is_complete(),
+            "a swept or seed-pending book is not caught up"
+        );
     }
 
     #[test]
