@@ -35,6 +35,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 
+#[path = "scripthash_unlink.rs"]
+mod unlink;
+
 /// Durable cold-materialize resume marker (next to `scripthash.head`).
 pub const COLD_PROGRESS_NAME: &str = "scripthash.cold_progress";
 const COLD_PROGRESS_MAGIC: &[u8; 8] = b"SHCOLDP1";
@@ -619,7 +622,11 @@ fn paged_first_from_last(body: &TableFile, last_page: u64) -> Result<u64, StoreE
     }
     let mut page = [0u8; SH_PAGE_SIZE];
     body.read_at(last_page, &mut page)?;
-    sh_page_first_off(sh_page_as_array(&page)?)
+    let page = sh_page_as_array(&page)?;
+    if sh_page_extent(page)?.is_none() {
+        return Err(StoreError::Corrupt("scripthash extent last page not ver=2"));
+    }
+    sh_page_first_off(page)
 }
 
 /// Cap on a contiguous megakey span pread (64 MiB ≈ 16k pages).
@@ -950,6 +957,7 @@ impl ScriptHashTable {
             }
             table.reset_all_bodies()?;
         }
+        table.recover_unlink_undos()?;
         Ok(table)
     }
 
@@ -1459,6 +1467,9 @@ impl ScriptHashTable {
             ShHeadValue::Extent { last_page } => {
                 let mut page = [0u8; SH_PAGE_SIZE];
                 body.read_at(*last_page, &mut page)?;
+                if sh_page_extent(&page)?.is_none() {
+                    return Err(StoreError::Corrupt("scripthash extent last page not ver=2"));
+                }
                 sh_page_last_fk(&page)
             }
         }
@@ -1908,24 +1919,15 @@ impl ScriptHashTable {
         }
     }
 
+    /// Pack `live` into a new inline, slab, or extent. Does not free `old`
+    /// and does not publish the head. The caller writes the head, then frees.
     fn rewrite_entries_for_key(
         &self,
         body: &TableFile,
         alloc: &mut AllocState,
-        old: &ShHeadValue,
         live: &[Fk],
     ) -> Result<ShHeadValue, StoreError> {
-        let n = live.len() as u32;
-        let old_list = self.collect_entries_from(body, old)?;
-        let old_n = old_list.len() as u32;
-        if n > old_n {
-            alloc.live_count = alloc.live_count.saturating_add(u64::from(n - old_n));
-        } else if n < old_n {
-            alloc.live_count = alloc.live_count.saturating_sub(u64::from(old_n - n));
-        }
-
-        if n == 0 {
-            self.free_if_paged(body, alloc, old)?;
+        if live.is_empty() {
             return Ok(ShHeadValue::Empty);
         }
         for w in live.windows(2) {
@@ -1935,7 +1937,6 @@ impl ScriptHashTable {
                 ));
             }
         }
-        self.free_if_paged(body, alloc, old)?;
         self.pack_entries(body, alloc, live, false)
     }
 
@@ -2131,6 +2132,16 @@ impl ScriptHashTable {
         let mut last = last_page;
         let mut page = [0u8; SH_PAGE_SIZE];
         body.read_at(last, &mut page)?;
+        let Some((base_chk, n_chk)) = sh_page_extent(&page)? else {
+            return Err(StoreError::Corrupt("scripthash extent last page not ver=2"));
+        };
+        let contiguous_end = base_chk
+            .saturating_add(u64::from(n_chk.saturating_sub(1)).saturating_mul(SH_PAGE_SIZE as u64));
+        if last_page < contiguous_end {
+            return Err(StoreError::Corrupt(
+                "scripthash extent last page is not the extent tail",
+            ));
+        }
         let mut creates = crate::scripthash_pages::sh_page_extent_creates(&page);
         let mut extent = sh_page_extent(&page)?;
         let chain_first = {
@@ -2272,34 +2283,6 @@ impl ScriptHashTable {
         off: u64,
     ) -> Result<(), StoreError> {
         push_free_head(body, &mut alloc.free_head, class, off)
-    }
-
-    /// Unlink one create_tx_fk (disconnect tip). Caller should only remove the fk
-    /// when no remaining outputs of that tx still match this scripthash.
-    /// Swap-remove; demote paged→inline when ≤2 remain.
-    pub fn unlink_create(
-        &self,
-        scripthash: &[u8; 32],
-        create_tx_fk: Fk,
-        _vout: u32,
-    ) -> Result<bool, StoreError> {
-        let Some((val, home)) = self.locate_head(scripthash)? else {
-            return Ok(false);
-        };
-        let body = self.body_for(scripthash, KeyHome::from(home));
-        let mut live = self.collect_entries_from(body, &val)?;
-        let Some(pos) = live.iter().position(|fk| *fk == create_tx_fk) else {
-            return Ok(false);
-        };
-        live.remove(pos);
-        live.sort_by_key(|fk| fk.0);
-        let alloc_mu = self.alloc_for(scripthash, KeyHome::from(home));
-        let mut alloc = alloc_mu.lock().unwrap();
-        let new_val = self.rewrite_entries_for_key(body, &mut alloc, &val, &live)?;
-        write_alloc_header(body, &alloc)?;
-        drop(alloc);
-        self.unlink_write_home(scripthash, home, &new_val)?;
-        Ok(true)
     }
 
     fn unlink_write_home(
@@ -3102,7 +3085,8 @@ impl<'a> ScriptHashBulkSession<'a> {
 }
 
 fn write_alloc_header(body: &TableFile, state: &AllocState) -> Result<(), StoreError> {
-    let mut buf = vec![0u8; SH_ALLOC_HEADER_LEN];
+    // Stop at the freelist. Bytes after that hold an in-progress unlink undo.
+    let mut buf = vec![0u8; 24 + 8 * (SH_MAX_CLASS as usize + 1)];
     buf[0..4].copy_from_slice(&SH_ALLOC_MAGIC);
     buf[4..6].copy_from_slice(&SH_ALLOC_VERSION.to_le_bytes());
     buf[8..16].copy_from_slice(&state.live_count.to_le_bytes());

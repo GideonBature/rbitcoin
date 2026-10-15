@@ -79,8 +79,12 @@ Open revalidation runs in `Query::open_or_create` **before** P2P can extend tip.
   `scripthash.body` once into a process set of `create_tx_fk`s already present;
   re-confirm skips those txs. Hot path only appends + maintains heads in RAM.
 - Creates for unstrong / above-tip txs are **invisible** via `is_confirmed_strong`.
-- Disconnect tip: **unlink** creates for that block’s outputs (tombstone + rewire);
-  process set updated so re-confirm can re-index.
+- Disconnect tip: **one unlink per scripthash**. A megakey drops that block's
+  creates from the tail pages. The old page image is saved, the new tail is
+  written, then the head moves. Old pages are freed only after that. A crash
+  restores the saved page and the old head word so the same disconnect can
+  run again. A non-suffix unlink writes the replacement chain before it frees
+  the old one.
 - No tip-mode full rebuild; corrupt index ⇒ reindex (wipe store / redo IBD).
 
 ## Flush

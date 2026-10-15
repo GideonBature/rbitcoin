@@ -203,6 +203,24 @@ impl MphfHead {
         Ok(true)
     }
 
+    /// Byte offset of the pack8 word in `.val`, when the key is present.
+    pub(crate) fn value_word_offset(&self, key: &ShHeadKey) -> Result<Option<u64>, StoreError> {
+        Ok(self
+            .slot_if_present(key)?
+            .map(|slot| slot.saturating_mul(8)))
+    }
+
+    pub(crate) fn read_value_word(&self, off: u64) -> Result<[u8; 8], StoreError> {
+        let mut buf = [0u8; 8];
+        pread_file_exact(&self.val_file, off, &mut buf)
+            .map_err(|e| StoreError::io(val_path(&self.base), e))?;
+        Ok(buf)
+    }
+
+    pub(crate) fn write_value_word(&self, off: u64, bytes: &[u8; 8]) -> Result<(), StoreError> {
+        pwrite_file(&self.val_file, off, bytes).map_err(|e| StoreError::io(val_path(&self.base), e))
+    }
+
     pub fn for_each_occupied(
         &self,
         mut f: impl FnMut(ShHeadKey, ShHeadValue) -> Result<(), StoreError>,

@@ -1040,7 +1040,11 @@ fn freelist_reuses_page() {
         }
         other => panic!("expected slab, got {other:?}"),
     };
-    assert_eq!(off1, off2, "slab freelist should reuse offset");
+    let step = crate::scripthash_layout::slab_bytes(0);
+    assert!(
+        off2 == off1 || off2 == off1 + step,
+        "slab freelist should reuse a freed offset (first {off1}, next {off2})"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1889,6 +1893,147 @@ fn extent_append_glued_bumps_extent_n() {
     assert_eq!(n1, 3, "glued HWM grows extent_n in place");
     assert_eq!(last, base + 2 * SH_PAGE_SIZE as u64);
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A tip disconnect removes the highest creates. That must rewrite the tail
+/// page, not allocate another copy of the whole extent.
+#[test]
+fn extent_suffix_unlink_does_not_copy_the_chain() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    // Last page must keep the remaining creates. A one-fk tail would promote
+    // the previous full page and allocate a split, which is a different budget.
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_add(400);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x31;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let before = t.body().logical_len();
+    assert!(t.unlink_create(&sh, Fk(n), 0).unwrap());
+    let growth = t.body().logical_len().saturating_sub(before);
+    assert!(
+        growth <= SH_PAGE_SIZE as u64,
+        "suffix unlink grew the body by {growth} bytes (chain copy)"
+    );
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), (n - 1) as usize);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n - 1)));
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    let after = t.body().logical_len();
+    assert!(!t.unlink_create(&sh, Fk(n), 0).unwrap());
+    assert_eq!(t.body().logical_len(), after, "absent unlink must not grow");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dropping more than one tail page still must not copy the prefix.
+#[test]
+fn extent_suffix_batch_unlink_stays_within_two_pages() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x32;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let drop_n = (SH_PAGE_STREAM_MAX as u64).saturating_add(50);
+    let fks: Vec<_> = ((n - drop_n + 1)..=n).map(Fk).collect();
+    let before = t.body().logical_len();
+    assert!(t.unlink_creates(&sh, &fks).unwrap());
+    let growth = t.body().logical_len().saturating_sub(before);
+    assert!(
+        growth <= (SH_PAGE_SIZE as u64).saturating_mul(2),
+        "batch suffix unlink grew the body by {growth} bytes"
+    );
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), (n - drop_n) as usize);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n - drop_n)));
+    assert!(!t.unlink_creates(&sh, &fks).unwrap());
+    let again = t.entries(&sh).unwrap();
+    assert_eq!(again.len(), got.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A torn tail write rolls back to the pre-unlink page on open.
+#[test]
+fn extent_torn_tail_restores_on_open() {
+    let dir = tmp();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_add(10);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x33;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let ents: Vec<_> = (1..=n).map(Fk).collect();
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh, &ents);
+        seal_session(&t, 0, session);
+        t.test_tear_extent_tail(&sh).unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Removing a create that is not the tail still leaves a readable key.
+#[test]
+fn extent_middle_unlink_roundtrips() {
+    let dir = tmp();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x34;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let ents: Vec<_> = (1..=n).map(Fk).collect();
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh, &ents);
+        seal_session(&t, 0, session);
+        assert!(t.unlink_create(&sh, Fk(10), 0).unwrap());
+        let got = t.entries(&sh).unwrap();
+        assert_eq!(got.len(), (n - 1) as usize);
+        assert!(got.iter().all(|e| e.0 != Fk(10)));
+        t.flush().unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), (n - 1) as usize);
+    assert!(got.iter().all(|e| e.0 != Fk(10)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn append_rejects_extent_page_that_is_not_ver2() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = SH_PAGE_STREAM_MAX as u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x35;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last_page = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last_page, &mut page).unwrap();
+    page[0] = 0;
+    t.body().write_at(last_page, &page).unwrap();
+    let err = t
+        .put_create_batch_append(&[rec(sh, n + 1, 0)], &mut HashMap::new())
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("scripthash extent last page not ver=2"),
+        "{msg}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
