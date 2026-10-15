@@ -1728,18 +1728,21 @@ pub(in crate::ibd) mod tests {
             "a second peer on an in-flight hash does not spend unique room"
         );
         st.slots[0].getdata_wire.wrote(1, 9_000);
-        assert!(!super::super::peer_io::getdata_on_wire_stalled(
-            &st.slots[0],
-            9_000 + 29_999,
-            30_000
-        ));
+        assert!(
+            super::super::peer_io::getdata_on_wire_stalled(
+                &st.slots[0],
+                9_000 + 29_999,
+                30_000
+            ),
+            "last rx at 42ms is the clock; the write at 9s does not refresh it"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Silence before a new hash is written does not satisfy the stall, and
-    /// the write itself opens a fresh 30s. A hash already in flight does not.
+    /// Silence on an old on-wire request stays a stall after a later hash is
+    /// written. A hash already in flight does not move the written timestamp.
     #[test]
-    fn new_hash_on_a_busy_peer_starts_a_fresh_stall_window() {
+    fn new_hash_on_a_busy_peer_does_not_refresh_stall() {
         use super::super::peer_io::getdata_on_wire_stalled;
         let (dir, _hub) = tmp_hub();
         let mut st = IbdWorkState::new(vec![dummy_slot(0)], None, Some(0));
@@ -1760,8 +1763,10 @@ pub(in crate::ibd) mod tests {
         );
         let now = 100_000;
         st.slots[0].getdata_wire.wrote(1, now);
-        assert!(!getdata_on_wire_stalled(&st.slots[0], now + 29_999, 30_000));
-        assert!(getdata_on_wire_stalled(&st.slots[0], now + 30_001, 30_000));
+        assert!(
+            getdata_on_wire_stalled(&st.slots[0], now + 1, 30_000),
+            "a new getdata write does not open a fresh stall window"
+        );
         let again = st.slots[0].getdata_wire.written_ms();
         assert!(!issue_one(&mut st, 0, h(2), &mut room, &mut issued));
         assert_eq!(st.slots[0].getdata_wire.unwritten(), 0);
@@ -1784,8 +1789,10 @@ pub(in crate::ibd) mod tests {
         assert!(!getdata_on_wire_stalled(&st.slots[0], 1_000_000, 30_000));
         let now = 50_000;
         st.slots[0].getdata_wire.wrote(1, now);
-        assert!(!getdata_on_wire_stalled(&st.slots[0], now + 29_999, 30_000));
-        assert!(getdata_on_wire_stalled(&st.slots[0], now + 30_001, 30_000));
+        assert!(
+            getdata_on_wire_stalled(&st.slots[0], now + 1, 30_000),
+            "once the ask is on the socket, silence is measured from last rx"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

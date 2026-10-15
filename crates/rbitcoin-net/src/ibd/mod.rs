@@ -9,7 +9,8 @@
 //!   room (`window` = in-flight cap, not tip-distance); tip-batch multi-peer race
 //! - Peer frames land **raw** in the body queue (no peer full-block decode);
 //!   confirm pack is the sole decode site for wire
-//! - Stall: 30s with no block-download progress on a peer → disconnect + cooldown
+//! - Stall: 30s with no received block bytes on one peer → disconnect + cooldown.
+//!   Tip motion is not an input. Every on-wire peer quiet in one pass is not a stall.
 //! - Main-loop housekeeping is wall-clock cadenced (assign ≤50 ms, headers
 //!   ≤500 ms, peer-slow/hygiene ≤1 s). Drain + confirm-offer stay event-driven.
 
@@ -44,8 +45,8 @@ use assign::{assign_work_ordered, bq_pipeline_saturated, AssignDepth};
 use cadence::IbdLoopCadence;
 use dial::{
     admit_cooldown_fallback, alive_dial_addrs, apply_dial_result, dial_batch, dial_blocked_addrs,
-    disconnect_relative_slow_block_peers, expire_addr_cooldown, record_stall_kick, redial_want,
-    release_peer_block_work,
+    disconnect_relative_slow_block_peers, disconnect_stalled_block_peers, expire_addr_cooldown,
+    redial_want, release_peer_block_work,
 };
 use events::{
     apply_confirm_events, apply_peer_event, disconnect_all_peers, drain_ready_peer_and_body_events,
@@ -58,7 +59,7 @@ use exit::{
 use peer_io::{empty_header_fk_bus, sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
 use progress::{
     read_progress_published, spawn_status_thread, work_chain_progress_at, StatusBoard, StatusSnap,
-    TipRateTracker, WireWatch,
+    TipRateTracker,
 };
 use published::spawn_header_thread;
 use state::IbdWorkState;
@@ -255,23 +256,9 @@ impl Drop for PeerBookSession {
 
 fn publish_status_snap(st: &IbdWorkState, hub: &ChainHub, board: &StatusBoard) {
     let headers = header_walk::header_status_view(st, hub);
-    let wires: Vec<WireWatch> = st
-        .slots
-        .iter()
-        .filter(|s| s.alive)
-        .map(|s| WireWatch {
-            cmd_tx: s.cmd_tx.clone(),
-            abort: s.task.abort_handle(),
-            in_flight: s.in_flight.len(),
-            getdata_wire: Arc::clone(&s.getdata_wire),
-            rate: s.rate,
-            alive: s.alive,
-            addr: s.addr,
-            bytes_rx: s.bytes_rx_total.load(Ordering::Relaxed),
-        })
-        .collect();
+    let peers = st.slots.iter().filter(|s| s.alive).count();
     board.publish(StatusSnap {
-        peers: wires.len(),
+        peers,
         horizon: headers.horizon,
         hole: 0,
         header_origin: headers.origin,
@@ -281,7 +268,6 @@ fn publish_status_snap(st: &IbdWorkState, hub: &ChainHub, board: &StatusBoard) {
         header_work_ok: headers.work_ok,
         header_walk: headers.walk,
         header_quiet: headers.quiet,
-        wires,
     });
 }
 
@@ -501,7 +487,6 @@ pub async fn ibd_cancellable(
         Arc::clone(&status_board),
         Arc::clone(&hub.query),
         Arc::clone(&confirm_queues),
-        cfg.stall,
         start_tip,
         status_stop_rx,
     );
@@ -699,9 +684,6 @@ pub async fn ibd_cancellable(
             if cadence.peer_slow_due(now_cadence) {
                 sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
                 let now = Instant::now();
-                for addr in status_board.take_kicks() {
-                    record_stall_kick(&mut st.addr_cooldown, &mut st.addr_strikes, addr, now);
-                }
                 let finished: Vec<usize> = st
                     .slots
                     .iter()
@@ -717,6 +699,15 @@ pub async fn ibd_cancellable(
                         id,
                     ));
                 }
+                freed.extend(disconnect_stalled_block_peers(
+                    &mut st.slots,
+                    &mut st.inflight,
+                    &mut st.body,
+                    &mut st.addr_cooldown,
+                    &mut st.addr_strikes,
+                    now,
+                    cfg.stall,
+                ));
                 freed.extend(disconnect_relative_slow_block_peers(
                     &mut st.slots,
                     &mut st.inflight,

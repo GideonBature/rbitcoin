@@ -698,23 +698,34 @@ pub(crate) fn disconnect_stalled_block_peers_at(
     stall: Duration,
     now_ms: u64,
 ) -> Vec<bitcoin::BlockHash> {
-    let mut freed = Vec::new();
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;
-    let stalled_peers: Vec<(usize, usize, SocketAddr, u64)> = slots
-        .iter()
-        .filter(|s| s.alive && !s.in_flight.is_empty())
-        .filter(|s| super::peer_io::getdata_on_wire_stalled(s, now_ms, stall_ms))
-        .map(|s| {
-            (
+    let mut on_wire = 0usize;
+    let mut stalled_peers: Vec<(usize, usize, SocketAddr, u64)> = Vec::new();
+    for s in slots.iter() {
+        if !s.alive || s.in_flight.is_empty() {
+            continue;
+        }
+        if s.getdata_wire.unwritten() >= s.in_flight.len() {
+            continue;
+        }
+        on_wire += 1;
+        if super::peer_io::getdata_on_wire_stalled(s, now_ms, stall_ms) {
+            stalled_peers.push((
                 s.id,
                 s.in_flight.len(),
                 s.addr,
                 s.bytes_rx_total.load(Ordering::Relaxed),
-            )
-        })
-        .collect();
-    for (id, n_work, addr, stream) in stalled_peers {
+            ));
+        }
+    }
+    // Every judged peer quiet at once is our clock (we stopped reading), not
+    // eight independent failures. One quiet peer among live senders is a peer.
+    if stalled_peers.is_empty() || (stalled_peers.len() >= 2 && stalled_peers.len() == on_wire) {
+        return Vec::new();
+    }
+    let mut freed = Vec::new();
+    if let Some((id, n_work, addr, stream)) = stalled_peers.into_iter().next() {
         let cool = record_stall_kick(addr_cooldown, addr_strikes, addr, now);
         warn!(
             "ibd: peer[{id}] {addr} stalled (no block progress for {stall:?}, {n_work} in-flight, stream={stream}) — disconnect + reassign (cooldown {cool:?})"

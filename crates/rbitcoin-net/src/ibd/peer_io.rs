@@ -223,11 +223,12 @@ impl GetdataWire {
     }
 }
 
-/// True when this peer owes a block that is already on the wire and neither
-/// that write nor a later requested block is inside `stall_ms`.
+/// True when this peer owes a block that is already on the wire and no
+/// block bytes have arrived inside `stall_ms`.
 ///
 /// An empty window is not a stall. A window whose every hash is still sitting
-/// in the writer is not a stall: the peer has not been asked yet.
+/// in the writer is not a stall: the peer has not been asked yet. A getdata
+/// write does not move the clock.
 pub(crate) fn getdata_on_wire_stalled(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
     let outstanding = slot.in_flight.len();
     if outstanding == 0 {
@@ -236,12 +237,7 @@ pub(crate) fn getdata_on_wire_stalled(slot: &PeerSlot, now_ms: u64, stall_ms: u6
     if slot.getdata_wire.unwritten() >= outstanding {
         return false;
     }
-    let mut rate = slot.rate;
-    let written = slot.getdata_wire.written_ms();
-    if written > rate.work_started_ms {
-        rate.work_started_ms = written;
-    }
-    rate.stalled(now_ms, stall_ms, true)
+    slot.rate.stalled(now_ms, stall_ms, true)
 }
 
 /// In-flight light decodes (inv, addr, tx, cmpct) per IBD peer. Not a knob.
@@ -441,9 +437,17 @@ impl LightDecodes {
     }
 }
 
-fn note_read_progress(bytes_io: &AtomicU64, prog_mark: &mut usize, buffered: usize) {
+fn note_read_progress(
+    bytes_io: &AtomicU64,
+    rx_ms: &AtomicU64,
+    prog_mark: &mut usize,
+    buffered: usize,
+) {
     let delta = buffered.saturating_sub(*prog_mark);
-    note_stream_bytes(bytes_io, delta as u64);
+    if delta > 0 {
+        note_stream_bytes(bytes_io, delta as u64);
+        rx_ms.store(ibd_mono_ms(), Ordering::Relaxed);
+    }
     *prog_mark = buffered;
 }
 
@@ -672,6 +676,7 @@ async fn read_ibd_peer(
     light_decode: Arc<Semaphore>,
 ) {
     let mut prog_mark = 0usize;
+    let rx_ms = Arc::clone(&solicited_ms);
     let mut ctx = IbdReadCtx {
         id,
         out_tx,
@@ -689,7 +694,7 @@ async fn read_ibd_peer(
         let frame = read_v2_frame_with_progress(
             &mut reader,
             magic,
-            |buffered| note_read_progress(&bytes_io, &mut prog_mark, buffered),
+            |buffered| note_read_progress(&bytes_io, &rx_ms, &mut prog_mark, buffered),
             |n| decoy_hook(&mut ctx.rate, &mut ctx.ban_score, n),
         )
         .await;
@@ -812,6 +817,7 @@ pub(crate) async fn spawn_peer(
     )
     .await?;
     let peer_height = u32::try_from(ver.start_height).unwrap_or(0);
+    let connected_ms = ibd_mono_ms();
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<PeerCmd>();
     // Reader → writer for pongs (must not write on the read task — that would
@@ -888,10 +894,14 @@ pub(crate) async fn spawn_peer(
         solicited_ms,
         getdata_wire,
         peer_height,
-        connected_ms: ibd_mono_ms(),
+        connected_ms,
         first_data_ms: 0,
         bytes_rx_total,
-        rate: PeerRate::default(),
+        rate: {
+            let mut rate = PeerRate::default();
+            rate.note_connected(connected_ms);
+            rate
+        },
         alive: true,
         task,
     })
@@ -1222,14 +1232,20 @@ mod tests {
     fn read_progress_counts_the_delta_from_the_mark() {
         let bytes = AtomicU64::new(0);
         let mut mark = 0usize;
-        note_read_progress(&bytes, &mut mark, 10);
-        note_read_progress(&bytes, &mut mark, 25);
+        let rx_ms = AtomicU64::new(0);
+        // The process clock starts at 0. Wait so a stamp is distinguishable.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        note_read_progress(&bytes, &rx_ms, &mut mark, 10);
+        note_read_progress(&bytes, &rx_ms, &mut mark, 25);
         assert_eq!(bytes.load(Ordering::Relaxed), 25);
         assert_eq!(mark, 25);
+        assert!(rx_ms.load(Ordering::Relaxed) > 0);
+        let stamped = rx_ms.load(Ordering::Relaxed);
         // The reader stores the latest buffered size, even when it shrinks.
-        note_read_progress(&bytes, &mut mark, 4);
+        note_read_progress(&bytes, &rx_ms, &mut mark, 4);
         assert_eq!(bytes.load(Ordering::Relaxed), 25);
         assert_eq!(mark, 4);
+        assert_eq!(rx_ms.load(Ordering::Relaxed), stamped);
     }
 
     #[test]

@@ -14,12 +14,13 @@ pub(crate) const PROGRESS_STEP: u64 = 64 * 1024;
 /// Integer EWMA of received bytes, sampled on the IBD main thread.
 ///
 /// Accrues only while the peer has block getdata in flight. Idle time rebaselines
-/// the byte cursor so it does not dilute the rate. `progress_ms` is last qualifying
-/// rx (a requested block, or event-path `note_rx`); `work_started_ms` is the
-/// last getdata write of a new hash ([`super::peer_io::GetdataWire::wrote`]).
-/// Stall is `now - max(progress, work_started) > stall` while some of those
-/// hashes are already on the socket. A quiet in-flight gap does not rewrite
-/// the EWMA. Ranking, densify caps, and AddrMan FAST/SLOW read [`Self::bps`].
+/// the byte cursor so it does not dilute the rate. `progress_ms` is the last
+/// received block bytes (reader progress or a completed requested block).
+/// `work_started_ms` records the last getdata write and is not a stall input:
+/// a later ask must not refresh a peer that has stopped sending.
+/// Stall is `now - progress_ms > stall` while a getdata is already on the
+/// socket. A quiet in-flight gap does not rewrite the EWMA. Ranking, densify
+/// caps, and AddrMan FAST/SLOW read [`Self::bps`].
 /// Eviction reads
 /// [`Self::eviction_bps`], which folds silence in as zero throughput.
 #[derive(Clone, Copy, Debug, Default)]
@@ -77,6 +78,12 @@ impl PeerRate {
         self.last_ms = Some(now_ms);
     }
 
+    /// First silence window starts when the peer connects, not at process epoch
+    /// and not when we later write getdata.
+    pub(crate) fn note_connected(&mut self, now_ms: u64) {
+        self.progress_ms = now_ms;
+    }
+
     #[cfg(test)]
     pub(crate) fn note_work_started(&mut self, now_ms: u64) {
         self.work_started_ms = now_ms;
@@ -114,8 +121,7 @@ impl PeerRate {
         if !inflight {
             return false;
         }
-        let last = self.progress_ms.max(self.work_started_ms);
-        now_ms.saturating_sub(last) > stall_ms
+        now_ms.saturating_sub(self.progress_ms) > stall_ms
     }
 
     pub(crate) fn has_recent_rx(&self, now_ms: u64, stale_ms: u64) -> bool {
