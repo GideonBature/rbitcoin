@@ -738,6 +738,50 @@ async fn pin_esplora_tx_status(
     assert_eq!(st, 404);
 }
 
+async fn pin_esplora_script_classes(esplora_addr: SocketAddr, txid: &str) {
+    let (st, body) = http_get(esplora_addr, &format!("/tx/{txid}")).await;
+    assert_eq!(st, 200, "script-class tx: {body}");
+    let txj: Value = serde_json::from_str(&body).unwrap();
+    let types: Vec<&str> = txj["vout"]
+        .as_array()
+        .expect("vout")
+        .iter()
+        .map(|o| o["scriptpubkey_type"].as_str().expect("scriptpubkey_type"))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "p2pkh",
+            "p2sh",
+            "v0_p2wpkh",
+            "v0_p2wsh",
+            "v1_p2tr",
+            "p2pk",
+            "multisig",
+            "unknown",
+            "op_return",
+        ]
+    );
+    assert!(
+        txj["vout"][7].get("scriptpubkey_address").is_none(),
+        "OP_TRUE has no address: {}",
+        txj["vout"][7]
+    );
+    let addr = txj["vout"][2]["scriptpubkey_address"]
+        .as_str()
+        .expect("p2wpkh address");
+    let (st, body) = http_get(esplora_addr, &format!("/address/{addr}")).await;
+    assert_eq!(st, 200, "GET /address p2wpkh: {body}");
+    let (st, body) = http_get(esplora_addr, "/address/not-an-address").await;
+    assert_eq!(st, 404, "bad address: {body}");
+    let (st, body) = http_get(
+        esplora_addr,
+        "/address/bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+    )
+    .await;
+    assert_eq!(st, 404, "mainnet address on regtest: {body}");
+}
+
 async fn pin_esplora_tx_json_unknown_coinbase(esplora_addr: SocketAddr, cb_txid: &str) {
     let (st, body) = http_get(esplora_addr, &format!("/tx/{cb_txid}")).await;
     assert_eq!(st, 200, "tx json: {body}");
@@ -852,6 +896,16 @@ fn encode_tx(tx: &Transaction) -> String {
 }
 
 fn acs_spend(prev: Txid, input_sat: u64, fee: u64, spk: ScriptBuf) -> Transaction {
+    acs_spend_outputs(
+        prev,
+        vec![TxOut {
+            value: Amount::from_sat(input_sat - fee),
+            script_pubkey: spk,
+        }],
+    )
+}
+
+fn acs_spend_outputs(prev: Txid, output: Vec<TxOut>) -> Transaction {
     Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
@@ -864,11 +918,84 @@ fn acs_spend(prev: Txid, input_sat: u64, fee: u64, spk: ScriptBuf) -> Transactio
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: Witness::new(),
         }],
-        output: vec![TxOut {
-            value: Amount::from_sat(input_sat - fee),
-            script_pubkey: spk,
-        }],
+        output,
     }
+}
+
+/// One anyone-can-spend parent, one vout per Esplora script class.
+/// Output order is the `scriptpubkey_type` list the journey asserts.
+fn script_class_outputs(input_sat: u64) -> Vec<TxOut> {
+    const G_COMPRESSED: [u8; 33] = [
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16,
+        0xf8, 0x17, 0x98,
+    ];
+    const G_XONLY: [u8; 32] = [
+        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8,
+        0x17, 0x98,
+    ];
+    let p2pkh = {
+        let mut v = vec![0x76, 0xa9, 0x14];
+        v.extend_from_slice(&[0x11; 20]);
+        v.extend_from_slice(&[0x88, 0xac]);
+        v
+    };
+    let p2sh = {
+        let mut v = vec![0xa9, 0x14];
+        v.extend_from_slice(&[0x33; 20]);
+        v.push(0x87);
+        v
+    };
+    let p2wpkh = {
+        let mut v = vec![0x00, 0x14];
+        v.extend_from_slice(&[0x22; 20]);
+        v
+    };
+    let p2wsh = {
+        let mut v = vec![0x00, 0x20];
+        v.extend_from_slice(&[0xab; 32]);
+        v
+    };
+    let p2tr = {
+        let mut v = vec![0x51, 0x20];
+        v.extend_from_slice(&G_XONLY);
+        v
+    };
+    let p2pk = {
+        let mut v = vec![0x21];
+        v.extend_from_slice(&G_COMPRESSED);
+        v.push(0xac);
+        v
+    };
+    let multisig = {
+        let mut v = vec![0x51, 0x21];
+        v.extend_from_slice(&G_COMPRESSED);
+        v.extend_from_slice(&[0x51, 0xae]);
+        v
+    };
+    let scripts = [
+        p2pkh,
+        p2sh,
+        p2wpkh,
+        p2wsh,
+        p2tr,
+        p2pk,
+        multisig,
+        vec![0x51],
+        vec![0x6a, 0x02, b'h', b'i'],
+    ];
+    let fee = 10_000u64;
+    let n = scripts.len();
+    let each = (input_sat - fee) / (n as u64 - 1);
+    scripts
+        .into_iter()
+        .enumerate()
+        .map(|(i, raw)| TxOut {
+            value: Amount::from_sat(if i + 1 == n { 0 } else { each }),
+            script_pubkey: ScriptBuf::from_bytes(raw),
+        })
+        .collect()
 }
 
 fn tx_wu(tx: &Transaction) -> u64 {
@@ -1665,6 +1792,12 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     );
     let replaced = jsonrpc(rpc_addr, "sendrawtransaction", json!([high_hex])).await;
     assert_eq!(replaced["result"], high_txid, "{replaced}");
+    let high_value = 50_0000_0000 - (1_000 + inc);
+    let script_tx = acs_spend_outputs(high.compute_txid(), script_class_outputs(high_value));
+    let script_hex = encode_tx(&script_tx);
+    let script_txid = script_tx.compute_txid().to_string();
+    let script_sent = jsonrpc(rpc_addr, "sendrawtransaction", json!([script_hex])).await;
+    assert_eq!(script_sent["result"], script_txid, "{script_sent}");
     let mem = jsonrpc(rpc_addr, "getrawmempool", json!([])).await;
     assert!(
         mempool_has(&mem, &high_txid),
@@ -1880,6 +2013,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         &chain_last,
         &cpfp_parent_txid,
         &cpfp_child_txid,
+        &script_txid,
     ] {
         assert!(mempool_has(&mem, tid), "getrawmempool missing {tid}: {mem}");
     }
@@ -1919,6 +2053,10 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     // pool alone does not set a rate, so no target answers.
     let (st, body) = http_get(esplora_addr, "/fee-estimates").await;
     assert_eq!(st, 503, "GET /fee-estimates: {body}");
+    assert!(
+        body.contains("fee estimates unavailable"),
+        "an empty estimator must not invent a target: {body}"
+    );
 
     let metrics_in_ibd = pin_metrics_equal_rpc(health_addr, rpc_addr, false).await;
     assert!(
@@ -1986,6 +2124,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         &at_min_txid,
         &chain_last,
         &cpfp_parent_txid,
+        &script_txid,
     ] {
         assert!(
             txs.iter().any(|t| t["txid"] == *tid),
@@ -2009,6 +2148,16 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     pin_esplora_block_height_and_header(esplora_addr, new_hash, 107).await;
     pin_esplora_tx_status(esplora_addr, new_hash, &cb_txid, 107).await;
     pin_esplora_tx_json_unknown_coinbase(esplora_addr, &cb_txid).await;
+    pin_esplora_script_classes(esplora_addr, &script_txid).await;
+    let genesis_id = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+        .block_hash()
+        .to_string();
+    let (st, body) = http_get(esplora_addr, &format!("/block/{genesis_id}")).await;
+    assert_eq!(st, 200, "genesis block json: {body}");
+    let genesis_json: Value = serde_json::from_str(&body).unwrap();
+    assert!(genesis_json["previousblockhash"].is_null(), "{body}");
+    let (st, body) = http_get(esplora_addr, &format!("/block/{}", "11".repeat(32))).await;
+    assert_eq!(st, 404, "unknown block: {body}");
     pin_esplora_scripthash_pages(esplora_addr).await;
     let cb_val = (txs[0]["vout"][0]["value"].as_f64().unwrap() * 100_000_000.0).round() as u64;
     let immature = Transaction {
