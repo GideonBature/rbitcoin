@@ -2132,12 +2132,12 @@ impl ScriptHashTable {
         let mut last = last_page;
         let mut page = [0u8; SH_PAGE_SIZE];
         body.read_at(last, &mut page)?;
-        let Some((base_chk, n_chk)) = sh_page_extent(&page)? else {
+        if sh_page_extent(&page)?.is_none() {
             return Err(StoreError::Corrupt("scripthash extent last page not ver=2"));
-        };
-        let contiguous_end = base_chk
-            .saturating_add(u64::from(n_chk.saturating_sub(1)).saturating_mul(SH_PAGE_SIZE as u64));
-        if last_page < contiguous_end {
+        }
+        // A low freelist tail and an inflated extent_n both sit below the
+        // stamped geometric end. The tail is the page with no successor.
+        if sh_page_next(&page)? != 0 {
             return Err(StoreError::Corrupt(
                 "scripthash extent last page is not the extent tail",
             ));

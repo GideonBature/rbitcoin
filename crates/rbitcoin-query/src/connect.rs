@@ -908,13 +908,14 @@ impl Query {
                 by_sh.entry(script_hash(&o.script)).or_default().push(tx_fk);
             }
         }
-        let mut touched_sh: Vec<[u8; 32]> = Vec::with_capacity(by_sh.len());
+        let mut groups: Vec<([u8; 32], Vec<Fk>)> = Vec::with_capacity(by_sh.len());
         for (sh, mut fks) in by_sh {
             fks.sort_by_key(|fk| fk.0);
             fks.dedup();
-            self.store.scripthash.unlink_creates(&sh, &fks)?;
-            touched_sh.push(sh);
+            groups.push((sh, fks));
         }
+        self.store.scripthash.unlink_creates_batch(&groups)?;
+        let touched_sh: Vec<[u8; 32]> = groups.iter().map(|(sh, _)| *sh).collect();
         if !touched_sh.is_empty() {
             let mut heads = self.sh.heads.lock().unwrap();
             for sh in touched_sh {

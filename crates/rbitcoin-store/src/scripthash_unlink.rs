@@ -15,7 +15,16 @@ use crate::scripthash_pages::{
     sh_page_entries_into, sh_page_extent_creates, sh_page_set_extent_creates,
 };
 use rbitcoin_primitives::Fk;
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::BTreeSet;
+
+#[cfg(test)]
+thread_local! {
+    static WATCH_READABLE: Cell<bool> = const { Cell::new(false) };
+    static READABLE_BROKE: Cell<bool> = const { Cell::new(false) };
+    static FAIL_CLEAR_UNDO: Cell<bool> = const { Cell::new(false) };
+}
 
 const UNDO_AT: usize = 256;
 const UNDO_LEN: usize = 48;
@@ -38,6 +47,21 @@ struct UndoRec {
     target: u64,
     image: u64,
     word: Option<HeadWord>,
+}
+
+#[derive(Default)]
+struct UnlinkBatch {
+    rewrites: Vec<DeferredRewrite>,
+    main_shards: Vec<usize>,
+    ovf: bool,
+}
+
+struct DeferredRewrite {
+    scripthash: [u8; 32],
+    home: LocatedHome,
+    new_val: ShHeadValue,
+    old: ShHeadValue,
+    removed: u64,
 }
 
 enum SuffixPlan {
@@ -68,6 +92,28 @@ impl ScriptHashTable {
         scripthash: &[u8; 32],
         create_tx_fks: &[Fk],
     ) -> Result<bool, StoreError> {
+        let mut batch = UnlinkBatch::default();
+        let changed = self.unlink_one(scripthash, create_tx_fks, &mut batch)?;
+        self.finish_unlink_batch(batch)?;
+        Ok(changed)
+    }
+
+    /// Unlink every group, then sync the new chains and heads once before any
+    /// replaced page is freed. One scripthash uses [`Self::unlink_creates`].
+    pub fn unlink_creates_batch(&self, groups: &[([u8; 32], Vec<Fk>)]) -> Result<(), StoreError> {
+        let mut batch = UnlinkBatch::default();
+        for (scripthash, fks) in groups {
+            self.unlink_one(scripthash, fks, &mut batch)?;
+        }
+        self.finish_unlink_batch(batch)
+    }
+
+    fn unlink_one(
+        &self,
+        scripthash: &[u8; 32],
+        create_tx_fks: &[Fk],
+        batch: &mut UnlinkBatch,
+    ) -> Result<bool, StoreError> {
         let mut remove = BTreeSet::new();
         for fk in create_tx_fks {
             if !fk.is_null() {
@@ -84,12 +130,12 @@ impl ScriptHashTable {
             return Ok(false);
         }
         let ShHeadValue::Extent { last_page } = val else {
-            return self.unlink_by_rewrite(scripthash, home, &val, &remove);
+            return self.unlink_by_rewrite(scripthash, home, &val, &remove, batch);
         };
         let body = self.body_for(scripthash, super::KeyHome::from(home));
         match plan_extent_suffix(body, last_page, &remove)? {
             SuffixPlan::Absent => Ok(false),
-            SuffixPlan::NotSuffix => self.unlink_by_rewrite(scripthash, home, &val, &remove),
+            SuffixPlan::NotSuffix => self.unlink_by_rewrite(scripthash, home, &val, &remove, batch),
             plan => self.apply_suffix_plan(scripthash, home, &val, plan),
         }
     }
@@ -115,7 +161,7 @@ impl ScriptHashTable {
         Ok(())
     }
 
-    /// Leave a torn last page with a durable undo image. Open restores it.
+    /// Leave a torn last page and an empty head word. Open restores both.
     #[cfg(test)]
     pub(super) fn test_tear_extent_tail(&self, scripthash: &[u8; 32]) -> Result<(), StoreError> {
         let Some((val, home)) = self.locate_head(scripthash)? else {
@@ -134,8 +180,28 @@ impl ScriptHashTable {
         torn[0] = 0;
         body.write_at(last_page, &torn)?;
         let _ = rec;
+        self.unlink_write_home(scripthash, home, &ShHeadValue::Empty)?;
+        self.sync_home(home, scripthash)?;
         body.sync_data_only()?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn watch_readable_during_unlink(&self, on: bool) {
+        WATCH_READABLE.with(|c| c.set(on));
+        if on {
+            READABLE_BROKE.with(|c| c.set(false));
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn readable_broke(&self) -> bool {
+        READABLE_BROKE.with(|c| c.get())
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_undo_clear(&self) {
+        FAIL_CLEAR_UNDO.with(|c| c.set(true));
     }
 
     fn unlink_by_rewrite(
@@ -144,6 +210,7 @@ impl ScriptHashTable {
         home: LocatedHome,
         old: &ShHeadValue,
         remove: &BTreeSet<u64>,
+        batch: &mut UnlinkBatch,
     ) -> Result<bool, StoreError> {
         let body = self.body_for(scripthash, super::KeyHome::from(home));
         let mut live = self.collect_entries_from(body, old)?;
@@ -166,24 +233,87 @@ impl ScriptHashTable {
             *alloc = saved;
             return Err(e);
         }
+        let removed = (before - live.len()) as u64;
+        if frees_old_pages(old) {
+            // Head stays on the old chain until the batch syncs these bytes.
+            note_batch_body(self, batch, scripthash, home);
+            batch.rewrites.push(DeferredRewrite {
+                scripthash: *scripthash,
+                home,
+                new_val,
+                old: old.clone(),
+                removed,
+            });
+            return Ok(true);
+        }
         if let Err(e) = self.unlink_write_home(scripthash, home, &new_val) {
             *alloc = saved;
             let _ = write_alloc_header(body, &alloc);
             return Err(e);
         }
-        let new_n = live.len() as u64;
-        let old_n = before as u64;
-        if new_n > old_n {
-            alloc.live_count = alloc.live_count.saturating_add(new_n - old_n);
-        } else {
-            alloc.live_count = alloc.live_count.saturating_sub(old_n - new_n);
-        }
-        if let Err(e) = self.free_if_paged(body, &mut alloc, old) {
-            let _ = write_alloc_header(body, &alloc);
-            return Err(e);
-        }
+        alloc.live_count = alloc.live_count.saturating_sub(removed);
         write_alloc_header(body, &alloc)?;
         Ok(true)
+    }
+
+    fn finish_unlink_batch(&self, batch: UnlinkBatch) -> Result<(), StoreError> {
+        if batch.rewrites.is_empty() {
+            return Ok(());
+        }
+        for si in &batch.main_shards {
+            self.bodies[*si].sync_data_only()?;
+        }
+        if batch.ovf {
+            if let Some(body) = &self.ovf_body {
+                body.sync_data_only()?;
+            }
+        }
+        for job in &batch.rewrites {
+            self.unlink_write_home(&job.scripthash, job.home, &job.new_val)?;
+        }
+        self.sync_batch_homes(&batch)?;
+        for job in &batch.rewrites {
+            let body = self.body_for(&job.scripthash, super::KeyHome::from(job.home));
+            let alloc_mu = self.alloc_for(&job.scripthash, super::KeyHome::from(job.home));
+            let mut alloc = alloc_mu.lock().unwrap();
+            alloc.live_count = alloc.live_count.saturating_sub(job.removed);
+            if let Err(e) = self.free_if_paged(body, &mut alloc, &job.old) {
+                let _ = write_alloc_header(body, &alloc);
+                return Err(e);
+            }
+            write_alloc_header(body, &alloc)?;
+        }
+        Ok(())
+    }
+
+    fn sync_batch_homes(&self, batch: &UnlinkBatch) -> Result<(), StoreError> {
+        for si in &batch.main_shards {
+            if let Some(slot) = self.sorted_main.get(*si) {
+                if let Some(h) = slot.read().unwrap().as_ref() {
+                    h.flush()?;
+                }
+            }
+        }
+        let ingest = batch
+            .rewrites
+            .iter()
+            .any(|job| matches!(job.home, LocatedHome::Main | LocatedHome::Ingest));
+        let ovf = batch
+            .rewrites
+            .iter()
+            .any(|job| matches!(job.home, LocatedHome::SealedOvf));
+        if ingest {
+            self.ingest.lock().unwrap().flush()?;
+        }
+        if ovf {
+            for h in self.sealed_ovf.lock().unwrap().iter() {
+                h.flush()?;
+            }
+            if let Some(l1) = self.ovf_l1.lock().unwrap().as_ref() {
+                l1.head.flush()?;
+            }
+        }
+        Ok(())
     }
 
     fn apply_suffix_plan(
@@ -214,22 +344,42 @@ impl ScriptHashTable {
                 creates,
                 removed,
             } => {
+                let old_last = match old {
+                    ShHeadValue::Extent { last_page } => *last_page,
+                    _ => boundary,
+                };
+                let extent_n = new_extent_n(base, old_n, boundary);
+                let creates = new_creates(creates, removed);
+                if boundary != old_last {
+                    // The head still names `old_last`. Shrink that page's
+                    // extent first so `boundary` is not an interior page
+                    // when it is rewritten.
+                    self.retire_head_page(
+                        body,
+                        &mut alloc,
+                        scripthash,
+                        home,
+                        old_last,
+                        &BoundaryPack {
+                            base,
+                            extent_n,
+                            boundary,
+                            creates,
+                        },
+                    )?;
+                }
                 let prepared = prepare_boundary(
                     self,
                     body,
                     &mut alloc,
                     &BoundaryPack {
                         base,
-                        extent_n: new_extent_n(base, old_n, boundary),
+                        extent_n,
                         boundary,
-                        creates: new_creates(creates, removed),
+                        creates,
                     },
                     &keep,
                 )?;
-                let old_last = match old {
-                    ShHeadValue::Extent { last_page } => *last_page,
-                    _ => boundary,
-                };
                 let new_head = if prepared.new_last == old_last && drop_pages.is_empty() {
                     None
                 } else {
@@ -244,6 +394,7 @@ impl ScriptHashTable {
                         target: prepared.at,
                         bytes: &prepared.bytes,
                         new_head,
+                        head_page: old_last,
                         removed,
                     },
                 )?;
@@ -276,6 +427,7 @@ impl ScriptHashTable {
             return Err(e);
         }
         body.sync_data_only()?;
+        note_readable(body, write.head_page);
         if let Some(val) = write.new_head {
             if let Err(e) = self.unlink_write_home(scripthash, home, &val) {
                 self.rollback_undo(body, alloc, &rec)?;
@@ -285,11 +437,50 @@ impl ScriptHashTable {
                 self.rollback_undo(body, alloc, &rec)?;
                 return Err(e);
             }
+            if let ShHeadValue::Extent { last_page } = val {
+                note_readable(body, last_page);
+            }
         }
         alloc.live_count = alloc.live_count.saturating_sub(write.removed);
-        clear_undo_keep_image(body, alloc)?;
+        if let Err(e) = clear_undo_keep_image(body, alloc) {
+            alloc.live_count = alloc.live_count.saturating_add(write.removed);
+            self.rollback_undo(body, alloc, &rec)?;
+            return Err(e);
+        }
         self.free_slab(body, alloc, SH_PAGE_SLAB_CLASS, rec.image)?;
         Ok(())
+    }
+
+    /// Publish a shorter extent on the page the head already names.
+    ///
+    /// The page stays `ver=2` and empty. Readers follow the predecessor's
+    /// `next` onto it and stop, so a later rewrite of that predecessor is
+    /// not an interior-link break.
+    fn retire_head_page(
+        &self,
+        body: &TableFile,
+        alloc: &mut AllocState,
+        scripthash: &[u8; 32],
+        home: LocatedHome,
+        head_page: u64,
+        pack: &BoundaryPack,
+    ) -> Result<(), StoreError> {
+        let mut page = [0u8; SH_PAGE_SIZE];
+        sh_page_pack_extent_last_fks(&mut page, &[], pack.base, pack.extent_n, 0)?;
+        sh_page_set_extent_creates(&mut page, pack.creates);
+        self.commit_tail_page(
+            body,
+            alloc,
+            scripthash,
+            home,
+            TailWrite {
+                target: head_page,
+                bytes: &page,
+                new_head: None,
+                head_page,
+                removed: 0,
+            },
+        )
     }
 
     fn rollback_undo(
@@ -474,6 +665,8 @@ struct TailWrite<'a> {
     target: u64,
     bytes: &'a [u8; SH_PAGE_SIZE],
     new_head: Option<ShHeadValue>,
+    /// Page the head names while `target` is written.
+    head_page: u64,
     removed: u64,
 }
 
@@ -567,7 +760,21 @@ fn plan_extent_suffix(
         let page = read_page(body, off)?;
         let fks = page_fks(&page)?;
         if fks.is_empty() {
-            return Err(StoreError::Corrupt("scripthash extent tail page is empty"));
+            let Some(pred) = predecessor(body, base, off)? else {
+                return if found.is_empty() {
+                    Ok(SuffixPlan::Absent)
+                } else {
+                    Ok(SuffixPlan::DropAll {
+                        removed: found.len() as u64,
+                    })
+                };
+            };
+            if pred == off {
+                return Err(StoreError::Corrupt("scripthash extent empty tail loops"));
+            }
+            dropped_pages.push(off);
+            off = pred;
+            continue;
         }
         let first = fks[0].0;
         let mut keep = Vec::new();
@@ -715,6 +922,9 @@ fn arm_undo(
     let old_page = read_page(body, target)?;
     let image = table.alloc_page(body, alloc)?;
     body.write_at(image, &old_page)?;
+    // The image and the header are different blocks. Publish SHUN only after
+    // the image is durable, or recovery copies an unwritten page onto the tail.
+    body.sync_data_only()?;
     let rec = UndoRec {
         target,
         image,
@@ -733,9 +943,46 @@ fn restore_page(body: &TableFile, rec: &UndoRec) -> Result<(), StoreError> {
 }
 
 fn clear_undo_keep_image(body: &TableFile, alloc: &AllocState) -> Result<(), StoreError> {
+    #[cfg(test)]
+    if FAIL_CLEAR_UNDO.with(|c| c.replace(false)) {
+        return Err(StoreError::Corrupt("scripthash undo clear failed"));
+    }
     persist_undo(body, alloc, None)?;
     body.sync_data_only()?;
     Ok(())
+}
+
+fn frees_old_pages(old: &ShHeadValue) -> bool {
+    matches!(old, ShHeadValue::Extent { .. } | ShHeadValue::Slab { .. })
+}
+
+fn note_batch_body(
+    table: &ScriptHashTable,
+    batch: &mut UnlinkBatch,
+    scripthash: &[u8; 32],
+    home: LocatedHome,
+) {
+    match home {
+        LocatedHome::Main => {
+            let si = table.shard_index(scripthash);
+            if !batch.main_shards.contains(&si) {
+                batch.main_shards.push(si);
+            }
+        }
+        LocatedHome::Ingest | LocatedHome::SealedOvf => batch.ovf = true,
+    }
+}
+
+fn note_readable(body: &TableFile, last_page: u64) {
+    #[cfg(test)]
+    if WATCH_READABLE.with(|c| c.get()) && super::collect_extent_then_tail(body, last_page).is_err()
+    {
+        READABLE_BROKE.with(|c| c.set(true));
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (body, last_page);
+    }
 }
 
 fn persist_undo(
