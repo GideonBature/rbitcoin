@@ -12,7 +12,8 @@ use crate::scripthash_materialize::{
 use crate::scripthash_mphf::{mix_key16, MphfHead};
 use crate::scripthash_pages::{
     sh_page_as_array, sh_page_as_array_mut, sh_page_extent, sh_page_set_extent,
-    SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
+    sh_page_set_extent_creates, sh_page_set_next, SH_PAGE_EXTENT_STREAM_MAX, SH_PAGE_OFF_N_FKS,
+    SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -1040,7 +1041,11 @@ fn freelist_reuses_page() {
         }
         other => panic!("expected slab, got {other:?}"),
     };
-    assert_eq!(off1, off2, "slab freelist should reuse offset");
+    let step = crate::scripthash_layout::slab_bytes(0);
+    assert!(
+        off2 == off1 || off2 == off1 + step,
+        "slab freelist should reuse a freed offset (first {off1}, next {off2})"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1889,6 +1894,564 @@ fn extent_append_glued_bumps_extent_n() {
     assert_eq!(n1, 3, "glued HWM grows extent_n in place");
     assert_eq!(last, base + 2 * SH_PAGE_SIZE as u64);
     assert_eq!(t.entries(&sh).unwrap().len(), n + 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A tip disconnect removes the highest creates. That must rewrite the tail
+/// page, not allocate another copy of the whole extent.
+#[test]
+fn extent_suffix_unlink_does_not_copy_the_chain() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    // Last page must keep the remaining creates. A one-fk tail would promote
+    // the previous full page and allocate a split, which is a different budget.
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_add(400);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x31;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let before = t.body().logical_len();
+    assert!(t.unlink_create(&sh, Fk(n), 0).unwrap());
+    let growth = t.body().logical_len().saturating_sub(before);
+    assert!(
+        growth <= SH_PAGE_SIZE as u64,
+        "suffix unlink grew the body by {growth} bytes (chain copy)"
+    );
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), (n - 1) as usize);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n - 1)));
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    let after = t.body().logical_len();
+    assert!(!t.unlink_create(&sh, Fk(n), 0).unwrap());
+    assert_eq!(t.body().logical_len(), after, "absent unlink must not grow");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dropping more than one tail page still must not copy the prefix.
+#[test]
+fn extent_suffix_batch_unlink_stays_within_two_pages() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x32;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let drop_n = (SH_PAGE_STREAM_MAX as u64).saturating_add(50);
+    let fks: Vec<_> = ((n - drop_n + 1)..=n).map(Fk).collect();
+    let before = t.body().logical_len();
+    assert!(t.unlink_creates(&sh, &fks).unwrap());
+    let growth = t.body().logical_len().saturating_sub(before);
+    assert!(
+        growth <= (SH_PAGE_SIZE as u64).saturating_mul(2),
+        "batch suffix unlink grew the body by {growth} bytes"
+    );
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), (n - drop_n) as usize);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n - drop_n)));
+    assert!(!t.unlink_creates(&sh, &fks).unwrap());
+    let again = t.entries(&sh).unwrap();
+    assert_eq!(again.len(), got.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A torn tail on the ingest home restores the page and the ingest head word.
+#[test]
+fn extent_ingest_torn_tail_restores_on_open() {
+    let dir = tmp();
+    let sh = script_hash(&[0x36]);
+    let n = 300u64;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+        t.put_create_batch_append(&many, &mut HashMap::new())
+            .unwrap();
+        assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::Ingest));
+        t.test_tear_extent_tail(&sh).unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A torn tail on a sealed overflow file, and again after L1 promote.
+#[test]
+fn extent_sealed_ovf_torn_tail_restores_on_open() {
+    let dir = tmp();
+    let n = 300u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x37;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let sh_main = script_hash(&[0x10]);
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh_main, &[Fk(1)]);
+        seal_session(&t, 0, session);
+        let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+        t.put_create_batch_append(&many, &mut HashMap::new())
+            .unwrap();
+        for i in 0..210u32 {
+            let filler = script_hash(&[0xa4, (i & 0xff) as u8, (i >> 8) as u8, 0x04]);
+            put_create(&t, rec(filler, 5000 + u64::from(i), 0));
+        }
+        assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::SealedOvf));
+        t.test_tear_extent_tail(&sh).unwrap();
+        t.flush().unwrap();
+    }
+    {
+        let t = ScriptHashTable::open_tiny(&dir).unwrap();
+        assert_eq!(t.entries(&sh).unwrap().len(), n as usize);
+        for i in 0..210u32 {
+            let filler = script_hash(&[0xa5, (i & 0xff) as u8, (i >> 8) as u8, 0x05]);
+            put_create(&t, rec(filler, 8000 + u64::from(i), 0));
+        }
+        t.compact_sealed_ovf().unwrap();
+        assert!(t.ovf_l1.lock().unwrap().is_some());
+        assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::SealedOvf));
+        t.test_tear_extent_tail(&sh).unwrap();
+        t.flush().unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dropping a linked tail page finds the previous page by walking `next`.
+#[test]
+fn extent_linked_tail_unlink_walks_to_the_extent() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX - 1;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x38;
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
+    let mut sh_gap = [0u8; 32];
+    sh_gap[0] = 0x38;
+    sh_gap[1] = 0x01;
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    push_chain(&mut session, sh_gap, &[Fk(1), Fk(2)]);
+    seal_session(&t, 0, session);
+    let (base, last0, n0) = extent_meta(&t, &sh);
+    assert_eq!(n0, 2);
+    put_create(&t, rec(sh, n as u64 + 1, 0));
+    let (_, last1, _) = extent_meta(&t, &sh);
+    assert_ne!(last1, base + u64::from(n0 - 1) * SH_PAGE_SIZE as u64);
+    assert_ne!(last1, last0);
+    assert!(t.unlink_create(&sh, Fk(n as u64 + 1), 0).unwrap());
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n as u64)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A torn tail write rolls back to the pre-unlink page on open.
+#[test]
+fn extent_torn_tail_restores_on_open() {
+    let dir = tmp();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_add(10);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x33;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let ents: Vec<_> = (1..=n).map(Fk).collect();
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh, &ents);
+        seal_session(&t, 0, session);
+        t.test_tear_extent_tail(&sh).unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    assert!(
+        matches!(
+            t.head_value(&sh).unwrap().unwrap(),
+            ShHeadValue::Extent { .. }
+        ),
+        "open restores the head word, not the empty word written after the tear"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Removing a create that is not the tail still leaves a readable key.
+#[test]
+fn extent_middle_unlink_roundtrips() {
+    let dir = tmp();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x34;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let ents: Vec<_> = (1..=n).map(Fk).collect();
+        let mut session = t.pack_shard_session(0).unwrap();
+        push_chain(&mut session, sh, &ents);
+        seal_session(&t, 0, session);
+        assert!(t.unlink_create(&sh, Fk(10), 0).unwrap());
+        let got = t.entries(&sh).unwrap();
+        assert_eq!(got.len(), (n - 1) as usize);
+        assert!(got.iter().all(|e| e.0 != Fk(10)));
+        t.flush().unwrap();
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), (n - 1) as usize);
+    assert!(got.iter().all(|e| e.0 != Fk(10)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn append_rejects_extent_page_that_is_not_ver2() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = SH_PAGE_STREAM_MAX as u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x35;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last_page = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last_page, &mut page).unwrap();
+    page[0] = 0;
+    t.body().write_at(last_page, &page).unwrap();
+    let err = t
+        .put_create_batch_append(&[rec(sh, n + 1, 0)], &mut HashMap::new())
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("scripthash extent last page not ver=2"),
+        "{msg}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dropping a whole tail page must not break a history read that still
+/// names the old head.
+#[test]
+fn extent_whole_page_drop_stays_readable() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x39;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    t.watch_readable_during_unlink(true);
+    assert!(t.unlink_create(&sh, Fk(n), 0).unwrap());
+    assert!(
+        !t.readable_broke(),
+        "a reader of the published head saw a broken extent"
+    );
+    t.watch_readable_during_unlink(false);
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), (n - 1) as usize);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n - 1)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failed undo clear must put the tail back. The next unlink then drops it.
+#[test]
+fn extent_undo_clear_failure_keeps_the_old_tail() {
+    let dir = tmp();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_add(400);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3a;
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    t.fail_next_undo_clear();
+    let err = t.unlink_create(&sh, Fk(n), 0).unwrap_err();
+    assert!(
+        err.to_string().contains("scripthash undo clear failed"),
+        "{err}"
+    );
+    assert_eq!(t.entries(&sh).unwrap().len(), n as usize);
+    assert!(t.unlink_create(&sh, Fk(n), 0).unwrap());
+    assert_eq!(t.entries(&sh).unwrap().len(), (n - 1) as usize);
+    t.flush().unwrap();
+    drop(t);
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    assert_eq!(t.entries(&sh).unwrap().len(), (n - 1) as usize);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `extent_n` past the real chain is a hint. The ver=2 page is still the tail.
+#[test]
+fn append_accepts_inflated_extent_tail() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let sh = script_hash(&[0x7d]);
+    let mut heads = HashMap::new();
+    let n = 600u32;
+    let many: Vec<_> = (1..=n).map(|v| rec(sh, u64::from(v), v)).collect();
+    t.put_create_batch_append(&many, &mut heads).unwrap();
+    let last_page = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.ovf_file().read_at(last_page, &mut page).unwrap();
+    let arr = sh_page_as_array_mut(&mut page).unwrap();
+    let (base, pages) = sh_page_extent(arr).unwrap().expect("ver=2 last page");
+    let over = (64 * 1024 * 1024 / SH_PAGE_SIZE as u64) as u32 + 1;
+    assert!(over > pages);
+    sh_page_set_extent(arr, base, over).unwrap();
+    t.ovf_file().write_at(last_page, &page).unwrap();
+    put_create(&t, rec(sh, u64::from(n) + 1, 0));
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize + 1);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(u64::from(n) + 1)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A linked tail popped from the page freelist may sit below the extent.
+#[test]
+fn append_accepts_linked_tail_below_the_extent() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = SH_PAGE_STREAM_MAX + SH_PAGE_EXTENT_STREAM_MAX - 1;
+    let mut sh_a = [0u8; 32];
+    sh_a[0] = 0x51;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x52;
+    let mut sh_gap = [0u8; 32];
+    sh_gap[0] = 0x53;
+    let a_ents: Vec<_> = (1..=SH_PAGE_STREAM_MAX as u64).map(Fk).collect();
+    let ents: Vec<_> = (1..=n as u64).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh_a, &a_ents);
+    push_chain(&mut session, sh, &ents);
+    push_chain(&mut session, sh_gap, &[Fk(1), Fk(2)]);
+    seal_session(&t, 0, session);
+    let a_page = match t.head_value(&sh_a).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent for the low key, got {other:?}"),
+    };
+    let (base, _, pages) = extent_meta(&t, &sh);
+    let end = base + u64::from(pages - 1) * SH_PAGE_SIZE as u64;
+    assert!(
+        a_page < end,
+        "freed page {a_page} must sit below the extent end {end}"
+    );
+    assert!(t.unlink_creates(&sh_a, &a_ents).unwrap());
+    put_create(&t, rec(sh, n as u64 + 1, 0));
+    let (_, last, _) = extent_meta(&t, &sh);
+    assert!(
+        last < end,
+        "linked tail {last} should sit below the stamped end {end} (freed page {a_page})"
+    );
+    put_create(&t, rec(sh, n as u64 + 2, 0));
+    assert_eq!(t.entries(&sh).unwrap().len(), n + 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn zero_n_fks(body: &crate::file::TableFile, off: u64) {
+    let mut page = [0u8; SH_PAGE_SIZE];
+    body.read_at(off, &mut page).unwrap();
+    page[SH_PAGE_OFF_N_FKS..SH_PAGE_OFF_N_FKS + 2].copy_from_slice(&0u16.to_le_bytes());
+    body.write_at(off, &page).unwrap();
+}
+
+/// A head page emptied before the predecessor is rewritten is still the tail.
+/// Unlink walks it and drops the suffix from the page that still holds creates.
+#[test]
+fn extent_empty_head_unlink_walks_to_the_predecessor() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3b;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let (base, last, _) = extent_meta(&t, &sh);
+    assert_ne!(last, base, "the head page must have a predecessor");
+    zero_n_fks(t.body(), last);
+    let before = t.entries(&sh).unwrap();
+    assert!(!before.is_empty(), "the predecessor still holds creates");
+    let drop_fk = before.last().unwrap().0;
+    assert!(t.unlink_create(&sh, drop_fk, 0).unwrap());
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), before.len() - 1);
+    assert!(got.iter().all(|e| e.0 != drop_fk));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(drop_fk.0 - 1)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tail's creates are gone and the only earlier page is empty, so the key goes.
+#[test]
+fn extent_empty_predecessor_drops_the_key() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = (SH_PAGE_STREAM_MAX as u64).saturating_mul(2);
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3c;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let (base, last, _) = extent_meta(&t, &sh);
+    assert_ne!(last, base);
+    zero_n_fks(t.body(), base);
+    let tail = t.entries(&sh).unwrap();
+    assert!(!tail.is_empty());
+    assert!(tail.iter().all(|e| e.0 .0 > 1));
+    let mut remove: Vec<Fk> = tail.iter().map(|e| e.0).collect();
+    remove.push(Fk(1));
+    assert!(t.unlink_creates(&sh, &remove).unwrap());
+    assert!(t.entries(&sh).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty one-page extent has no create to drop.
+#[test]
+fn extent_empty_only_page_unlink_is_absent() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3d;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let (base, last, pages) = extent_meta(&t, &sh);
+    assert_eq!(pages, 1);
+    assert_eq!(last, base);
+    zero_n_fks(t.body(), last);
+    assert!(!t.unlink_create(&sh, Fk(1), 0).unwrap());
+    assert!(t.entries(&sh).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A page that still names a successor is not the tail.
+#[test]
+fn append_rejects_a_page_that_still_has_a_successor() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3e;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last, &mut page).unwrap();
+    sh_page_set_next(sh_page_as_array_mut(&mut page).unwrap(), last).unwrap();
+    t.body().write_at(last, &page).unwrap();
+    let err = t
+        .put_create_batch_append(&[rec(sh, n + 1, 0)], &mut HashMap::new())
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("scripthash extent last page is not the extent tail"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A zero creates counter is recounted from the pages before the new create lands.
+#[test]
+fn append_recounts_when_the_creates_counter_is_zero() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x3f;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last, &mut page).unwrap();
+    sh_page_set_extent_creates(sh_page_as_array_mut(&mut page).unwrap(), 0);
+    t.body().write_at(last, &page).unwrap();
+    put_create(&t, rec(sh, n + 1, 0));
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize + 1);
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n + 1)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty tail whose creates counter is also zero still accepts one create.
+#[test]
+fn append_accepts_an_empty_tail_with_a_zero_creates_counter() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let n = 2100u64;
+    let mut sh = [0u8; 32];
+    sh[0] = 0x40;
+    let ents: Vec<_> = (1..=n).map(Fk).collect();
+    let mut session = t.pack_shard_session(0).unwrap();
+    push_chain(&mut session, sh, &ents);
+    seal_session(&t, 0, session);
+    let last = match t.head_value(&sh).unwrap().unwrap() {
+        ShHeadValue::Extent { last_page } => last_page,
+        other => panic!("expected extent, got {other:?}"),
+    };
+    zero_n_fks(t.body(), last);
+    let mut page = [0u8; SH_PAGE_SIZE];
+    t.body().read_at(last, &mut page).unwrap();
+    sh_page_set_extent_creates(sh_page_as_array_mut(&mut page).unwrap(), 0);
+    t.body().write_at(last, &page).unwrap();
+    put_create(&t, rec(sh, n + 1, 0));
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0, Fk(n + 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two slab unlinks publish both heads, then free. Reopen sees both.
+#[test]
+fn unlink_batch_publishes_both_heads() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let a = script_hash(&[0x61]);
+    let b = script_hash(&[0x62]);
+    for i in 1..=3u64 {
+        put_create(&t, rec(a, i, i as u32));
+        put_create(&t, rec(b, i + 10, i as u32));
+    }
+    t.unlink_creates_batch(&[(a, vec![Fk(2)]), (b, vec![Fk(12)])])
+        .unwrap();
+    assert_eq!(t.entries(&a).unwrap().len(), 2);
+    assert!(t.entries(&a).unwrap().iter().all(|e| e.0 != Fk(2)));
+    assert_eq!(t.entries(&b).unwrap().len(), 2);
+    assert!(t.entries(&b).unwrap().iter().all(|e| e.0 != Fk(12)));
+    t.flush().unwrap();
+    drop(t);
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    assert_eq!(t.entries(&a).unwrap().len(), 2);
+    assert_eq!(t.entries(&b).unwrap().len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

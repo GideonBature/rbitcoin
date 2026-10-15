@@ -143,6 +143,26 @@ impl SortedHead {
         Ok(Some(unpack8_bytes(&val)?))
     }
 
+    /// Byte offset of the pack8 word, when the key is on this file.
+    pub(crate) fn value_word_offset(&self, key: &ShHeadKey) -> Result<Option<u64>, StoreError> {
+        let Some((slot, _)) = self.locate_rec(key)? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            DATA_HEADER_LEN + slot * SH_HEAD_SLOT_SIZE as u64 + SH_HEAD_KEY_LEN as u64,
+        ))
+    }
+
+    pub(crate) fn read_value_word(&self, off: u64) -> Result<[u8; 8], StoreError> {
+        let mut buf = [0u8; 8];
+        pread_file_exact(&self.file, off, &mut buf).map_err(|e| StoreError::io(&self.path, e))?;
+        Ok(buf)
+    }
+
+    pub(crate) fn write_value_word(&self, off: u64, bytes: &[u8; 8]) -> Result<(), StoreError> {
+        pwrite_file(&self.file, off, bytes).map_err(|e| StoreError::io(&self.path, e))
+    }
+
     /// In-place `value16` update. `Ok(false)` if the key is not on this file.
     pub fn update_value(&self, key: &ShHeadKey, value: &ShHeadValue) -> Result<bool, StoreError> {
         if let Some(ref fuse) = self.fuse {

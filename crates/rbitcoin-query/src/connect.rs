@@ -854,7 +854,8 @@ impl Query {
     /// tip is still high (permanent if kill). Mid-kill after tip shrink leaves
     /// strong **not on the new fence** → `repair_class_c_above_tip` heals.
     ///
-    /// Every successful tip shrink logs [`format_disconnect_tip_line`] at **warn**.
+    /// Logs [`format_disconnect_tip_line`] at **warn** before the scripthash
+    /// unlink and again after the tip shrink commits.
     pub fn disconnect_tip(&self) -> Result<(), QueryError> {
         let _commit = self.lock_tip_commit();
         self.disconnect_tip_body(true)
@@ -899,15 +900,22 @@ impl Query {
             .unwrap_or([0u8; 32]);
         let tx_fks = self.block_tx_fks(height)?;
 
-        let mut touched_sh: Vec<[u8; 32]> = Vec::new();
+        log_disconnect_tip(height.0, &hash, tx_fks.len());
+        let mut by_sh: HashMap<[u8; 32], Vec<Fk>> = HashMap::new();
         for &tx_fk in &tx_fks {
             let outputs = self.tx_output_run_class_a(tx_fk)?;
-            for (i, o) in outputs.iter().enumerate() {
-                let sh = script_hash(&o.script);
-                let _ = self.store.scripthash.unlink_create(&sh, tx_fk, i as u32)?;
-                touched_sh.push(sh);
+            for o in &outputs {
+                by_sh.entry(script_hash(&o.script)).or_default().push(tx_fk);
             }
         }
+        let mut groups: Vec<([u8; 32], Vec<Fk>)> = Vec::with_capacity(by_sh.len());
+        for (sh, mut fks) in by_sh {
+            fks.sort_by_key(|fk| fk.0);
+            fks.dedup();
+            groups.push((sh, fks));
+        }
+        self.store.scripthash.unlink_creates_batch(&groups)?;
+        let touched_sh: Vec<[u8; 32]> = groups.iter().map(|(sh, _)| *sh).collect();
         if !touched_sh.is_empty() {
             let mut heads = self.sh.heads.lock().unwrap();
             for sh in touched_sh {

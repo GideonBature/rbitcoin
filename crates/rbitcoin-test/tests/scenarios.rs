@@ -832,6 +832,17 @@ fn pin_disconnect_to_genesis_reconnect_and_tip_shrink(
         "poison at n-3 shrinks to last good n-4"
     );
     pin_megakey_block_disconnect(&q, tip, hashes[tip.0 as usize]);
+    let sh = rbitcoin_store::script_hash(&[0x99]);
+    let store = td.store_path();
+    let expect_tip = q.tip_height();
+    q.flush().unwrap();
+    drop(q);
+    let q = Query::open_or_create_tiny(&store).unwrap();
+    assert_eq!(q.tip_height(), expect_tip, "tip changed on reopen");
+    assert!(
+        q.scripthash_history(&sh).unwrap().is_empty(),
+        "reopen keeps the disconnected megakey gone"
+    );
 }
 
 /// Disconnect genesis too, then rebuild from an empty chain with a
@@ -924,7 +935,8 @@ fn pin_disconnect_logs_and_rewinds_ibd_marks(q: &Query, top: u32, top_hash: &[u8
 
 /// 257 creates of one script in one block make its scripthash head an
 /// extent. Disconnecting that block unlinks every create and truncates the
-/// tweak index with it.
+/// tweak index with it. A multi-page suffix is a store test: building it
+/// here means archiving thousands of transactions.
 fn pin_megakey_block_disconnect(q: &Query, tip: Height, tip_hash: [u8; 32]) {
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{script_hash, InputRecord, OutputRecord, ShHeadValue};

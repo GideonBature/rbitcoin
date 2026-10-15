@@ -263,6 +263,39 @@ impl ScriptHashHead {
         self.insert_many(&[(*full, value.clone())])
     }
 
+    /// Byte offset of the pack8 word for an occupied key.
+    pub(crate) fn value_word_offset(&self, full: &[u8; 32]) -> Result<Option<u64>, StoreError> {
+        let key = Self::to_key(full);
+        let slots = self.state.lock().unwrap().slots;
+        let mut cache = SlotPageCache::new(self, slots);
+        let mut slot = Self::hash_slot(&key, slots);
+        for _ in 0..slots {
+            let (k, v) = cache.read_slot(slot)?;
+            if is_empty_slot(&k, &v) {
+                return Ok(None);
+            }
+            if k == key {
+                return Ok(Some(
+                    FILE_HEADER_LEN as u64
+                        + slot * SH_HEAD_SLOT_SIZE as u64
+                        + SH_HEAD_KEY_LEN as u64,
+                ));
+            }
+            slot = (slot + 1) & (slots - 1);
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn read_value_word(&self, off: u64) -> Result<[u8; 8], StoreError> {
+        let mut buf = [0u8; 8];
+        self.file.read_at(off, &mut buf)?;
+        Ok(buf)
+    }
+
+    pub(crate) fn write_value_word(&self, off: u64, bytes: &[u8; 8]) -> Result<(), StoreError> {
+        self.file.write_at(off, bytes)
+    }
+
     /// Soft-clear value; keeps probe chain.
     pub fn clear_key(&self, full: &[u8; 32]) -> Result<bool, StoreError> {
         let key = Self::to_key(full);
