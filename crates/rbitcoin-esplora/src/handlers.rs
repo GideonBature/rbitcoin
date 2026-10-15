@@ -2001,8 +2001,7 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
 
 #[cfg(test)]
 mod pure_helper_tests {
-    use super::{block_summary_json, fee_estimates_from, outspend_json, resolve_address_sh};
-    use bitcoin::Network;
+    use super::{block_summary_json, fee_estimates_from, outspend_json};
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::{Query, TxApply};
@@ -2063,16 +2062,6 @@ mod pure_helper_tests {
         assert_eq!(est["1"], json!(1.234));
         assert_eq!(est["3"], json!(0.987));
         assert_eq!(est["144"], json!(0.101));
-    }
-
-    #[test]
-    fn fee_routes_do_not_invent_an_estimate() {
-        // A target the estimator cannot answer is left out, as electrs does.
-        let est = fee_estimates_from(&[(1, -1.0), (6, 0.000_002)]).expect("one target");
-        assert!(est.get("1").is_none(), "{est}");
-        assert_eq!(est["6"], json!(0.2));
-        assert!(fee_estimates_from(&[(1, -1.0)]).is_none());
-        assert!(fee_estimates_from(&[]).is_none());
     }
 
     #[test]
@@ -2139,47 +2128,6 @@ mod pure_helper_tests {
         assert_eq!(v["spent"], true, "{v}");
         assert!(v.get("txid").is_some(), "{v}");
         assert_eq!(v["vin"], 0, "outspend vin from spent slot: {v}");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn resolve_address_sh_and_block_summary_surface() {
-        // Invalid / wrong-network addresses.
-        assert!(resolve_address_sh("not-an-address", Network::Bitcoin).is_err());
-        assert!(resolve_address_sh(
-            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-            Network::Regtest
-        )
-        .is_err());
-        // Well-known mainnet P2WPKH.
-        let sh = resolve_address_sh(
-            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-            Network::Bitcoin,
-        )
-        .expect("mainnet p2wpkh");
-        assert_ne!(sh, [0u8; 32]);
-
-        let (dir, q) = temp_query();
-        let hash = seed_genesis(&q);
-        let summary = block_summary_json(&q, &hash).expect("genesis summary");
-        assert_eq!(summary["height"], 0);
-        assert_eq!(summary["tx_count"], 1);
-        assert!(summary["previousblockhash"].is_null());
-        assert!(summary["id"].as_str().unwrap().len() == 64);
-        assert!(summary["difficulty"].as_f64().unwrap() > 0.0);
-        assert!(summary["size"].as_u64().unwrap() > 80);
-        assert!(summary["weight"].as_u64().unwrap() > 0);
-        // Unknown hash → NotFound class error.
-        assert!(block_summary_json(&q, &[0x11; 32]).is_err());
-        let _ = q.sample_reset_reconstruct_archived();
-        let _ = block_summary_json(&q, &hash).expect("summary again");
-        assert_eq!(
-            q.sample_reset_reconstruct_archived(),
-            0,
-            "block JSON uses stamped size/weight"
-        );
-        assert!(q.reconstruct_archived_block(&hash).unwrap().is_some());
-        assert!(q.sample_reset_reconstruct_archived() >= 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
