@@ -793,11 +793,16 @@ mod tests {
         assert_eq!(flat, [4_000, 4_000, 1_000]);
     }
 
+    /// Bucket count is one past the edges. `estimatesmartfee` on an empty
+    /// pool returns "Insufficient data" and does not read this count. A warm
+    /// pool's published rate indexes these buckets.
     #[test]
     fn bucket_count_is_one_past_the_edges() {
         assert_eq!(bucket_count(), FEE_BUCKET_EDGES_SAT_PER_KVB.len() + 1);
     }
 
+    /// Percentile of recorded feerates. An empty `estimatesmartfee` answer
+    /// does not rank any samples. A warm estimate uses this index.
     #[test]
     fn percentile_sat_picks_the_ranked_index() {
         assert_eq!(percentile_sat(vec![], 50), None);

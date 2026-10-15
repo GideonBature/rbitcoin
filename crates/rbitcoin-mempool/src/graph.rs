@@ -1859,6 +1859,8 @@ mod tests {
     /// Fee 1 at vsize 501 and vsize 999 both floor to 1 sat/kvB. Chunkify
     /// still splits them when the lighter tx is linearized first. Strict `<`
     /// keeps that earlier chunk; `<=` replaces it with the later one.
+    /// `getblocktemplate` orders those chunks, but only after the txs have
+    /// these exact weights. A normal spend does not land on both sizes.
     #[test]
     fn floored_rate_tie_keeps_the_earlier_chunk() {
         let mut g = TxGraph::new();
@@ -2116,6 +2118,8 @@ mod tests {
         assert!(g.cluster_would_exceed(&parents, 1, room + 4));
     }
 
+    /// Empty-pool cluster cap. `getmempoolinfo` on an empty pool does not
+    /// report this constant. The first admit compares the new tx against it.
     #[test]
     fn empty_graph_reports_the_cluster_weight_cap() {
         let g = TxGraph::new();
@@ -2131,6 +2135,9 @@ mod tests {
 
     /// Siblings in one cluster. Higher modified fee rate, then higher fee, then
     /// the lesser txid. A negative modified fee stays behind a positive one.
+    /// Equal rate with a higher fee only shows up when the two weights differ
+    /// and the feerates still floor together. `getblocktemplate` would list
+    /// that order; a pair of ordinary spends does not hit the tie.
     #[test]
     fn cluster_linearization_orders_rate_then_fee_then_txid() {
         let mut g = TxGraph::new();

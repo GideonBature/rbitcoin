@@ -87,8 +87,9 @@ mod tests {
     use std::time::Duration;
 
     /// Two admits, two seconds apart, at 10_000 WU. The rounded bucket rate is
-    /// the EMA a peer's fee estimate reads. Pure arithmetic: the half-life
-    /// blend is not a socket.
+    /// the EMA a warm `estimatesmartfee` reads. An empty pool answers
+    /// "Insufficient data" before this blend runs, and one RPC admit does not
+    /// move a half-life EMA to this exact integer.
     #[test]
     fn two_admits_pin_the_bucket_ema() {
         let t0 = Instant::now();

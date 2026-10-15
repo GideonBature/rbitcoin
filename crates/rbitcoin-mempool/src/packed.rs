@@ -356,6 +356,10 @@ mod tests {
         assert_eq!(packed[98], 0b0001_1011, "vin flags {:08b}", packed[98]);
     }
 
+    /// Vin flag bits and a script or witness that ends the record. Encode and
+    /// decode share the constants, so a reopen of a tx this process wrote
+    /// still round-trips if a bit number changes. The byte is the schema an
+    /// older mempool file uses.
     #[test]
     fn packed_vin_flags_and_exact_tail_roundtrip() {
         let mut bare = sample_tx(false);
@@ -420,6 +424,8 @@ mod tests {
         encode_packed_live(&tx, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap()
     }
 
+    /// Input and output counts past 100_000. A live mempool tx cannot be that
+    /// large. Opening a torn `tx.body` hits this decoder and must not allocate.
     #[test]
     fn packed_live_rejects_only_past_the_count_cap() {
         let tx = sample_tx(false);

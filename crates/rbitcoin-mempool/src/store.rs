@@ -1924,6 +1924,9 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A clean pool skips the next meta fsync. The txs are already on disk
+    /// either way. The client reads the same set. The skip is what a quiet
+    /// node does on the persist interval.
     #[test]
     fn clear_dirty_keeps_a_second_interval_from_rewriting_meta() {
         let dir = tmp_dir();
@@ -1944,6 +1947,9 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Two new slot rows share one `pwrite` when they are adjacent. Separate
+    /// writes leave the same bytes a reopen reads. The merge is the persist
+    /// path for a burst of admits.
     #[test]
     fn adjacent_slot_records_touch_when_the_next_starts_at_the_end() {
         assert!(Mempool::adjacent_slot_records(64, 64));
@@ -1967,6 +1973,8 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Free, live, and dead slot counts. No RPC returns the split. Eviction
+    /// and compact both read it to decide whether a slot is reusable.
     #[test]
     fn slot_stats_counts_free_live_and_dead() {
         let dir = tmp_dir();
@@ -1981,6 +1989,9 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A live slot whose body length runs past the file. Compact refuses it.
+    /// A normal reopen never builds this row. Startup compact of a torn
+    /// slots file is the path that returns the error.
     #[test]
     fn compact_rejects_a_live_slot_whose_body_range_is_not_in_the_file() {
         let dir = tmp_dir();

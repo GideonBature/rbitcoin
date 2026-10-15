@@ -311,7 +311,8 @@ mod tests {
         // 2024-01-01 00:00:00 UTC
         let s = format_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(1_704_067_200));
         assert_eq!(s, "2024-01-01T00:00:00.000Z");
-        // February and December exercise the Hinnant month branches.
+        // February and December are the Hinnant month arms. A log line's
+        // timestamp is the operator surface; these two dates are the arms.
         let s = format_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(31 * 86_400));
         assert_eq!(s, "1970-02-01T00:00:00.000Z");
         let s = format_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(364 * 86_400));

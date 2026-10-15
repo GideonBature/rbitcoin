@@ -737,6 +737,9 @@ mod tests {
         );
     }
 
+    /// Orphan count, the per-peer reserve, and taking children of one parent.
+    /// A peer tx parks an orphan. The reserve choice (drop the unannounced
+    /// tx, keep the peer's) is not a field `getmempoolinfo` returns.
     #[test]
     fn orphan_counters_limits_and_child_take() {
         let parent = txid_n(21);
@@ -801,6 +804,8 @@ mod tests {
 
     /// `with_limits` floors the weight cap at one max-size orphan. A tx that
     /// lands on that cap is admitted. One past it evicts a single orphan.
+    /// The default orphan pool is far above one max-size tx. A journey cannot
+    /// fill it. Every orphan a peer sends still runs this compare.
     #[test]
     fn weight_cap_admits_exact_and_evicts_one_past() {
         let parent = txid_n(21);

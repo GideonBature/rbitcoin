@@ -2231,7 +2231,8 @@ fn reject_rearms_lookup_and_requeues_a_retried_wave() {
 }
 
 /// A cancelled write drops the load plan. A retried or engine-fault script
-/// wave goes back on the body queue.
+/// wave goes back on the body queue. A peer's invalid block is a one-block
+/// consensus reject and does not take these arms. The confirm thread does.
 #[test]
 fn write_cancel_and_script_reject_requeue() {
     use super::{apply_write_reject, rearm_script_reject};
@@ -2302,6 +2303,8 @@ fn write_cancel_and_script_reject_requeue() {
 }
 
 /// The 5s cut is the gap between two publishes on the confirm thread.
+/// A wall-clock journey would sleep to tell `<` from `<=`. The operator
+/// sees the progress line; this passes the timestamp the thread would.
 #[test]
 fn confirm_progress_publishes_on_a_five_second_boundary() {
     use super::{clear_confirm_progress_clock, publish_confirm_progress_at};
@@ -2372,6 +2375,8 @@ impl Drop for ParentClockGuard {
 
 /// Parent stamp: off-tip waits out the deadline, a stop does not, an uncovered
 /// fence on the tip is an engine miss, and a disconnect during the read retries.
+/// The clock is injected so the test does not sleep 10s. A peer block on a
+/// stopped node, or a reorg during the parent read, is what a session runs.
 #[test]
 fn parent_check_reads_the_tip() {
     use super::{check_missing_parent, parent_now, set_parent_check_clock, ParentCheck};
@@ -2466,6 +2471,8 @@ fn parent_check_reads_the_tip() {
 }
 
 /// A stale load offers a body the node has not connected and skips one it has.
+/// The confirm thread does this when its load epoch is no longer current.
+/// A peer does not send that epoch.
 #[test]
 fn unconnected_stale_body_returns_to_the_queue() {
     use super::reoffer_unconnected_bodies;
@@ -2500,7 +2507,9 @@ fn unconnected_stale_body_returns_to_the_queue() {
 }
 
 /// A lone consensus load reject drops the block. `&&` becoming `||` treats
-/// that reject as a cascade and puts the body back.
+/// that reject as a cascade and puts the body back. The confirm thread
+/// classifies the load error. A peer sees the block stay off the tip, which
+/// a cascade that immediately retries can also produce.
 #[test]
 fn load_consensus_rewind_drops_the_block() {
     use super::{rewind_after_load_reject, ConfirmRejectClass, LoadAheadState};
@@ -2533,7 +2542,8 @@ fn load_consensus_rewind_drops_the_block() {
 }
 
 /// A stopped confirm does not wait out the parent deadline. Off-tip and
-/// on-tip both retry.
+/// on-tip both retry. Same stop arm as `parent_check_reads_the_tip`, on the
+/// real clock, bounded so a passing run stays under two seconds.
 #[test]
 fn stopped_parent_check_is_off_tip() {
     use super::{check_missing_parent, ParentCheck};
