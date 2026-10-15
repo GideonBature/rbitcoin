@@ -2709,8 +2709,6 @@ fn p2wsh_item_lens(target_vsize: u64) -> Vec<usize> {
         );
         if lens.last().copied().unwrap_or(520) >= 520 {
             lens.push(1);
-        } else if lens.is_empty() {
-            lens.push(1);
         } else {
             *lens.last_mut().unwrap() += 1;
         }
