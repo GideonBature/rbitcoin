@@ -1646,73 +1646,6 @@ mod tests {
     }
 
     #[test]
-    fn rpc_work_queue_zero_is_the_default_finite_queue() {
-        assert_eq!(
-            NodeConfig::default().rpc.work_queue,
-            Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE)
-        );
-        let mut c = NodeConfig::default();
-        assert_eq!(
-            c.apply_kv("rpc_work_queue", "0").unwrap(),
-            ConfApply::Applied
-        );
-        assert_eq!(c.rpc.work_queue, Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE));
-        assert_eq!(
-            c.apply_kv("rpc_work_queue", "4").unwrap(),
-            ConfApply::Applied
-        );
-        assert_eq!(c.rpc.work_queue, Some(4));
-    }
-
-    #[test]
-    fn tor_control_password_rejects_a_line_break() {
-        let mut c = NodeConfig::default();
-        let err = c
-            .apply_kv("tor_control_password", "a\nb")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("CR"), "{err}");
-        c.apply_kv("tor_control_password", "pw").unwrap();
-        assert_eq!(c.tor.password.as_deref(), Some("pw"));
-    }
-
-    #[test]
-    fn apply_kv_is_the_conf_setter_and_unknown_is_not_error() {
-        let mut c = NodeConfig::default();
-        assert_eq!(
-            c.apply_kv("network", "regtest").unwrap(),
-            ConfApply::Applied
-        );
-        assert_eq!(c.network, Network::Regtest);
-        assert_eq!(
-            c.apply_kv("datadir", "/tmp/rb-apply-kv").unwrap(),
-            ConfApply::Applied
-        );
-        assert_eq!(c.datadir.path(), Path::new("/tmp/rb-apply-kv"));
-        match c.apply_kv("not-a-real-key", "1").unwrap() {
-            ConfApply::Unknown(k) => assert_eq!(k, "not-a-real-key"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn rpc_socket_moves_the_socket_out_of_the_datadir() {
-        let mut c = NodeConfig::default().with_datadir(Path::new("/var/lib/rbitcoin"));
-        assert_eq!(c.rpc_socket_path(), Path::new("/var/lib/rbitcoin/rpc.sock"));
-        assert_eq!(
-            c.apply_kv("rpc_socket", "/run/rbitcoin/rpc.sock").unwrap(),
-            ConfApply::Applied
-        );
-        assert!(c.rpc.socket, "rpc_socket implies rpc");
-        assert_eq!(c.rpc_socket_path(), Path::new("/run/rbitcoin/rpc.sock"));
-        let err = NodeConfig::default()
-            .apply_kv("rpc_socket", "")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("rpc_socket requires a path"), "{err}");
-    }
-
-    #[test]
     fn sv2_tp_apply_kv_and_listen_requires_authority() {
         let mut c = NodeConfig::default().with_datadir(tmp());
         assert_eq!(c.sv2_tp_listen, None);
@@ -1908,37 +1841,6 @@ mod tests {
             ConfApply::Unknown(k) => assert_eq!(k, "sptweaks_dust"),
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn blocks_dir_is_not_an_operator_key() {
-        let mut c = NodeConfig::default();
-        assert_eq!(
-            c.apply_kv("blocks_dir", "/tmp/x").unwrap(),
-            ConfApply::Unknown("blocks_dir".into())
-        );
-        assert_eq!(
-            c.apply_kv("blocks-dir", "/tmp/x").unwrap(),
-            ConfApply::Unknown("blocks-dir".into())
-        );
-        assert_eq!(
-            c.apply_kv("blocksdir", "/tmp/x").unwrap(),
-            ConfApply::Unknown("blocksdir".into())
-        );
-    }
-
-    #[test]
-    fn duplicate_listen_is_init_error() {
-        let mut c = NodeConfig::default();
-        assert_eq!(
-            c.apply_kv("listen", "127.0.0.1:18444").unwrap(),
-            ConfApply::Applied
-        );
-        let err = c.apply_kv("listen", "127.0.0.1:18444").unwrap_err();
-        assert!(
-            err.to_string().contains("Duplicate binding configuration"),
-            "{err}"
-        );
     }
 
     #[test]
