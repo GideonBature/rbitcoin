@@ -615,8 +615,12 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     };
     let asmap = load_asmap(config.datadir.path(), config.asmap.as_deref());
     addrman.set_asmap(asmap.clone());
-    addrman.set_only_net(config.listen.only_net.clone());
+    // Reachability before `--only-net`, so a sweep does not drop a net this
+    // process can dial and then forget the rows.
+    addrman.set_onion_reachable(config.listen.proxy.is_some() || config.listen.onion.is_some());
+    addrman.set_i2p_reachable(config.listen.i2p_sam.is_some());
     addrman.set_cjdns_reachable(config.listen.cjdns_reachable);
+    addrman.set_only_net(config.listen.only_net.clone());
     node.peers
         .set_cjdns_reachable(config.listen.cjdns_reachable);
     node.peers.set_pruned(config.prune_seqsigwit);
@@ -2592,6 +2596,7 @@ mod tests {
                 .parse()
                 .unwrap();
         let mut am = AddrMan::new();
+        am.set_onion_reachable(true);
         am.set_only_net(vec![rbitcoin_net::OnlyNet::Onion]);
         am.add_addr(onion);
         assert_eq!(follow_dial_targets(&[], &am, 1, &[]), vec![onion]);

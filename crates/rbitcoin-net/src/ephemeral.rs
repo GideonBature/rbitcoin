@@ -228,6 +228,7 @@ mod tests {
         let onion: NetAddr = "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
             .parse()
             .unwrap();
+        am.set_onion_reachable(true);
         am.add_addr(onion);
         let got = isolated_broadcast_targets(&am, 1);
         assert_eq!(got, vec![onion]);

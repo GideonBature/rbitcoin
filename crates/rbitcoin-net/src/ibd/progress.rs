@@ -363,7 +363,6 @@ impl StatusClock {
             rate,
         }
     }
-
 }
 
 /// One progress line from published counters and the last coordination snapshot.
@@ -455,7 +454,6 @@ impl StatusBoard {
     pub(crate) fn set_hole(&self, hole: usize) {
         self.hole.store(hole, std::sync::atomic::Ordering::Relaxed);
     }
-
 }
 
 pub(crate) fn spawn_status_thread(

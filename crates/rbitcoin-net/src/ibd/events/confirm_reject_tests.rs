@@ -756,8 +756,14 @@ fn apply_peer_event_body_and_control_surface() {
             .unwrap();
     inject_learned_addrs(&mut book, &[onion], local, 1);
     assert!(
+        book.entries().iter().all(|e| e.addr != onion),
+        "IBD must not store an onion this process cannot dial"
+    );
+    book.set_onion_reachable(true);
+    inject_learned_addrs(&mut book, &[onion], local, 1);
+    assert!(
         book.entries().iter().any(|e| e.addr == onion),
-        "IBD addrv2 onion must enter the dial book"
+        "IBD addrv2 onion enters the book once SOCKS is configured"
     );
 
     // Dead releases work and reopens its heights for densify.

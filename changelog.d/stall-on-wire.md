@@ -1,3 +1,3 @@
 Fixed
 
-- **IBD stall timer starts when getdata is written.** Idle time before the ask, and time the command spends queued, no longer disconnects a peer that has not yet been asked on the socket.
+- **IBD disconnects a peer for its own silence.** Getdata must already be on the wire, and that peer's received bytes must have been still for 30 seconds. Tip motion and a later getdata write do not refresh the clock. When every such peer is quiet in the same pass, none are disconnected.

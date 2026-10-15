@@ -1729,11 +1729,7 @@ pub(in crate::ibd) mod tests {
         );
         st.slots[0].getdata_wire.wrote(1, 9_000);
         assert!(
-            super::super::peer_io::getdata_on_wire_stalled(
-                &st.slots[0],
-                9_000 + 29_999,
-                30_000
-            ),
+            super::super::peer_io::getdata_on_wire_stalled(&st.slots[0], 9_000 + 29_999, 30_000),
             "last rx at 42ms is the clock; the write at 9s does not refresh it"
         );
         let _ = std::fs::remove_dir_all(dir);

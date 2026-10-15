@@ -125,7 +125,9 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
     let cjdns_sock = SocketAddr::from((ip, port));
     let book = am.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-    let clear = book.take_dial_candidates(8, &HashSet::new(), &[]);
+    let mut hidden = book.clone();
+    hidden.set_cjdns_reachable(false);
+    let clear = hidden.take_dial_candidates(8, &HashSet::new(), &[]);
     assert!(
         clear
             .iter()
@@ -135,6 +137,10 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
     assert!(
         !clear.contains(&cjdns_sock),
         "fc00 must not dial without --cjdns-reachable: {clear:?}"
+    );
+    assert!(
+        hidden.entries().iter().all(|e| e.addr != cjdns),
+        "turning CJDNS off drops the row"
     );
 
     let mut only = book.clone();
@@ -168,6 +174,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
     );
 
     let mut mixed = crate::seeds::AddrMan::new();
+    mixed.set_onion_reachable(true);
     for i in 0..8u8 {
         mixed.add(SocketAddr::from((Ipv4Addr::new(10, 0, 0, i), 8333)));
     }
@@ -210,6 +217,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
         port: 8333,
     };
     let mut fresh_ip = crate::seeds::AddrMan::new();
+    fresh_ip.set_onion_reachable(true);
     fresh_ip.add(clear);
     fresh_ip.add_addr(tired_onion);
     fresh_ip.note_connect_failed_addr(tired_onion, false);
@@ -222,6 +230,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
     );
 
     let mut tired_ip = crate::seeds::AddrMan::new();
+    tired_ip.set_onion_reachable(true);
     let tired_clear = SocketAddr::from((Ipv4Addr::new(9, 9, 9, 9), 8333));
     tired_ip.add(tired_clear);
     tired_ip.note_connect_failed(tired_clear, false);
@@ -234,6 +243,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
     );
 
     let mut only_bad = crate::seeds::AddrMan::new();
+    only_bad.set_onion_reachable(true);
     only_bad.add_addr(bad_onion);
     only_bad.note_connect_failed_addr(bad_onion, true);
     let got = only_bad.take_dial_candidates_net(4, &HashSet::new(), &[]);
@@ -247,6 +257,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
         port: 8333,
     };
     let mut mix = crate::seeds::AddrMan::new();
+    mix.set_onion_reachable(true);
     mix.add_addr(good_onion);
     mix.add_addr(bad_onion);
     mix.note_connect_failed_addr(bad_onion, true);
@@ -256,6 +267,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<crate::seeds::AddrMan>, overlays: [c
         "without a fresh clearnet, incompatible overlays lose to a compatible one: {got:?}"
     );
     let mut sole_recent = crate::seeds::AddrMan::new();
+    sole_recent.set_onion_reachable(true);
     sole_recent.add_addr(good_onion);
     sole_recent.note_attempt_addr(good_onion);
     let got = sole_recent.take_dial_candidates_net(4, &HashSet::new(), &[]);
@@ -289,6 +301,11 @@ fn overlay_config() {
     let hub = PeerHub::new();
     let am = Arc::new(Mutex::new(crate::seeds::AddrMan::new()));
     hub.set_addrman(am.clone());
+    {
+        let mut book = am.lock().unwrap_or_else(|e| e.into_inner());
+        book.set_onion_reachable(true);
+        book.set_cjdns_reachable(true);
+    }
     let pk = [
         0x79, 0xbc, 0xc6, 0x25, 0x18, 0x4b, 0x05, 0x19, 0x49, 0x75, 0xc2, 0x8b, 0x66, 0xb6, 0x6b,
         0x04, 0x69, 0xf7, 0xf6, 0x55, 0x6f, 0xb1, 0xac, 0x31, 0x89, 0xa7, 0x9b, 0x40, 0xdd, 0xa3,
@@ -339,6 +356,12 @@ fn overlay_config() {
     let ip = crate::NetAddr::Ip(SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 18444)));
     for (i, addr) in [onion, i2p, i2p0, cjdns, ip].into_iter().enumerate() {
         let mut one = crate::seeds::AddrMan::new();
+        match addr {
+            crate::NetAddr::Onion { .. } => one.set_onion_reachable(true),
+            crate::NetAddr::I2p { .. } => one.set_i2p_reachable(true),
+            crate::NetAddr::Cjdns { .. } => one.set_cjdns_reachable(true),
+            crate::NetAddr::Ip(_) => {}
+        }
         one.add_addr(addr);
         hub.set_addrman(Arc::new(Mutex::new(one)));
         let bind = SocketAddr::from(([127, 0, 0, 1], 19000 + i as u16));
