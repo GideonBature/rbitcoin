@@ -1505,6 +1505,7 @@ pub(in crate::ibd) mod tests {
             requested: solicit_track().0,
             solicited_bytes: solicit_track().1,
             solicited_ms: solicit_track().2,
+            any_rx_ms: Arc::new(AtomicU64::new(0)),
             getdata_wire: super::super::peer_io::GetdataWire::new(),
             peer_height: 100,
             connected_ms: 1,

@@ -11,24 +11,28 @@ pub(crate) const RELSLOW_ACTIVE_MS: u64 = 30_000;
 /// Qualifying stream delta for rx progress.
 pub(crate) const PROGRESS_STEP: u64 = 64 * 1024;
 
-/// Integer EWMA of received bytes, sampled on the IBD main thread.
+/// Integer EWMA of received block bytes, sampled on the IBD main thread.
 ///
 /// Accrues only while the peer has block getdata in flight. Idle time rebaselines
 /// the byte cursor so it does not dilute the rate. `progress_ms` is the last
-/// received block bytes (reader progress or a completed requested block).
-/// `work_started_ms` records the last getdata write and is not a stall input:
-/// a later ask must not refresh a peer that has stopped sending.
-/// Stall is `now - progress_ms > stall` while a getdata is already on the
-/// socket. A quiet in-flight gap does not rewrite the EWMA. Ranking, densify
-/// caps, and AddrMan FAST/SLOW read [`Self::bps`].
-/// Eviction reads
-/// [`Self::eviction_bps`], which folds silence in as zero throughput.
+/// solicited block progress. `any_rx_ms` is the last socket byte of any kind.
+/// Quiet disconnect uses `any_rx_ms`. Block clocks (`progress_ms`, eviction,
+/// recent-rx) ignore pings, addr, and headers.
+/// `bytes_at_progress` is the stream total when block progress last moved, so
+/// a body still arriving is not scored as chat.
+/// `work_started_ms` records the last getdata write and is not a stall input.
+/// A quiet in-flight gap does not rewrite the EWMA. Ranking, densify caps,
+/// and AddrMan FAST/SLOW read [`Self::bps`].
+/// Eviction reads [`Self::eviction_bps`], which folds missing block bytes in
+/// as zero throughput.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PeerRate {
     ewma: u64,
     pub(crate) active_ms: u64,
     pub(crate) progress_ms: u64,
     pub(crate) work_started_ms: u64,
+    pub(crate) any_rx_ms: u64,
+    pub(crate) bytes_at_progress: u64,
     last_bytes: u64,
     last_ms: Option<u64>,
 }
@@ -82,6 +86,7 @@ impl PeerRate {
     /// and not when we later write getdata.
     pub(crate) fn note_connected(&mut self, now_ms: u64) {
         self.progress_ms = now_ms;
+        self.any_rx_ms = now_ms;
     }
 
     #[cfg(test)]
@@ -89,8 +94,22 @@ impl PeerRate {
         self.work_started_ms = now_ms;
     }
 
+    /// Solicited block progress. Also counts as socket bytes.
     pub(crate) fn note_rx(&mut self, now_ms: u64) {
         self.progress_ms = now_ms;
+        self.any_rx_ms = now_ms;
+    }
+
+    /// Ping, addr, headers, or any other socket bytes. Not block progress.
+    /// Production writes the reader atomic; this is the test seam.
+    #[cfg(test)]
+    pub(crate) fn note_any_rx(&mut self, now_ms: u64) {
+        self.any_rx_ms = now_ms;
+    }
+
+    /// Stream total at the latest block-progress mark.
+    pub(crate) fn note_bytes_at_progress(&mut self, bytes_rx: u64) {
+        self.bytes_at_progress = bytes_rx;
     }
 
     pub(crate) fn bps(&self) -> Option<u64> {
@@ -117,11 +136,20 @@ impl PeerRate {
         Some(bps.saturating_mul(TAU_MS) / TAU_MS.saturating_add(age))
     }
 
+    /// No solicited block progress inside `stall_ms` while getdata is in flight.
     pub(crate) fn stalled(&self, now_ms: u64, stall_ms: u64, inflight: bool) -> bool {
         if !inflight {
             return false;
         }
         now_ms.saturating_sub(self.progress_ms) > stall_ms
+    }
+
+    /// No socket bytes at all inside `stall_ms` while getdata is in flight.
+    pub(crate) fn quiet(&self, now_ms: u64, stall_ms: u64, inflight: bool) -> bool {
+        if !inflight {
+            return false;
+        }
+        now_ms.saturating_sub(self.any_rx_ms) > stall_ms
     }
 
     pub(crate) fn has_recent_rx(&self, now_ms: u64, stale_ms: u64) -> bool {
@@ -215,5 +243,18 @@ mod tests {
         assert!(r.stalled(50_001, 30_000, true));
         assert!(r.has_recent_rx(45_000, 30_000));
         assert!(!r.has_recent_rx(50_001, 30_000));
+        assert!(!r.quiet(45_000, 30_000, true));
+    }
+
+    #[test]
+    fn any_rx_does_not_move_block_progress() {
+        let mut r = PeerRate::default();
+        r.note_connected(1_000);
+        r.note_any_rx(40_000);
+        assert_eq!(r.progress_ms, 1_000);
+        assert_eq!(r.any_rx_ms, 40_000);
+        assert!(r.stalled(40_000, 30_000, true));
+        assert!(!r.quiet(40_000, 30_000, true));
+        assert!(!r.quiet(40_000, 30_000, false));
     }
 }
