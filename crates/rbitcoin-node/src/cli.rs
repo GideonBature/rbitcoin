@@ -1068,6 +1068,87 @@ mod tests {
             ready_config(["rbitcoin-node", "--esplora-block-template=1"]).esplora_block_template
         );
         assert!(!ready_config(["rbitcoin-node", "--esplora-onion=0"]).esplora_onion);
+
+        // Zero is the finite default queue, not an unbounded one.
+        assert_eq!(
+            ready_config(["rbitcoin-node"]).rpc.work_queue,
+            Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE)
+        );
+        assert_eq!(
+            ready_config(["rbitcoin-node", "--rpc-work-queue=0"])
+                .rpc
+                .work_queue,
+            Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE)
+        );
+        assert_eq!(
+            ready_config(["rbitcoin-node", "--rpc-work-queue=4"])
+                .rpc
+                .work_queue,
+            Some(4)
+        );
+
+        let mut dir_cfg = NodeConfig::default();
+        assert_eq!(
+            dir_cfg.apply_kv("datadir", "/tmp/rb-apply-kv").unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(
+            dir_cfg.datadir.path(),
+            std::path::Path::new("/tmp/rb-apply-kv")
+        );
+        match dir_cfg.apply_kv("not-a-real-key", "1").unwrap() {
+            ConfApply::Unknown(k) => assert_eq!(k, "not-a-real-key"),
+            other => panic!("{other:?}"),
+        }
+
+        let mut blocks = NodeConfig::default();
+        for key in ["blocks_dir", "blocks-dir", "blocksdir"] {
+            assert_eq!(
+                blocks.apply_kv(key, "/tmp/x").unwrap(),
+                ConfApply::Unknown(key.into()),
+                "{key} is not an operator key"
+            );
+        }
+
+        let mut listen = NodeConfig::default();
+        listen.apply_kv("listen", "127.0.0.1:18444").unwrap();
+        let dup = listen
+            .apply_kv("listen", "127.0.0.1:18444")
+            .unwrap_err()
+            .to_string();
+        assert!(dup.contains("Duplicate binding configuration"), "{dup}");
+
+        let mut sock_cfg =
+            NodeConfig::default().with_datadir(std::path::Path::new("/var/lib/rbitcoin"));
+        assert_eq!(
+            sock_cfg.rpc_socket_path(),
+            std::path::Path::new("/var/lib/rbitcoin/rpc.sock")
+        );
+        assert_eq!(
+            sock_cfg
+                .apply_kv("rpc_socket", "/run/rbitcoin/rpc.sock")
+                .unwrap(),
+            ConfApply::Applied
+        );
+        assert!(sock_cfg.rpc.socket, "rpc_socket implies rpc");
+        assert_eq!(
+            sock_cfg.rpc_socket_path(),
+            std::path::Path::new("/run/rbitcoin/rpc.sock")
+        );
+        let empty = NodeConfig::default()
+            .apply_kv("rpc_socket", "")
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("rpc_socket requires a path"), "{empty}");
+
+        let mut tor = NodeConfig::default();
+        let cr = tor
+            .apply_kv("tor_control_password", "a\nb")
+            .unwrap_err()
+            .to_string();
+        assert!(cr.contains("CR"), "{cr}");
+        tor.apply_kv("tor_control_password", "pw").unwrap();
+        assert_eq!(tor.tor.password.as_deref(), Some("pw"));
     }
 
     include!("overlay_config_journey.rs");
