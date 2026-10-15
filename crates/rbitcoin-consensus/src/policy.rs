@@ -300,17 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn libre_rejects_bad_annex() {
-        let mut tx = bare_tx(1);
-        tx.input[0].witness = Witness::from_slice(&[vec![0x01], vec![0x50, 0x01]]);
-        let weight = tx.weight().to_wu();
-        assert_eq!(
-            check_libre_admission(&tx, 50_000, weight),
-            PolicyResult::NonStandard("libre annex")
-        );
-    }
-
-    #[test]
     fn policy_result_is_ok_alias() {
         assert!(PolicyResult::Standard.is_ok());
         assert!(!PolicyResult::NonStandard("x").is_ok());

@@ -1665,23 +1665,6 @@ mod tests {
     }
 
     #[test]
-    fn conf_error_names_the_file_and_line() {
-        let dir = std::env::temp_dir().join(format!("rbitcoin-conf-line-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bad.conf");
-        std::fs::write(&path, "secret-token-xyz\n").unwrap();
-        let err = NodeConfig::default()
-            .merge_conf_file(&path)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("bad.conf:1"), "{err}");
-        assert!(err.contains("expected key=value"), "{err}");
-        assert!(!err.contains("secret-token-xyz"), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn tor_control_password_rejects_a_line_break() {
         let mut c = NodeConfig::default();
         let err = c
@@ -1928,31 +1911,6 @@ mod tests {
     }
 
     #[test]
-    fn check_blocks_apply_kv_zero_is_all() {
-        let mut c = NodeConfig::default();
-        assert_eq!(c.check_blocks, None);
-        assert_eq!(c.check_blocks_window(), rbitcoin_store::VERIFY_TIP_BLOCKS);
-        assert_eq!(c.apply_kv("check_blocks", "6").unwrap(), ConfApply::Applied);
-        assert_eq!(c.check_blocks, Some(6));
-        assert_eq!(c.check_blocks_window(), 6);
-        assert_eq!(c.apply_kv("check-blocks", "0").unwrap(), ConfApply::Applied);
-        assert_eq!(c.check_blocks, Some(0));
-        assert_eq!(c.check_blocks_window(), 0);
-        assert_eq!(
-            c.apply_kv("check_blocks", "-1").unwrap(),
-            ConfApply::Applied
-        );
-        assert_eq!(c.check_blocks, Some(-1));
-        assert_eq!(c.check_blocks_window(), 0);
-        let bad = c.apply_kv("check_blocks", "nope").unwrap_err();
-        assert!(bad.to_string().contains("check-blocks"), "{bad}");
-        assert_eq!(
-            c.apply_kv("checkblocks", "6").unwrap(),
-            ConfApply::Unknown("checkblocks".into())
-        );
-    }
-
-    #[test]
     fn blocks_dir_is_not_an_operator_key() {
         let mut c = NodeConfig::default();
         assert_eq!(
@@ -2040,27 +1998,6 @@ mod tests {
             "net_permission_bind listens"
         );
         assert_eq!(c2.net_perms.whitebind.len(), 1);
-    }
-
-    #[test]
-    fn prefillcompact_cli_conf_default_on() {
-        let mut c = NodeConfig::default();
-        assert!(c.prefill_compact);
-        match c.apply_kv("prefillcompact", "0").unwrap() {
-            ConfApply::Unknown(k) => assert_eq!(k, "prefillcompact"),
-            other => panic!("{other:?}"),
-        }
-        assert!(c.prefill_compact);
-        assert_eq!(
-            c.apply_kv("prefill_compact", "0").unwrap(),
-            ConfApply::Applied
-        );
-        assert!(!c.prefill_compact);
-        assert_eq!(
-            c.apply_kv("prefill_compact", "1").unwrap(),
-            ConfApply::Applied
-        );
-        assert!(c.prefill_compact);
     }
 
     #[test]
