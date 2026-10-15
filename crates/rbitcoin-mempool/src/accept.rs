@@ -3871,6 +3871,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Dead-slot quarter of the slot cap. Compacting or not leaves the same
+    /// live txs a client reads back. A session runs this when dead slots
+    /// reach a quarter of the table; the pin uses a 4-slot and a 5-slot cap
+    /// because the default table never gets there in a journey.
     #[test]
     fn maybe_compact_runs_when_dead_catches_live_or_nothing_live_remains() {
         let dir = tmp_dir();
@@ -3945,6 +3949,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Prepare/commit gap. A second `sendrawtransaction` takes `accept_tx`,
+    /// not a `PreparedAdmit` another thread already committed. The hub hits
+    /// this when the tx lands between prepare and commit.
     #[test]
     fn duplicate_commit_after_prepare_is_duplicate() {
         let dir = tmp_dir();
@@ -3960,8 +3967,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Core `IsChildWithParents` for `submitpackage` when
+    /// `RBITCOIN_RPC_PACKAGE_DIALECT` is on. Setting that variable in a test
+    /// races every other package RPC in the process, so this stays on the
+    /// function the RPC calls. A session with the flag rejects a package
+    /// whose last tx does not spend every other member.
     #[test]
-    fn package_child_shape_requires_parents_first() {
+    fn package_direct_parents_require_the_child_to_spend_each_member() {
         let (op, _, _) = chain_utxo(100_000);
         let parent = spend_tx(op, 90_000);
         let child = spend_tx(
@@ -3979,43 +3991,11 @@ mod tests {
             child.clone()
         ]));
         assert!(!ActiveMempool::package_is_child_with_direct_parents(&[
-            child.clone(),
-            parent.clone()
+            child, parent
         ]));
-        assert!(!ActiveMempool::package_is_child_with_parents(
-            std::slice::from_ref(&parent)
-        ));
-        assert!(ActiveMempool::package_is_child_with_parents(&[
-            parent.clone(),
-            child.clone()
-        ]));
-        let grand = spend_tx(op, 70_000);
-        let mid = spend_tx(
-            OutPoint {
-                txid: grand.compute_txid(),
-                vout: 0,
-            },
-            60_000,
-        );
-        let tip = spend_tx(
-            OutPoint {
-                txid: mid.compute_txid(),
-                vout: 0,
-            },
-            50_000,
-        );
-        assert!(
-            ActiveMempool::package_is_child_with_parents(&[grand, mid, tip]),
-            "a three-tx ancestor chain is still one child with parents"
-        );
-        assert!(ActiveMempool::check_package_shape(&[parent.clone(), child.clone()]).is_ok());
-        assert!(matches!(
-            ActiveMempool::check_package_shape(&[child.clone(), parent.clone()]),
-            Err(AcceptError::PackageNotTopo)
-        ));
-        // A txid commits to its prevout, so no peer can send a one-tx self-spend.
-        // `p < i` vs `p <= i` only differed on that input. The later-txid set is
-        // what `check_package_shape` runs; the index compare is not in the function.
+        // The index compare is gone. A one-tx self-spend is not a peer
+        // message, because the txid commits to the prevout. `seen.contains`
+        // is what `testmempoolaccept` rejects.
         let src = include_str!("accept.rs");
         let start = src.find("pub fn check_package_shape(").expect("shape");
         let end = start
@@ -4027,9 +4007,11 @@ mod tests {
         assert!(!shape.contains("i > p"));
         assert!(!shape.contains("<="));
         assert!(!shape.contains(">="));
-        assert!(ActiveMempool::check_package_shape(std::slice::from_ref(&parent)).is_ok());
     }
 
+    /// Recent-reject and extra-txn maps. No RPC returns them. A later peer
+    /// announcement of the same invalid txid consults the map instead of
+    /// re-running script.
     #[test]
     fn recent_rejects_keep_every_id_under_the_cap() {
         let dir = tmp_dir();
@@ -4051,6 +4033,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Free-slot eviction. A session reaches it only when the slot table is
+    /// at `MAX_SLOT_CAP` (1_048_576) and every row is live. The pin pretends
+    /// the table is already there. Weight-budget eviction is the full-pool
+    /// journey; this is the slot-table stop.
     #[test]
     fn a_full_pinned_slot_table_evicts_one_chunk_then_stops() {
         let dir = tmp_dir();

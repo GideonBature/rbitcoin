@@ -2673,10 +2673,12 @@ fn pressure_tiny_weight() {
 
 fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
     use bitcoin::consensus::encode::serialize;
-    let (chain_hex, chain_parent) =
-        spend_generated_coinbase(ctx, 2, 50_0000_0000 - 1_000, spk.clone());
-    let chain_child = child_of(&chain_parent, 1_000);
-    let chain_grand = child_of(&chain_child, 1_000);
+    // Parent and child are under the relay floor. The grandchild pays for
+    // the chain. A package walk that stops at the direct parent does not
+    // admit them.
+    let (chain_hex, chain_parent) = spend_generated_coinbase(ctx, 2, 50_0000_0000 - 1, spk.clone());
+    let chain_child = child_of(&chain_parent, 1);
+    let chain_grand = child_of(&chain_child, 80_000);
     let chain_child_hex = hex_encode(serialize(&chain_child));
     let chain = dispatch(
         ctx,
@@ -2689,11 +2691,10 @@ fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
     )
     .unwrap();
     assert_eq!(chain["package_msg"], "success", "{chain}");
-    assert!(ctx
-        .mempool
-        .as_ref()
-        .unwrap()
-        .contains(&chain_parent.compute_txid()));
+    let admitted = ctx.mempool.as_ref().unwrap();
+    assert!(admitted.contains(&chain_parent.compute_txid()), "{chain}");
+    assert!(admitted.contains(&chain_child.compute_txid()), "{chain}");
+    assert!(admitted.contains(&chain_grand.compute_txid()), "{chain}");
     let pair = dispatch(
         ctx,
         "submitpackage",
