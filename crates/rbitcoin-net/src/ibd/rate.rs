@@ -184,11 +184,13 @@ mod tests {
     }
 
     #[test]
-    fn stalled_uses_work_started_when_no_rx() {
+    fn stalled_ignores_getdata_write_time() {
         let mut r = PeerRate::default();
-        r.note_work_started(0);
-        assert!(!r.stalled(29_999, 30_000, true));
+        // Last real receive is t=0. A getdata write at t=20s is us, not the peer.
+        r.note_rx(0);
+        r.note_work_started(20_000);
         assert!(r.stalled(30_001, 30_000, true));
+        assert!(r.stalled(40_000, 30_000, true));
     }
 
     #[test]

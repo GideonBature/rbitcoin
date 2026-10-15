@@ -1441,6 +1441,132 @@ mod tests {
         assert!(inflight.contains_key(&h));
     }
 
+    fn hash_byte(b: u8) -> BlockHash {
+        BlockHash::from_byte_array([b; 32])
+    }
+
+    /// One requested hash is on the wire as of `written_ms`.
+    fn put_on_wire(slot: &mut PeerSlot, hash: BlockHash, written_ms: u64) {
+        slot.in_flight.insert(hash);
+        slot.getdata_wire.queue(1);
+        slot.getdata_wire.wrote(1, written_ms);
+    }
+
+    #[test]
+    fn disconnect_stalled_later_getdata_does_not_refresh_silence() {
+        let a = addr(14);
+        let mut slot = dummy_slot(8, a, true);
+        let h = hash_byte(0x14);
+        put_on_wire(&mut slot, h, 40_000);
+        slot.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(h, super::super::state::InflightReq::new(8));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            50_000,
+        );
+        assert!(cooldown.contains_key(&a));
+        assert!(inflight.is_empty());
+    }
+
+    #[test]
+    fn disconnect_stalled_skips_getdata_still_in_the_writer() {
+        let a = addr(15);
+        let mut slot = dummy_slot(9, a, true);
+        let h = hash_byte(0x15);
+        slot.in_flight.insert(h);
+        slot.getdata_wire.queue(1);
+        slot.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(h, super::super::state::InflightReq::new(9));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            90_000,
+        );
+        assert!(!cooldown.contains_key(&a));
+        assert!(inflight.contains_key(&h));
+    }
+
+    #[test]
+    fn disconnect_stalled_keeps_the_set_when_every_peer_is_quiet() {
+        let a = addr(16);
+        let b = addr(17);
+        let mut sa = dummy_slot(10, a, true);
+        let mut sb = dummy_slot(11, b, true);
+        let ha = hash_byte(0x16);
+        let hb = hash_byte(0x17);
+        put_on_wire(&mut sa, ha, 0);
+        put_on_wire(&mut sb, hb, 0);
+        sa.rate.note_rx(0);
+        sb.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(ha, super::super::state::InflightReq::new(10));
+        inflight.insert(hb, super::super::state::InflightReq::new(11));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [sa, sb],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert!(cooldown.is_empty());
+        assert_eq!(inflight.len(), 2);
+    }
+
+    #[test]
+    fn disconnect_stalled_drops_only_the_quiet_peer() {
+        let quiet_addr = addr(18);
+        let live_addr = addr(19);
+        let mut quiet = dummy_slot(12, quiet_addr, true);
+        let mut live = dummy_slot(13, live_addr, true);
+        let hq = hash_byte(0x18);
+        let hl = hash_byte(0x19);
+        put_on_wire(&mut quiet, hq, 0);
+        put_on_wire(&mut live, hl, 0);
+        quiet.rate.note_rx(0);
+        live.rate.note_rx(50_000);
+        let mut inflight = HashMap::new();
+        inflight.insert(hq, super::super::state::InflightReq::new(12));
+        inflight.insert(hl, super::super::state::InflightReq::new(13));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            &mut [quiet, live],
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert!(cooldown.contains_key(&quiet_addr));
+        assert!(!cooldown.contains_key(&live_addr));
+        assert!(!inflight.contains_key(&hq));
+        assert!(inflight.contains_key(&hl));
+    }
+
     #[test]
     fn disconnect_stalled_releases_and_cools_addr() {
         let now = Instant::now();
