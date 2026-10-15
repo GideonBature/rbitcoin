@@ -72,6 +72,12 @@ fn regrind(block: &mut Block) {
 #[test]
 fn rpc_regtest_from_genesis() {
     let (ctx, dir, hub) = ctx_regtest_hub();
+    let help = dispatch(&ctx, "help", vec![json!("getnetworkhashps")]).unwrap();
+    let h = help.as_str().expect("help is a string");
+    assert!(
+        h.to_lowercase().contains("chainwork") && !h.contains("Dummy 2-work"),
+        "hashrate help must name chainwork, not dummy 2-work: {h}"
+    );
     let (addr, p2wpkh) = p2wpkh_regtest();
     let store = dir.join("store");
     chain_ops_at_genesis(&ctx, &hub, &store);

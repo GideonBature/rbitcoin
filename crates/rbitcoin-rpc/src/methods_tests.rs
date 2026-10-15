@@ -462,15 +462,6 @@ fn blockchain_empty_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn getnetworkhashps_help_names_chainwork() {
-    let h = super::method_help("getnetworkhashps");
-    assert!(
-        h.to_lowercase().contains("chainwork") && !h.contains("Dummy 2-work"),
-        "hashrate help must name chainwork, not dummy 2-work: {h}"
-    );
-}
-
 fn chainwork_f64(hex: &str) -> f64 {
     let b = rbitcoin_primitives::hex_decode(hex).unwrap();
     b.iter().fold(0.0, |a, x| a * 256.0 + f64::from(*x))
