@@ -882,6 +882,16 @@ mod tests {
         assert!(signet_skip.milestone().skips_scripts_at(1));
         let work = ready_config(["rbitcoin-node", "--min-chain-work=0x65"]);
         assert_eq!(work.minimum_chain_work.unwrap()[31], 0x65);
+        let mut long_work = NodeConfig::default();
+        let long_hex = "01234567890123456789012345678901234567890123456789012345678901234";
+        let refused = long_work
+            .apply_kv("min_chain_work", long_hex)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("64 hex digits"),
+            "65 hex digits must be refused: {refused}"
+        );
 
         // Kebab flags set the knob the conf key of the same name sets.
         let cfg = ready_config([
