@@ -455,7 +455,8 @@ pub(crate) fn apply_peer_event(
             }
         }
         PeerEvent::Addrs { peer, addrs } => {
-            inject_learned_addrs(peer_book, &addrs, local_addr, peer);
+            let allow = take_addr_tokens(st, peer, addrs.len());
+            inject_learned_addrs(peer_book, &addrs[..allow], local_addr, peer);
         }
         PeerEvent::Dead { peer, reason } => apply_peer_dead(st, peer_book, peer, reason),
     }
@@ -871,8 +872,24 @@ fn apply_notfound(st: &mut IbdWorkState, peer: usize, hashes: Vec<BlockHash>) {
     st.reopen_for_densify(&freed);
 }
 
+/// How many of `want` addresses from `peer` may enter the dial book. The
+/// bucket counts from the peer's connect on the IBD mono clock.
+fn take_addr_tokens(st: &mut IbdWorkState, peer: usize, want: usize) -> usize {
+    let now = super::peer_io::ibd_mono_ms();
+    let start = st
+        .slots
+        .iter()
+        .find(|s| s.id == peer)
+        .map_or(now, |s| s.connected_ms);
+    st.addr_buckets
+        .entry(peer)
+        .or_insert_with(|| crate::peer::AddrTokenBucket::new(start))
+        .take(want, now)
+}
+
 fn apply_peer_dead(st: &mut IbdWorkState, peer_book: &mut AddrMan, peer: usize, reason: String) {
     warn!("ibd: peer[{peer}] dead: {reason}");
+    st.addr_buckets.remove(&peer);
     super::header_walk::forget_walk_peer(st, peer);
     if let Some(s) = st.slots.iter().find(|s| s.id == peer) {
         if reason == "peer misbehavior threshold" {
@@ -1365,6 +1382,36 @@ mod misbehavior_dead_tests {
             "a body already counted keeps an ordinary death off the cooldown"
         );
         assert!(!book.flags(&other_addr).failed_last_connect());
+    }
+}
+
+#[cfg(test)]
+mod addr_bucket_tests {
+    use super::super::assign::tests::dummy_slot;
+    use super::super::peer_io::ibd_mono_ms;
+    use super::super::state::IbdWorkState;
+    use super::{apply_peer_dead, take_addr_tokens};
+    use crate::seeds::AddrMan;
+
+    /// IBD peers spend the same addr token bucket as tip-follow sessions: one
+    /// token at connect, so a 1000-address flood teaches the book one address.
+    #[test]
+    fn ibd_peer_addr_flood_takes_one_token() {
+        let mut slot = dummy_slot(1);
+        slot.connected_ms = ibd_mono_ms();
+        let mut st = IbdWorkState::new(vec![slot], None, Some(0));
+        assert_eq!(take_addr_tokens(&mut st, 1, 1_000), 1);
+        assert_eq!(
+            take_addr_tokens(&mut st, 1, 1_000),
+            0,
+            "the bucket is spent"
+        );
+        let mut book = AddrMan::new();
+        apply_peer_dead(&mut st, &mut book, 1, "bye".to_string());
+        assert!(
+            st.addr_buckets.is_empty(),
+            "a dead peer's bucket is dropped"
+        );
     }
 }
 

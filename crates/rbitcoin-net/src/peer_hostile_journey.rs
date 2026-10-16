@@ -303,8 +303,20 @@ async fn hostile_addr_relay(
         let (quiet_tx, mut quiet_rx) = mpsc::unbounded_channel();
         quiet.attach_out(quiet_tx);
 
-        assert_eq!(addr_relay_tokens(0.0, 1_000, 11_000), 1.0);
-        assert!(addr_relay_tokens(0.0, 1_000, 1_000) < 1.0);
+        let mut fresh = AddrTokenBucket::new(1_000);
+        assert_eq!(fresh.take(5, 1_000), 1, "a new bucket holds one token");
+        assert_eq!(fresh.take(1, 10_999), 0, "under 10 s is less than a token");
+        let mut ten = AddrTokenBucket::new(1_000);
+        assert_eq!(ten.take(1, 1_000), 1);
+        assert_eq!(ten.take(1, 11_000), 1, "10 s refills one token");
+        let mut capped = AddrTokenBucket::new(0);
+        assert_eq!(
+            capped.take(5_000, 1_000_000_000),
+            MAX_ADDR_TO_SEND,
+            "refill stops at the cap"
+        );
+        // A quiet peer refills its bucket: let 10_000 s of node time pass.
+        peers.set_mock_now(peer.connected_at_secs() + 10_000);
 
         let list: Vec<AddrV2Message> = (1..=3u8)
             .map(|i| AddrV2Message {
@@ -435,4 +447,54 @@ async fn hostile_addr_relay(
         }
         assert_eq!(extra_relay, 0, "past the 1000-address burst nothing is relayed");
 
+}
+
+fn addr_flood(first_octet: u8) -> Vec<AddrV2Message> {
+    (0..MAX_ADDR_TO_SEND as u32)
+        .map(|i| AddrV2Message {
+            time: 1_700_000_000,
+            services: ServiceFlags::NETWORK,
+            addr: AddrV2::Ipv4(Ipv4Addr::new(first_octet, (i >> 8) as u8, i as u8, 1)),
+            port: 8333,
+        })
+        .collect()
+}
+
+/// Core v31.1 ADDR processing: a peer's token bucket starts at one address,
+/// and an address with no token left is dropped before AddrMan, not only
+/// before relay. A peer with the `addr` permission is not rate limited.
+#[test]
+fn addrv2_flood_is_rate_limited_before_addrman() {
+    for (perm, want_learned) in [(false, 1usize), (true, MAX_ADDR_TO_SEND)] {
+        let peers = crate::peers::PeerHub::new();
+        if perm {
+            let mut t = crate::NetPermTable::default();
+            t.whitelist
+                .push(crate::parse_whitelist("addr@127.0.0.1").unwrap());
+            peers.set_net_perms(t);
+        }
+        let am = std::sync::Arc::new(std::sync::Mutex::new(crate::seeds::AddrMan::new()));
+        peers.set_addrman(am.clone());
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
+        let ver = hostile_ver(bind);
+        let peer = peers.register(bind, bind, &ver, true, crate::peers::PeerConnType::Inbound);
+        let mut follow = PeerFollowState::new();
+        on_addrv2(&mut follow, Some(peer.as_ref()), &addr_flood(11)).unwrap();
+        assert_eq!(
+            am.lock().unwrap().len(),
+            want_learned,
+            "addr permission {perm}: addresses that reach AddrMan"
+        );
+        let info = peers
+            .snapshot()
+            .into_iter()
+            .find(|p| p.id == peer.id)
+            .expect("peer info");
+        let limited = (MAX_ADDR_TO_SEND - want_learned) as u64;
+        assert_eq!(
+            (info.addr_processed, info.addr_rate_limited),
+            (want_learned as u64, limited),
+            "getpeerinfo addr counters, addr permission {perm}"
+        );
+    }
 }

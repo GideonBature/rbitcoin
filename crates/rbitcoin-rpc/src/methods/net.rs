@@ -115,6 +115,8 @@ pub(crate) fn peerinfo_json(ctx: &RpcContext, p: rbitcoin_net::PeerInfo) -> Valu
         "bytessent": p.bytessent,
         "last_inv_sequence": p.last_inv_sequence,
         "inv_to_send": p.inv_to_send,
+        "addr_processed": p.addr_processed,
+        "addr_rate_limited": p.addr_rate_limited,
         "inflight": p.inflight,
         "permissions": p.permissions,
     });

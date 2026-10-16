@@ -402,16 +402,41 @@ pub fn version_handshake_timeout_log(peer: u64) -> String {
 /// Max addresses in one ADDR / addrv2. Interop size — do not change without
 /// a named reason to diverge (see COMPAT.md).
 pub const MAX_ADDR_TO_SEND: usize = 1000;
-/// Addresses one peer may relay before the bucket must refill (~0.1/s).
-pub(crate) const ADDR_RELAY_BURST: f64 = 1000.0;
-pub(crate) const ADDR_RELAY_PER_SEC: f64 = 0.1;
+/// Core `MAX_ADDR_RATE_PER_SECOND`: a peer earns one address token per 10 s.
+pub(crate) const MAX_ADDR_RATE_PER_SECOND: f64 = 0.1;
+/// Core `MAX_ADDR_PROCESSING_TOKEN_BUCKET`: refill stops at this many tokens.
+pub(crate) const MAX_ADDR_PROCESSING_TOKEN_BUCKET: f64 = MAX_ADDR_TO_SEND as f64;
 
-pub(crate) fn addr_relay_tokens(tokens: f64, at_ms: u64, now_ms: u64) -> f64 {
-    if now_ms <= at_ms {
-        return tokens.min(ADDR_RELAY_BURST);
+/// Core `Peer::m_addr_token_bucket`. It starts at one token. Each address a
+/// peer sends costs one, and an address with no token left is dropped before
+/// AddrMan and relay.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AddrTokenBucket {
+    tokens: f64,
+    at_ms: u64,
+}
+
+impl AddrTokenBucket {
+    pub(crate) fn new(now_ms: u64) -> Self {
+        Self {
+            tokens: 1.0,
+            at_ms: now_ms,
+        }
     }
-    let dt = (now_ms - at_ms) as f64 / 1000.0;
-    (tokens + dt * ADDR_RELAY_PER_SEC).min(ADDR_RELAY_BURST)
+
+    /// Refill for the time since the last call (only below the cap), then
+    /// take up to `want` tokens. Returns how many addresses may be processed.
+    pub(crate) fn take(&mut self, want: usize, now_ms: u64) -> usize {
+        if self.tokens < MAX_ADDR_PROCESSING_TOKEN_BUCKET {
+            let dt = now_ms.saturating_sub(self.at_ms) as f64 / 1000.0;
+            self.tokens =
+                (self.tokens + dt * MAX_ADDR_RATE_PER_SECOND).min(MAX_ADDR_PROCESSING_TOKEN_BUCKET);
+        }
+        self.at_ms = self.at_ms.max(now_ms);
+        let take = (self.tokens.floor() as usize).min(want);
+        self.tokens -= take as f64;
+        take
+    }
 }
 
 fn addr_relay_key(msg: &bitcoin::p2p::address::AddrV2Message) -> u64 {
@@ -2983,12 +3008,10 @@ fn on_addrv2(
     }
     if let Some(s) = session {
         if let Some(ph) = s.peer_hub() {
-            ph.learn_addrv2(list);
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let allow = s.take_addr_relay(list.len(), now_ms);
+            // Node time, as the bucket's start (`connected_at`) is.
+            let now_ms = s.clock_now().saturating_mul(1000);
+            let allow = s.take_addr_tokens(list.len(), now_ms);
+            ph.learn_addrv2(&list[..allow]);
             let mut neighbors: Vec<_> = ph
                 .live_peers()
                 .into_iter()
