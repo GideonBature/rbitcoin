@@ -377,13 +377,11 @@ async fn assert_esplora_asof_dead(addr: SocketAddr, path: &str) {
 
 async fn mempool_status_matches_history_row_order(
     stream: &mut TcpStream,
-    q: &Query,
     hub: &rbitcoin_net::MempoolHub,
     chain: &rbitcoin_test::MatureRegtestChain,
 ) {
     use bitcoin::hashes::{sha256, Hash as _};
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_primitives::Height;
 
     let coinbase = &chain.blocks[2].txdata[0];
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -428,13 +426,10 @@ async fn mempool_status_matches_history_row_order(
     for row in rows {
         let height = row["height"].as_i64().unwrap();
         let tx_hash = row["tx_hash"].as_str().unwrap();
-        let piece = if height > 0 {
-            let (_, rec) = q.header_at_height(Height(height as u32)).unwrap().unwrap();
-            let block = rbitcoin_primitives::display_hash_hex(&rec.hash);
-            format!("{tx_hash}:{height}:{block}:")
-        } else {
-            format!("{tx_hash}:{height}:")
-        };
+        // Electrum protocol status: `tx_hash:height:` for every row. Electrum
+        // desktop recomputes it from get_history and drops the history on a
+        // mismatch (`synchronizer.py` `history_status`).
+        let piece = format!("{tx_hash}:{height}:");
         preimage.push_str(&piece);
         ordered.push((height, piece));
     }
@@ -660,7 +655,7 @@ async fn electrum_server_version_history_balance() {
     assert!(v["result"]["count"].as_u64().unwrap() >= 1);
     assert!(!v["result"]["hex"].as_str().unwrap().is_empty());
 
-    mempool_status_matches_history_row_order(&mut stream, &q, &hub, &chain).await;
+    mempool_status_matches_history_row_order(&mut stream, &hub, &chain).await;
 
     pin_wallet_protocol_1_6(&mut stream).await;
 
@@ -2012,15 +2007,24 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
             reorg_from_height: Some(103),
         })
         .expect("same-height replace notify");
-    let push_b = read_notify(&mut stream, "same-height status B").await;
-    assert_eq!(
-        push_b["method"].as_str(),
-        Some("blockchain.scripthash.subscribe")
+    // Same txids at the same heights: the protocol status is unchanged, so
+    // the restatus pushes nothing and a fresh subscribe answers status A.
+    let quiet_b = drain_lines(&mut stream, Duration::from_millis(500)).await;
+    assert!(
+        quiet_b.is_empty(),
+        "same-height replace keeps tx_hash:height:, so no status push: {quiet_b:?}"
     );
-    let status_b = push_b["params"][1].as_str().expect("status B").to_string();
-    assert_ne!(
-        status_a, status_b,
-        "same-height replace must change status via confirming blockhash"
+    let resub_b = rpc(
+        &mut stream,
+        22,
+        "blockchain.scripthash.subscribe",
+        json!([sh.clone()]),
+    )
+    .await;
+    assert_eq!(
+        resub_b["result"].as_str(),
+        Some(status_a.as_str()),
+        "status hashes tx_hash:height: only: {resub_b}"
     );
     let live_b = rpc(
         &mut stream,
@@ -2070,11 +2074,10 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
             reorg_from_height: Some(103),
         })
         .expect("A-B-A restore notify");
-    let push_a2 = read_notify(&mut stream, "same-height status A again").await;
-    assert_eq!(
-        push_a2["params"][1].as_str(),
-        Some(status_a.as_str()),
-        "A-B-A must restore the original status string: {push_a2}"
+    let quiet_a2 = drain_lines(&mut stream, Duration::from_millis(500)).await;
+    assert!(
+        quiet_a2.is_empty(),
+        "A-B-A leaves the status unchanged, so no push: {quiet_a2:?}"
     );
 
     q.disconnect_tip().unwrap();
