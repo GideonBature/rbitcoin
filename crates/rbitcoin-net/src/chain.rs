@@ -3926,6 +3926,15 @@ mod tests {
     }
 
     #[test]
+    fn generate_refuses_more_than_ten_thousand_blocks() {
+        let (_dir, hub) = tmp_hub();
+        let err = hub
+            .generate_to_script(10_001, ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .expect_err("10001 blocks is past the cap");
+        assert!(err.to_string().contains("nblocks too large"), "{err}");
+    }
+
+    #[test]
     fn rewind_defers_while_a_tip_commit_is_open() {
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
