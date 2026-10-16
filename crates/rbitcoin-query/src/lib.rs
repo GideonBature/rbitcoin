@@ -1306,9 +1306,6 @@ impl Query {
         self.reconstruct_archived.swap(0, AtomicOrdering::Relaxed)
     }
 
-    pub const MAX_SH_CREATES_MSG: &'static str =
-        "scripthash join exceeds --max-sh-creates (default 10000)";
-
     /// [`StoreError::Rejected`] payload from [`Self::block_queue_offer`] for
     /// wire that does not decode. Only this refusal is the sender's fault.
     pub const UNDECODABLE_WIRE_MSG: &'static str = "block wire does not decode";

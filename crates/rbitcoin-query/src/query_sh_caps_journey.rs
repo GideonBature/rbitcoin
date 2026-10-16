@@ -102,7 +102,7 @@ fn sh_history_caps() {
         q.scripthash_history(&sh).map(|_| ()).unwrap_err(),
     ] {
         assert!(
-            matches!(err, StoreError::Rejected(m) if m == Query::MAX_SH_CREATES_MSG),
+            err.to_string() == "scripthash join exceeds --max-sh-creates (7 creates, cap 2)",
             "{err}"
         );
     }
@@ -157,7 +157,7 @@ fn sh_history_caps() {
         )
         .unwrap_err();
     assert!(
-        matches!(err, StoreError::Rejected(m) if m == Query::MAX_SH_CREATES_MSG),
+        err.to_string() == "scripthash join exceeds --max-sh-creates (7 creates, cap 2)",
         "{err}"
     );
 
