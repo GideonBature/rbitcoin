@@ -180,6 +180,9 @@ pub struct AcceptResult {
     pub replaced_scripthashes: Vec<[u8; 32]>,
     /// Replaced bodies, for package rollback to restore victims.
     pub replaced_txs: Vec<Transaction>,
+    /// Accept times of [`Self::replaced_txs`], so a rollback restores each
+    /// with its own time.
+    pub replaced_accept_secs: std::collections::HashMap<Txid, u64>,
     /// Txids dropped to free a slot or the weight budget while admitting this tx.
     /// Distinct from [`Self::replaced`]. The admitted tx is not in this list
     /// when the commit succeeds.
@@ -433,6 +436,9 @@ pub struct PreparedAdmit {
     pub prevouts: Vec<TxOut>,
     pub chain_coins: Vec<Option<Coin>>,
     pub utxo_us: u64,
+    /// Accept time to persist instead of now. Set when a failed replacement
+    /// puts an already-admitted conflict back, so it keeps its own time.
+    pub keep_accept_secs: Option<u64>,
 }
 
 /// Graph spend edges for one tx (conflicts + mempool parents).
@@ -489,6 +495,8 @@ pub struct ActiveMempool {
     /// Bodies removed for replacement when `finish_commit` later returns
     /// `Err`. Success moves them onto [`AcceptResult::replaced_txs`].
     undone_replacements: Vec<Transaction>,
+    /// Accept times of `undone_replacements`, read before their slots died.
+    undone_accept_secs: std::collections::HashMap<Txid, u64>,
     /// `setmocktime` seconds, shared with the hub's clock (0 = wall).
     node_clock: Arc<AtomicU64>,
     /// Accept times of the records loaded at open, until the hub takes them.
@@ -521,6 +529,7 @@ impl ActiveMempool {
 
     /// Conflicts a failed `finish_commit` already removed. Empty after a success.
     pub fn take_undone_replacements(&mut self) -> Vec<Transaction> {
+        self.undone_accept_secs.clear();
         std::mem::take(&mut self.undone_replacements)
     }
 }
@@ -633,6 +642,7 @@ impl ActiveMempool {
             extra_compact: VecDeque::new(),
             last_evicted: Vec::new(),
             undone_replacements: Vec::new(),
+            undone_accept_secs: std::collections::HashMap::new(),
             node_clock: Arc::new(AtomicU64::new(0)),
             loaded_accept: ingested.accept_secs,
         })
@@ -1024,6 +1034,7 @@ impl ActiveMempool {
             prevouts,
             chain_coins,
             utxo_us,
+            keep_accept_secs: None,
         })
     }
 
@@ -1111,6 +1122,7 @@ impl ActiveMempool {
         trim: bool,
     ) -> Result<AcceptResult, AcceptError> {
         self.undone_replacements.clear();
+        self.undone_accept_secs.clear();
         let (conflict_set, fee_sat, adj_weight) = self.plan_after_script(tx, &prep)?;
         let txid = prep.txid;
         let weight = prep.weight;
@@ -1118,6 +1130,13 @@ impl ActiveMempool {
         let mut replaced_scripthashes: Vec<[u8; 32]> = Vec::new();
         let mut replaced_txs: Vec<Transaction> = Vec::new();
         for c in &conflict_set {
+            if let Some(at) = self
+                .graph
+                .get(c)
+                .and_then(|e| self.store.live_accept_secs(e.slot))
+            {
+                self.undone_accept_secs.insert(*c, at);
+            }
             if let Some(old) = self.bodies.get(c) {
                 let old_tx = (**old).clone();
                 self.note_extra(&old_tx);
@@ -1143,7 +1162,9 @@ impl ActiveMempool {
         let mut evicted = self.ensure_free_slot(Some(txid))?;
 
         let aux = Self::vin_aux_from_prep(tx, &prep);
-        let accept_secs = self.node_now_secs();
+        let accept_secs = prep
+            .keep_accept_secs
+            .unwrap_or_else(|| self.node_now_secs());
         let t_dur = Instant::now();
         let slot = match self.store.append_live_tx(
             tx,
@@ -1202,6 +1223,7 @@ impl ActiveMempool {
             "a successful admit is not in its own eviction set"
         );
         let replaced_txs = std::mem::take(&mut self.undone_replacements);
+        let replaced_accept_secs = std::mem::take(&mut self.undone_accept_secs);
 
         Ok(AcceptResult {
             txid,
@@ -1212,6 +1234,7 @@ impl ActiveMempool {
             replaced: conflict_set.into_iter().collect(),
             replaced_scripthashes,
             replaced_txs,
+            replaced_accept_secs,
             evicted,
         })
     }
@@ -1233,6 +1256,7 @@ impl ActiveMempool {
             replaced: conflict_set.into_iter().collect(),
             replaced_scripthashes: Vec::new(),
             replaced_txs: Vec::new(),
+            replaced_accept_secs: std::collections::HashMap::new(),
             evicted: Vec::new(),
         })
     }
@@ -1594,11 +1618,15 @@ impl ActiveMempool {
             .iter()
             .flat_map(|r| r.replaced_txs.iter().cloned())
             .collect();
+        let accept_secs: std::collections::HashMap<Txid, u64> = accepted
+            .iter()
+            .flat_map(|r| r.replaced_accept_secs.iter().map(|(t, s)| (*t, *s)))
+            .collect();
         for r in accepted.iter().rev() {
             let _ = self.unlink_tree(&r.txid);
         }
         let _ = self.store.sync_deaths();
-        self.restore_victims(&victims, utxos, tip);
+        self.restore_victims(&victims, &accept_secs, utxos, tip);
     }
 
     /// Parents before children, so a restored descendant can see its in-set parent.
@@ -1648,13 +1676,16 @@ impl ActiveMempool {
 
     /// Put an already-admitted body back. The fee floor does not apply again,
     /// and a missing parent is not parked.
+    /// It keeps `accept_secs`, its original accept time, when known.
     fn reaccept_already_admitted(
         &mut self,
         tx: &Transaction,
+        accept_secs: Option<u64>,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let prep = self.prepare_admit(tx, utxos, tip, 0, false, Some(0))?;
+        let mut prep = self.prepare_admit(tx, utxos, tip, 0, false, Some(0))?;
+        prep.keep_accept_secs = accept_secs;
         verify_tx_scripts(tx, prep.prevouts.clone())?;
         self.commit_after_script(tx, prep)
     }
@@ -1662,11 +1693,13 @@ impl ActiveMempool {
     fn restore_victims(
         &mut self,
         victims: &[Transaction],
+        accept_secs: &std::collections::HashMap<Txid, u64>,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) {
         for i in Self::ancestor_first_order(victims) {
-            match self.reaccept_already_admitted(&victims[i], utxos, tip) {
+            let at = accept_secs.get(&victims[i].compute_txid()).copied();
+            match self.reaccept_already_admitted(&victims[i], at, utxos, tip) {
                 Ok(r) => self.promote_orphans_of(r.txid, utxos, tip),
                 Err(_) => {
                     if !self.undone_replacements.is_empty() {
@@ -1680,7 +1713,8 @@ impl ActiveMempool {
     /// Re-accept conflicts a failed commit already removed.
     fn restore_undone(&mut self, utxos: &impl UtxoProvider, tip: ChainTipCtx) {
         let victims = std::mem::take(&mut self.undone_replacements);
-        self.restore_victims(&victims, utxos, tip);
+        let accept_secs = std::mem::take(&mut self.undone_accept_secs);
+        self.restore_victims(&victims, &accept_secs, utxos, tip);
     }
 
     /// Drop one live tx from the graph and `pwrite` its slot DEAD. No `fdatasync`.
@@ -3680,6 +3714,109 @@ mod tests {
             "paying child must stay"
         );
         assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A conflict put back after a failed replacement keeps the accept time it
+    /// was admitted with. The sidecar must not take the restore instant.
+    #[test]
+    fn failed_replacement_restore_keeps_accept_time_on_disk() {
+        let value = 50_000_000u64;
+        let dir = tmp_dir();
+        let utxos = coins(&[(0x11, value), (0x22, value)]);
+        let anchor_op = OutPoint {
+            txid: Txid::from_byte_array([0x11; 32]),
+            vout: 0,
+        };
+        let low_op = OutPoint {
+            txid: Txid::from_byte_array([0x22; 32]),
+            vout: 0,
+        };
+        let clock = Arc::new(AtomicU64::new(0));
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.set_node_clock(Arc::clone(&clock));
+        let anchor_wu = fat_spend(anchor_op, value, 0).weight().to_wu();
+        let victim_wu = spend_tx_fee(low_op, value, 0).weight().to_wu();
+        mp.max_weight = anchor_wu + victim_wu + 500;
+        let floor = mp.mempool_min_fee_sat_kvb();
+        let anchor = fat_spend(anchor_op, value, fee_at_least(anchor_wu, floor));
+        let victim = spend_tx_fee(low_op, value, fee_at_least(victim_wu, floor));
+        let victim_id = victim.compute_txid();
+        let t0 = 1_700_000_000u64;
+        clock.store(t0, Ordering::Relaxed);
+        mp.accept_tx(&anchor, &utxos, TIP_OK).expect("anchor");
+        mp.accept_tx(&victim, &utxos, TIP_OK).expect("victim");
+        clock.store(t0 + 600, Ordering::Relaxed);
+        let replacement = heavy_conflict(
+            low_op,
+            OutPoint {
+                txid: anchor.compute_txid(),
+                vout: 0,
+            },
+            value + anchor.output[0].value.to_sat(),
+            30_000,
+            victim_wu + 500,
+        );
+        let err = mp
+            .accept_tx(&replacement, &utxos, TIP_OK)
+            .expect_err("replacement over budget");
+        assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
+        assert!(mp.graph.contains(&victim_id), "conflict restored");
+        mp.store.flush().unwrap();
+        drop(mp);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let loaded = mp.take_loaded_accept_times();
+        let at = loaded
+            .iter()
+            .find(|(t, _, _)| *t == victim_id)
+            .map(|(_, _, s)| *s);
+        assert_eq!(at, Some(t0), "restored conflict keeps its accept time");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A package member that replaced a conflict, followed by a member that
+    /// fails, rolls back. The restored conflict keeps its own accept time.
+    #[test]
+    fn package_rollback_restore_keeps_accept_time_on_disk() {
+        let value = 50_000_000u64;
+        let dir = tmp_dir();
+        let utxos = coins(&[(0x33, value)]);
+        let op = OutPoint {
+            txid: Txid::from_byte_array([0x33; 32]),
+            vout: 0,
+        };
+        let clock = Arc::new(AtomicU64::new(0));
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        mp.set_node_clock(Arc::clone(&clock));
+        let low = spend_tx_fee(op, value, 1_000);
+        let low_id = low.compute_txid();
+        let high = spend_tx_fee(op, value, 100_000);
+        let mut bad_child = spend_tx_fee(
+            OutPoint {
+                txid: high.compute_txid(),
+                vout: 0,
+            },
+            high.output[0].value.to_sat(),
+            10_000,
+        );
+        bad_child.input[0].witness = Witness::from_slice(&[vec![0x01], vec![0x50, 0x01]]);
+        let t0 = 1_700_000_000u64;
+        clock.store(t0, Ordering::Relaxed);
+        mp.accept_tx(&low, &utxos, TIP_OK).expect("low");
+        clock.store(t0 + 600, Ordering::Relaxed);
+        mp.accept_package(&[high.clone(), bad_child], &utxos, TIP_OK)
+            .expect_err("annex child fails");
+        assert!(!mp.graph.contains(&high.compute_txid()));
+        assert!(mp.graph.contains(&low_id), "victim restored");
+        mp.store.flush().unwrap();
+        drop(mp);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let at = mp
+            .take_loaded_accept_times()
+            .iter()
+            .find(|(t, _, _)| *t == low_id)
+            .map(|(_, _, s)| *s);
+        assert_eq!(at, Some(t0), "restored victim keeps its accept time");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

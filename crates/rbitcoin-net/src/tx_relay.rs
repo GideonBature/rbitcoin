@@ -2273,7 +2273,9 @@ impl MempoolHub {
             time_prepare_lock: false,
             min_relay: Some(0),
         };
-        let prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
+        let mut prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
+        // Keep the time the hub already holds, so disk and RAM agree.
+        prep.keep_accept_secs = self.accept_time_txid(&prep.txid);
         let sample = self.sample_chain_coins(tx, utxo);
         let committed = {
             let mut g = self.lock_write();
@@ -3762,6 +3764,7 @@ impl MempoolHub {
             replaced: Vec::new(),
             replaced_scripthashes: Vec::new(),
             replaced_txs: Vec::new(),
+            replaced_accept_secs: Default::default(),
             evicted: Vec::new(),
         })
     }
@@ -7110,6 +7113,103 @@ mod tests {
                 hub.contains(&victim_id),
                 "package={package}: failed replacement must keep the conflict"
             );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A conflict restored after a failed replacement keeps its accept time
+    /// in RAM and on disk, so a restart moves neither `getmempoolentry.time`
+    /// nor its expiry.
+    #[test]
+    fn failed_replacement_restore_keeps_accept_time_across_restart() {
+        let (_store, owned_q, owned_cbs) = pad_cbs(3);
+        let q = &owned_q;
+        let cbs = owned_cbs.as_slice();
+        for package in [false, true] {
+            let mut fat = Vec::with_capacity(5_000);
+            for _ in 0..9 {
+                fat.push(0x4d);
+                fat.extend_from_slice(&520u16.to_le_bytes());
+                fat.extend(std::iter::repeat_n(0u8, 520));
+                fat.push(0x75);
+            }
+            fat.push(0x51);
+            let parent = spend_true(cbs[0], 2_000, ScriptBuf::from_bytes(fat));
+            let parent_id = parent.compute_txid();
+            let victim = spend_true(cbs[1], 3_000, ScriptBuf::from_bytes(vec![0x51]));
+            let victim_id = victim.compute_txid();
+            let parent_out = parent.output[0].value.to_sat();
+            let repl_fee = 60_000u64;
+            let replacement = Transaction {
+                version: Version::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![
+                    TxIn {
+                        previous_output: OutPoint {
+                            txid: cbs[1],
+                            vout: 0,
+                        },
+                        script_sig: ScriptBuf::new(),
+                        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                        witness: Witness::new(),
+                    },
+                    TxIn {
+                        previous_output: OutPoint {
+                            txid: parent_id,
+                            vout: 0,
+                        },
+                        script_sig: ScriptBuf::new(),
+                        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                        witness: Witness::new(),
+                    },
+                ],
+                output: vec![TxOut {
+                    value: Amount::from_sat(50_0000_0000 + parent_out - repl_fee),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51; 800]),
+                }],
+            };
+            let budget = parent.weight().to_wu() + victim.weight().to_wu() + 500;
+            let dir = tmp();
+            let hub = MempoolHub::open_with_weight(&dir, Arc::clone(q), budget).unwrap();
+            hub.set_relay_enabled(true);
+            let t0 = 1_700_000_000u64;
+            hub.note_mock_now(t0);
+            hub.accept_tx(&parent).expect("parent fits");
+            hub.accept_tx(&victim).expect("victim fits");
+            hub.note_mock_now(t0 + 600);
+            let err = if package {
+                hub.accept_package(std::slice::from_ref(&replacement))
+                    .map(|_| ())
+            } else {
+                hub.accept_tx(&replacement).map(|_| ())
+            };
+            assert!(
+                matches!(err, Err(AcceptError::Policy("mempool full"))),
+                "package={package}: got {err:?}"
+            );
+            assert!(hub.contains(&victim_id), "package={package}: restored");
+            assert_eq!(
+                hub.accept_time_txid(&victim_id),
+                Some(t0),
+                "package={package}: RAM keeps the original accept time"
+            );
+            hub.flush().expect("shutdown flush");
+            drop(hub);
+            let hub2 = MempoolHub::open_with_weight(&dir, Arc::clone(q), budget).unwrap();
+            assert!(hub2.contains(&victim_id), "package={package}: reloaded");
+            assert_eq!(
+                hub2.accept_time_txid(&victim_id),
+                Some(t0),
+                "package={package}: disk keeps the original accept time"
+            );
+            hub2.set_expiry_hours(1);
+            hub2.note_mock_now(t0 + 3600 + 5);
+            assert!(
+                hub2.expire_stale() >= 1,
+                "package={package}: expiry counts from the original accept"
+            );
+            assert!(!hub2.contains(&victim_id));
+            drop(hub2);
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

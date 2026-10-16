@@ -3,7 +3,8 @@
 //!
 //! Schema 3 had no `accept_secs` and schema 2 had no `sigops` either;
 //! [`decode_packed_live_v3`] / [`decode_packed_live_v2`] read them for the soft
-//! migrate, which stamps the migrate time and writes [`SIGOP_COST_UNKNOWN`]
+//! migrate. Every upgraded record takes the migrate time as its accept time.
+//! Schema 3 keeps its sigop cost; schema ≤ 2 writes [`SIGOP_COST_UNKNOWN`]
 //! until the hub recomputes.
 //!
 //! Vin codec mirrors Class A packed flags/witness but writes `prev_txid` when
@@ -27,6 +28,8 @@ const VIN_HAS_SCRIPT_HASH: u8 = 1 << 4;
 const SIGOP_COST_UNKNOWN: u64 = u64::MAX;
 /// Byte offset of `sigops` in a schema-3 or schema-4 record.
 pub(crate) const SIGOP_COST_OFF: usize = 16;
+/// Byte offset of `accept_secs` in a schema-4 record.
+pub(crate) const ACCEPT_SECS_OFF: usize = SIGOP_COST_OFF + 8;
 
 /// Per-vin aux persisted with the packed body (SH index / tip-entry purge).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,7 +513,7 @@ mod tests {
             assert_eq!(decode_packed_live(&rec).unwrap().sigop_cost, want);
         }
         let mut v3 = v4.clone();
-        v3.drain(SIGOP_COST_OFF + 8..SIGOP_COST_OFF + 16);
+        v3.drain(ACCEPT_SECS_OFF..ACCEPT_SECS_OFF + 8);
         let got = decode_packed_live_v3(&v3).unwrap();
         assert_eq!((got.fee_sat, got.weight, got.sigop_cost), (7, 400, None));
         assert_eq!(got.accept_secs, 0, "schema 3 has no accept time");

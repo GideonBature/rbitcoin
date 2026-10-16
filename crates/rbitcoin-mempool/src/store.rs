@@ -7,7 +7,8 @@
 //! | `{datadir}/store/tx.body` | **Class A** confirmed archive — confirm commit sole writer |
 //! | `{datadir}/mempool/tx.body` | **This file** — unconfirmed live set only |
 //!
-//! Schema **3** packed live records (schema 2 + per-record sigop cost). Body is append-only (`body_persisted_len`);
+//! Schema **4** packed live records (`fee‖weight‖sigops‖accept_secs‖…`); schema 1–3
+//! recode on open. Body is append-only (`body_persisted_len`);
 //! `persist_due` syncs the dirty tail, then syncs new LIVE slots, then writes meta.
 //! Compact copies packed payload ranges. DEAD of a durable slot is a one-byte
 //! `pwrite`. A batch syncs `slots` once, then `meta`.
@@ -24,7 +25,7 @@
 use crate::error::MempoolError;
 use crate::packed::{
     decode_packed_live, decode_packed_live_v2, decode_packed_live_v3, encode_packed_live,
-    PackedLive, VinAux, SIGOP_COST_OFF,
+    PackedLive, VinAux, ACCEPT_SECS_OFF, SIGOP_COST_OFF,
 };
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::hashes::Hash;
@@ -589,6 +590,21 @@ impl Mempool {
             .write_all(&cost.to_le_bytes())
             .map_err(|e| MempoolError::io(&path, e))?;
         Ok(())
+    }
+
+    /// `accept_secs` of a LIVE slot's record, read from RAM.
+    pub(crate) fn live_accept_secs(&self, slot: u32) -> Option<u64> {
+        if slot >= self.slot_cap {
+            return None;
+        }
+        let off = SLOTS_HEADER + (slot as usize) * SLOT_REC;
+        if self.slots[off] != SLOT_LIVE {
+            return None;
+        }
+        let body_off = u64::from_le_bytes(self.slots[off + 4..off + 12].try_into().unwrap());
+        let at = body_off as usize + ACCEPT_SECS_OFF;
+        let bytes = self.body.get(at..at + 8)?;
+        Some(u64::from_le_bytes(bytes.try_into().unwrap()))
     }
 
     /// Load LIVE txs whose packed bytes sit inside the logical body.
