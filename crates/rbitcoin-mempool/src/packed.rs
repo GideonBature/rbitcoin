@@ -1,7 +1,11 @@
-//! MEM_SCHEMA 3 packed live records (`fee‖weight‖sigops‖txid‖wtxid‖tx‖vin aux`).
+//! MEM_SCHEMA 4 packed live records
+//! (`fee‖weight‖sigops‖accept_secs‖txid‖wtxid‖tx‖vin aux`).
 //!
-//! Schema 2 had no `sigops`; [`decode_packed_live_v2`] reads it for the soft
-//! migrate, which writes [`SIGOP_COST_UNKNOWN`] until the hub recomputes.
+//! Schema 3 had no `accept_secs` and schema 2 had no `sigops` either;
+//! [`decode_packed_live_v3`] / [`decode_packed_live_v2`] read them for the soft
+//! migrate. Every upgraded record takes the migrate time as its accept time.
+//! Schema 3 keeps its sigop cost; schema ≤ 2 writes [`SIGOP_COST_UNKNOWN`]
+//! until the hub recomputes.
 //!
 //! Vin codec mirrors Class A packed flags/witness but writes `prev_txid` when
 //! there is no Class A `create_fk`. Outputs reuse [`OutputRecord`] unspent
@@ -22,8 +26,10 @@ const VIN_HAS_SCRIPT_HASH: u8 = 1 << 4;
 
 /// `sigops` value for a record migrated from schema ≤ 2 (cost not yet known).
 const SIGOP_COST_UNKNOWN: u64 = u64::MAX;
-/// Byte offset of `sigops` in a schema-3 record.
+/// Byte offset of `sigops` in a schema-3 or schema-4 record.
 pub(crate) const SIGOP_COST_OFF: usize = 16;
+/// Byte offset of `accept_secs` in a schema-4 record.
+pub(crate) const ACCEPT_SECS_OFF: usize = SIGOP_COST_OFF + 8;
 
 /// Per-vin aux persisted with the packed body (SH index / tip-entry purge).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,19 +40,23 @@ pub struct VinAux {
     pub create_fk: Option<Fk>,
 }
 
-/// One LIVE body payload (schema 3).
+/// One LIVE body payload (schema 4).
 #[derive(Debug, Clone)]
 pub struct PackedLive {
     pub fee_sat: u64,
     pub weight: u64,
     /// Full sigop cost; `None` for a record migrated from schema ≤ 2.
     pub sigop_cost: Option<u64>,
+    /// Node-time seconds at accept (Core `nTime`). A record read from schema
+    /// ≤ 3 has none and reads 0; the migrate stamps it.
+    pub accept_secs: u64,
     pub txid: Txid,
     pub wtxid: Wtxid,
     pub tx: Transaction,
     pub vins: Vec<VinAux>,
 }
 
+#[allow(clippy::too_many_arguments)] // one field per record column
 pub fn encode_packed_live(
     tx: &Transaction,
     txid: &Txid,
@@ -54,6 +64,7 @@ pub fn encode_packed_live(
     fee_sat: u64,
     weight: u64,
     sigop_cost: Option<u64>,
+    accept_secs: u64,
     vins: &[VinAux],
 ) -> Result<Vec<u8>, MempoolError> {
     if vins.len() != tx.input.len() && !vins.is_empty() {
@@ -64,6 +75,7 @@ pub fn encode_packed_live(
     out.extend_from_slice(&weight.to_le_bytes());
     let sigops = sigop_cost.unwrap_or(SIGOP_COST_UNKNOWN);
     out.extend_from_slice(&sigops.to_le_bytes());
+    out.extend_from_slice(&accept_secs.to_le_bytes());
     out.extend_from_slice(txid.as_byte_array());
     out.extend_from_slice(wtxid.as_byte_array());
     out.extend_from_slice(&tx.version.0.to_le_bytes());
@@ -81,16 +93,25 @@ pub fn encode_packed_live(
 }
 
 pub fn decode_packed_live(buf: &[u8]) -> Result<PackedLive, MempoolError> {
-    decode_packed(buf, true)
+    decode_packed(buf, true, true)
 }
 
-/// Schema-2 record (no `sigops` field) for the 2 → 3 soft migrate.
+/// Schema-3 record (no `accept_secs` field) for the 3 → 4 soft migrate.
+pub(crate) fn decode_packed_live_v3(buf: &[u8]) -> Result<PackedLive, MempoolError> {
+    decode_packed(buf, true, false)
+}
+
+/// Schema-2 record (no `sigops` or `accept_secs`) for the 2 → 4 soft migrate.
 pub(crate) fn decode_packed_live_v2(buf: &[u8]) -> Result<PackedLive, MempoolError> {
-    decode_packed(buf, false)
+    decode_packed(buf, false, false)
 }
 
-fn decode_packed(buf: &[u8], has_sigops: bool) -> Result<PackedLive, MempoolError> {
-    let ids = if has_sigops { 24 } else { 16 };
+fn decode_packed(
+    buf: &[u8],
+    has_sigops: bool,
+    has_accept: bool,
+) -> Result<PackedLive, MempoolError> {
+    let ids = 16 + if has_sigops { 8 } else { 0 } + if has_accept { 8 } else { 0 };
     if buf.len() < ids + 32 + 32 + 8 {
         return Err(MempoolError::Corrupt("packed live short"));
     }
@@ -104,6 +125,11 @@ fn decode_packed(buf: &[u8], has_sigops: bool) -> Result<PackedLive, MempoolErro
         (v <= crate::graph::MAX_BLOCK_SIGOPS_COST).then_some(v)
     } else {
         None
+    };
+    let accept_secs = if has_accept {
+        u64::from_le_bytes(buf[ids - 8..ids].try_into().unwrap())
+    } else {
+        0
     };
     let txid = Txid::from_byte_array(buf[ids..ids + 32].try_into().unwrap());
     let wtxid = Wtxid::from_byte_array(buf[ids + 32..ids + 64].try_into().unwrap());
@@ -149,6 +175,7 @@ fn decode_packed(buf: &[u8], has_sigops: bool) -> Result<PackedLive, MempoolErro
         fee_sat,
         weight,
         sigop_cost,
+        accept_secs,
         txid,
         wtxid,
         tx,
@@ -304,6 +331,10 @@ mod tests {
     use bitcoin::consensus::encode::serialize;
     use bitcoin::transaction::Version;
 
+    /// First vin's flag byte: the fixed prefix (ids, version and locktime,
+    /// 104 B) plus the one-byte input and output counts.
+    const VIN0_FLAGS: usize = 104 + 1 + 1;
+
     fn sample_tx(annex: bool) -> Transaction {
         let mut witness = Witness::new();
         witness.push([0x01, 0x02]);
@@ -342,18 +373,25 @@ mod tests {
             script_hash: Some(sh),
             create_fk: Some(Fk(42)),
         }];
-        let packed = encode_packed_live(&tx, &txid, &wtxid, 123, 400, Some(80), &aux).unwrap();
+        let packed =
+            encode_packed_live(&tx, &txid, &wtxid, 123, 400, Some(80), 1_700_000_123, &aux)
+                .unwrap();
         let got = decode_packed_live(&packed).unwrap();
         assert_eq!(got.fee_sat, 123);
         assert_eq!(got.weight, 400);
         assert_eq!(got.sigop_cost, Some(80));
+        assert_eq!(got.accept_secs, 1_700_000_123);
         assert_eq!(got.txid, txid);
         assert_eq!(got.wtxid, wtxid);
         assert_eq!(serialize(&got.tx), raw, "consensus serialize pin");
         assert_eq!(got.vins[0].script_hash, Some(sh));
         assert_eq!(got.vins[0].create_fk, Some(Fk(42)));
         // SEQ_FINAL | EMPTY_SCRIPT | CREATE_FK | SCRIPT_HASH. Witness is present.
-        assert_eq!(packed[98], 0b0001_1011, "vin flags {:08b}", packed[98]);
+        assert_eq!(
+            packed[VIN0_FLAGS], 0b0001_1011,
+            "vin flags {:08b}",
+            packed[VIN0_FLAGS]
+        );
     }
 
     /// Vin flag bits and a script or witness that ends the record. Encode and
@@ -366,10 +404,15 @@ mod tests {
         bare.input[0].witness = Witness::new();
         let txid = bare.compute_txid();
         let wtxid = bare.compute_wtxid();
-        let packed = encode_packed_live(&bare, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap();
+        let packed =
+            encode_packed_live(&bare, &txid, &wtxid, 1, 400, Some(1), 1_700_000_000, &[]).unwrap();
         // SEQ_FINAL | EMPTY_SCRIPT | EMPTY_WITNESS, no aux. The witness/script
         // tails are absent, so this pins the three flag bits an operator reload reads.
-        assert_eq!(packed[98], 0b0000_0111, "vin flags {:08b}", packed[98]);
+        assert_eq!(
+            packed[VIN0_FLAGS], 0b0000_0111,
+            "vin flags {:08b}",
+            packed[VIN0_FLAGS]
+        );
         let got = decode_packed_live(&packed).unwrap();
         assert_eq!(serialize(&got.tx), serialize(&bare));
 
@@ -377,9 +420,14 @@ mod tests {
         bare.input[0].sequence = Sequence::ZERO;
         let txid = bare.compute_txid();
         let wtxid = bare.compute_wtxid();
-        let packed = encode_packed_live(&bare, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap();
+        let packed =
+            encode_packed_live(&bare, &txid, &wtxid, 1, 400, Some(1), 1_700_000_000, &[]).unwrap();
         // Non-empty script, empty witness, non-final sequence: only EMPTY_WITNESS.
-        assert_eq!(packed[98], 0b0000_0100, "vin flags {:08b}", packed[98]);
+        assert_eq!(
+            packed[VIN0_FLAGS], 0b0000_0100,
+            "vin flags {:08b}",
+            packed[VIN0_FLAGS]
+        );
         let got = decode_packed_live(&packed).unwrap();
         assert_eq!(got.tx.input[0].script_sig.as_bytes(), &[0x51]);
         assert_eq!(serialize(&got.tx), serialize(&bare));
@@ -421,7 +469,7 @@ mod tests {
             tx.input[0].witness = w;
         }
         let (txid, wtxid) = (tx.compute_txid(), tx.compute_wtxid());
-        encode_packed_live(&tx, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap()
+        encode_packed_live(&tx, &txid, &wtxid, 1, 400, Some(1), 1_700_000_000, &[]).unwrap()
     }
 
     /// Input and output counts past 100_000. A live mempool tx cannot be that
@@ -430,9 +478,10 @@ mod tests {
     fn packed_live_rejects_only_past_the_count_cap() {
         let tx = sample_tx(false);
         let (txid, wtxid) = (tx.compute_txid(), tx.compute_wtxid());
-        let seed = encode_packed_live(&tx, &txid, &wtxid, 1, 400, Some(1), &[]).unwrap();
+        let seed =
+            encode_packed_live(&tx, &txid, &wtxid, 1, 400, Some(1), 1_700_000_000, &[]).unwrap();
         let with_counts = |n_in: u64, n_out: u64| {
-            let mut buf = seed[..96].to_vec();
+            let mut buf = seed[..104].to_vec();
             write_compact_size(&mut buf, n_in);
             write_compact_size(&mut buf, n_out);
             buf
@@ -450,27 +499,38 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sigops_and_schema2_record_decode_as_none() {
+    fn unknown_sigops_and_older_schema_records_decode() {
         let tx = sample_tx(false);
         let (txid, wtxid) = (tx.compute_txid(), tx.compute_wtxid());
-        let v3 = encode_packed_live(&tx, &txid, &wtxid, 7, 400, None, &[]).unwrap();
-        assert_eq!(decode_packed_live(&v3).unwrap().sigop_cost, None);
+        let v4 = encode_packed_live(&tx, &txid, &wtxid, 7, 400, None, 1_700_000_000, &[]).unwrap();
+        assert_eq!(decode_packed_live(&v4).unwrap().sigop_cost, None);
         // A torn 8-byte write-back over 0xFF.. overestimates; any cost no block
         // can hold reads as unknown so the open-time pass recomputes it.
         for (stored, want) in [(80_000, Some(80_000)), (80_001, None)] {
-            let rec = encode_packed_live(&tx, &txid, &wtxid, 7, 400, Some(stored), &[]).unwrap();
+            let rec =
+                encode_packed_live(&tx, &txid, &wtxid, 7, 400, Some(stored), 1_700_000_000, &[])
+                    .unwrap();
             assert_eq!(decode_packed_live(&rec).unwrap().sigop_cost, want);
         }
+        let mut v3 = v4.clone();
+        v3.drain(ACCEPT_SECS_OFF..ACCEPT_SECS_OFF + 8);
+        let got = decode_packed_live_v3(&v3).unwrap();
+        assert_eq!((got.fee_sat, got.weight, got.sigop_cost), (7, 400, None));
+        assert_eq!(got.accept_secs, 0, "schema 3 has no accept time");
+        assert_eq!(got.txid, txid);
+        assert_eq!(serialize(&got.tx), serialize(&tx));
         let mut v2 = v3.clone();
         v2.drain(SIGOP_COST_OFF..SIGOP_COST_OFF + 8);
         let got = decode_packed_live_v2(&v2).unwrap();
         assert_eq!((got.fee_sat, got.weight, got.sigop_cost), (7, 400, None));
         assert_eq!(got.txid, txid);
         assert_eq!(serialize(&got.tx), serialize(&tx));
-        // Fixed prefix is 96 B (schema 3) / 88 B (schema 2): one byte short
-        // fails the length guard; exactly the prefix reaches the input count.
+        // Fixed prefix is 104 B (schema 4) / 96 B (schema 3) / 88 B (schema 2):
+        // one byte short fails the length guard; exactly the prefix reaches the
+        // input count.
         for (buf, min, decode) in [
-            (&v3, 96, decode_packed_live as fn(&[u8]) -> _),
+            (&v4, 104, decode_packed_live as fn(&[u8]) -> _),
+            (&v3, 96, decode_packed_live_v3),
             (&v2, 88, decode_packed_live_v2),
         ] {
             assert!(matches!(

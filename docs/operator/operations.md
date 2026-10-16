@@ -583,8 +583,10 @@ failed window still logs `rbitcoin: tip revalidate …`. That is intentional
 mid-chain header graph poison still means a clean datadir.
 
 **Mempool recovery:** `{datadir}/mempool/` is a private sidecar (not Class A),
-schema **3**. Leftover schema **1** (pre-packed `fee‖weight‖bitcoin-serialize`)
-or **2** converts to schema 3 on the next open (Class A untouched). Wipe `{datadir}/mempool/`
+schema **4** (each record keeps its accept time, so `getmempoolentry.time` and
+`-mempoolexpiry` survive a restart). Leftover schema **1** (pre-packed
+`fee‖weight‖bitcoin-serialize`), **2** or **3** converts to schema 4 on the next
+open, and its records count their accept time from that open (Class A untouched). Wipe `{datadir}/mempool/`
 only if the sidecar is damaged or an unknown schema/old 4k-slot table was left
 wedged — the next start recreates it empty and redownloads unconfirmed txs.
 Do **not** wipe `store/` for mempool slot/full/schema errors.
@@ -601,7 +603,11 @@ Do **not** wipe `store/` for mempool slot/full/schema errors.
 - **Discovery** queries Core DNS seeds for `NETWORK|WITNESS|P2P_V2`
   (`x809.<seed>` first; the bare seed name only if that returns nothing).
   Learned `addr` / `addrv2` is ingested only when the row advertises `P2P_V2`
-  (plus `NETWORK` or `NETWORK_LIMITED`). Dial ranking omits known-v1
+  (plus `NETWORK` or `NETWORK_LIMITED`). Each peer, IBD or tip-follow, has
+  Core's address token bucket: one address at connect, then one per 10 s, up
+  to 1000. Addresses past it are dropped before the book and relay, and
+  `getpeerinfo` counts them in `addr_rate_limited` (`addr_processed` counts
+  the rest). A peer with the `addr` whitelist permission is not limited. Dial ranking omits known-v1
   (`INCOMPATIBLE`) addresses while any better candidate remains. Seed host
   list lives in `dns_seeds()` (`crates/rbitcoin-net/src/seeds.rs`).
 - **Outbound diversity:** live IBD and tip-follow peers prefer unused

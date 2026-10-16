@@ -427,9 +427,9 @@ fn pin_unreadable_sidecar_then_accept(
     std::fs::write(mp_dir.join("tx.body"), body_prefix).unwrap();
     std::fs::write(mp_dir.join("slots"), slots_prefix).unwrap();
     let mut body = std::fs::read(mp_dir.join("tx.body")).unwrap();
-    // Schema-3 txid starts 24 bytes into the packed record. Flip it so the
+    // Schema-4 txid starts 32 bytes into the packed record. Flip it so the
     // slot's txid does not match the payload. The tx bytes still decode.
-    let txid_at = 16 + 24;
+    let txid_at = 16 + 32;
     assert!(body.len() > txid_at, "payload has a txid");
     body[txid_at] ^= 0xff;
     std::fs::write(mp_dir.join("tx.body"), &body).unwrap();

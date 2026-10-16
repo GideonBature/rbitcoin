@@ -157,6 +157,9 @@ pub(crate) struct IbdWorkState {
     pub assign_rot: usize,
     /// Stall-disconnect cooldowns (addr → until).
     pub addr_cooldown: HashMap<SocketAddr, Instant>,
+    /// Per-peer addr token buckets (peer id → bucket), as on tip-follow
+    /// sessions. Dropped when the peer dies.
+    pub addr_buckets: HashMap<usize, crate::peer::AddrTokenBucket>,
     /// Process-local stall/relative-slow kick counts (not persisted).
     pub addr_strikes: HashMap<SocketAddr, u8>,
     /// Relative-slow hysteresis: peer id + first Gate B fail ms.
@@ -266,6 +269,7 @@ impl IbdWorkState {
             header_req_seq: 0,
             assign_rot: 0,
             addr_cooldown: HashMap::new(),
+            addr_buckets: HashMap::new(),
             addr_strikes: HashMap::new(),
             relative_slow_suspect: None,
             relative_slow_last_kick_ms: 0,

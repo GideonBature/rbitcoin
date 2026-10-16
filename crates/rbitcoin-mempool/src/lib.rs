@@ -5,9 +5,9 @@
 //!
 //! | File | Role |
 //! |------|------|
-//! | `meta` | Magic, schema **3**, commit generation **G**, slot capacity, live count |
+//! | `meta` | Magic, schema **4**, commit generation **G**, slot capacity, live count |
 //! | `slots` | Fixed-size slot records (status + body range + txid) |
-//! | `tx.body` | Packed live records (fee, weight, sigop cost, txid, wtxid, packed tx, vin aux) |
+//! | `tx.body` | Packed live records (fee, weight, sigop cost, accept time, txid, wtxid, packed tx, vin aux) |
 //!
 //! **Commit model:** body tail complete → slot LIVE → RAM graph. No fsync per
 //! tx. Admits persist on a 5 s timer ([`ActiveMempool::persist_due`]); that path
@@ -18,7 +18,10 @@
 //! slot dump, not one sync per tx).
 //! [`ActiveMempool::flush`] bumps `G`, rewrites slots, and `sync_data`s. Crash
 //! may lose ≤5 s of admits; never LIVE slots past durable `tx.body`. Leftover
-//! schema 1 converts to packed on open (vin aux empty; SH reindex batch-fills).
+//! schema 1–3 converts on open. Schema 1 has empty vin aux (SH reindex
+//! batch-fills), schema ≤ 2 has unknown sigops until the hub recomputes them,
+//! and every upgraded record takes the migrate's wall-clock second as its
+//! accept time.
 //!
 //! Packed decode uses stored txid/wtxid (no SHA256d). Vin aux is hashed at
 //! admit from resolved prevouts. Compact copies packed payload ranges.

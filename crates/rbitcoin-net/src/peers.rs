@@ -359,9 +359,11 @@ pub struct LivePeer {
     inflight: Mutex<Vec<u32>>,
     /// Session writer. RPC/accept flushes tx INVs onto this (`p2p_blocksonly`).
     out_tx: Mutex<Option<mpsc::UnboundedSender<PeerOut>>>,
-    /// Addr relay tokens still available, and the millisecond they were last filled.
-    addr_tokens: Mutex<f64>,
-    addr_token_ms: AtomicU64,
+    /// Addresses this peer may still send us (Core `m_addr_token_bucket`).
+    addr_bucket: Mutex<crate::peer::AddrTokenBucket>,
+    /// `getpeerinfo.addr_processed` / `addr_rate_limited`.
+    addr_processed: AtomicU64,
+    addr_rate_limited: AtomicU64,
     /// Unix seconds when this session was registered.
     connected_at: AtomicU64,
     /// Netgroup fixed at accept. Inbound eviction compares this integer
@@ -960,14 +962,28 @@ impl LivePeer {
         *self.out_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 
-    pub(crate) fn take_addr_relay(&self, want: usize, now_ms: u64) -> usize {
-        let mut tokens = self.addr_tokens.lock().unwrap_or_else(|e| e.into_inner());
-        let at = self.addr_token_ms.load(Ordering::Relaxed);
-        let filled = crate::peer::addr_relay_tokens(*tokens, at, now_ms);
-        self.addr_token_ms.store(now_ms.max(at), Ordering::Relaxed);
-        let take = (filled.floor() as usize).min(want);
-        *tokens = filled - take as f64;
-        take
+    /// How many of the `want` addresses in one message this peer may have
+    /// processed (learned and relayed). The rest count as rate limited. A
+    /// peer with the `addr` permission spends tokens but is never limited.
+    pub(crate) fn take_addr_tokens(&self, want: usize, now_ms: u64) -> usize {
+        let took = self
+            .addr_bucket
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take(want, now_ms);
+        let allow = if self
+            .net_perm_flags()
+            .has(crate::net_permissions::NetPermissionFlags::ADDR)
+        {
+            want
+        } else {
+            took
+        };
+        self.addr_processed
+            .fetch_add(allow as u64, Ordering::Relaxed);
+        self.addr_rate_limited
+            .fetch_add((want - allow) as u64, Ordering::Relaxed);
+        allow
     }
 
     pub(crate) fn writer(&self) -> Option<mpsc::UnboundedSender<PeerOut>> {
@@ -1230,6 +1246,8 @@ impl LivePeer {
             minfeefilter_sat_kvb: self.minfeefilter_sat_kvb.load(Ordering::Relaxed),
             last_inv_sequence: self.last_inv_sequence(),
             inv_to_send: self.inv_to_send(),
+            addr_processed: self.addr_processed.load(Ordering::Relaxed),
+            addr_rate_limited: self.addr_rate_limited.load(Ordering::Relaxed),
             bytesrecv,
             bytessent,
             inflight: self
@@ -1342,6 +1360,10 @@ pub struct PeerInfo {
     pub last_inv_sequence: u64,
     /// `getpeerinfo.inv_to_send` (queued tx INV count).
     pub inv_to_send: u32,
+    /// `getpeerinfo.addr_processed`: addresses not dropped by the rate limit.
+    pub addr_processed: u64,
+    /// `getpeerinfo.addr_rate_limited`: addresses the rate limit dropped.
+    pub addr_rate_limited: u64,
     /// Raw TCP bytes (`getpeerinfo.bytesrecv`), including BIP324 handshake.
     pub bytesrecv: u64,
     /// Raw TCP bytes (`getpeerinfo.bytessent`), including BIP324 handshake.
@@ -2331,8 +2353,11 @@ impl PeerHub {
             failed_cmpct: Mutex::new(HashSet::new()),
             inflight: Mutex::new(Vec::new()),
             out_tx: Mutex::new(None),
-            addr_tokens: Mutex::new(crate::peer::ADDR_RELAY_BURST),
-            addr_token_ms: AtomicU64::new(0),
+            addr_bucket: Mutex::new(crate::peer::AddrTokenBucket::new(
+                connected_at.saturating_mul(1000),
+            )),
+            addr_processed: AtomicU64::new(0),
+            addr_rate_limited: AtomicU64::new(0),
             connected_at: AtomicU64::new(connected_at),
             netgroup: crate::eviction::eviction_netgroup(endpoint.addr),
             inv_gen_floor: AtomicU64::new(0),
