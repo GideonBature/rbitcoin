@@ -773,6 +773,7 @@ mod tests {
     /// Peer frames for the commands whose decode arm a missed mutant can delete,
     /// plus the feefilter bounds and a trailing byte that must not be accepted.
     #[test]
+    #[allow(clippy::cognitive_complexity)] // one codec, many rare-frame arms
     fn peer_frames_keep_rare_commands_and_feefilter_bounds() {
         use bitcoin::bip158::{FilterHash, FilterHeader};
         use bitcoin::hashes::Hash;
