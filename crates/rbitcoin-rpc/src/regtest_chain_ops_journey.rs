@@ -71,13 +71,14 @@ fn regrind(block: &mut Block) {
 /// mocktime, and the consensus rejects that do not need a mature coinbase.
 #[test]
 fn rpc_regtest_from_genesis() {
-    let (ctx, dir, hub) = ctx_regtest_hub();
+    let (mut ctx, dir, hub) = ctx_regtest_hub();
     let help = dispatch(&ctx, "help", vec![json!("getnetworkhashps")]).unwrap();
     let h = help.as_str().expect("help is a string");
     assert!(
         h.to_lowercase().contains("chainwork") && !h.contains("Dummy 2-work"),
         "hashrate help must name chainwork, not dummy 2-work: {h}"
     );
+    chain_ops_client_param_edges(&mut ctx);
     let (addr, p2wpkh) = p2wpkh_regtest();
     let store = dir.join("store");
     chain_ops_genesis_client_edges(&ctx);
@@ -95,6 +96,490 @@ fn rpc_regtest_from_genesis() {
     chain_ops_submit_tx_shape(&ctx, &hub, &p2wpkh);
     chain_ops_echo_overlap(&ctx);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Param, decode, help, and stop outcomes on the hub this journey already
+/// opened. Knobs this beat flips (stop, network) are put back before the
+/// later chain beats. Tip stays at genesis.
+fn chain_ops_client_param_edges(ctx: &mut RpcContext) {
+    assert_eq!(tip_count(ctx), 0);
+    chain_ops_waiters_return_on_stop(ctx);
+    chain_ops_stop_sets_flag(ctx);
+    chain_ops_help_lists_every_method(ctx);
+    chain_ops_named_help(ctx);
+    chain_ops_signet_challenge_and_filtertype(ctx);
+    chain_ops_unknown_named_param(ctx);
+    chain_ops_wrong_json_types(ctx);
+    chain_ops_regtest_type_errors(ctx);
+    chain_ops_junk_tx_hex(ctx);
+    chain_ops_decode_raw(ctx);
+    chain_ops_decode_scripts(ctx);
+    chain_ops_validate_address(ctx);
+    ctx.stop.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ctx.network, Network::Regtest);
+    assert_eq!(tip_count(ctx), 0);
+}
+
+fn chain_ops_stop_sets_flag(ctx: &RpcContext) {
+    assert!(
+        !ctx.stop.load(std::sync::atomic::Ordering::SeqCst),
+        "later beats still run on this hub"
+    );
+    let stopped = dispatch(ctx, "stop", vec![]).unwrap();
+    assert_eq!(stopped, json!("rbitcoin stopping"));
+    assert!(ctx.stop.load(std::sync::atomic::Ordering::SeqCst));
+    ctx.stop.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn chain_ops_waiters_return_on_stop(ctx: &RpcContext) {
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let wake = |stop: std::sync::Arc<std::sync::atomic::AtomicBool>| {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            stop.store(true, Ordering::SeqCst);
+        })
+    };
+    let stop = std::sync::Arc::clone(&ctx.stop);
+    let h = wake(stop);
+    let t0 = Instant::now();
+    let got = dispatch(ctx, "waitfornewblock", vec![json!(5_000)]).unwrap();
+    assert_eq!(got["height"], 0);
+    assert!(
+        t0.elapsed() < Duration::from_millis(1_000),
+        "stop must wake the waiter, not the timeout"
+    );
+    h.join().unwrap();
+
+    ctx.stop.store(false, Ordering::SeqCst);
+    let stop = std::sync::Arc::clone(&ctx.stop);
+    let h = wake(stop);
+    let t0 = Instant::now();
+    let missing = "00".repeat(32);
+    let got = dispatch(ctx, "waitforblock", vec![json!(missing), json!(5_000)]).unwrap();
+    assert_eq!(got["height"], 0);
+    assert!(t0.elapsed() < Duration::from_millis(1_000));
+    h.join().unwrap();
+
+    ctx.stop.store(false, Ordering::SeqCst);
+    let stop = std::sync::Arc::clone(&ctx.stop);
+    let h = wake(stop);
+    let t0 = Instant::now();
+    let got = dispatch(ctx, "waitforblockheight", vec![json!(99), json!(5_000)]).unwrap();
+    assert_eq!(got["height"], 0);
+    assert!(t0.elapsed() < Duration::from_millis(1_000));
+    h.join().unwrap();
+    ctx.stop.store(false, Ordering::SeqCst);
+}
+
+fn chain_ops_help_lists_every_method(ctx: &RpcContext) {
+    let help = dispatch(ctx, "help", vec![]).expect("help");
+    let help_text = help.as_str().expect("help string");
+    let info = dispatch(ctx, "getrpcinfo", vec![]).expect("getrpcinfo");
+    let listed = info["methods"]
+        .as_array()
+        .expect("methods array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    for name in ["generate", "mockscheduler", "addpeeraddress", "getnodeaddresses"] {
+        assert!(
+            help_text.lines().any(|l| l == name),
+            "help missing {name}: {help_text}"
+        );
+        assert!(
+            listed.contains(&name),
+            "getrpcinfo.methods missing {name}: {listed:?}"
+        );
+        let err = dispatch(ctx, name, vec![]).err();
+        if let Some(e) = err {
+            assert_ne!(
+                e["message"].as_str(),
+                Some("Method not found"),
+                "{name} dispatched as missing"
+            );
+        }
+    }
+    for name in listed {
+        let err = dispatch(ctx, name, vec![]).err();
+        if let Some(e) = err {
+            assert_ne!(
+                e["message"].as_str(),
+                Some("Method not found"),
+                "{name} in the catalog but dispatch misses it"
+            );
+        }
+    }
+    // `stop` is in the catalog and sets the flag. Later beats must not see it.
+    ctx.stop.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn chain_ops_named_help(ctx: &RpcContext) {
+    for m in [
+        "estimatesmartfee",
+        "estimaterawfee",
+        "getblockchaininfo",
+        "getblockstats",
+        "generatetoaddress",
+        "generateblock",
+        "generate",
+        "mockscheduler",
+        "generatetodescriptor",
+        "decoderawtransaction",
+        "decodescript",
+        "validateaddress",
+        "gettxout",
+        "sendrawtransaction",
+        "getchaintips",
+        "getdeploymentinfo",
+        "getblocktemplate",
+        "getmininginfo",
+        "getnetworkhashps",
+        "prioritisetransaction",
+        "getprioritisedtransactions",
+        "submitblock",
+        "submitheader",
+        "getpeerinfo",
+        "getorphantxs",
+        "help",
+        "echo",
+        "ping",
+        "getblock",
+        "getrawmempool",
+        "setmocktime",
+        "preciousblock",
+    ] {
+        let h = dispatch(ctx, "help", vec![json!(m)]).unwrap();
+        let h = h.as_str().unwrap();
+        assert!(
+            h.starts_with(m),
+            "help for listed method {m} must start with the name: {h}"
+        );
+        assert!(
+            !h.starts_with("unknown method"),
+            "listed method {m} must not be unknown: {h}"
+        );
+    }
+    let unknown = dispatch(ctx, "help", vec![json!("not-a-method")]).unwrap();
+    assert_eq!(unknown.as_str().unwrap(), "unknown method not-a-method");
+}
+
+fn chain_ops_signet_challenge_and_filtertype(ctx: &mut RpcContext) {
+    let info = dispatch(ctx, "getblockchaininfo", vec![]).unwrap();
+    assert!(info.get("signet_challenge").is_none());
+    let mining = dispatch(ctx, "getmininginfo", vec![]).unwrap();
+    assert!(mining.get("signet_challenge").is_none());
+
+    let prev = ctx.network;
+    ctx.network = Network::Signet;
+    let expect = "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae";
+    let info = dispatch(ctx, "getblockchaininfo", vec![]).unwrap();
+    assert_eq!(info["chain"], "signet");
+    assert_eq!(info["signet_challenge"], json!(expect));
+    let mining = dispatch(ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(mining["signet_challenge"], json!(expect));
+    assert_eq!(mining["blocks"], 0);
+    assert!(mining.get("currentblocktx").is_none());
+    assert!(mining.get("currentblockweight").is_none());
+    ctx.network = prev;
+
+    let err = dispatch(
+        ctx,
+        "getblockfilter",
+        vec![json!("00".repeat(32)), json!("unknown")],
+    )
+    .unwrap_err();
+    assert_eq!(err["code"], ERR_INVALID_ADDRESS_OR_KEY);
+    assert!(err["message"]
+        .as_str()
+        .unwrap()
+        .contains("Unknown filtertype"));
+}
+
+fn chain_ops_unknown_named_param(ctx: &RpcContext) {
+    let info = dispatch(ctx, "getrpcinfo", vec![]).unwrap();
+    let listed = info["methods"].as_array().unwrap();
+    assert!(listed.len() >= 50, "catalog shrank: {}", listed.len());
+    for name in listed.iter().filter_map(|v| v.as_str()) {
+        let err = dispatch(ctx, name, named(json!({"not_a_real_rpc_param": 1}))).unwrap_err();
+        assert_eq!(err["code"], ERR_INVALID_PARAMETER, "{name}: {err}");
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown named parameter not_a_real_rpc_param"),
+            "{name}: {err}"
+        );
+    }
+}
+
+fn chain_ops_wrong_json_types(ctx: &RpcContext) {
+    for (method, params, needle) in [
+        ("help", vec![json!(1)], "command must be a string"),
+        ("getblockhash", vec![json!("0")], "must be an integer"),
+        ("getblockheader", vec![json!(1)], "must be a string"),
+        ("getblock", vec![json!(true)], "must be a string"),
+        ("getrawtransaction", vec![json!([])], "must be a string"),
+        ("decoderawtransaction", vec![json!(0)], "must be a string"),
+        ("decodescript", vec![json!(false)], "must be a string"),
+        ("validateaddress", vec![json!(1)], "must be a string"),
+        ("sendrawtransaction", vec![json!(1)], "must be a string"),
+        ("submitblock", vec![json!(1)], "must be a string"),
+        ("getmempoolentry", vec![json!(0)], "must be a string"),
+        ("stop", vec![json!("1")], "must be an integer"),
+        ("gettxout", vec![json!(1), json!(0)], "must be a string"),
+        (
+            "prioritisetransaction",
+            vec![json!(1), json!(0), json!(1)],
+            "must be a string",
+        ),
+        (
+            "testmempoolaccept",
+            vec![json!("00")],
+            "rawtxs array required",
+        ),
+        ("submitpackage", vec![json!("00")], "package array required"),
+        (
+            "gettxspendingprevout",
+            vec![json!("00")],
+            "outputs array required",
+        ),
+        ("waitforblock", vec![json!(1)], "must be a string"),
+        ("waitforblockheight", vec![json!("1")], "must be an integer"),
+        ("waitfornewblock", vec![json!("1")], "must be an integer"),
+        ("getnetworkhashps", vec![json!("120")], "must be an integer"),
+        ("getrawmempool", vec![json!("true")], "must be a bool"),
+    ] {
+        let err = dispatch(ctx, method, params).unwrap_err();
+        assert!(
+            err["message"].as_str().unwrap_or("").contains(needle),
+            "{method}: expected {needle:?} in {err}"
+        );
+    }
+    let wit = dispatch(
+        ctx,
+        "decoderawtransaction",
+        named(json!({"hexstring": "00", "iswitness": "yes"})),
+    )
+    .unwrap_err();
+    assert!(wit["message"].as_str().unwrap().contains("must be a bool"));
+    let extra = dispatch(
+        ctx,
+        "decoderawtransaction",
+        named(json!({"hexstring": "00", "nope": true})),
+    )
+    .unwrap_err();
+    assert_eq!(extra["code"], ERR_INVALID_PARAMETER);
+    let missing = dispatch(ctx, "validateaddress", vec![]).unwrap_err();
+    assert_eq!(missing["code"], ERR_INVALID_PARAMS);
+    assert!(missing["message"]
+        .as_str()
+        .unwrap()
+        .contains("address required"));
+}
+
+fn chain_ops_regtest_type_errors(ctx: &RpcContext) {
+    for (method, params, needle) in [
+        ("submitheader", vec![json!(true)], "must be a string"),
+        ("invalidateblock", vec![json!(1)], "must be a string"),
+        ("reconsiderblock", vec![json!(false)], "must be a string"),
+        ("preciousblock", vec![json!(0)], "must be a string"),
+        ("setmocktime", vec![json!("0")], "must be an integer"),
+        ("mockscheduler", vec![json!("1")], "must be an integer"),
+    ] {
+        let err = dispatch(ctx, method, params).unwrap_err();
+        assert!(
+            err["message"].as_str().unwrap_or("").contains(needle),
+            "{method}: expected {needle:?} in {err}"
+        );
+    }
+}
+
+fn chain_ops_junk_tx_hex(ctx: &RpcContext) {
+    for (method, params) in [
+        ("sendrawtransaction", vec![json!("ff00baar")]),
+        ("testmempoolaccept", vec![json!(["ff00baar"])]),
+        ("submitpackage", vec![json!(["ff00baar"])]),
+        ("sendrawtransaction", vec![json!("00")]),
+    ] {
+        let e = dispatch(ctx, method, params).unwrap_err();
+        assert_eq!(e["code"], ERR_DESERIALIZATION, "{method}: {e}");
+        assert_eq!(e["message"], json!("TX decode failed:"), "{method}: {e}");
+    }
+}
+
+fn chain_ops_decode_raw(ctx: &RpcContext) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
+
+    let help = dispatch(ctx, "help", vec![]).unwrap();
+    let help_text = help.as_str().unwrap();
+    for name in ["decoderawtransaction", "decodescript", "validateaddress"] {
+        assert!(help_text.lines().any(|l| l == name), "help missing {name}");
+    }
+
+    let script_sig = ScriptBuf::from_bytes(vec![0x51]);
+    let legacy = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([1; 32]),
+                vout: 0,
+            },
+            script_sig: script_sig.clone(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let legacy_hex = serialize_hex(&legacy);
+    let dec = dispatch(ctx, "decoderawtransaction", vec![json!(legacy_hex)]).unwrap();
+    assert_eq!(dec["version"], json!(2));
+    assert_eq!(dec["vin"][0]["vout"], json!(0));
+    assert_eq!(
+        dec["vin"][0]["scriptSig"]["hex"],
+        json!(rbitcoin_primitives::hex_encode(script_sig.as_bytes()))
+    );
+    assert!(dec["vin"][0]["scriptSig"]["asm"]
+        .as_str()
+        .unwrap()
+        .contains("1"));
+    assert_eq!(dec["vout"][0]["scriptPubKey"]["type"], json!("nonstandard"));
+    assert!(dec["size"].as_u64().unwrap() > 0);
+    assert!(dec["weight"].as_u64().unwrap() > 0);
+    assert!(dec.get("vin").unwrap()[0].get("txinwitness").is_none());
+
+    let extra = dispatch(
+        ctx,
+        "decoderawtransaction",
+        vec![json!(format!("{legacy_hex}00"))],
+    )
+    .unwrap_err();
+    assert_eq!(extra["code"], ERR_DESERIALIZATION);
+    assert_eq!(extra["message"], json!("TX decode failed"));
+
+    let mut wit = Witness::new();
+    wit.push([0xAAu8]);
+    let witness_tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([2; 32]),
+                vout: 1,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: wit,
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let wit_hex = serialize_hex(&witness_tx);
+    let wit_ok = dispatch(
+        ctx,
+        "decoderawtransaction",
+        vec![json!(wit_hex.clone()), json!(true)],
+    )
+    .unwrap();
+    assert_eq!(wit_ok["vin"][0]["txinwitness"], json!(["aa"]));
+    let wit_forced = dispatch(
+        ctx,
+        "decoderawtransaction",
+        vec![json!(wit_hex), json!(false)],
+    )
+    .unwrap_err();
+    assert_eq!(wit_forced["code"], ERR_DESERIALIZATION);
+    assert_eq!(wit_forced["message"], json!("TX decode failed"));
+}
+
+fn chain_ops_decode_scripts(ctx: &RpcContext) {
+    let p2wpkh = Address::from_str("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")
+        .unwrap()
+        .require_network(BtcNetwork::Regtest)
+        .unwrap();
+    let spk_hex = rbitcoin_primitives::hex_encode(p2wpkh.script_pubkey().as_bytes());
+    let script = dispatch(ctx, "decodescript", vec![json!(spk_hex.clone())]).unwrap();
+    assert_eq!(script["type"], json!("witness_v0_keyhash"));
+    assert_eq!(script["address"], json!(p2wpkh.to_string()));
+    assert_eq!(script["hex"], json!(spk_hex));
+    assert!(script.get("p2sh").is_none());
+    assert!(script.get("segwit").is_none());
+    assert!(script.get("desc").is_none());
+
+    let op_true = dispatch(ctx, "decodescript", vec![json!("51")]).unwrap();
+    assert_eq!(op_true["type"], json!("nonstandard"));
+    assert!(op_true.get("address").is_none());
+}
+
+fn chain_ops_validate_address(ctx: &RpcContext) {
+    let p2wpkh = Address::from_str("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")
+        .unwrap()
+        .require_network(BtcNetwork::Regtest)
+        .unwrap();
+    let spk_hex = rbitcoin_primitives::hex_encode(p2wpkh.script_pubkey().as_bytes());
+    let valid = dispatch(ctx, "validateaddress", vec![json!(p2wpkh.to_string())]).unwrap();
+    assert_eq!(valid["isvalid"], json!(true));
+    assert_eq!(valid["address"], json!(p2wpkh.to_string()));
+    assert_eq!(valid["scriptPubKey"], json!(spk_hex));
+    assert_eq!(valid["isscript"], json!(false));
+    assert_eq!(valid["iswitness"], json!(true));
+    assert_eq!(valid["witness_version"], json!(0));
+    assert!(valid["witness_program"].as_str().unwrap().len() == 40);
+    assert!(valid.get("error_locations").is_none());
+
+    let p2sh = dispatch(
+        ctx,
+        "validateaddress",
+        vec![json!("2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc")],
+    )
+    .unwrap();
+    assert_eq!(p2sh["isvalid"], json!(true));
+    assert_eq!(p2sh["isscript"], json!(true));
+    assert_eq!(p2sh["iswitness"], json!(false));
+
+    let junk = dispatch(ctx, "validateaddress", vec![json!("not-an-address")]).unwrap();
+    assert_eq!(junk, json!({"isvalid": false}));
+
+    let mainnet = dispatch(
+        ctx,
+        "validateaddress",
+        vec![json!("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")],
+    )
+    .unwrap();
+    assert_eq!(mainnet, json!({"isvalid": false}));
+
+    let p2tr_spk = ScriptBuf::from_bytes(
+        rbitcoin_primitives::hex_decode(
+            "512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap(),
+    );
+    let p2tr = Address::from_script(&p2tr_spk, BtcNetwork::Regtest).expect("p2tr address");
+    let tr = dispatch(ctx, "validateaddress", vec![json!(p2tr.to_string())]).unwrap();
+    assert_eq!(tr["isscript"], json!(true), "{tr}");
+    assert_eq!(tr["iswitness"], json!(true));
+    assert_eq!(tr["witness_version"], json!(1));
+
+    let p2a_spk = ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
+    let p2a = Address::from_script(&p2a_spk, BtcNetwork::Regtest).expect("p2a address");
+    let anchor = dispatch(ctx, "validateaddress", vec![json!(p2a.to_string())]).unwrap();
+    assert_eq!(anchor["isscript"], json!(true), "{anchor}");
+    assert_eq!(anchor["iswitness"], json!(true));
+    assert!(anchor.get("witness_version").is_none(), "{anchor}");
+    assert!(anchor.get("witness_program").is_none(), "{anchor}");
+
+    let still_never = dispatch(ctx, "createrawtransaction", vec![]).unwrap_err();
+    assert_eq!(still_never["code"], ERR_METHOD_NOT_FOUND);
 }
 
 fn chain_ops_echo_overlap(ctx: &RpcContext) {
