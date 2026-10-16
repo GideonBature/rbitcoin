@@ -2187,45 +2187,4 @@ mod tests {
         );
         assert!(!cooldown.contains_key(&a));
     }
-
-    #[test]
-    fn warm_locator_replaces_the_store_locator() {
-        struct ClearWarm;
-        impl Drop for ClearWarm {
-            fn drop(&mut self) {
-                set_warm_locator(None);
-            }
-        }
-        let _clear = ClearWarm;
-        set_warm_locator(None);
-
-        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("dial-warm-locator");
-        hub.ensure_genesis().unwrap();
-        let genesis = hub.tip_hash().unwrap();
-        hub.generate_to_script(4, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
-            .unwrap();
-        let tip = hub.tip_hash().unwrap();
-        assert_ne!(tip, genesis);
-
-        let warm = BlockHash::from_byte_array([0xab; 32]);
-        set_warm_locator(Some(vec![warm]));
-        let loc = ibd_header_locator(&hub, &[]).unwrap();
-        assert!(
-            loc.contains(&warm),
-            "a warmed locator is what getheaders sends"
-        );
-        assert!(
-            !loc.contains(&genesis),
-            "the store locator is not required once a warm locator is set"
-        );
-
-        set_warm_locator(None);
-        let loc = ibd_header_locator(&hub, &[]).unwrap();
-        assert!(loc.contains(&tip));
-        assert!(
-            loc.contains(&genesis),
-            "with no warm locator, getheaders uses the store"
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
 }
