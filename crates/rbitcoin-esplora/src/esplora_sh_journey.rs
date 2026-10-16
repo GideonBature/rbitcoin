@@ -6,7 +6,7 @@ async fn cap_refuses_three_creates(q: &Query, app: &Router) {
     let (st, body) = oneshot_http(app, get_with_client(&format!("/scripthash/{h51}"), "cap")).await;
     assert_eq!(st, 503, "{body}");
     assert!(
-        body.contains("scripthash join exceeds --max-sh-creates"),
+        body.contains("scripthash join exceeds --max-sh-creates (3 creates, cap 2)"),
         "{body}"
     );
     let (st, utxo) =

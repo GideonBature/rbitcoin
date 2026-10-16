@@ -1130,6 +1130,9 @@ pub(crate) fn store_err(e: rbitcoin_query::QueryError) -> Response {
         StoreError::Pruned { .. } => (StatusCode::NOT_FOUND, "pruned").into_response(),
         StoreError::Stale(m) => (StatusCode::SERVICE_UNAVAILABLE, m).into_response(),
         StoreError::Rejected(m) => (StatusCode::SERVICE_UNAVAILABLE, m).into_response(),
+        e @ StoreError::ShCreatesCap { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+        }
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response(),
     }
 }

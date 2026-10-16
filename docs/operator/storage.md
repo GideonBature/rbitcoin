@@ -151,7 +151,7 @@ Electrum/Esplora **start without** `--sh-index`. Address/scripthash methods then
 `--max-sh-creates N` (conf `max_sh_creates=`) defaults to **10000**. An unpaged
 Electrum history or full stats join with more than N creates is refused
 before Class A expand: Esplora **503** / Electrum JSON-RPC error
-`scripthash join exceeds --max-sh-creates (default 10000)`. **0** is unlimited.
+`scripthash join exceeds --max-sh-creates (<creates> creates, cap <N>)`. **0** is unlimited.
 A history request that names a page (Esplora's 25, or any caller that sets a
 limit) is still served: the join stops once that page is full.
 

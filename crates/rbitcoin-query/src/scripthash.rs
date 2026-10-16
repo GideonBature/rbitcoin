@@ -602,7 +602,7 @@ impl Query {
         if cap > 0 && !paging {
             let n = self.scripthash_create_count(scripthash)?;
             if n > cap {
-                return Err(StoreError::Rejected(Query::MAX_SH_CREATES_MSG));
+                return Err(StoreError::ShCreatesCap { creates: n, cap });
             }
         }
         let t_pages = std::time::Instant::now();
