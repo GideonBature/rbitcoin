@@ -583,8 +583,10 @@ failed window still logs `rbitcoin: tip revalidate …`. That is intentional
 mid-chain header graph poison still means a clean datadir.
 
 **Mempool recovery:** `{datadir}/mempool/` is a private sidecar (not Class A),
-schema **3**. Leftover schema **1** (pre-packed `fee‖weight‖bitcoin-serialize`)
-or **2** converts to schema 3 on the next open (Class A untouched). Wipe `{datadir}/mempool/`
+schema **4** (each record keeps its accept time, so `getmempoolentry.time` and
+`-mempoolexpiry` survive a restart). Leftover schema **1** (pre-packed
+`fee‖weight‖bitcoin-serialize`), **2** or **3** converts to schema 4 on the next
+open, and its records count their accept time from that open (Class A untouched). Wipe `{datadir}/mempool/`
 only if the sidecar is damaged or an unknown schema/old 4k-slot table was left
 wedged — the next start recreates it empty and redownloads unconfirmed txs.
 Do **not** wipe `store/` for mempool slot/full/schema errors.

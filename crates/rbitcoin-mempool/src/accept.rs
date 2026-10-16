@@ -11,6 +11,7 @@ use bitcoin::{OutPoint, Transaction, TxOut, Txid, Wtxid};
 use rbitcoin_consensus::policy::{self, PolicyResult};
 use rbitcoin_primitives::Fk;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -169,6 +170,8 @@ pub struct AcceptResult {
     /// Sigop-adjusted weight; `vsize = ceil(weight / 4)` is Core's `m_vsize`.
     pub weight: u64,
     pub slot: u32,
+    /// Node-time seconds stamped on the durable record (Core `nTime`).
+    pub accept_secs: u64,
     /// Mempool txids removed by full-RBF / RBFR when admitting this tx (empty if no conflict).
     pub replaced: Vec<Txid>,
     /// Electrum scripthashes (SHA256 of output scriptPubKeys) of **replaced** bodies,
@@ -447,6 +450,8 @@ struct IngestedLive {
     graph: TxGraph,
     bodies: std::collections::HashMap<Txid, Arc<Transaction>>,
     vin_aux: std::collections::HashMap<Txid, Vec<VinAux>>,
+    /// `(txid, wtxid, accept_secs)` per loaded record.
+    accept_secs: Vec<(Txid, Wtxid, u64)>,
 }
 
 /// Mempool with RAM TxGraph layered on durable store.
@@ -484,9 +489,31 @@ pub struct ActiveMempool {
     /// Bodies removed for replacement when `finish_commit` later returns
     /// `Err`. Success moves them onto [`AcceptResult::replaced_txs`].
     undone_replacements: Vec<Transaction>,
+    /// `setmocktime` seconds, shared with the hub's clock (0 = wall).
+    node_clock: Arc<AtomicU64>,
+    /// Accept times of the records loaded at open, until the hub takes them.
+    loaded_accept: Vec<(Txid, Wtxid, u64)>,
 }
 
 impl ActiveMempool {
+    /// Share the hub's mock clock so stamped accept times follow `setmocktime`.
+    pub fn set_node_clock(&mut self, clock: Arc<AtomicU64>) {
+        self.node_clock = clock;
+    }
+
+    fn node_now_secs(&self) -> u64 {
+        match self.node_clock.load(Ordering::Relaxed) {
+            0 => unix_ms() / 1000,
+            mock => mock,
+        }
+    }
+
+    /// `(txid, wtxid, accept_secs)` of every record loaded at open. Empty
+    /// after the first call; the hub indexes them for expiry and RPC.
+    pub fn take_loaded_accept_times(&mut self) -> Vec<(Txid, Wtxid, u64)> {
+        std::mem::take(&mut self.loaded_accept)
+    }
+
     /// Evictions from a commit that returned `Err`. Empty after a success.
     pub fn take_failed_evictions(&mut self) -> Vec<Txid> {
         std::mem::take(&mut self.last_evicted)
@@ -606,6 +633,8 @@ impl ActiveMempool {
             extra_compact: VecDeque::new(),
             last_evicted: Vec::new(),
             undone_replacements: Vec::new(),
+            node_clock: Arc::new(AtomicU64::new(0)),
+            loaded_accept: ingested.accept_secs,
         })
     }
 
@@ -695,8 +724,10 @@ impl ActiveMempool {
         let mut bodies = std::collections::HashMap::new();
         let mut vin_aux = std::collections::HashMap::new();
         let mut items = Vec::with_capacity(loaded.len());
+        let mut accept_secs = Vec::with_capacity(loaded.len());
         for live in loaded {
             let p = live.packed;
+            accept_secs.push((p.txid, p.wtxid, p.accept_secs));
             let tx = Arc::new(p.tx);
             let entry = TxEntry {
                 txid: p.txid,
@@ -719,6 +750,7 @@ impl ActiveMempool {
             graph,
             bodies,
             vin_aux,
+            accept_secs,
         }
     }
 
@@ -1111,6 +1143,7 @@ impl ActiveMempool {
         let mut evicted = self.ensure_free_slot(Some(txid))?;
 
         let aux = Self::vin_aux_from_prep(tx, &prep);
+        let accept_secs = self.node_now_secs();
         let t_dur = Instant::now();
         let slot = match self.store.append_live_tx(
             tx,
@@ -1119,6 +1152,7 @@ impl ActiveMempool {
             fee_sat,
             weight,
             prep.sigop_cost,
+            accept_secs,
             &aux,
         ) {
             Ok(slot) => slot,
@@ -1174,6 +1208,7 @@ impl ActiveMempool {
             fee_sat,
             weight: adj_weight,
             slot,
+            accept_secs,
             replaced: conflict_set.into_iter().collect(),
             replaced_scripthashes,
             replaced_txs,
@@ -1194,6 +1229,7 @@ impl ActiveMempool {
             fee_sat,
             weight,
             slot: 0,
+            accept_secs: self.node_now_secs(),
             replaced: conflict_set.into_iter().collect(),
             replaced_scripthashes: Vec::new(),
             replaced_txs: Vec::new(),
@@ -2815,7 +2851,16 @@ mod tests {
             // Admitted by a pre-sigop-check build.
             let (pid, pw) = (probe.compute_txid(), probe.compute_wtxid());
             mp.store
-                .append_live_tx(&probe, &pid, &pw, 1_000, probe.weight().to_wu(), 0, &[])
+                .append_live_tx(
+                    &probe,
+                    &pid,
+                    &pw,
+                    1_000,
+                    probe.weight().to_wu(),
+                    0,
+                    1_700_000_000,
+                    &[],
+                )
                 .unwrap();
             mp.flush().unwrap();
         }

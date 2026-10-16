@@ -657,7 +657,8 @@ pub struct MempoolHub {
     /// INV immediately instead of waiting on mocktime.
     immediate_relay: AtomicBool,
     /// Last `setmocktime` (0 = wall). Used to age mempool txs for delayed INV.
-    mock_now: AtomicU64,
+    /// Shared with the mempool, which stamps it on each durable record.
+    mock_now: Arc<AtomicU64>,
     /// Mock/wall seconds when each live wtxid was accepted.
     accept_at: Mutex<HashMap<Wtxid, u64>>,
     /// Monotonic accept generation for `p2p_tx_privacy` (skip pre-handshake txs).
@@ -851,7 +852,7 @@ impl MempoolHub {
             wtxid_by_txid: Mutex::new(HashMap::new()),
             next_relay_seq: AtomicU64::new(1),
             immediate_relay: AtomicBool::new(false),
-            mock_now: AtomicU64::new(0),
+            mock_now: Arc::new(AtomicU64::new(0)),
             accept_at: Mutex::new(HashMap::new()),
             next_accept_gen: AtomicU64::new(1),
             accept_gen: Mutex::new(HashMap::new()),
@@ -871,8 +872,19 @@ impl MempoolHub {
             parent_req: Mutex::new(parent_req::ParentTracker::new()),
         };
         // Schema ≤ 2 records carry no sigop cost: fill (or evict) before serving.
-        hub.lock_write()
-            .recompute_missing_sigops(&QueryUtxoProvider::new(&hub.query));
+        let loaded = {
+            let mut g = hub.lock_write();
+            g.set_node_clock(Arc::clone(&hub.mock_now));
+            g.recompute_missing_sigops(&QueryUtxoProvider::new(&hub.query));
+            g.take_loaded_accept_times()
+        };
+        // Stored accept times feed expiry and `getmempoolentry.time`. A loaded
+        // tx is not queued for INV, as before a restart dropped the maps.
+        for (txid, wtxid, at) in loaded {
+            if hub.contains(&txid) {
+                hub.insert_relay_maps(txid, wtxid, 0, at, false);
+            }
+        }
         {
             let mut u = hub.unbroadcast.lock().unwrap();
             u.retain(|t| hub.contains(t));
@@ -1028,8 +1040,9 @@ impl MempoolHub {
             .unwrap_or(0)
     }
 
-    fn insert_relay_maps(&self, txid: Txid, wtxid: Wtxid, seq: u64) {
-        let at = self.relay_now_secs();
+    /// Index a live tx accepted at `at` (node seconds). `age_inv` queues the
+    /// delayed INV for a fresh accept.
+    fn insert_relay_maps(&self, txid: Txid, wtxid: Wtxid, seq: u64, at: u64, age_inv: bool) {
         let gen = self.next_accept_gen.fetch_add(1, Ordering::Relaxed);
         let due = at.saturating_add(30);
         let mut by_tx = self.wtxid_by_txid.lock().unwrap();
@@ -1046,7 +1059,9 @@ impl MempoolHub {
         seqs.insert(wtxid, seq);
         ats.insert(wtxid, at);
         gens.insert(wtxid, gen);
-        age.insert((due, gen), (txid, wtxid));
+        if age_inv {
+            age.insert((due, gen), (txid, wtxid));
+        }
         order.insert((at, wtxid), txid);
         self.min_live_accept_at.fetch_min(at, Ordering::Relaxed);
     }
@@ -2333,7 +2348,7 @@ impl MempoolHub {
         self.unindex_evicted(&r.evicted);
         let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
         let w = tx.compute_wtxid();
-        self.insert_relay_maps(r.txid, w, seq);
+        self.insert_relay_maps(r.txid, w, seq, r.accept_secs, true);
         self.reorg_servable.lock().unwrap().remove(&w);
         self.note_fee_flow_admit(r.weight, r.fee_sat);
         self.push_recent(tx, r);
@@ -2759,7 +2774,7 @@ impl MempoolHub {
             self.unindex_evicted(&r.evicted);
             // Same relay-age clock as an individual admit (`mempool_limit.py` INV).
             let seq = self.next_relay_seq.fetch_add(1, Ordering::Relaxed);
-            self.insert_relay_maps(r.txid, tx.compute_wtxid(), seq);
+            self.insert_relay_maps(r.txid, tx.compute_wtxid(), seq, r.accept_secs, true);
             self.index_txid(
                 r.txid,
                 tx,
@@ -3065,7 +3080,7 @@ impl MempoolHub {
             if let Ok(prevouts) = self.staged_reorg_admit(tx, &utxo) {
                 let w = tx.compute_wtxid();
                 self.reorg_servable.lock().unwrap().insert(w);
-                self.insert_relay_maps(tx.compute_txid(), w, 0);
+                self.insert_relay_maps(tx.compute_txid(), w, 0, self.relay_now_secs(), true);
                 admitted.push((tx, prevouts));
             }
         }
@@ -3724,13 +3739,24 @@ impl MempoolHub {
     }
 
     fn live_accept_result(&self, txid: &Txid) -> Option<AcceptResult> {
-        let g = self.lock_read();
-        let e = g.graph.get(txid)?;
+        let (txid, fee_sat, weight, slot) = {
+            let g = self.lock_read();
+            let e = g.graph.get(txid)?;
+            (
+                e.txid,
+                e.fee_sat,
+                e.adjusted_weight(g.graph.bytes_per_sigop()),
+                e.slot,
+            )
+        };
         Some(AcceptResult {
-            txid: e.txid,
-            fee_sat: e.fee_sat,
-            weight: e.adjusted_weight(g.graph.bytes_per_sigop()),
-            slot: e.slot,
+            txid,
+            fee_sat,
+            weight,
+            slot,
+            accept_secs: self
+                .accept_time_txid(&txid)
+                .unwrap_or_else(|| self.relay_now_secs()),
             replaced: Vec::new(),
             replaced_scripthashes: Vec::new(),
             replaced_txs: Vec::new(),
@@ -4451,6 +4477,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A reopened pool keeps each entry's accept time: `getmempoolentry.time`
+    /// and `-mempoolexpiry` see the original accept, not 0 or the restart.
+    #[test]
+    fn reopen_keeps_accept_time_and_expiry() {
+        let (_store, q, cbs) = pad_cbs(3);
+        let mp = tmp();
+        let hub = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        let t0 = 1_700_000_000;
+        hub.note_mock_now(t0);
+        let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
+        let tid = tx.compute_txid();
+        hub.accept_tx(&tx).expect("admit");
+        assert_eq!(hub.accept_time_txid(&tid), Some(t0));
+        hub.flush().expect("shutdown flush");
+        drop(hub);
+        let hub2 = MempoolHub::open(&mp, Arc::clone(&q)).unwrap();
+        assert!(hub2.contains(&tid));
+        assert_eq!(
+            hub2.accept_time_txid(&tid),
+            Some(t0),
+            "accept time must survive a restart"
+        );
+        hub2.set_expiry_hours(1);
+        hub2.note_mock_now(t0 + 3600 - 5);
+        assert_eq!(hub2.expire_stale(), 0, "not yet an hour old");
+        hub2.note_mock_now(t0 + 3600 + 5);
+        assert_eq!(hub2.expire_stale(), 1, "a loaded entry must still expire");
+        assert!(!hub2.contains(&tid));
+        let _ = std::fs::remove_dir_all(&mp);
+    }
+
     /// One scan visits 256 live txs. With more than that expired, the survivors
     /// are the newest accepts, and the next call continues from there.
     #[test]
@@ -5093,7 +5150,7 @@ mod tests {
         {
             let mut store = rbitcoin_mempool::Mempool::open_or_create(&mp).unwrap();
             store
-                .append_live_tx(&tx, &tid, &wtxid, 1_000, 400, 0, &[])
+                .append_live_tx(&tx, &tid, &wtxid, 1_000, 400, 0, 1_700_000_000, &[])
                 .unwrap();
             store.flush().unwrap();
         }
@@ -5125,7 +5182,7 @@ mod tests {
             for tx in [&ok, &gone] {
                 let (tid, wtxid) = (tx.compute_txid(), tx.compute_wtxid());
                 store
-                    .append_live_tx(tx, &tid, &wtxid, 1_000, 400, u64::MAX, &[])
+                    .append_live_tx(tx, &tid, &wtxid, 1_000, 400, u64::MAX, 1_700_000_000, &[])
                     .unwrap();
             }
             store.flush().unwrap();
@@ -5155,7 +5212,7 @@ mod tests {
         {
             let mut store = rbitcoin_mempool::Mempool::open_or_create(&mp).unwrap();
             store
-                .append_live_tx(&tx, &tid, &wtxid, 1_000, 400, 100, &[])
+                .append_live_tx(&tx, &tid, &wtxid, 1_000, 400, 100, 1_700_000_000, &[])
                 .unwrap();
             store.flush().unwrap();
         }
@@ -5879,7 +5936,13 @@ mod tests {
             Err(AcceptError::Orphaned { .. })
         ));
         let orphan_w = orphan.compute_wtxid();
-        hub.insert_relay_maps(orphan.compute_txid(), orphan_w, 1);
+        hub.insert_relay_maps(
+            orphan.compute_txid(),
+            orphan_w,
+            1,
+            hub.relay_now_secs(),
+            true,
+        );
         assert!(hub.relay_seq_of(&orphan_w).is_some());
         hub.unindex_if_absent(&orphan);
         assert!(
@@ -5888,7 +5951,13 @@ mod tests {
         );
         let absent = spend_true(cbs[2], 3_000, ScriptBuf::from_bytes(vec![0x51]));
         let absent_w = absent.compute_wtxid();
-        hub.insert_relay_maps(absent.compute_txid(), absent_w, 1);
+        hub.insert_relay_maps(
+            absent.compute_txid(),
+            absent_w,
+            1,
+            hub.relay_now_secs(),
+            true,
+        );
         assert!(hub.relay_seq_of(&absent_w).is_some());
         hub.unindex_if_absent(&absent);
         assert!(
@@ -6247,6 +6316,7 @@ mod tests {
                     4_999_999_001,
                     tx.weight().to_wu(),
                     u64::MAX,
+                    1_700_000_000,
                     &[],
                 )
                 .unwrap();
