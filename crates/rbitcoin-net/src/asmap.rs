@@ -152,13 +152,16 @@ fn bit_width(x: u32) -> u32 {
 }
 
 /// Core `Interpret`. Aborts return `0` (never panic).
+///
+/// There is no `pos` bound. At or past the last bit, [`decode_type`] yields
+/// an invalid opcode and this returns 0, the same result as stopping when
+/// `pos` reaches the bit length.
 pub fn interpret(asmap: &[u8], ip16: &[u8; 16]) -> u32 {
     let mut pos = 0usize;
-    let endpos = asmap.len().saturating_mul(8);
     let mut ip_bit = 0usize;
     let ip_bits_end = 128usize;
     let mut default_asn = 0u32;
-    while pos < endpos {
+    loop {
         let opcode = decode_type(&mut pos, asmap);
         if opcode == RETURN {
             let asn = decode_asn(&mut pos, asmap);
@@ -508,6 +511,32 @@ mod tests {
         assert_eq!(interpret(&[], &[0u8; 16]), 0);
         assert_eq!(interpret(&[0xff, 0xff], &[0u8; 16]), 0);
         assert_eq!(interpret(&[0], &[0u8; 16]), 0);
+    }
+
+    #[test]
+    fn a_jump_that_lands_past_the_file_returns_zero() {
+        // Smallest jump is 17 bits past the instruction, which is past EOF
+        // when the file is only that jump. The high address bit takes it.
+        let bytes = pack_le(&instr_jump(17));
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-asmap-eof-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ip_asn.dat");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(AsMap::from_path(&path).unwrap().is_none());
+        let reopened = std::fs::read(&path).unwrap();
+        assert_eq!(reopened, bytes);
+        let mut ip = [0u8; 16];
+        ip[0] = 0x80;
+        assert_eq!(interpret(&reopened, &ip), 0);
+        assert_eq!(interpret(&reopened, &[0u8; 16]), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
