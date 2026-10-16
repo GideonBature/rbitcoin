@@ -180,14 +180,7 @@ impl HeaderWalk {
         }
         let mut step = 1usize;
         let mut i = self.checkpoints.len();
-        // The ask path keeps the first eight hashes. Walking every checkpoint
-        // step still names the same prefix, and there is no second cap here.
-        loop {
-            // `i == 0` is the stop. The index has already been emitted, and
-            // stepping again would stay on checkpoint 0.
-            if i == 0 {
-                break;
-            }
+        while i > 0 && out.len() < 8 {
             i = i.saturating_sub(step);
             let h = self.checkpoints[i].hash;
             if !out.contains(&h) {

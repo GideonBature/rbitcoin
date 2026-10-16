@@ -523,6 +523,36 @@ fn locator_names_the_earlier_checkpoint() {
 }
 
 #[test]
+fn getheaders_locator_stops_at_eight_hashes() {
+    let (dir, hub, mut st, mut rx) = fresh("loc-eight", 100_000);
+    plant_origin(&mut st, &hub);
+    let gen = hub.tip_hash().unwrap();
+    // One header per batch: each accepted batch is one checkpoint. 256 keeps
+    // the eighth hash off checkpoint 0, so a ninth comparison still names one.
+    let headers = chain_of(gen, 256);
+    let early = headers[1].block_hash();
+    for hdr in headers {
+        apply_headers_event(&mut st, &hub, 0, vec![hdr]);
+    }
+    while rx.try_recv().is_ok() {}
+    assert!(
+        send_getheaders(&mut st, &hub).unwrap(),
+        "a peer still ahead of a long walk is asked"
+    );
+    let locator = locator_of(&mut rx);
+    assert!(
+        locator.contains(&early),
+        "getheaders names an early checkpoint, got {locator:?}"
+    );
+    assert_eq!(
+        locator.len(),
+        9,
+        "getheaders is eight walk hashes plus the confirmed tip, got {locator:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn successor_at_the_walk_tip_is_what_gets_asked() {
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("next-h");
     let (s0, mut rx) = slot(0, 50_000);

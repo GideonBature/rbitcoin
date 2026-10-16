@@ -438,12 +438,15 @@ pub(crate) fn ibd_header_locator(
     work_tips: &[BlockHash],
 ) -> Result<Vec<BlockHash>, NetError> {
     let mut locator = Vec::with_capacity(32);
+    // Eight hashes is the walk's own stop. This only enforces the protocol
+    // maximum, so a stored tip prepended in front does not drop the oldest
+    // checkpoint.
     for h in work_tips {
+        if locator.len() >= crate::codec::MAX_LOCATOR_SZ {
+            break;
+        }
         if !locator.contains(h) {
             locator.push(*h);
-        }
-        if locator.len() >= 8 {
-            break;
         }
     }
     if let Some(t) = hub.tip_hash() {
