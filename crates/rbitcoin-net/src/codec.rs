@@ -760,6 +760,128 @@ mod tests {
         assert!(encode_is_cpu_heavy(&large));
     }
 
+    fn padded(name: &str) -> [u8; 12] {
+        let mut c = [0u8; 12];
+        c[..name.len()].copy_from_slice(name.as_bytes());
+        c
+    }
+
+    fn decoded(name: &str, payload: Vec<u8>) -> NetworkMessage {
+        frame(padded(name), payload).decode().payload().clone()
+    }
+
+    /// Peer frames for the commands whose decode arm a missed mutant can delete,
+    /// plus the feefilter bounds and a trailing byte that must not be accepted.
+    #[test]
+    fn peer_frames_keep_rare_commands_and_feefilter_bounds() {
+        use bitcoin::bip158::{FilterHash, FilterHeader};
+        use bitcoin::hashes::Hash;
+        use bitcoin::p2p::address::Address;
+        use bitcoin::p2p::message_filter::{CFCheckpt, CFHeaders, CFilter};
+        use bitcoin::p2p::message_network::{Reject, RejectReason};
+        use bitcoin::p2p::ServiceFlags;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let zero = [0u8; 32];
+        let block = bitcoin::BlockHash::from_byte_array(zero);
+        let addr = Address::new(
+            &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333),
+            ServiceFlags::NONE,
+        );
+        assert!(matches!(
+            decoded("addr", serialize(&vec![(1u32, addr)])),
+            NetworkMessage::Addr(v) if v.len() == 1
+        ));
+        assert!(matches!(
+            decoded(
+                "cfilter",
+                serialize(&CFilter {
+                    filter_type: 0,
+                    block_hash: block,
+                    filter: vec![0x01],
+                })
+            ),
+            NetworkMessage::CFilter(f) if f.filter == vec![0x01]
+        ));
+        assert!(matches!(
+            decoded(
+                "cfheaders",
+                serialize(&CFHeaders {
+                    filter_type: 0,
+                    stop_hash: block,
+                    previous_filter_header: FilterHeader::from_byte_array(zero),
+                    filter_hashes: vec![FilterHash::from_byte_array(zero)],
+                })
+            ),
+            NetworkMessage::CFHeaders(h) if h.filter_hashes.len() == 1
+        ));
+        assert!(matches!(
+            decoded(
+                "cfcheckpt",
+                serialize(&CFCheckpt {
+                    filter_type: 0,
+                    stop_hash: block,
+                    filter_headers: vec![FilterHeader::from_byte_array(zero)],
+                })
+            ),
+            NetworkMessage::CFCheckpt(c) if c.filter_headers.len() == 1
+        ));
+        assert!(matches!(
+            decoded(
+                "reject",
+                serialize(&Reject {
+                    message: "tx".into(),
+                    ccode: RejectReason::Malformed,
+                    reason: "bad".into(),
+                    hash: bitcoin::hashes::sha256d::Hash::from_byte_array(zero),
+                })
+            ),
+            NetworkMessage::Reject(_)
+        ));
+        assert!(matches!(
+            decoded("alert", serialize(&vec![0xAAu8])),
+            NetworkMessage::Alert(b) if b == vec![0xAA]
+        ));
+
+        let upper: i64 = bitcoin::Amount::MAX_MONEY.to_sat().try_into().unwrap();
+        assert!(matches!(
+            decoded("feefilter", serialize(&0i64)),
+            NetworkMessage::FeeFilter(0)
+        ));
+        assert!(matches!(
+            decoded("feefilter", serialize(&upper)),
+            NetworkMessage::FeeFilter(fee) if fee == upper
+        ));
+        for bad in [-1i64, upper.saturating_add(1)] {
+            assert!(
+                matches!(
+                    decoded("feefilter", serialize(&bad)),
+                    NetworkMessage::Unknown { .. }
+                ),
+                "feefilter {bad} must not become a fee"
+            );
+        }
+
+        // A trailing byte is not part of verack. The empty-slice guard has to
+        // refuse it; replacing that guard with true would return Verack.
+        assert!(matches!(
+            decoded("verack", vec![0]),
+            NetworkMessage::Unknown { .. }
+        ));
+
+        use bitcoin::p2p::message_blockdata::Inventory;
+        let exact = NetworkMessage::Inv(vec![
+            Inventory::Block(bitcoin::BlockHash::from_byte_array(
+                zero
+            ));
+            64
+        ]);
+        assert!(
+            !encode_is_cpu_heavy(&exact),
+            "64 invs stay on the async worker; 65 is the heavy side"
+        );
+    }
+
     fn frame(command: [u8; 12], payload: Vec<u8>) -> FramedMessage {
         FramedMessage {
             magic: signet_magic(),
