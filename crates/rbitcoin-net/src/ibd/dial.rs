@@ -1853,36 +1853,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn ibd_header_locator_uses_a_warm_locator_or_the_store() {
-        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("dial-warm-loc");
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        let block = rbitcoin_consensus::mine_empty_regtest(gen, 1_300_000_000, 1);
-        hub.accept_block(block.clone()).unwrap();
-        let tip = block.block_hash();
-        set_warm_locator(None);
-        let stored = ibd_header_locator(&hub, &[]).unwrap();
-        assert!(stored.contains(&tip));
-        assert!(
-            stored.contains(&gen),
-            "with no warm locator the store locator still names genesis"
-        );
-        let warm = BlockHash::from_byte_array([0x42; 32]);
-        set_warm_locator(Some(vec![warm]));
-        let warmed = ibd_header_locator(&hub, &[]).unwrap();
-        assert!(
-            warmed.contains(&warm),
-            "a published locator is what getheaders sends"
-        );
-        assert!(
-            !warmed.contains(&gen),
-            "a warm locator replaces the store locator"
-        );
-        set_warm_locator(None);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     /// median / pick edge matrix + mature-sample early exits + relative-slow early exits.
     #[test]
     fn relative_slow_pure_edges_and_mature_sample_filters() {

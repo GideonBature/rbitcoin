@@ -583,7 +583,21 @@ mod tests {
     }
 
     fn load(bits: &[bool]) -> Option<AsMap> {
-        AsMap::from_bytes(pack_le(bits))
+        let bytes = pack_le(bits);
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-asmap-load-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ip_asn.dat");
+        std::fs::write(&path, &bytes).unwrap();
+        let loaded = AsMap::from_path(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        loaded
     }
 
     fn default_then_match_return() -> Vec<bool> {

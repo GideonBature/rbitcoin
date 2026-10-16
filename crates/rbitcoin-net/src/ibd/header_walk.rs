@@ -6345,11 +6345,16 @@ mod tests {
 
     #[test]
     fn locator_hashes_name_the_fork_and_stop_at_eight() {
-        let mut walk = HeaderWalk::default();
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-locator");
+        hub.ensure_genesis().unwrap();
+        let (peer, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], hub.tip_hash(), hub.tip_height());
+        st.header_walk.origin = true;
+        fill_queue(&mut st);
         let tip = byte_hash(1);
         let fork = byte_hash(2);
-        walk.tip.hash = Some(tip);
-        walk.challenger = Some(Challenger {
+        st.header_walk.tip.hash = Some(tip);
+        st.header_walk.challenger = Some(Challenger {
             fork_hash: fork,
             fork_height: 1,
             tip: WalkTip {
@@ -6359,18 +6364,27 @@ mod tests {
             checkpoints: Vec::new(),
         });
         for n in 0..200u8 {
-            walk.checkpoints
+            st.header_walk
+                .checkpoints
                 .push(checkpoint(byte_hash(n.saturating_add(10)), n as u32));
         }
-        // The newest checkpoint repeats the tip. It must not be asked twice.
-        let dup_at = walk.checkpoints.len() - 1;
-        walk.checkpoints[dup_at].hash = tip;
-        let loc = walk.locator_hashes();
-        assert_eq!(loc.len(), 8, "a locator stops after eight hashes");
+        let dup_at = st.header_walk.checkpoints.len() - 1;
+        st.header_walk.checkpoints[dup_at].hash = tip;
+        assert!(
+            send_getheaders(&mut st, &hub).unwrap(),
+            "the walk asks the peer for the next headers"
+        );
+        let loc = match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => locator,
+            Ok(_) => panic!("expected getheaders"),
+            Err(_) => panic!("peer was not asked"),
+        };
+        let genesis = hub.tip_hash().unwrap();
+        assert_eq!(loc.len(), 9, "eight walk hashes plus the stored tip");
         assert_eq!(loc[0], tip);
         assert!(
             loc.contains(&fork),
-            "the lighter fork is part of the locator"
+            "the lighter fork is part of the getheaders locator"
         );
         assert_eq!(
             loc.iter().filter(|h| **h == tip).count(),
@@ -6378,18 +6392,29 @@ mod tests {
             "a checkpoint that repeats the tip is not asked again"
         );
         assert!(
-            loc.iter().any(|h| *h != tip && *h != fork),
-            "earlier checkpoints follow the fork"
+            loc.contains(&byte_hash(83)),
+            "the doubled step still names an earlier checkpoint"
+        );
+        assert!(
+            loc.contains(&genesis),
+            "getheaders also names the stored tip"
         );
 
-        let mut one = HeaderWalk::default();
+        let (peer, mut rx) = slot(1);
+        let mut one = IbdWorkState::new(vec![peer], hub.tip_hash(), hub.tip_height());
+        one.header_walk.origin = true;
+        fill_queue(&mut one);
         let oldest = byte_hash(9);
-        one.checkpoints.push(checkpoint(oldest, 0));
-        assert_eq!(
-            one.locator_hashes(),
-            vec![oldest],
-            "the walk names the only checkpoint"
-        );
+        one.header_walk.checkpoints.push(checkpoint(oldest, 0));
+        assert!(send_getheaders(&mut one, &hub).unwrap());
+        match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => {
+                assert_eq!(locator[0], oldest, "the ask names the only checkpoint");
+                assert!(locator.contains(&hub.tip_hash().unwrap()));
+            }
+            Ok(_) => panic!("expected getheaders"),
+            Err(_) => panic!("peer was not asked"),
+        }
     }
 
     #[test]
