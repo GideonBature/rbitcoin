@@ -4496,6 +4496,7 @@ include!("peer_catchup_journey.rs");
 include!("peer_hostile_journey.rs");
 include!("peer_tip_announce_journey.rs");
 include!("peer_header_dos_journey.rs");
+include!("peer_header_sync_journey.rs");
 include!("peer_blocksonly_journey.rs");
 
 /// Core `PrepareBlockFilterRequest`: start past stop, or a range of 1000+

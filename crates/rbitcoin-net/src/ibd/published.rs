@@ -1,7 +1,6 @@
 //! Header thread. It persists batches, loads the walk origin, and reseeds.
 //! The coordination loop only queues those commands.
 
-use super::dial::set_warm_locator;
 use super::events::run_header_batch;
 use super::header_walk::{install_origin, load_origin, origin_input, send_getheaders};
 use super::path::{load_resume_entries, stage_resumed_path};
@@ -35,7 +34,6 @@ pub(crate) fn spawn_header_thread(
                     } else {
                         Some(load_origin(hub.as_ref(), &input))
                     };
-                    set_warm_locator(hub.query.locator_hashes().ok());
                     {
                         let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
                         if let Some(loaded) = loaded {
@@ -43,7 +41,6 @@ pub(crate) fn spawn_header_thread(
                         }
                         let _ = send_getheaders(&mut st, hub.as_ref());
                     }
-                    set_warm_locator(None);
                 }
                 HeaderCmd::Reseed => {
                     let exclude: Vec<[u8; 32]> = {

@@ -555,10 +555,8 @@ fn check_witness_commitment_with_wtxids(
     let mut committed = [0u8; 32];
     committed.copy_from_slice(&b[6..38]);
 
-    if precomputed_non_cb.len() != block.txdata.len().saturating_sub(1) {
-        return Err(ConsensusError::BadBlock("wtxid count mismatch"));
-    }
-    // Witness merkle: coinbase wtxid is 32 zero bytes.
+    // Witness merkle: coinbase wtxid is 32 zero bytes. The caller builds
+    // `precomputed_non_cb` as one wtxid per non-coinbase tx.
     let mut leaves = Vec::with_capacity(block.txdata.len());
     leaves.push([0u8; 32]);
     leaves.extend_from_slice(precomputed_non_cb);

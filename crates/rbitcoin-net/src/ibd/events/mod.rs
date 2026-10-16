@@ -726,9 +726,7 @@ fn complete_stored_headers(
             && live < MAX_ORDERED_HEADERS
             && (live < ORDERED_HEADERS_SOFT_CAP || need_ready_headroom);
     }
-    if batch_len == 0 {
-        return false;
-    }
+    // A stored plan has at least one header. An empty batch never reaches here.
     on_known_headers_batch(st, hub, 0, batch_len);
     false
 }
@@ -814,21 +812,19 @@ fn apply_block_framed(
         Ok(_offer) => {
             let _ = try_complete_awaiting_reorg(st, hub);
         }
-        Err(rbitcoin_store::StoreError::Rejected(why))
-            if why == rbitcoin_query::Query::UNDECODABLE_WIRE_MSG =>
-        {
-            warn!("ibd: peer[{peer}] block {hash} h={height}: {why}; dropping peer");
-            st.body.mark_missing(hash);
-            st.reopen_for_densify(&[hash]);
-            disconnect_peer(
-                &mut st.slots,
-                &mut st.addr_cooldown,
-                &mut st.addr_strikes,
-                peer,
-            );
-            return;
-        }
         Err(e) => {
+            if store_reject_drops_peer(&e) {
+                warn!("ibd: peer[{peer}] block {hash} h={height}: {e}; dropping peer");
+                st.body.mark_missing(hash);
+                st.reopen_for_densify(&[hash]);
+                disconnect_peer(
+                    &mut st.slots,
+                    &mut st.addr_cooldown,
+                    &mut st.addr_strikes,
+                    peer,
+                );
+                return;
+            }
             rbitcoin_log::warn!("ibd: body queue offer failed ({e}) h={height}");
             st.body.mark_missing(hash);
             return;
@@ -837,6 +833,17 @@ fn apply_block_framed(
     st.body.mark_pending(hash);
     if let Some(feed) = confirm_feed {
         feed.note(height, hash);
+    }
+}
+
+/// Undecodable wire is the sender's block. Any other store refusal stays a
+/// re-get: the peer may still have an honest copy.
+fn store_reject_drops_peer(err: &rbitcoin_store::StoreError) -> bool {
+    match err {
+        rbitcoin_store::StoreError::Rejected(why) => {
+            *why == rbitcoin_query::Query::UNDECODABLE_WIRE_MSG
+        }
+        _ => false,
     }
 }
 

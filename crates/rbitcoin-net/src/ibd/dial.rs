@@ -426,19 +426,6 @@ pub(crate) fn request_headers_from(
     Ok(s.cmd_tx.send(PeerCmd::GetHeaders { locator }).is_ok())
 }
 
-thread_local! {
-    static WARM_LOCATOR: std::cell::RefCell<Option<Vec<BlockHash>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-pub(crate) fn set_warm_locator(locator: Option<Vec<BlockHash>>) {
-    WARM_LOCATOR.with(|slot| *slot.borrow_mut() = locator);
-}
-
-fn warm_locator() -> Option<Vec<BlockHash>> {
-    WARM_LOCATOR.with(|slot| slot.borrow().clone())
-}
-
 /// Locator for IBD getheaders: prefer the **work-path tip** (highest ordered /
 /// archived hash) ahead of the confirmed store tip.
 ///
@@ -451,12 +438,15 @@ pub(crate) fn ibd_header_locator(
     work_tips: &[BlockHash],
 ) -> Result<Vec<BlockHash>, NetError> {
     let mut locator = Vec::with_capacity(32);
+    // Eight hashes is the walk's own stop. This only enforces the protocol
+    // maximum, so a stored tip prepended in front does not drop the oldest
+    // checkpoint.
     for h in work_tips {
+        if locator.len() >= crate::codec::MAX_LOCATOR_SZ {
+            break;
+        }
         if !locator.contains(h) {
             locator.push(*h);
-        }
-        if locator.len() >= 8 {
-            break;
         }
     }
     if let Some(t) = hub.tip_hash() {
@@ -464,13 +454,10 @@ pub(crate) fn ibd_header_locator(
             locator.push(t);
         }
     }
-    let rest = if let Some(warm) = warm_locator() {
-        warm
-    } else {
-        hub.query
-            .locator_hashes()
-            .map_err(|e| NetError::Consensus(e.to_string()))?
-    };
+    let rest = hub
+        .query
+        .locator_hashes()
+        .map_err(|e| NetError::Consensus(e.to_string()))?;
     for h in rest {
         if !locator.contains(&h) {
             locator.push(h);

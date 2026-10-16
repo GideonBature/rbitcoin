@@ -274,8 +274,6 @@ pub(crate) fn reject_is_mutated(reason: &str) -> bool {
         || reason.contains("bad-txns-duplicate")
         || reason.contains("witness commitment")
         || reason.contains("bad-witness-nonce")
-        || reason.contains("missing witness commitment")
-        || reason.contains("wtxid count")
         || reason.contains("unexpected witness")
 }
 
@@ -488,13 +486,13 @@ impl ChainHub {
         self.mining.block_version.store(v, Ordering::Relaxed);
     }
 
-    /// GBT `version`: override or versionbits TOP_BITS | testdummy (bit 28).
+    /// GBT `version`: override, or versionbits top bits with testdummy (`0x30000000`).
     pub fn gbt_block_version(&self) -> i32 {
         let v = self.mining.block_version.load(Ordering::Relaxed);
         if v != 0 {
             v
         } else {
-            0x2000_0000 | (1 << 28)
+            0x3000_0000
         }
     }
 
@@ -2817,7 +2815,7 @@ impl ChainHub {
     }
 
     pub fn cache_body_count(&self) -> usize {
-        self.cache.body_count()
+        self.cache.stored_bodies()
     }
 
     pub fn held_body_count(&self) -> usize {

@@ -2841,7 +2841,7 @@ fn block_cache_and_mempool_hub_surface() {
     // BlockCache: push chain, locator, headers, truncate, depth eviction.
     let cache = BlockCache::with_body_depth(4);
     assert!(cache.is_empty());
-    assert_eq!(cache.len(), 0);
+    assert!(cache.tip_height().is_none());
     for b in &blocks {
         cache.push_best(b.clone()).unwrap();
     }
@@ -2858,11 +2858,11 @@ fn block_cache_and_mempool_hub_surface() {
         "body depth eviction"
     );
     assert!(cache.hash_at_height(0).is_some(), "hash chain retained");
-    let loc = cache.locator();
-    assert!(!loc.is_empty());
+    let genesis_hash = cache.hash_at_height(0).unwrap();
     let stop = BlockHash::from_byte_array([0u8; 32]);
-    let hdrs = cache.headers_after_locator(&loc[loc.len().saturating_sub(1)..], stop);
+    let hdrs = cache.headers_after_locator(&[genesis_hash], stop);
     assert!(!hdrs.is_empty());
+    assert_ne!(hdrs[0].block_hash(), genesis_hash);
     // Bad extension rejected.
     let mut bad = blocks.last().unwrap().clone();
     bad.header.prev_blockhash = BlockHash::from_byte_array([0xee; 32]);
@@ -2872,7 +2872,6 @@ fn block_cache_and_mempool_hub_surface() {
     cache.clear();
     assert!(cache.is_empty());
     let empty = BlockCache::new();
-    assert!(!empty.locator().is_empty());
     assert!(empty
         .headers_after_locator(&[], BlockHash::from_byte_array([0u8; 32]))
         .is_empty());

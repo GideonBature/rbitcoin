@@ -371,6 +371,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         }
     }
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
+    publish_listener_addr(config.datadir.path(), "p2p", node.local_addr);
     let spend_sync = SpendSync::spawn(std::sync::Arc::clone(&node.hub.query));
     status.attach_p2p(&node.hub, &node.peers);
     for extra in &config.listen.p2p_extra {
@@ -2633,59 +2634,6 @@ mod tests {
             follow_dial_targets(&[], &am, 1, &[onion]).is_empty(),
             "live onion net must not be re-dialed via 0.0.0.0 hint"
         );
-    }
-
-    #[test]
-    fn load_asmap_missing_configured_is_none() {
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-asmap-miss-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(load_asmap(&dir, Some(Path::new("no-such-asmap"))).is_none());
-        assert!(load_asmap(&dir, None).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_asmap_valid_tiny_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-asmap-ok-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("ip_asn.dat");
-        std::fs::write(&path, rbitcoin_net::TWO_PREFIX_ASMAP).unwrap();
-        let m = load_asmap(&dir, None).expect("default ip_asn.dat");
-        assert_eq!(
-            m.mapped_as(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 2, 0, 0))),
-            1
-        );
-        let rel = load_asmap(&dir, Some(Path::new("ip_asn.dat"))).expect("relative asmap");
-        assert_eq!(rel.len(), m.len());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_asmap_truncated_is_none() {
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-asmap-bad-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bad.dat");
-        std::fs::write(&path, [0u8]).unwrap();
-        assert!(load_asmap(&dir, Some(path.as_path())).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

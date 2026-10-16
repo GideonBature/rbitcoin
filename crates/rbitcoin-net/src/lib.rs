@@ -31,7 +31,11 @@ mod tx_relay;
 mod v2;
 mod versionbits_warn;
 
-pub use asmap::{AsMap, TWO_PREFIX_ASMAP};
+pub use asmap::{
+    AsMap, ASMAP_EIGHT_TRAILING_ZEROS, ASMAP_JUMP_OFF_END, ASMAP_JUMP_PAST_FILE,
+    ASMAP_JUMP_SHORT_TAIL, ASMAP_MATCH_PAST_END, ASMAP_SECOND_DEFAULT, ASMAP_TRAILING_ONE,
+    ASMAP_TWO_SHORT_MATCHES, LONE_RETURN_ASMAP, LOOPBACK_ASMAP, TWO_PREFIX_ASMAP,
+};
 pub use cache::BlockCache;
 pub use chain::{check_block_proposal_with, AcceptOutcome, ChainHub, ChainTipInfo, TipEvent};
 pub use compact::{

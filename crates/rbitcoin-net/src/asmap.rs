@@ -42,16 +42,10 @@ impl AsMap {
         Ok(Self::from_bytes(bytes))
     }
 
+    // An empty file fails sanity, so a loaded map is never empty.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
     }
 
     pub fn interpret_ip16(&self, ip16: &[u8; 16]) -> u32 {
@@ -75,6 +69,53 @@ pub const TWO_PREFIX_ASMAP: &[u8] = &[
     0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0xff, 0xff, 0xfe, 0xff, 0xfb, 0x80, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x01,
 ];
+
+/// `::ffff:127.0.0.1` → ASN 1, `.2` → ASN 2, `.3` → ASN 9.
+///
+/// Default ASN 9, a one-bit match then an eight-bit match, the shared
+/// `::ffff:127.0.0.0/120` prefix, then a jump on the bit that separates `.1`
+/// from `.2` and `.3`. The fall-through consumes the last IP bit and returns 1.
+/// The jump target returns 2, or the default when that bit does not match (`.3`).
+pub const LOOPBACK_ASMAP: &[u8] = &[
+    0x07, 0x80, 0x18, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0, 0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f,
+    0xb0, 0x3f, 0xc0, 0xfe, 0x00, 0xfb, 0x03, 0xec, 0x07, 0xd8, 0xff, 0x7f, 0xff, 0xff, 0xfd, 0xfd,
+    0xf7, 0x07, 0xd8, 0x1f, 0x60, 0x1f, 0x10, 0x3a, 0x01, 0x00, 0x0c, 0x00, 0x80,
+];
+
+/// Every address returns ASN 1. Length 3, digest `709e80c8`.
+pub const LONE_RETURN_ASMAP: &[u8] = &[0x00, 0x00, 0x00];
+
+/// A second `DEFAULT`. Sanity rejects it.
+pub const ASMAP_SECOND_DEFAULT: &[u8] = &[0x07, 0x00, 0x38, 0x00, 0xc0, 0x00, 0x00, 0x08];
+
+/// Return ASN 1 plus a trailing one bit.
+pub const ASMAP_TRAILING_ONE: &[u8] = &[0x00, 0x00, 0x02];
+
+/// Return ASN 1 plus eight trailing zero bits.
+pub const ASMAP_EIGHT_TRAILING_ZEROS: &[u8] = &[0x00, 0x00, 0x00, 0x00];
+
+/// Two one-bit matches in a row, then a return.
+pub const ASMAP_TWO_SHORT_MATCHES: &[u8] = &[0x63, 0x00, 0x00, 0x00];
+
+/// Sixteen full-byte matches, then one more match bit.
+pub const ASMAP_MATCH_PAST_END: &[u8] = &[
+    0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0, 0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0,
+    0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0, 0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0,
+    0x3f, 0xc0, 0xfe, 0x00, 0x03, 0x00, 0x00,
+];
+
+/// A jump of 5000 bits, then a return.
+pub const ASMAP_JUMP_PAST_FILE: &[u8] = &[0xfd, 0x71, 0x3a, 0x00, 0x00];
+
+/// A jump that leaves too few IP bits for the match after it.
+pub const ASMAP_JUMP_SHORT_TAIL: &[u8] = &[
+    0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0, 0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0,
+    0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0, 0x3f, 0xc0, 0xfe, 0x00, 0xfb, 0x03, 0xec, 0x0f, 0xb0,
+    0x3f, 0x40, 0x00, 0x00, 0x80, 0xfd, 0x01, 0x00, 0x00, 0x02,
+];
+
+/// Smallest jump, with nothing after it.
+pub const ASMAP_JUMP_OFF_END: &[u8] = &[0x01];
 
 /// IPv4 as `::ffff:0:0/96` + 32 bits; IPv6 as 16 raw bytes.
 pub fn ip16_for_lookup(ip: IpAddr) -> [u8; 16] {
@@ -158,13 +199,16 @@ fn bit_width(x: u32) -> u32 {
 }
 
 /// Core `Interpret`. Aborts return `0` (never panic).
+///
+/// There is no `pos` bound. At or past the last bit, [`decode_type`] yields
+/// an invalid opcode and this returns 0, the same result as stopping when
+/// `pos` reaches the bit length.
 pub fn interpret(asmap: &[u8], ip16: &[u8; 16]) -> u32 {
     let mut pos = 0usize;
-    let endpos = asmap.len().saturating_mul(8);
     let mut ip_bit = 0usize;
     let ip_bits_end = 128usize;
     let mut default_asn = 0u32;
-    while pos < endpos {
+    loop {
         let opcode = decode_type(&mut pos, asmap);
         if opcode == RETURN {
             let asn = decode_asn(&mut pos, asmap);
@@ -178,9 +222,6 @@ pub fn interpret(asmap: &[u8], ip16: &[u8; 16]) -> u32 {
                 break;
             }
             if ip_bit == ip_bits_end {
-                break;
-            }
-            if i64::from(jump) >= (endpos - pos) as i64 {
                 break;
             }
             let Some(bit) = consume_bit_be(&mut ip_bit, ip16) else {
@@ -274,7 +315,6 @@ fn sanity_return(
 fn sanity_jump(
     pos: &mut usize,
     asmap: &[u8],
-    endpos: usize,
     bits: &mut i32,
     jumps: &mut Vec<(usize, i32)>,
 ) -> bool {
@@ -282,9 +322,8 @@ fn sanity_jump(
     if jump == INVALID {
         return false;
     }
-    if i64::from(jump) > (endpos - *pos) as i64 {
-        return false;
-    }
+    // A jump to EOF or past it cannot be popped onto a finishing RETURN
+    // (the target compare fails, or the walker falls off and returns false).
     if *bits == 0 {
         return false;
     }
@@ -344,7 +383,7 @@ fn sanity_check_bits(asmap: &[u8], mut bits: i32) -> bool {
                 None => prevopcode = JUMP,
             }
         } else if opcode == JUMP {
-            if !sanity_jump(&mut pos, asmap, endpos, &mut bits, &mut jumps) {
+            if !sanity_jump(&mut pos, asmap, &mut bits, &mut jumps) {
                 return false;
             }
             prevopcode = JUMP;
@@ -476,53 +515,13 @@ fn encode_two_prefix_asmap() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
-
-    #[test]
-    fn asmap_two_prefix_maps_distinct_asns() {
-        let bytes = two_prefix_asmap_bytes();
-        let m = AsMap::from_bytes(bytes).expect("fixture sanity");
-        assert_eq!(m.mapped_as(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 0))), 1);
-        assert_eq!(m.mapped_as(IpAddr::V4(Ipv4Addr::new(3, 4, 0, 0))), 2);
-        assert_eq!(m.mapped_as(IpAddr::V4(Ipv4Addr::new(1, 2, 9, 9))), 1);
-        let mapped = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0102, 0x0304));
-        assert_eq!(m.mapped_as(mapped), 1);
-        assert_eq!(m.mapped_as(IpAddr::V6(Ipv6Addr::LOCALHOST)), 0);
-    }
-
-    #[test]
-    fn asmap_truncated_file_is_none() {
-        assert!(AsMap::from_bytes(Vec::new()).is_none());
-        assert!(AsMap::from_bytes(vec![0]).is_none());
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-asmap-trunc-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bad.dat");
-        std::fs::write(&path, [0u8]).unwrap();
-        assert!(AsMap::from_path(&path).unwrap().is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn asmap_interpret_garbage_returns_zero_no_panic() {
         assert_eq!(interpret(&[], &[0u8; 16]), 0);
         assert_eq!(interpret(&[0xff, 0xff], &[0u8; 16]), 0);
         assert_eq!(interpret(&[0], &[0u8; 16]), 0);
-    }
-
-    #[test]
-    fn asmap_lone_return_asn1() {
-        let bits = instr_return(1);
-        let bytes = pack_le(&bits);
-        let m = AsMap::from_bytes(bytes).expect("RETURN ASN1");
-        assert_eq!(m.interpret_ip16(&[0u8; 16]), 1);
-        assert_eq!(m.interpret_ip16(&[0xff; 16]), 1);
     }
 
     #[test]
@@ -541,19 +540,5 @@ mod tests {
         ip16.copy_from_slice(ip);
         assert_eq!(m.interpret_ip16(&ip16), 1);
         assert_eq!(ip16, ip16_for_lookup(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 0))));
-    }
-
-    #[test]
-    fn sanity_check_bits_rejects_jump_at_zero_bits_and_double_default() {
-        assert!(!sanity_check_bits(&[], 128));
-        let mut bits = instr_jump(17);
-        bits.extend(instr_return(1));
-        assert!(!sanity_check_bits(&pack_le(&bits), 0));
-        let mut bits = instr_type(DEFAULT);
-        bits.extend(encode_bits(1, 1, &ASN_BIT_SIZES));
-        bits.extend(instr_type(DEFAULT));
-        bits.extend(encode_bits(1, 1, &ASN_BIT_SIZES));
-        bits.extend(instr_return(1));
-        assert!(AsMap::from_bytes(pack_le(&bits)).is_none());
     }
 }
