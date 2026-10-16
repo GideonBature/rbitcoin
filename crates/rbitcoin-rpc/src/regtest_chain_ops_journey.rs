@@ -80,6 +80,7 @@ fn rpc_regtest_from_genesis() {
     );
     let (addr, p2wpkh) = p2wpkh_regtest();
     let store = dir.join("store");
+    chain_ops_genesis_client_edges(&ctx);
     chain_ops_at_genesis(&ctx, &hub, &store);
     chain_ops_refusals_at_genesis(&ctx, &hub);
     chain_ops_first_block_to_an_address(&ctx, &hub, &addr, &p2wpkh);
@@ -97,6 +98,35 @@ fn rpc_regtest_from_genesis() {
 }
 
 fn chain_ops_echo_overlap(ctx: &RpcContext) {
+    let empty = dispatch(ctx, "echo", vec![]).unwrap();
+    assert_eq!(empty, json!([]));
+    let named_echo = dispatch(ctx, "echo", named(json!({"arg0": 0, "arg9": 9}))).unwrap();
+    let mut want = vec![Value::Null; 10];
+    want[0] = json!(0);
+    want[9] = json!(9);
+    assert_eq!(named_echo, Value::Array(want));
+    let arg1 = dispatch(ctx, "echo", named(json!({"arg1": 1}))).unwrap();
+    assert_eq!(arg1, json!([Value::Null, 1]));
+    let arg9_null = dispatch(ctx, "echo", named(json!({"arg9": null}))).unwrap();
+    assert_eq!(arg9_null, json!(vec![Value::Null; 10]));
+    let mixed = dispatch(
+        ctx,
+        "echo",
+        named(json!({"args": [0, 1], "arg3": 3, "arg5": 5})),
+    )
+    .unwrap();
+    assert_eq!(mixed, json!([0, 1, Value::Null, 3, Value::Null, 5]));
+    let twice_null = dispatch(
+        ctx,
+        "echo",
+        named(json!({"args": [0, null, 2], "arg1": 1})),
+    )
+    .unwrap_err();
+    assert_eq!(twice_null["code"], ERR_INVALID_PARAMETER);
+    let gh = dispatch(ctx, "getblockhash", named(json!({"args": [0]}))).unwrap_err();
+    assert_eq!(gh["code"], ERR_INVALID_PARAMETER);
+    assert_eq!(gh["message"], "Unknown named parameter args");
+
     let twice = dispatch(ctx, "echo", named(json!({"args": [0, 1], "arg1": 1}))).unwrap_err();
     assert_eq!(twice["code"], ERR_INVALID_PARAMETER);
     assert_eq!(
@@ -171,8 +201,234 @@ fn rpc_regtest_mature_chain_ops() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn chain_ops_genesis_not_an_ordinary_tx(ctx: &RpcContext) {
+    let genesis = bitcoin::blockdata::constants::genesis_block(BtcNetwork::Regtest);
+    let g_txid = genesis.txdata[0].compute_txid().to_string();
+    let g_hash = genesis.block_hash().to_string();
+    for params in [
+        vec![json!(g_txid.clone())],
+        vec![json!(g_txid.clone()), json!(1)],
+        vec![json!(g_txid.clone()), json!(2), json!(g_hash)],
+    ] {
+        let e = dispatch(ctx, "getrawtransaction", params.clone()).unwrap_err();
+        assert_eq!(e["code"], ERR_INVALID_ADDRESS_OR_KEY, "{params:?}: {e}");
+        assert_eq!(
+            e["message"],
+            "The genesis block coinbase is not considered an ordinary transaction and cannot be retrieved",
+            "{params:?}: {e}"
+        );
+    }
+    for ext in ["json", "hex", "bin"] {
+        let rest = dispatch_rest(ctx, &format!("/rest/tx/{g_txid}.{ext}"), "", &[]);
+        assert_eq!(rest.status, axum::http::StatusCode::NOT_FOUND, "{ext}");
+        let body = String::from_utf8(rest.body).unwrap();
+        assert_eq!(body.trim_end(), format!("{g_txid} not found"), "{ext}");
+    }
+
+}
+
+fn chain_ops_estimate_fee_edges(ctx: &RpcContext) {
+    let missing = dispatch(ctx, "gettxout", vec![json!("00".repeat(32)), json!(0)]).unwrap();
+    assert!(missing.is_null(), "unknown outpoint must be JSON null: {missing}");
+
+    let r = dispatch(ctx, "estimatesmartfee", vec![json!(2)]).unwrap();
+    assert!(r.get("feerate").is_none(), "no estimate has no feerate: {r}");
+    assert_eq!(r["errors"][0], "Insufficient data or no feerate found", "{r}");
+    assert_eq!(r["blocks"], 2, "{r}");
+    for target in [2_u64, 6, 12, 100] {
+        let fee = dispatch(ctx, "estimatesmartfee", vec![json!(target)]).unwrap();
+        assert!(
+            fee.get("feerate").is_some() || fee.get("errors").is_some(),
+            "estimatesmartfee {target}: {fee}"
+        );
+        if let Some(n) = fee["blocks"].as_u64() {
+            assert!(n >= 1, "{fee}");
+        }
+    }
+}
+
+fn chain_ops_estimate_fee_param_gates(ctx: &RpcContext) {
+    let e = dispatch(ctx, "estimatesmartfee", vec![]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert!(e["message"].as_str().unwrap().contains("estimatesmartfee"), "{e}");
+    let e = dispatch(ctx, "estimaterawfee", vec![]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert!(e["message"].as_str().unwrap().contains("estimaterawfee"), "{e}");
+    let e = dispatch(ctx, "estimatesmartfee", vec![json!("foo")]).unwrap_err();
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    assert!(
+        e["message"].as_str().unwrap().contains("JSON value of type string is not of expected type number"),
+        "{e}"
+    );
+    let e = dispatch(ctx, "estimatesmartfee", vec![json!(1), json!(1)]).unwrap_err();
+    assert_eq!(e["code"], ERR_TYPE_ERROR);
+    assert!(
+        e["message"].as_str().unwrap().contains("JSON value of type number is not of expected type string"),
+        "{e}"
+    );
+    let e = dispatch(ctx, "estimatesmartfee", vec![json!(1), json!("foo")]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert!(e["message"].as_str().unwrap().contains("Invalid estimate_mode parameter"), "{e}");
+    let e = dispatch(ctx, "estimatesmartfee", vec![json!(1), json!("ECONOMICAL"), json!(1)]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert!(e["message"].as_str().unwrap().contains("estimatesmartfee"), "{e}");
+    for method in ["estimatesmartfee", "estimaterawfee"] {
+        for bad in [json!(0), json!(1009)] {
+            let e = dispatch(ctx, method, vec![bad]).unwrap_err();
+            assert_eq!(e["code"], ERR_INVALID_PARAMETER, "{method}");
+            assert!(
+                e["message"].as_str().unwrap().contains("Invalid conf_target, must be between 1 and 1008"),
+                "{method} {e}"
+            );
+        }
+    }
+    dispatch(ctx, "estimatesmartfee", vec![json!(1)]).unwrap();
+    dispatch(ctx, "estimatesmartfee", vec![json!(1), json!("ECONOMICAL")]).unwrap();
+    let raw = dispatch(ctx, "estimaterawfee", vec![json!(1)]).unwrap();
+    assert!(raw.get("feerate").is_some(), "{raw}");
+    assert!(raw.get("short").is_none(), "{raw}");
+    dispatch(ctx, "estimaterawfee", vec![json!(1), json!(1)]).unwrap();
+    dispatch(ctx, "estimatesmartfee", vec![json!(1), json!("unset")]).unwrap();
+    dispatch(ctx, "estimatesmartfee", vec![json!(1), json!("conservative")]).unwrap();
+}
+
+fn chain_ops_mempoolinfo_constants(ctx: &RpcContext) {
+    let mem = dispatch(ctx, "getmempoolinfo", vec![]).unwrap();
+    assert_eq!(mem["permitbaremultisig"], true, "{mem}");
+    assert_eq!(mem["fullrbf"], true);
+    assert!(mem["maxdatacarriersize"].is_null());
+    assert_eq!(mem["limitclustercount"], 64);
+    assert_eq!(mem["limitclustersize"], 101_000);
+    assert_eq!(mem["loaded"], true);
+    assert_eq!(serde_json::to_string(&mem["mempoolminfee"]).unwrap(), "0.00000100");
+    assert_eq!(serde_json::to_string(&mem["minrelaytxfee"]).unwrap(), "0.00000100");
+    assert_eq!(serde_json::to_string(&mem["total_fee"]).unwrap(), "0.00000000");
+    let mp = ctx.mempool.as_ref().unwrap();
+    let prior = mp.min_relay_sat_kvb();
+    mp.set_min_relay_sat_kvb(2_500);
+    let raised = dispatch(ctx, "getmempoolinfo", vec![]).unwrap();
+    assert_eq!(serde_json::to_string(&raised["minrelaytxfee"]).unwrap(), "0.00002500");
+    assert_eq!(serde_json::to_string(&raised["incrementalrelayfee"]).unwrap(), "0.00000100");
+    assert_eq!(serde_json::to_string(&raised["mempoolminfee"]).unwrap(), "0.00002500");
+    mp.set_min_relay_sat_kvb(prior);
+}
+
+fn chain_ops_missing_methods(ctx: &RpcContext) {
+    let missing_rpc = dispatch(ctx, "no-such-rpc", vec![]).unwrap_err();
+    let scan = dispatch(ctx, "scantxoutset", vec![json!("start"), json!(["raw(51)"])]).unwrap_err();
+    assert_eq!(scan["code"], missing_rpc["code"]);
+    assert_eq!(scan["message"], missing_rpc["message"]);
+    assert_eq!(scan["code"], ERR_METHOD_NOT_FOUND);
+    let combined = dispatch(ctx, "combinerawtransaction", vec![]).unwrap_err();
+    assert_eq!(combined["code"], ERR_METHOD_NOT_FOUND);
+    let utxo = dispatch(ctx, "gettxoutsetinfo", vec![]).unwrap_err();
+    assert_eq!(utxo["code"], ERR_METHOD_NOT_FOUND);
+    assert!(utxo["message"].as_str().unwrap_or("").contains("not supported"), "{utxo}");
+    let sync = dispatch(ctx, "syncwithvalidationinterfacequeue", vec![]).unwrap_err();
+    assert_eq!(sync["code"], ERR_METHOD_NOT_FOUND);
+    assert_eq!(sync["message"], "Method not found");
+    let help = dispatch(ctx, "help", vec![]).unwrap();
+    assert!(!help.as_str().unwrap().lines().any(|l| {
+        l == "syncwithvalidationinterfacequeue" || l == "gettxoutsetinfo"
+    }));
+    let info = dispatch(ctx, "getrpcinfo", vec![]).unwrap();
+    let listed: Vec<&str> = info["methods"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(!listed.contains(&"syncwithvalidationinterfacequeue"));
+    assert!(!listed.contains(&"gettxoutsetinfo"));
+}
+
+fn chain_ops_decode_segwit_coinbase(ctx: &RpcContext) {
+    let coinbase = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![0x51, 0x00]),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::from_slice(&[vec![0u8; 32]]),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: Amount::from_sat(50_0000_0000),
+            script_pubkey: ScriptBuf::new_op_return([0xaa; 4]),
+        }],
+    };
+    let obj = dispatch(ctx, "decoderawtransaction", vec![json!(serialize_hex(&coinbase))]).unwrap();
+    let vin = &obj["vin"][0];
+    assert_eq!(vin["coinbase"], json!("5100"), "{obj}");
+    assert!(vin.get("txid").is_none(), "{obj}");
+    assert_eq!(vin["txinwitness"], json!(["00".repeat(32)]), "{obj}");
+}
+
+/// Reads and rejects on the genesis hub this journey already opened.
+/// Nothing here mines, opens a store, or leaves a knob changed.
+fn chain_ops_genesis_client_edges(ctx: &RpcContext) {
+    assert_eq!(tip_count(ctx), 0);
+    chain_ops_genesis_not_an_ordinary_tx(ctx);
+    chain_ops_estimate_fee_edges(ctx);
+    chain_ops_estimate_fee_param_gates(ctx);
+    chain_ops_mempoolinfo_constants(ctx);
+    chain_ops_missing_methods(ctx);
+    chain_ops_decode_segwit_coinbase(ctx);
+}
+
+fn chain_ops_genesis_coinbase_not_a_utxo(ctx: &RpcContext) {
+    let genesis = bitcoin::blockdata::constants::genesis_block(BtcNetwork::Regtest);
+    let g_hash = dispatch(ctx, "getblockhash", vec![json!(0)]).unwrap();
+    let g_blk = dispatch(ctx, "getblock", vec![g_hash, json!(2)]).unwrap();
+    let g_txid = g_blk["tx"][0]["txid"].as_str().unwrap().to_string();
+    assert_eq!(g_txid, genesis.txdata[0].compute_txid().to_string());
+    for include_mempool in [true, false] {
+        let out = dispatch(ctx, "gettxout", vec![json!(g_txid), json!(0), json!(include_mempool)]).unwrap();
+        assert!(out.is_null(), "include_mempool={include_mempool}: {out}");
+    }
+    let rest = dispatch_rest(ctx, &format!("/rest/getutxos/{g_txid}-0.json"), "", &[]);
+    assert_eq!(rest.status, axum::http::StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&rest.body).unwrap();
+    assert_eq!(body["bitmap"], "0", "{body}");
+
+    let h1 = dispatch(ctx, "getblockhash", vec![json!(1)]).unwrap();
+    let h1_blk = dispatch(ctx, "getblock", vec![h1, json!(1)]).unwrap();
+    let h1_txid = h1_blk["tx"].as_array().unwrap()[0].clone();
+    let live = dispatch(ctx, "gettxout", vec![h1_txid, json!(0)]).unwrap();
+    assert_eq!(live["coinbase"], true, "{live}");
+    assert!(live["confirmations"].as_u64().unwrap() >= 1, "{live}");
+}
+
+fn chain_ops_getblockstats_errors(ctx: &RpcContext, header_only: &Block) {
+    let e = dispatch(ctx, "getblockstats", vec![json!(2)]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert!(
+        e["message"].as_str().unwrap().contains("Target block height 2 after current tip 1"),
+        "{e}"
+    );
+    let e = dispatch(ctx, "getblockstats", vec![json!(-1)]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert!(e["message"].as_str().unwrap().contains("Target block height -1 is negative"), "{e}");
+    let e = dispatch(ctx, "getblockstats", vec![json!(1), json!(["asdfghjkl"])]).unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_PARAMETER);
+    assert_eq!(e["message"], "Invalid selected statistic 'asdfghjkl'");
+    let e = dispatch(
+        ctx,
+        "getblockstats",
+        vec![json!("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")],
+    )
+    .unwrap_err();
+    assert_eq!(e["code"], ERR_INVALID_ADDRESS_OR_KEY);
+    assert_eq!(e["message"], "Block not found");
+    let e = dispatch(ctx, "getblockstats", vec![]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert_eq!(e["message"], "getblockstats hash_or_height ( stats )");
+    let e = dispatch(ctx, "getblockstats", vec![json!("00"), json!(1), json!(2)]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert_eq!(e["message"], "getblockstats hash_or_height ( stats )");
+    let e = dispatch(ctx, "getblockstats", vec![json!(header_only.block_hash().to_string())]).unwrap_err();
+    assert_eq!(e["code"], ERR_MISC);
+    assert_eq!(e["message"], "Block not available (not fully downloaded)");
+}
+
 fn chain_ops_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, store: &std::path::Path) {
     let info = dispatch(ctx, "getblockchaininfo", vec![]).unwrap();
+    assert_eq!(info["chain"], "regtest", "{info}");
     let store_bytes = dir_file_bytes(store);
     assert!(store_bytes > 0, "open store has table files");
     assert_eq!(
@@ -318,7 +574,8 @@ fn chain_ops_first_block_to_an_address(
     assert_eq!(cb_out["address"], json!(addr));
     // Core getblock(hash, False) is verbosity 0 (raw hex).
     let raw = dispatch(ctx, "getblock", vec![best.clone(), json!(false)]).unwrap();
-    assert!(raw.as_str().unwrap().len() > 160);
+    let raw_s = raw.as_str().unwrap();
+    assert!(raw_s.len() > 160 && raw_s.len() % 2 == 0, "{raw_s}");
     let hdr = dispatch(ctx, "getblockheader", vec![best.clone()]).unwrap();
     assert_eq!(hdr["height"], 1);
     assert_eq!(hdr["hash"], best);
@@ -350,7 +607,7 @@ fn chain_ops_first_block_to_an_address(
     assert!(dispatch(ctx, "sendrawtransaction", vec![raw_tx]).is_err());
     let net = dispatch(ctx, "getnetworkinfo", vec![]).unwrap();
     assert_eq!(net["connections_in"], 0);
-
+    chain_ops_genesis_coinbase_not_a_utxo(ctx);
 }
 
 fn chain_ops_first_block_info(
@@ -413,6 +670,7 @@ fn chain_ops_first_block_info(
             .any(|t| t["status"] == "headers-only" && t["height"] == 2),
         "{tips}"
     );
+    chain_ops_getblockstats_errors(ctx, &child);
 }
 
 fn chain_ops_mocktime(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wpkh: &ScriptBuf) {
