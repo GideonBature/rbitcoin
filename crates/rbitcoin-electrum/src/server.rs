@@ -1312,7 +1312,7 @@ fn restatus_notes(
             query
                 .scripthash_history(sh)
                 .ok()
-                .and_then(|h| scripthash_status(Some(query), &h).ok())
+                .map(|h| scripthash_status(&h))
         };
         if let Some(status) = status {
             out.push((*sh, status));
@@ -1923,7 +1923,7 @@ fn dispatch_pinned(
                 let hist = query
                     .scripthash_history_slot(&sh, sh_join)
                     .map_err(|e| e.to_string())?;
-                scripthash_status(Some(query), &hist)?
+                scripthash_status(&hist)
             };
             Ok(status_json(status))
         }
@@ -2530,51 +2530,20 @@ fn append_mempool_history(
     }
 }
 
-fn cached_confirming_hash(
-    height: u32,
-    cache: &mut HashMap<u32, [u8; 32]>,
-    load: impl FnOnce(u32) -> Result<[u8; 32], String>,
-) -> Result<[u8; 32], String> {
-    if let Some(h) = cache.get(&height) {
-        return Ok(*h);
-    }
-    let h = load(height)?;
-    cache.insert(height, h);
-    Ok(h)
-}
-
-fn scripthash_status(
-    query: Option<&Query>,
-    hist: &[rbitcoin_query::ScriptHashHistoryItem],
-) -> Result<String, String> {
+/// Electrum protocol status: SHA-256 of `tx_hash:height:` for each row in
+/// `get_history` order (confirmed by height, then the mempool tail). Clients
+/// recompute it from `get_history` and drop the history when it differs.
+fn scripthash_status(hist: &[rbitcoin_query::ScriptHashHistoryItem]) -> String {
     if hist.is_empty() {
-        return Ok(String::new());
+        return String::new();
     }
     use bitcoin::hashes::{sha256, Hash as _};
     let mut s = String::new();
-    let mut by_height = HashMap::new();
     for i in hist {
-        if i.height > 0 {
-            let q = query.ok_or_else(|| "status preimage needs a chain query".to_string())?;
-            let hash = cached_confirming_hash(i.height as u32, &mut by_height, |h| {
-                let (_, rec) = q
-                    .header_at_height(Height(h))
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "header missing for confirmed history row".to_string())?;
-                Ok(rec.hash)
-            })?;
-            s.push_str(&format!(
-                "{}:{}:{}:",
-                txid_hex(&i.txid),
-                i.height,
-                hash_hex_rev(&hash)
-            ));
-        } else {
-            s.push_str(&format!("{}:{}:", txid_hex(&i.txid), i.height));
-        }
+        s.push_str(&format!("{}:{}:", txid_hex(&i.txid), i.height));
     }
     let hash = sha256::Hash::hash(s.as_bytes());
-    Ok(rbitcoin_primitives::hex_encode(hash.to_byte_array()))
+    rbitcoin_primitives::hex_encode(hash.to_byte_array())
 }
 
 fn scripthash_status_full(query: &Query, mp: &MempoolHub, sh: &[u8; 32]) -> Result<String, String> {
@@ -2592,7 +2561,7 @@ fn scripthash_status_full_slot(
         .scripthash_history_slot(sh, slot)
         .map_err(|e| e.to_string())?;
     append_mempool_history(&mut hist, mp, sh);
-    scripthash_status(Some(query), &hist)
+    Ok(scripthash_status(&hist))
 }
 
 /// Helper to compute electrum scripthash hex (reversed) from script bytes.

@@ -199,38 +199,21 @@ fn config_helpers_and_param_parsers() {
         .unwrap_err()
         .contains("to_height"));
 
-    let empty_status = scripthash_status(None, &[]).unwrap();
-    assert!(empty_status.is_empty());
-    let missing = scripthash_status(
-        None,
-        &[rbitcoin_query::ScriptHashHistoryItem {
-            height: 1,
-            txid: [1u8; 32],
-            tx_fk: Fk::NULL,
-            fee: None,
-        }],
-    )
-    .unwrap_err();
-    assert!(
-        missing.contains("query"),
-        "confirmed preimage without query: {missing}"
+    assert!(scripthash_status(&[]).is_empty());
+    let one = scripthash_status(&[rbitcoin_query::ScriptHashHistoryItem {
+        height: 1,
+        txid: [1u8; 32],
+        tx_fk: Fk::NULL,
+        fee: None,
+    }]);
+    let preimage = format!("{}:1:", txid_hex(&[1u8; 32]));
+    assert_eq!(
+        one,
+        rbitcoin_primitives::hex_encode(
+            bitcoin::hashes::sha256::Hash::hash(preimage.as_bytes()).to_byte_array()
+        ),
+        "confirmed row status is tx_hash:height: with no block hash"
     );
-    let (dir, q) = tmp_store();
-    let missing_hdr = scripthash_status(
-        Some(&q),
-        &[rbitcoin_query::ScriptHashHistoryItem {
-            height: 1,
-            txid: [1u8; 32],
-            tx_fk: Fk::NULL,
-            fee: None,
-        }],
-    )
-    .unwrap_err();
-    assert!(
-        missing_hdr.contains("header missing"),
-        "confirmed row without header: {missing_hdr}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
 
     use bitcoin::hashes::Hash;
     let hdr = bitcoin::block::Header {
@@ -265,23 +248,6 @@ fn config_helpers_and_param_parsers() {
         take_new_status(&mut last, &subs, sh, "bb".into()).unwrap(),
         "bb"
     );
-}
-
-#[test]
-fn cached_confirming_hash_loads_once_per_height() {
-    let mut cache = HashMap::new();
-    let mut loads = 0u32;
-    let mut load = |h: u32| {
-        loads += 1;
-        Ok::<_, String>([h as u8; 32])
-    };
-    let a = cached_confirming_hash(7, &mut cache, &mut load).unwrap();
-    let b = cached_confirming_hash(7, &mut cache, &mut load).unwrap();
-    let c = cached_confirming_hash(8, &mut cache, &mut load).unwrap();
-    assert_eq!(a, [7u8; 32]);
-    assert_eq!(b, [7u8; 32]);
-    assert_eq!(c, [8u8; 32]);
-    assert_eq!(loads, 2, "same height must not load twice");
 }
 
 #[test]
@@ -838,7 +804,7 @@ fn get_history_height_window_and_status_full() {
     };
     let full_hist = q.scripthash_history(&sh_bytes).unwrap();
     assert_eq!(full_hist.len(), 4);
-    assert_eq!(scripthash_status(Some(&q), &full_hist).unwrap(), status_s);
+    assert_eq!(scripthash_status(&full_hist), status_s);
 
     let _ = prev;
     let _ = std::fs::remove_dir_all(&dir);
