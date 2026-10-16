@@ -873,18 +873,27 @@ fn apply_notfound(st: &mut IbdWorkState, peer: usize, hashes: Vec<BlockHash>) {
 }
 
 /// How many of `want` addresses from `peer` may enter the dial book. The
-/// bucket counts from the peer's connect on the IBD mono clock.
+/// bucket counts from the peer's connect on the IBD mono clock. A peer with
+/// the `addr` permission spends tokens but is never limited, as in tip-follow.
 fn take_addr_tokens(st: &mut IbdWorkState, peer: usize, want: usize) -> usize {
     let now = super::peer_io::ibd_mono_ms();
-    let start = st
-        .slots
-        .iter()
-        .find(|s| s.id == peer)
-        .map_or(now, |s| s.connected_ms);
-    st.addr_buckets
+    let slot = st.slots.iter().find(|s| s.id == peer);
+    let start = slot.map_or(now, |s| s.connected_ms);
+    // IBD dials outbound only, so the peer address fills the bind slot.
+    let exempt = slot.zip(st.perms.as_ref()).is_some_and(|(s, p)| {
+        p.permission_flags(s.addr, false, s.addr)
+            .has(crate::net_permissions::NetPermissionFlags::ADDR)
+    });
+    let took = st
+        .addr_buckets
         .entry(peer)
         .or_insert_with(|| crate::peer::AddrTokenBucket::new(start))
-        .take(want, now)
+        .take(want, now);
+    if exempt {
+        want
+    } else {
+        took
+    }
 }
 
 fn apply_peer_dead(st: &mut IbdWorkState, peer_book: &mut AddrMan, peer: usize, reason: String) {
@@ -1411,6 +1420,29 @@ mod addr_bucket_tests {
         assert!(
             st.addr_buckets.is_empty(),
             "a dead peer's bucket is dropped"
+        );
+    }
+
+    /// An outbound `addr` whitelist exempts an IBD peer as it does a
+    /// tip-follow session.
+    #[test]
+    fn ibd_addr_permission_peer_is_not_rate_limited() {
+        let mut slot = dummy_slot(1);
+        slot.connected_ms = ibd_mono_ms();
+        let ip = slot.addr.ip();
+        let mut st = IbdWorkState::new(vec![slot], None, Some(0));
+        let peers = crate::peers::PeerHub::new();
+        let mut table = crate::net_permissions::NetPermTable::default();
+        table
+            .whitelist
+            .push(crate::net_permissions::parse_whitelist(&format!("addr,out@{ip}")).unwrap());
+        peers.set_net_perms(table);
+        st.perms = Some(peers);
+        assert_eq!(take_addr_tokens(&mut st, 1, 1_000), 1_000);
+        assert_eq!(
+            take_addr_tokens(&mut st, 1, 1_000),
+            1_000,
+            "an addr-permission peer is never limited"
         );
     }
 }
