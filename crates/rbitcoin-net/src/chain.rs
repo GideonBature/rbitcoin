@@ -3904,6 +3904,11 @@ mod tests {
             other => panic!("an empty store connects a genesis branch, got {other:?}"),
         }
         assert_eq!(hub.tip_height(), Some(1));
+        assert_eq!(
+            hub.cache_body_count(),
+            2,
+            "tip: perf cache_bodies counts the genesis and the child still in the body window"
+        );
         assert!(
             matches!(
                 hub.accept_block(genesis.clone()).unwrap(),
