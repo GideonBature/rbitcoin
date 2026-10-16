@@ -55,6 +55,10 @@ path = "tests/cross_surface.rs"
 name = "end_of_ibd"
 path = "tests/end_of_ibd.rs"
 
+[[test]]
+name = "asmap_journey"
+path = "tests/asmap_journey.rs"
+
 [features]
 # Live private-mesh journeys. Default `cargo test` stays fake SOCKS/SAM/control.
 overlay = []

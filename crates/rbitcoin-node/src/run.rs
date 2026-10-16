@@ -371,6 +371,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         }
     }
     .map_err(|e| NodeError::Config(format!("p2p start: {e}")))?;
+    publish_listener_addr(config.datadir.path(), "p2p", node.local_addr);
     let spend_sync = SpendSync::spawn(std::sync::Arc::clone(&node.hub.query));
     status.attach_p2p(&node.hub, &node.peers);
     for extra in &config.listen.p2p_extra {
