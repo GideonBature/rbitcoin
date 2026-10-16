@@ -671,9 +671,12 @@ pub(crate) fn note_misbehavior_dead(
 /// That peer is left alone while anyone else is delivering blocks. When
 /// every on-wire peer is withholding, one is disconnected.
 ///
-/// The window opens when getdata is written. Hashes still queued in the
-/// writer do not start it. A later getdata write does not refresh either
-/// clock. Headers and pings are socket bytes, not block progress.
+/// The window opens when the first getdata of an empty window is written.
+/// Hashes still queued in the writer do not start it. Idle time before that
+/// write does not count. A later getdata write while any of those hashes
+/// are still outstanding does not refresh the window. Draining the last
+/// outstanding hash disarms it. Headers and pings are socket bytes, not
+/// block progress.
 ///
 /// Stalled addresses enter a cooldown so redial does not immediately re-open
 /// the same host under a new peer id (log spam + wasted slots).
@@ -1501,8 +1504,10 @@ mod tests {
         slot.getdata_wire.wrote(1, written_ms);
     }
 
+    /// Idle time before a window does not count. The opening write starts
+    /// 30s. A later write while that hash is still out does not.
     #[test]
-    fn disconnect_stalled_later_getdata_does_not_refresh_silence() {
+    fn disconnect_stalled_opening_write_starts_a_fresh_window() {
         let a = addr(14);
         let mut slot = dummy_slot(8, a, true);
         let h = hash_byte(0x14);
@@ -1521,6 +1526,75 @@ mod tests {
             Instant::now(),
             Duration::from_secs(30),
             50_000,
+        );
+        assert!(
+            !cooldown.contains_key(&a),
+            "10s after the opening write is inside the new window"
+        );
+        assert!(inflight.contains_key(&h));
+
+        let later = hash_byte(0x15);
+        put_on_wire(&mut slot, later, 55_000);
+        inflight.insert(later, super::super::state::InflightReq::new(8));
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            70_001,
+        );
+        assert!(
+            cooldown.contains_key(&a),
+            "the second write must not move the window off t=40s"
+        );
+        assert!(inflight.is_empty());
+    }
+
+    /// Draining the last outstanding hash disarms the clock. The next write
+    /// starts 30s even when the last block is ancient.
+    #[test]
+    fn disconnect_stalled_rearms_after_the_window_drains() {
+        let a = addr(28);
+        let mut slot = dummy_slot(21, a, true);
+        let h = hash_byte(0x28);
+        put_on_wire(&mut slot, h, 0);
+        slot.rate.note_rx(0);
+        assert!(slot.track_remove(&h));
+        assert!(slot.in_flight.is_empty());
+
+        let next = hash_byte(0x29);
+        put_on_wire(&mut slot, next, 100_000);
+        slot.rate.note_rx(0);
+        let mut inflight = HashMap::new();
+        inflight.insert(next, super::super::state::InflightReq::new(21));
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            110_000,
+        );
+        assert!(
+            !cooldown.contains_key(&a),
+            "a drained window does not keep the old deadline"
+        );
+        disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut super::super::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            Instant::now(),
+            Duration::from_secs(30),
+            130_001,
         );
         assert!(cooldown.contains_key(&a));
         assert!(inflight.is_empty());
