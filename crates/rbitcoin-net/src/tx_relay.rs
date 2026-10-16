@@ -879,10 +879,12 @@ impl MempoolHub {
             g.take_loaded_accept_times()
         };
         // Stored accept times feed expiry and `getmempoolentry.time`. A loaded
-        // tx is not queued for INV, as before a restart dropped the maps.
+        // tx is not queued for INV. Like Core's load, it takes a fresh entry
+        // sequence, so a peer cannot getdata it before an INV.
         for (txid, wtxid, at) in loaded {
             if hub.contains(&txid) {
-                hub.insert_relay_maps(txid, wtxid, 0, at, false);
+                let seq = hub.next_relay_seq.fetch_add(1, Ordering::Relaxed);
+                hub.insert_relay_maps(txid, wtxid, seq, at, false);
             }
         }
         {
@@ -4498,6 +4500,12 @@ mod tests {
             hub2.accept_time_txid(&tid),
             Some(t0),
             "accept time must survive a restart"
+        );
+        // Core gives a loaded tx a fresh entry sequence. A new peer starts at
+        // last_inv_sequence 1, so it cannot getdata the tx before an INV.
+        assert!(
+            !hub2.is_relay_servable(&tx.compute_wtxid(), 1),
+            "a restored tx is not servable to a fresh peer before an INV"
         );
         hub2.set_expiry_hours(1);
         hub2.note_mock_now(t0 + 3600 - 5);
