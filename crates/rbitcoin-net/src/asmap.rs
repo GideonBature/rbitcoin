@@ -473,7 +473,19 @@ mod tests {
     #[test]
     fn asmap_two_prefix_maps_distinct_asns() {
         let bytes = two_prefix_asmap_bytes();
-        let m = AsMap::from_bytes(bytes).expect("fixture sanity");
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-asmap-two-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ip_asn.dat");
+        std::fs::write(&path, &bytes).unwrap();
+        let m = AsMap::from_path(&path).unwrap().expect("fixture sanity");
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(m.len(), 35);
         assert_ne!(m.len(), 0);
         assert_ne!(m.len(), 1);
@@ -542,8 +554,7 @@ mod tests {
     #[test]
     fn asmap_lone_return_asn1() {
         let bits = instr_return(1);
-        let bytes = pack_le(&bits);
-        let m = AsMap::from_bytes(bytes).expect("RETURN ASN1");
+        let m = load(&bits).expect("RETURN ASN1");
         assert_eq!(m.len(), 3);
         assert_eq!(m.digest_hex8(), "709e80c8");
         assert_eq!(m.interpret_ip16(&[0u8; 16]), 1);
