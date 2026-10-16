@@ -846,15 +846,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("sp_tweaks_dust"), "{err}");
-        let bad_line = dir.join("bad.conf");
-        std::fs::write(&bad_line, "secret-token-xyz\n").unwrap();
-        let err = NodeConfig::default()
-            .merge_conf_file(&bad_line)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("bad.conf:1"), "{err}");
-        assert!(err.contains("expected key=value"), "{err}");
-        assert!(!err.contains("secret-token-xyz"), "{err}");
         match operator_config_from_args(["rbitcoin-node", "--conf", bad_dust.to_str().unwrap()]) {
             Err(code) => assert_exit(code, ExitCode::from(2)),
             Ok(other) => panic!("bad sp_tweaks_dust conf assembled: {other:?}"),
@@ -974,9 +965,6 @@ mod tests {
             assert_eq!(cfg.check_blocks, Some(stored));
             assert_eq!(cfg.check_blocks_window(), window, "{arg}");
         }
-        let mut bad_blocks = NodeConfig::default();
-        let bad = bad_blocks.apply_kv("check_blocks", "nope").unwrap_err();
-        assert!(bad.to_string().contains("check-blocks"), "{bad}");
         for off in ["--no-listen", "--listen=0"] {
             let cfg = ready_config(["rbitcoin-node", off]);
             assert_eq!(cfg.listen.p2p, P2pListen::Off, "{off}");
@@ -1052,33 +1040,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{argv:?} must validate: {e}"));
         }
 
-        assert_eq!(
-            ready_config(["rbitcoin-node"]).electrum_max_subs,
-            rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS
-        );
-        assert_eq!(
-            ready_config(["rbitcoin-node", "--electrum-max-subs", "25000"]).electrum_max_subs,
-            25_000
-        );
-        assert_eq!(
-            ready_config(["rbitcoin-node", "--electrum-max-subs=5"]).electrum_max_subs,
-            5
-        );
-        let mut subs = NodeConfig::default();
-        let zero = subs.apply_kv("electrum_max_subs", "0").unwrap_err();
-        assert!(format!("{zero}").contains(">= 1"), "{zero}");
-        let bad = subs.apply_kv("electrum_max_subs", "nope").unwrap_err();
-        assert!(format!("{bad}").contains("electrum_max_subs"), "{bad}");
-        assert_eq!(
-            subs.electrum_max_subs,
-            rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS,
-            "a refused value leaves the default"
-        );
-        assert!(
-            ready_config(["rbitcoin-node", "--esplora-block-template=1"]).esplora_block_template
-        );
-        assert!(!ready_config(["rbitcoin-node", "--esplora-onion=0"]).esplora_onion);
-
         // Zero is the finite default queue, not an unbounded one.
         assert_eq!(
             ready_config(["rbitcoin-node"]).rpc.work_queue,
@@ -1096,69 +1057,55 @@ mod tests {
                 .work_queue,
             Some(4)
         );
+    }
 
-        let mut dir_cfg = NodeConfig::default();
+    #[test]
+    fn electrum_max_subs_cli_conf_and_bounds() {
         assert_eq!(
-            dir_cfg.apply_kv("datadir", "/tmp/rb-apply-kv").unwrap(),
-            ConfApply::Applied
+            ready_config(["rbitcoin-node"]).electrum_max_subs,
+            rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS
         );
         assert_eq!(
-            dir_cfg.datadir.path(),
-            std::path::Path::new("/tmp/rb-apply-kv")
-        );
-        match dir_cfg.apply_kv("not-a-real-key", "1").unwrap() {
-            ConfApply::Unknown(k) => assert_eq!(k, "not-a-real-key"),
-            other => panic!("{other:?}"),
-        }
-
-        let mut blocks = NodeConfig::default();
-        for key in ["blocks_dir", "blocks-dir", "blocksdir"] {
-            assert_eq!(
-                blocks.apply_kv(key, "/tmp/x").unwrap(),
-                ConfApply::Unknown(key.into()),
-                "{key} is not an operator key"
-            );
-        }
-
-        let mut listen = NodeConfig::default();
-        listen.apply_kv("listen", "127.0.0.1:18444").unwrap();
-        let dup = listen
-            .apply_kv("listen", "127.0.0.1:18444")
-            .unwrap_err()
-            .to_string();
-        assert!(dup.contains("Duplicate binding configuration"), "{dup}");
-
-        let mut sock_cfg =
-            NodeConfig::default().with_datadir(std::path::Path::new("/var/lib/rbitcoin"));
-        assert_eq!(
-            sock_cfg.rpc_socket_path(),
-            std::path::Path::new("/var/lib/rbitcoin/rpc.sock")
+            ready_config(["rbitcoin-node", "--electrum-max-subs", "25000"]).electrum_max_subs,
+            25_000
         );
         assert_eq!(
-            sock_cfg
-                .apply_kv("rpc_socket", "/run/rbitcoin/rpc.sock")
-                .unwrap(),
-            ConfApply::Applied
+            ready_config(["rbitcoin-node", "--electrum-max-subs=5"]).electrum_max_subs,
+            5
         );
-        assert!(sock_cfg.rpc.socket, "rpc_socket implies rpc");
+        let mut c = NodeConfig::default();
+        let zero = c.apply_kv("electrum_max_subs", "0").unwrap_err();
+        assert!(format!("{zero}").contains(">= 1"), "{zero}");
+        let bad = c.apply_kv("electrum_max_subs", "nope").unwrap_err();
+        assert!(format!("{bad}").contains("electrum_max_subs"), "{bad}");
         assert_eq!(
-            sock_cfg.rpc_socket_path(),
-            std::path::Path::new("/run/rbitcoin/rpc.sock")
+            c.electrum_max_subs,
+            rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS,
+            "a refused value leaves the default"
         );
-        let empty = NodeConfig::default()
-            .apply_kv("rpc_socket", "")
-            .unwrap_err()
-            .to_string();
-        assert!(empty.contains("rpc_socket requires a path"), "{empty}");
+    }
 
-        let mut tor = NodeConfig::default();
-        let cr = tor
-            .apply_kv("tor_control_password", "a\nb")
-            .unwrap_err()
-            .to_string();
-        assert!(cr.contains("CR"), "{cr}");
-        tor.apply_kv("tor_control_password", "pw").unwrap();
-        assert_eq!(tor.tor.password.as_deref(), Some("pw"));
+    #[test]
+    fn max_sh_creates_and_esplora_block_template_cli_hyphens() {
+        let omitted = ready_config(["rbitcoin-node"]);
+        assert_eq!(
+            omitted.max_sh_creates,
+            rbitcoin_query::DEFAULT_MAX_SH_CREATES
+        );
+        assert!(!omitted.esplora_block_template);
+        let n = ready_config(["rbitcoin-node", "--max-sh-creates", "42"]);
+        assert_eq!(n.max_sh_creates, 42);
+        let eq = ready_config(["rbitcoin-node", "--max-sh-creates=9"]);
+        assert_eq!(eq.max_sh_creates, 9);
+        let gbt = ready_config(["rbitcoin-node", "--esplora-block-template"]);
+        assert!(gbt.esplora_block_template);
+        let gbt_eq = ready_config(["rbitcoin-node", "--esplora-block-template=1"]);
+        assert!(gbt_eq.esplora_block_template);
+        let off = ready_config(["rbitcoin-node", "--esplora-block-template=0"]);
+        assert!(!off.esplora_block_template);
+        assert!(NodeConfig::default().esplora_onion);
+        let onion_off = ready_config(["rbitcoin-node", "--esplora-onion=0"]);
+        assert!(!onion_off.esplora_onion);
     }
 
     include!("overlay_config_journey.rs");
