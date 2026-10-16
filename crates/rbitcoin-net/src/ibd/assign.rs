@@ -1730,8 +1730,12 @@ pub(in crate::ibd) mod tests {
         );
         st.slots[0].getdata_wire.wrote(1, 9_000);
         assert!(
-            super::super::peer_io::getdata_on_wire_stalled(&st.slots[0], 9_000 + 29_999, 30_000),
-            "last rx at 42ms is the clock; the write at 9s does not refresh it"
+            !super::super::peer_io::getdata_on_wire_stalled(&st.slots[0], 9_000 + 29_999, 30_000),
+            "the opening write starts 30s; last rx at 42ms does not"
+        );
+        assert!(
+            super::super::peer_io::getdata_on_wire_stalled(&st.slots[0], 9_000 + 30_001, 30_000),
+            "silence after the opening write still stalls"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1787,8 +1791,12 @@ pub(in crate::ibd) mod tests {
         let now = 50_000;
         st.slots[0].getdata_wire.wrote(1, now);
         assert!(
-            getdata_on_wire_stalled(&st.slots[0], now + 1, 30_000),
-            "once the ask is on the socket, silence is measured from last rx"
+            !getdata_on_wire_stalled(&st.slots[0], now + 1, 30_000),
+            "the opening write starts a fresh 30s, ignoring idle time before it"
+        );
+        assert!(
+            getdata_on_wire_stalled(&st.slots[0], now + 30_001, 30_000),
+            "silence after the opening write still stalls"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

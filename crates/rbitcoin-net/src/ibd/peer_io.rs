@@ -21,7 +21,7 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::BlockHash;
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
@@ -177,22 +177,30 @@ pub(crate) fn solicit_track() -> (
     )
 }
 
-/// Outstanding getdata that has not left the process, and when the last new
-/// hash did leave.
+/// Outstanding getdata that has not left the process, and when this stall
+/// window opened.
 ///
-/// The stall window opens at [`Self::wrote`], not when the main loop queues
-/// the command. A repeat of a hash already in flight is not queued, so it
-/// does not move the window.
+/// The window opens at the first [`Self::wrote`] after it was disarmed, not
+/// when the main loop queues the command. A later write while the window is
+/// open does not move it. [`Self::disarm_window`] runs when the peer owes
+/// nothing, so the next ask starts a new 30s.
 pub(crate) struct GetdataWire {
     unwritten: AtomicUsize,
     written_ms: AtomicU64,
+    /// Mono ms the current on-wire window opened. [`WINDOW_DISARMED`] when
+    /// no getdata of this window is on the socket yet.
+    window_ms: AtomicI64,
 }
+
+/// `window_ms` while the peer owes no on-wire block.
+const WINDOW_DISARMED: i64 = -1;
 
 impl GetdataWire {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             unwritten: AtomicUsize::new(0),
             written_ms: AtomicU64::new(0),
+            window_ms: AtomicI64::new(WINDOW_DISARMED),
         })
     }
 
@@ -204,6 +212,9 @@ impl GetdataWire {
     }
 
     /// `n` hashes from one getdata chunk just went out on the socket.
+    ///
+    /// The first write of a disarmed window opens the stall clock at
+    /// `now_ms`. A write into an open window does not.
     pub(crate) fn wrote(&self, n: usize, now_ms: u64) {
         if n == 0 {
             return;
@@ -214,6 +225,7 @@ impl GetdataWire {
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(n))
             });
+        self.arm_window_if_closed(now_ms);
     }
 
     pub(crate) fn unwritten(&self) -> usize {
@@ -222,6 +234,31 @@ impl GetdataWire {
 
     pub(crate) fn written_ms(&self) -> u64 {
         self.written_ms.load(Ordering::Relaxed)
+    }
+
+    /// Open the stall window at `now_ms` if it is disarmed.
+    pub(crate) fn arm_window_if_closed(&self, now_ms: u64) {
+        let opened = i64::try_from(now_ms).unwrap_or(i64::MAX);
+        let _ = self.window_ms.compare_exchange(
+            WINDOW_DISARMED,
+            opened,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Drop the stall deadline. The next [`Self::wrote`] starts a new one.
+    pub(crate) fn disarm_window(&self) {
+        self.window_ms.store(WINDOW_DISARMED, Ordering::Relaxed);
+    }
+
+    pub(crate) fn window_ms(&self) -> Option<u64> {
+        let v = self.window_ms.load(Ordering::Relaxed);
+        if v < 0 {
+            None
+        } else {
+            Some(u64::try_from(v).unwrap_or(0))
+        }
     }
 }
 
@@ -232,19 +269,58 @@ fn asked_on_wire(slot: &PeerSlot) -> bool {
     outstanding > 0 && slot.getdata_wire.unwritten() < outstanding
 }
 
-/// True when this peer owes a block that is already on the wire and no
-/// solicited block progress has arrived inside `stall_ms`.
+/// Stall deadline for hashes already on the socket.
 ///
-/// A getdata write does not move the clock. Socket bytes that are not a
-/// requested block do not either.
+/// Nothing on the wire disarms the window, including a full queue that has
+/// not been written. An open window stays at its first write. A window that
+/// is on the wire but was never armed (tests, or a write the clock missed)
+/// opens at [`GetdataWire::written_ms`].
+fn prepare_stall_window(slot: &PeerSlot) -> Option<u64> {
+    if !asked_on_wire(slot) {
+        slot.getdata_wire.disarm_window();
+        return None;
+    }
+    if slot.getdata_wire.window_ms().is_none() {
+        slot.getdata_wire
+            .arm_window_if_closed(slot.getdata_wire.written_ms());
+    }
+    slot.getdata_wire.window_ms()
+}
+
+/// Copy the rate and lift one clock up to the window open.
+///
+/// Idle time before the ask falls behind `open` and drops out. A block or
+/// socket byte inside the window stays later than `open` and still counts.
+fn rate_in_window(slot: &PeerSlot, open: u64, block_progress: bool) -> PeerRate {
+    let mut rate = slot.rate;
+    if block_progress {
+        if open > rate.progress_ms {
+            rate.progress_ms = open;
+        }
+    } else if open > rate.any_rx_ms {
+        rate.any_rx_ms = open;
+    }
+    rate
+}
+
+/// True when this peer owes a block that is already on the wire and no
+/// solicited block has arrived inside `stall_ms` of this window.
+///
+/// Socket bytes that are not a requested block do not move this clock.
 pub(crate) fn getdata_on_wire_stalled(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
-    asked_on_wire(slot) && slot.rate.stalled(now_ms, stall_ms, true)
+    let Some(open) = prepare_stall_window(slot) else {
+        return false;
+    };
+    rate_in_window(slot, open, true).stalled(now_ms, stall_ms, true)
 }
 
 /// True when getdata is on the wire and this peer has sent no bytes at all
-/// inside `stall_ms`. A peer with nothing assigned is not quiet.
+/// inside `stall_ms` of this window. A peer with nothing assigned is not quiet.
 pub(crate) fn getdata_on_wire_quiet(slot: &PeerSlot, now_ms: u64, stall_ms: u64) -> bool {
-    asked_on_wire(slot) && slot.rate.quiet(now_ms, stall_ms, true)
+    let Some(open) = prepare_stall_window(slot) else {
+        return false;
+    };
+    rate_in_window(slot, open, false).quiet(now_ms, stall_ms, true)
 }
 
 /// In-flight light decodes (inv, addr, tx, cmpct) per IBD peer. Not a knob.
@@ -263,12 +339,14 @@ impl PeerSlot {
     pub(crate) fn track_remove(&mut self, hash: &BlockHash) -> bool {
         let removed = self.in_flight.remove(hash);
         self.requested_set().remove(hash);
+        self.disarm_stall_if_idle();
         removed
     }
 
     pub(crate) fn track_clear(&mut self) {
         self.in_flight.clear();
         self.requested_set().clear();
+        self.disarm_stall_if_idle();
     }
 
     pub(crate) fn track_retain(&mut self, mut keep: impl FnMut(&BlockHash) -> bool) {
@@ -279,12 +357,20 @@ impl PeerSlot {
         let mut set = self.requested_set();
         set.clear();
         set.extend(self.in_flight.iter().copied());
+        self.disarm_stall_if_idle();
     }
 
     pub(crate) fn track_drain(&mut self) -> Vec<BlockHash> {
         let drained: Vec<BlockHash> = self.in_flight.drain().collect();
         self.requested_set().clear();
+        self.disarm_stall_if_idle();
         drained
+    }
+
+    fn disarm_stall_if_idle(&self) {
+        if self.in_flight.is_empty() {
+            self.getdata_wire.disarm_window();
+        }
     }
 }
 
