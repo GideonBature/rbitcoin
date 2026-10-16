@@ -75,7 +75,7 @@ IO on Windows and Darwin.
 | `nix develop` / `nix-shell` | optional pin (below) | optional pin (below) — `aarch64-darwin` | no |
 
 **macOS Intel vs Apple Silicon:** rustup installs a native toolchain. CI `macos` is
-`macos-14` (aarch64). You can develop on either; Release Darwin zips are **aarch64
+`macos-26` (aarch64). You can develop on either; Release Darwin zips are **aarch64
 only** and ad-hoc signed ([`OPERATOR.md`](./OPERATOR.md)).
 
 **WSL2:** treat it as Linux. Install rustup *inside* the distro (not the Windows
@@ -147,7 +147,7 @@ That is **not** the operator binary (`nix build .#rbitcoin-musl`). Details:
 **Release `packages` stay Linux-only** (`nix build` has no `aarch64-darwin`
 attribute). The dev shell pins tool versions and builds nothing that ships, so
 the static-musl constraint that excludes Darwin from `packages` does not apply
-to it. Darwin operator binaries come from the `macos-14` release job, not Nix.
+to it. Darwin operator binaries come from the `macos-26` release job, not Nix.
 
 ## Principles
 
