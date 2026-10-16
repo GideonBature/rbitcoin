@@ -38,33 +38,46 @@ pub use dial::connect_timeout_for;
 pub use perf_log::{read_platform_rss, tip_perf_json, ProcessRss, TipPerfLog};
 
 use archive::{rehydrate_block_queue_into_confirm, rehydrate_class_a_into_body_queue};
-use assign_plan::{need_ready_headroom, want_headers_beyond_soft_cap};
+pub(crate) use assign_plan::need_ready_headroom;
+use assign_plan::want_headers_beyond_soft_cap;
 use confirm::{offer_confirm_ready, spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
+#[cfg(test)]
+pub(crate) use confirm::{ConfirmRejectClass, RejectParent};
 
-use assign::{assign_work_ordered, bq_pipeline_saturated, AssignDepth};
+use assign::bq_pipeline_saturated;
+pub(crate) use assign::{assign_work_ordered, AssignDepth};
 use cadence::IbdLoopCadence;
 use dial::{
     admit_cooldown_fallback, alive_dial_addrs, apply_dial_result, dial_batch, dial_blocked_addrs,
     disconnect_relative_slow_block_peers, disconnect_stalled_block_peers, expire_addr_cooldown,
     redial_want, release_peer_block_work,
 };
-use events::{
-    apply_confirm_events, apply_peer_event, disconnect_all_peers, drain_ready_peer_and_body_events,
-    update_confirm_lag,
-};
+pub(crate) use events::drain_ready_peer_and_body_events;
+use events::{apply_confirm_events, apply_peer_event, disconnect_all_peers, update_confirm_lag};
+#[cfg(test)]
+pub(crate) use events::{apply_confirm_reject, apply_headers_event};
 use exit::{
     all_peers_dead_action, best_chain_remainder, empty_path_header_fan, header_lag_behind_peers,
     ibd_caught_up, path_drained, should_unlatch_headers_done, AllPeersDead,
 };
-use peer_io::{empty_header_fk_bus, sample_peer_rates, PeerCmd, PeerEvent, PeerEventSinks};
-use progress::{
-    read_progress_published, spawn_status_thread, work_chain_progress_at, StatusBoard, StatusSnap,
-    TipRateTracker,
+#[cfg(test)]
+pub(crate) use header_walk::{
+    candidate_tip, candidate_work, forget_walk_peer, header_poll, header_status_view,
+    install_origin, load_origin, note_block_inv, note_reservation, origin_input, send_getheaders,
+    settle_walk_peer, take_header_ask, HeaderPoll, HeaderPollIn,
 };
-use published::spawn_header_thread;
-use state::IbdWorkState;
+pub(crate) use peer_io::{empty_header_fk_bus, PeerCmd, PeerEvent};
+use peer_io::{sample_peer_rates, PeerEventSinks};
+#[cfg(test)]
+pub(crate) use peer_io::{solicit_track, GetdataWire, PeerSlot};
+#[cfg(test)]
+pub(crate) use progress::{log_progress_tick, StatusClock};
+pub(crate) use progress::{read_progress_published, StatusSnap};
+use progress::{spawn_status_thread, work_chain_progress_at, StatusBoard, TipRateTracker};
+pub(crate) use published::spawn_header_thread;
+pub(crate) use state::IbdWorkState;
 use state::{enqueue_header_cmd, HeaderCmd};
-use status::LoopStats;
+pub(crate) use status::LoopStats;
 
 use crate::chain::ChainHub;
 use crate::codec::MAX_HEADERS_RESULTS;

@@ -726,9 +726,7 @@ fn complete_stored_headers(
             && live < MAX_ORDERED_HEADERS
             && (live < ORDERED_HEADERS_SOFT_CAP || need_ready_headroom);
     }
-    if batch_len == 0 {
-        return false;
-    }
+    // A stored plan has at least one header. An empty batch never reaches here.
     on_known_headers_batch(st, hub, 0, batch_len);
     false
 }

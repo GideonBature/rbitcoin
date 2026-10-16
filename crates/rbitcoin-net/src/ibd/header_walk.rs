@@ -180,7 +180,9 @@ impl HeaderWalk {
         }
         let mut step = 1usize;
         let mut i = self.checkpoints.len();
-        while out.len() < 8 {
+        // The ask path keeps the first eight hashes. Walking every checkpoint
+        // step still names the same prefix, and there is no second cap here.
+        loop {
             // `i == 0` is the stop. The index has already been emitted, and
             // stepping again would stay on checkpoint 0.
             if i == 0 {
@@ -197,16 +199,23 @@ impl HeaderWalk {
     }
 
     /// Height of the header after the candidate, when the walk has a tip.
+    ///
+    /// Callers run after the origin is installed, so a missing tip hash is the
+    /// only stop. A height of zero is the parent, not a later header.
     pub(crate) fn next_height(&self) -> Option<u32> {
-        if !self.origin || self.tip.hash.is_none() {
-            return None;
-        }
+        self.tip.hash?;
         Some(self.tip.height.saturating_add(1))
     }
 
     /// `height` is on the candidate and past the queue, so hygiene keeps it.
+    ///
+    /// The origin and the tip hash are installed together. Hygiene then only
+    /// needs the height to sit on that tip, above the genesis parent.
     pub(crate) fn indexes_through(&self, height: u32) -> bool {
-        self.origin && self.tip.hash.is_some() && height > 0 && height <= self.tip.height
+        if self.tip.hash.is_none() || !self.origin || height == 0 {
+            return false;
+        }
+        height <= self.tip.height
     }
 
     /// Test stand-in for a walk that already proved the confirmed tip.
@@ -298,9 +307,6 @@ pub(crate) fn load_origin(hub: &ChainHub, input: &OriginInput) -> OriginLoaded {
                 let mut latch = WalkTip {
                     height: *next_h,
                     hash: Some(*next),
-                    milestone_hash,
-                    milestone_prev,
-                    milestone_header,
                     ..WalkTip::default()
                 };
                 remember_milestone(&mut latch, hub, hdr.prev_blockhash, &hdr);
@@ -389,7 +395,9 @@ pub(crate) struct HeaderStatusView {
 
 pub(crate) fn header_status_view(st: &IbdWorkState, hub: &ChainHub) -> HeaderStatusView {
     let walk = wants_lookahead(st);
-    let quiet = st.header_walk.origin && st.header_walk.proven && !walk;
+    // Proven is set only after the origin is installed, so origin is not a
+    // second input to the caught-up line.
+    let quiet = st.header_walk.proven && !walk;
     HeaderStatusView {
         origin: st.header_walk.origin,
         height: st.header_walk.tip_height(),
@@ -429,16 +437,13 @@ pub(crate) fn log_status(st: &mut IbdWorkState, hub: &ChainHub, horizon: u32) {
     }
 }
 
-/// A live peer is still ahead of the walk and has not been retired from it.
+/// A connected peer is still ahead of the walk and has not been retired from it.
 ///
-/// Before the origin is known, the advertised high-water mark is enough to
-/// send the first ask. After that, advertised height alone does not keep the
-/// lane on.
+/// The advertised high-water mark is not a second signal. A disconnected
+/// peer leaves that mark behind, and the ask goes out only when someone
+/// still connected can serve the next header.
 pub(crate) fn wants_lookahead(st: &IbdWorkState) -> bool {
     let tip = st.header_walk.tip_height();
-    if !st.header_walk.origin {
-        return st.max_peer_height > tip;
-    }
     st.slots
         .iter()
         .any(|s| s.alive && s.peer_height > tip && !st.header_walk.walk_quiet.contains(&s.id))
@@ -713,9 +718,9 @@ pub(crate) fn suppress_competing_chain(
     if st.header_walk.tip_hash() == Some(prev) || batch_ends_on_checkpoint(st, headers) {
         return false;
     }
-    if st.ordered.len() < ORDERED_HEADERS_SOFT_CAP && stored_top_hash(st, hub) == Some(prev) {
-        return false;
-    }
+    // A short queue whose batch continues the stored tip is a refill. Classify
+    // returns that before this function runs, so the length comparison is not
+    // a second gate.
     if challenger_extends(st, prev) {
         return extend_challenger(st, hub, Some(peer), headers);
     }

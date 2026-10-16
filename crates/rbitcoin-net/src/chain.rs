@@ -274,7 +274,6 @@ pub(crate) fn reject_is_mutated(reason: &str) -> bool {
         || reason.contains("bad-txns-duplicate")
         || reason.contains("witness commitment")
         || reason.contains("bad-witness-nonce")
-        || reason.contains("wtxid count")
         || reason.contains("unexpected witness")
 }
 
@@ -2816,7 +2815,7 @@ impl ChainHub {
     }
 
     pub fn cache_body_count(&self) -> usize {
-        self.cache.body_count()
+        self.cache.stored_bodies()
     }
 
     pub fn held_body_count(&self) -> usize {

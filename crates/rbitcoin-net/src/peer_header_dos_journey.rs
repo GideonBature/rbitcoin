@@ -1775,3 +1775,108 @@ async fn below_floor_full_batch_does_not_page() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A side block three days behind the best header is still served. Every
+/// `+` and `/` rewrite of the 30-day limit is shorter than three days.
+#[test]
+fn three_day_side_block_is_served() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("stale-serve");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let t0 = 1_700_000_000u32;
+    hub.clock.set_mock(i64::from(t0));
+    let old = rbitcoin_consensus::mine_regtest_paying(gen, t0, 1, op_true(), vec![]);
+    hub.accept_block(old.clone()).unwrap();
+    let old_hash = old.block_hash();
+    hub.invalidate_block(old_hash).unwrap();
+    let t1 = t0 + 3 * 24 * 60 * 60;
+    hub.clock.set_mock(i64::from(t1));
+    let tip = rbitcoin_consensus::mine_regtest_paying(gen, t1, 1, op_true(), vec![]);
+    hub.accept_block(tip).unwrap();
+    assert!(!hub.is_connected(&old_hash));
+    let served =
+        headers_reply_for_getheaders(&hub, &GetHeadersMessage::new(vec![], old_hash)).unwrap();
+    assert_eq!(
+        served.len(),
+        1,
+        "a side block three days behind the tip is served"
+    );
+    assert_eq!(served[0].block_hash(), old_hash);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The store has no tip. `getheaders` is answered from the recent body cache.
+#[test]
+fn getheaders_serves_cached_bodies_when_the_store_has_no_tip() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("cache-serve");
+    assert!(hub.tip_height().is_none());
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    hub.cache.push_best(genesis.clone()).unwrap();
+    let mut prev = genesis.block_hash();
+    let mut time = genesis.header.time;
+    let mut hashes = vec![prev];
+    for h in 1..=3u32 {
+        time = time.saturating_add(600);
+        let block = rbitcoin_consensus::mine_regtest_paying(prev, time, h, op_true(), vec![]);
+        prev = block.block_hash();
+        hashes.push(prev);
+        hub.cache.push_best(block).unwrap();
+    }
+    let stop = hashes[2];
+    let served = headers_reply_for_getheaders(
+        &hub,
+        &GetHeadersMessage::new(vec![hashes[0]], stop),
+    )
+    .unwrap();
+    assert_eq!(served.len(), 2, "headers start after the locator and stop at the hash");
+    assert_eq!(served[0].block_hash(), hashes[1]);
+    assert_eq!(served[1].block_hash(), stop);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Noting a later block must not forget the earlier ask. A second peer
+/// announcing the same headers does not fetch the first body again.
+#[tokio::test]
+async fn a_later_ask_keeps_the_earlier_block() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("asked-keep");
+    hub.ensure_genesis().unwrap();
+    let peers = crate::peers::PeerHub::new();
+    let gen = hub.tip_hash().unwrap();
+    let t = hub.tip_header().unwrap().time.saturating_add(1);
+    let a = rbitcoin_consensus::mine_regtest_paying(gen, t, 1, op_true(), vec![]);
+    let b = rbitcoin_consensus::mine_regtest_paying(a.block_hash(), t.saturating_add(1), 2, op_true(), vec![]);
+    let peer = live_peer(&peers, 18601, 40, false);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    push(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+        NetworkMessage::Headers(vec![a.header, b.header]),
+    )
+    .await;
+    let first = asked_blocks(&mut out_rx);
+    assert!(
+        first.contains(&a.block_hash()) && first.contains(&b.block_hash()),
+        "both bodies are fetched once, got {first:?}"
+    );
+
+    let peer2 = live_peer(&peers, 18602, 41, false);
+    let (out2, mut rx2) = mpsc::unbounded_channel();
+    let mut follow2 = PeerFollowState::new();
+    push(
+        &hub,
+        &out2,
+        &mut follow2,
+        Some(peer2.as_ref()),
+        NetworkMessage::Headers(vec![a.header, b.header]),
+    )
+    .await;
+    let second = asked_blocks(&mut rx2);
+    assert!(
+        !second.contains(&a.block_hash()),
+        "the first body stays asked after the later one is noted, got {second:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

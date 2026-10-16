@@ -582,6 +582,61 @@ fn chain_ops_validate_address(ctx: &RpcContext) {
     assert_eq!(still_never["code"], ERR_METHOD_NOT_FOUND);
 }
 
+/// A second genesis hub. Tip age, the mining-info template latch, and the
+/// header-tip cap are visible here before this chain has assembled a template
+/// or left IBD. The long regtest journey has already done both.
+#[test]
+fn chain_ops_fresh_tip_age_template_and_header_cap() {
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let gen_time = hub.tip_header().unwrap().time;
+    // 10_000s is inside a day and outside either `+` rewrite of `24 * 60 * 60`.
+    dispatch(
+        &ctx,
+        "setmocktime",
+        vec![json!(i64::from(gen_time) + 10_000)],
+    )
+    .unwrap();
+    let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
+    assert_eq!(
+        info["initialblockdownload"], false,
+        "a tip 10000s old is still inside the 24h IBD window"
+    );
+
+    let prev = hub.tip_hash().unwrap();
+    for i in 0..129u32 {
+        let mut hdr = hub.tip_header().unwrap();
+        hdr.version = bitcoin::block::Version::from_consensus(4);
+        hdr.prev_blockhash = prev;
+        hdr.time = gen_time.saturating_add(2).saturating_add(i);
+        hdr.nonce = 0;
+        let mut merkle = [0u8; 32];
+        merkle[..4].copy_from_slice(&i.to_le_bytes());
+        hdr.merkle_root = bitcoin::TxMerkleNode::from_byte_array(merkle);
+        rbitcoin_consensus::grind_regtest_pow(&mut hdr);
+        let hex = hex_encode(bitcoin::consensus::encode::serialize(&hdr));
+        dispatch(&ctx, "submitheader", vec![json!(hex)]).unwrap();
+    }
+    let tips = dispatch(&ctx, "getchaintips", vec![]).unwrap();
+    let n = tips
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["status"] == "headers-only")
+        .count();
+    assert_eq!(n, 128, "header-only tips stay at the 128 cap");
+
+    let before = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert!(
+        before.get("currentblockweight").is_none(),
+        "getmininginfo names a template weight only after one is built: {before}"
+    );
+    let _tmpl = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let after = dispatch(&ctx, "getmininginfo", vec![]).unwrap();
+    assert_eq!(after["currentblockweight"], 8_000);
+    assert_eq!(after["currentblocktx"], 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn chain_ops_echo_overlap(ctx: &RpcContext) {
     let empty = dispatch(ctx, "echo", vec![]).unwrap();
     assert_eq!(empty, json!([]));

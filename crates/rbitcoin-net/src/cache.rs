@@ -59,15 +59,11 @@ impl BlockCache {
         self.inner.read().unwrap().chain.last().copied()
     }
 
-    pub fn len(&self) -> usize {
-        self.inner.read().unwrap().chain.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.inner.read().unwrap().chain.is_empty()
     }
 
-    pub fn body_count(&self) -> usize {
+    pub(crate) fn stored_bodies(&self) -> usize {
         self.inner.read().unwrap().by_hash.len()
     }
 
@@ -147,31 +143,6 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Locator hashes newest-first for getheaders.
-    pub fn locator(&self) -> Vec<BlockHash> {
-        let g = self.inner.read().unwrap();
-        if g.chain.is_empty() {
-            return vec![BlockHash::from_byte_array([0u8; 32])];
-        }
-        let mut out = Vec::new();
-        let mut i = g.chain.len() as i64 - 1;
-        let mut step = 1i64;
-        while i >= 0 {
-            out.push(g.chain[i as usize]);
-            if out.len() >= 10 {
-                step *= 2;
-            }
-            i -= step;
-        }
-        // Always include genesis
-        if let Some(g0) = g.chain.first() {
-            if out.last() != Some(g0) {
-                out.push(*g0);
-            }
-        }
-        out
-    }
-
     /// Headers after the best common locator hash, up to Core `MAX_HEADERS_RESULTS` (2000).
     ///
     /// Only returns headers still present as full bodies in the tip window; callers
@@ -183,10 +154,6 @@ impl BlockCache {
         }
         let mut start = 0usize;
         'outer: for loc in locator {
-            if loc.to_byte_array() == [0u8; 32] {
-                start = 0;
-                break;
-            }
             for (i, h) in g.chain.iter().enumerate() {
                 if h == loc {
                     start = i + 1;
