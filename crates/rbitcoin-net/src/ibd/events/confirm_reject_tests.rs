@@ -3914,3 +3914,384 @@ fn coord_loop_body_and_reject_do_not_read_headers() {
     assert_eq!(super::super::reorg::parent_hash_of_count(), 0);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn undecodable_wire_drops_the_peer_and_other_store_errors_do_not() {
+    use super::super::peer_io::PeerEvent;
+    use rbitcoin_store::StoreError;
+
+    assert!(super::store_reject_drops_peer(&StoreError::Rejected(
+        rbitcoin_query::Query::UNDECODABLE_WIRE_MSG
+    )));
+    assert!(!super::store_reject_drops_peer(&StoreError::Rejected(
+        "body queue full"
+    )));
+    assert!(!super::store_reject_drops_peer(&StoreError::NotFound));
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-undecodable");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let mut peer = super::super::assign::tests::dummy_slot(1);
+    let addr = peer.addr;
+    peer.alive = true;
+    let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+    let write_next = std::sync::atomic::AtomicU32::new(1);
+    let mut book = crate::seeds::AddrMan::new();
+    let local = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+    let hash = h(0x61);
+    st.record_height(hash, 1);
+    st.header_fks.insert(hash, rbitcoin_primitives::Fk(1));
+    st.inflight
+        .insert(hash, super::super::state::InflightReq::new(1));
+    super::apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 1,
+            hash,
+            payload: vec![0u8; 40],
+            header_fk: Some(rbitcoin_primitives::Fk(1)),
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert!(!st.slots[0].alive, "undecodable wire drops the sender");
+    assert!(st.addr_cooldown.contains_key(&addr));
+    assert!(st.body.is_missing(&hash));
+
+    let mut peer = super::super::assign::tests::dummy_slot(2);
+    peer.alive = true;
+    let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+    let good = {
+        let header = bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(4),
+            prev_blockhash: gen,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+            time: 1_300_000_000,
+            bits: bitcoin::CompactTarget::from_consensus(0x207fffff),
+            nonce: 1,
+        };
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::null(),
+                script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![],
+        };
+        let mut block = bitcoin::Block {
+            header,
+            txdata: vec![tx],
+        };
+        block.header.merkle_root = block.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut block.header);
+        bitcoin::consensus::encode::serialize(&block)
+    };
+    let good_hash = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&good)
+        .unwrap()
+        .block_hash();
+    st.record_height(good_hash, 1);
+    st.header_fks.insert(good_hash, rbitcoin_primitives::Fk(2));
+    st.inflight
+        .insert(good_hash, super::super::state::InflightReq::new(2));
+    super::apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 2,
+            hash: good_hash,
+            payload: good,
+            header_fk: Some(rbitcoin_primitives::Fk(2)),
+        },
+        &write_next,
+        &mut book,
+        local,
+        None,
+    );
+    assert!(
+        st.slots[0].alive,
+        "a decodable block does not drop the peer"
+    );
+    assert!(st.body.is_pending(&good_hash));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn full_header_cmd_stops_the_ctrl_drain() {
+    use super::super::peer_io::PeerEvent;
+    use super::super::state::HeaderCmd;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-ctrl-drain");
+    hub.ensure_genesis().unwrap();
+    let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+    let write_next = std::sync::atomic::AtomicU32::new(0);
+    let stats = super::super::status::LoopStats::default();
+    let local = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 1);
+    let learned = crate::NetAddr::Ip(std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+        8333,
+    ));
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    tx.try_send(HeaderCmd::Ask).unwrap();
+    assert_eq!(tx.capacity(), 0);
+    st.header_cmd = Some(tx);
+    let (_body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctrl_tx
+        .send(PeerEvent::Addrs {
+            peer: 1,
+            addrs: vec![learned],
+        })
+        .unwrap();
+    let mut book = crate::seeds::AddrMan::new();
+    super::drain_ready_peer_and_body_events(
+        &mut st,
+        &hub,
+        &mut body_rx,
+        &mut ctrl_rx,
+        &write_next,
+        &stats,
+        &mut book,
+        local,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        book.len(),
+        0,
+        "a full header command channel stops the ctrl drain"
+    );
+    assert!(ctrl_rx.try_recv().is_ok());
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    assert!(tx.capacity() > 0);
+    st.header_cmd = Some(tx);
+    ctrl_tx
+        .send(PeerEvent::Addrs {
+            peer: 1,
+            addrs: vec![learned],
+        })
+        .unwrap();
+    super::drain_ready_peer_and_body_events(
+        &mut st,
+        &hub,
+        &mut body_rx,
+        &mut ctrl_rx,
+        &write_next,
+        &stats,
+        &mut book,
+        local,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        book.len(),
+        1,
+        "spare header-command capacity still drains ctrl"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn stored_header_batch_asks_again_only_inside_the_window() {
+    use super::super::header_walk::InFlight;
+
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-stored-headers");
+    hub.ensure_genesis().unwrap();
+    let (cmd_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .spawn(async {});
+    let addr =
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 18444);
+    let mut slot = super::super::assign::tests::dummy_slot(1);
+    slot.cmd_tx = cmd_tx;
+    slot.addr = addr;
+    slot.net = crate::NetAddr::from_socket(addr);
+    slot.task = task;
+    slot.peer_height = 100;
+    slot.alive = true;
+    let mut st = IbdWorkState::new(vec![slot], hub.tip_hash(), hub.tip_height());
+    st.max_peer_height = 100;
+    st.ordered_set.insert(h(1));
+    st.ordered.push_back(h(1));
+
+    let mut inflight = InFlight::capture(&st);
+    let ask = super::complete_stored_headers(&mut st, &hub, &mut inflight, 0, 0);
+    assert!(!ask);
+    assert!(
+        rx.try_recv().is_err(),
+        "an empty headers batch does not request another"
+    );
+
+    let mut inflight = InFlight::capture(&st);
+    let ask = super::complete_stored_headers(&mut st, &hub, &mut inflight, 0, 5);
+    assert!(!ask);
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Ok(super::super::peer_io::PeerCmd::GetHeaders { .. })
+        ),
+        "a non-empty known batch still advances the locator"
+    );
+
+    // Two live headers and no archived bodies: soft-cap headroom is false,
+    // so the ask is the `live < soft cap` term alone.
+    st.ordered_set.insert(h(2));
+    st.ordered.push_back(h(2));
+    let mut inflight = InFlight::capture(&st);
+    let ask = super::complete_stored_headers(
+        &mut st,
+        &hub,
+        &mut inflight,
+        1,
+        crate::codec::MAX_HEADERS_RESULTS,
+    );
+    assert!(
+        ask,
+        "a full window under the soft cap asks for the next headers"
+    );
+
+    st.ordered_set.clear();
+    st.ordered.clear();
+    for n in 0..super::super::MAX_ORDERED_HEADERS {
+        st.ordered_set.insert(BlockHash::from_byte_array({
+            let mut b = [0u8; 32];
+            b[28..32].copy_from_slice(&(n as u32).to_le_bytes());
+            b
+        }));
+    }
+    let need = super::super::MAX_ORDERED_HEADERS * 3 / 4;
+    for n in 0..need {
+        st.body.mark_archived(BlockHash::from_byte_array({
+            let mut b = [0x11; 32];
+            b[28..32].copy_from_slice(&(n as u32).to_le_bytes());
+            b
+        }));
+    }
+    st.max_ordered_height = 10;
+    st.max_ready_height = 10;
+    let mut inflight = InFlight::capture(&st);
+    let ask = super::complete_stored_headers(
+        &mut st,
+        &hub,
+        &mut inflight,
+        1,
+        crate::codec::MAX_HEADERS_RESULTS,
+    );
+    assert!(!ask, "the ordered cap does not ask for another full window");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn single_block_consensus_cascade_regets_only_that_block() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("ev-cascade-reget");
+    hub.ensure_genesis().unwrap();
+    let parent = RejectParent {
+        hash: Some(h(0x91)),
+        unreadable: false,
+    };
+    let mut one = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(1));
+    apply_confirm_reject_class(
+        &mut one,
+        2,
+        h(0x21),
+        ConfirmRejectClass::ConsensusInvalid,
+        "consensus: script verification failed: script false",
+        None,
+        Some(&hub),
+        1,
+        None,
+        None,
+        parent,
+    );
+    assert!(
+        one.body.is_missing(&h(0x21)),
+        "one consensus-invalid block whose parent is not the tip is fetched again"
+    );
+
+    let mut many = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(1));
+    apply_confirm_reject_class(
+        &mut many,
+        2,
+        h(0x22),
+        ConfirmRejectClass::ConsensusInvalid,
+        "consensus: script verification failed: script false",
+        None,
+        Some(&hub),
+        3,
+        None,
+        None,
+        parent,
+    );
+    assert!(
+        !many.body.is_missing(&h(0x22)),
+        "a multi-block consensus batch does not re-get the first hash"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn noban_peer_keeps_a_mutated_block_and_others_are_dropped() {
+    fn punish(st: &mut IbdWorkState, peer: usize) {
+        apply_confirm_reject_class(
+            st,
+            1,
+            h(0x31),
+            ConfirmRejectClass::SoftWire,
+            "merkle root mismatch",
+            None,
+            None,
+            1,
+            None,
+            Some(peer),
+            RejectParent::default(),
+        );
+    }
+
+    let mut trusted = super::super::assign::tests::dummy_slot(7);
+    trusted.alive = true;
+    let addr = trusted.addr;
+    let mut st = IbdWorkState::new(vec![trusted], None, Some(0));
+    let perms = crate::peers::PeerHub::new();
+    perms.set_noban(true);
+    st.perms = Some(perms);
+    punish(&mut st, 7);
+    assert!(st.slots[0].alive, "a noban peer is not disconnected");
+    assert!(!st.addr_cooldown.contains_key(&addr));
+
+    let mut granted = super::super::assign::tests::dummy_slot(8);
+    granted.alive = true;
+    let addr = granted.addr;
+    let mut st = IbdWorkState::new(vec![granted], None, Some(0));
+    let perms = crate::peers::PeerHub::new();
+    let mut table = crate::net_permissions::NetPermTable::default();
+    table
+        .whitelist
+        .push(crate::parse_whitelist("noban,out@127.0.0.1").unwrap());
+    perms.set_net_perms(table);
+    st.perms = Some(perms);
+    punish(&mut st, 8);
+    assert!(
+        st.slots[0].alive,
+        "a whitelist noban peer is not disconnected"
+    );
+    assert!(!st.addr_cooldown.contains_key(&addr));
+
+    let mut open = super::super::assign::tests::dummy_slot(9);
+    open.alive = true;
+    let addr = open.addr;
+    let mut st = IbdWorkState::new(vec![open], None, Some(0));
+    st.perms = Some(crate::peers::PeerHub::new());
+    punish(&mut st, 9);
+    assert!(!st.slots[0].alive, "a peer without noban is dropped");
+    assert!(st.addr_cooldown.contains_key(&addr));
+}

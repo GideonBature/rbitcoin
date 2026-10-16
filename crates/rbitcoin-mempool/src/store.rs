@@ -724,8 +724,7 @@ impl Mempool {
         let logical = body_logical_len(&self.body)?;
         let end = logical.saturating_add(need);
         if end > self.body.len() {
-            let new_len = (self.body.len().max(4096) * 2).max(end + 4096);
-            self.body.resize(new_len, 0);
+            self.body.resize(end, 0);
         }
         self.body[8..16].copy_from_slice(&(end as u64).to_le_bytes());
         Ok(logical as u64)
@@ -740,31 +739,20 @@ impl Mempool {
         let body_path = self.dir.join("tx.body");
         let logical = body_logical_len(&self.body)? as u64;
         let start = self.body_persisted_len.min(logical);
-        if start < BODY_HEADER as u64 {
+        if logical != start {
             self.body_file
-                .seek(SeekFrom::Start(0))
+                .seek(SeekFrom::Start(8))
                 .map_err(|e| MempoolError::io(&body_path, e))?;
             self.body_file
-                .write_all(&self.body[..logical as usize])
+                .write_all(&self.body[8..16])
                 .map_err(|e| MempoolError::io(&body_path, e))?;
-        } else {
-            if start > BODY_HEADER as u64 || logical != start {
-                self.body_file
-                    .seek(SeekFrom::Start(8))
-                    .map_err(|e| MempoolError::io(&body_path, e))?;
-                self.body_file
-                    .write_all(&self.body[8..16])
-                    .map_err(|e| MempoolError::io(&body_path, e))?;
-            }
-            if logical > start {
-                self.body_file
-                    .seek(SeekFrom::Start(start))
-                    .map_err(|e| MempoolError::io(&body_path, e))?;
-                self.body_file
-                    .write_all(&self.body[start as usize..logical as usize])
-                    .map_err(|e| MempoolError::io(&body_path, e))?;
-            }
         }
+        self.body_file
+            .seek(SeekFrom::Start(start))
+            .map_err(|e| MempoolError::io(&body_path, e))?;
+        self.body_file
+            .write_all(&self.body[start as usize..logical as usize])
+            .map_err(|e| MempoolError::io(&body_path, e))?;
         self.body_file
             .set_len(logical)
             .map_err(|e| MempoolError::io(&body_path, e))?;
@@ -1089,7 +1077,6 @@ fn open_or_init_slots(path: &Path, slot_cap: u32) -> Result<(File, Vec<u8>), Mem
 }
 
 fn open_or_init_body(path: &Path) -> Result<(File, Vec<u8>), MempoolError> {
-    let initial = BODY_HEADER + 64;
     if path.exists() {
         let mut file = OpenOptions::new()
             .read(true)
@@ -1116,10 +1103,6 @@ fn open_or_init_body(path: &Path) -> Result<(File, Vec<u8>), MempoolError> {
         if logical > len {
             return Err(MempoolError::Corrupt("body logical past file"));
         }
-        // Spare capacity in process for appends (not on disk until persist).
-        if buf.len() < initial {
-            buf.resize(initial, 0);
-        }
         Ok((file, buf))
     } else {
         let mut file = OpenOptions::new()
@@ -1128,11 +1111,11 @@ fn open_or_init_body(path: &Path) -> Result<(File, Vec<u8>), MempoolError> {
             .create_new(true)
             .open(path)
             .map_err(|e| MempoolError::io(path, e))?;
-        let mut buf = vec![0u8; initial];
+        let mut buf = vec![0u8; BODY_HEADER];
         buf[0..4].copy_from_slice(&MEM_MAGIC);
         buf[4..6].copy_from_slice(&MEM_SCHEMA.to_le_bytes());
         buf[8..16].copy_from_slice(&(BODY_HEADER as u64).to_le_bytes());
-        file.write_all(&buf[..BODY_HEADER])
+        file.write_all(&buf)
             .map_err(|e| MempoolError::io(path, e))?;
         file.flush().map_err(|e| MempoolError::io(path, e))?;
         Ok((file, buf))
@@ -1314,6 +1297,39 @@ pub(crate) mod tests {
             assert!(mp.dir().join("slots").exists());
             assert!(mp.dir().join("tx.body").exists());
         }
+        assert_eq!(
+            fs::metadata(dir.join("tx.body")).unwrap().len(),
+            BODY_HEADER as u64,
+            "an empty body file is the 16-byte header"
+        );
+        let slots_path = dir.join("slots");
+        let slots = fs::read(&slots_path).unwrap();
+        let mut longer = slots.clone();
+        longer.push(0xab);
+        fs::write(&slots_path, &longer).unwrap();
+        Mempool::open_or_create(&dir).expect("slots longer than the table still open");
+        fs::write(&slots_path, &slots[..slots.len() - 1]).unwrap();
+        let err = match Mempool::open_or_create(&dir) {
+            Err(e) => e,
+            Ok(_) => panic!("a short slots file must not open"),
+        };
+        assert!(
+            matches!(err, MempoolError::Corrupt("slots file short")),
+            "{err}"
+        );
+        fs::write(&slots_path, &slots).unwrap();
+        let body_path = dir.join("tx.body");
+        let body = fs::read(&body_path).unwrap();
+        assert_eq!(body.len(), BODY_HEADER);
+        fs::write(&body_path, &body[..BODY_HEADER - 1]).unwrap();
+        let err = match Mempool::open_or_create(&dir) {
+            Err(e) => e,
+            Ok(_) => panic!("a short body file must not open"),
+        };
+        assert!(
+            matches!(err, MempoolError::Corrupt("body too short")),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1461,6 +1477,16 @@ pub(crate) mod tests {
             .unwrap();
         let persisted = mp.body_persisted_len();
         mp.persist_slots_without_body().unwrap();
+        let on_disk = fs::read(dir.join("slots")).unwrap();
+        assert_eq!(
+            on_disk[SLOTS_HEADER], SLOT_FREE,
+            "a live row past the durable body is free on disk"
+        );
+        assert_eq!(
+            &on_disk[SLOTS_HEADER + 16..SLOTS_HEADER + 48],
+            t1.as_byte_array(),
+            "demotion keeps the txid and only clears LIVE"
+        );
         drop(mp);
         let mp = Mempool::open_or_create(&dir).unwrap();
         let live = mp
@@ -1738,9 +1764,19 @@ pub(crate) mod tests {
             "expected grow on full table, got {:?}",
             r.err().map(|e| e.to_string())
         );
-        assert!(mp.meta().slot_cap > tiny);
+        assert_eq!(mp.meta().slot_cap, 16_388);
         assert_eq!(mp.live_count(), tiny + 1);
-        // Must not be the old Corrupt message.
+        drop(mp);
+        assert_eq!(
+            fs::metadata(dir.join("slots")).unwrap().len(),
+            786_640,
+            "grown slots file is the 16-byte header plus 16388 records"
+        );
+        let mp = Mempool::open_or_create(&dir).unwrap();
+        assert_eq!(mp.meta().slot_cap, 16_388);
+        // Grow persists the four rows already in the table. The fifth slot is
+        // RAM until the next sidecar write, so a reopen keeps those four.
+        assert_eq!(mp.load_live_txs().unwrap().len(), 4);
         assert!(!format!("{:?}", MempoolError::Full).contains("corrupt"));
         let _ = fs::remove_dir_all(&dir);
     }

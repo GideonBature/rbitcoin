@@ -137,10 +137,9 @@ impl BlockCache {
         }
         g.by_hash.insert(hash, block);
         g.chain.push(hash);
-        let depth = self.body_depth;
-        if g.chain.len() > depth {
-            let drop_to = g.chain.len() - depth;
-            let stale: Vec<BlockHash> = g.chain[..drop_to].to_vec();
+        let extra = g.chain.len().saturating_sub(self.body_depth);
+        if extra != 0 {
+            let stale: Vec<BlockHash> = g.chain[..extra].to_vec();
             for h in stale {
                 g.by_hash.remove(&h);
             }
@@ -220,5 +219,124 @@ mod tests {
     #[test]
     fn default_body_depth_is_compact_serve_window() {
         assert_eq!(DEFAULT_BODY_DEPTH, 16);
+    }
+
+    fn extend(prev: BlockHash, n: u32) -> Block {
+        use bitcoin::block::{Header, Version};
+        use bitcoin::CompactTarget;
+        Block {
+            header: Header {
+                version: Version::from_consensus(1),
+                prev_blockhash: prev,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array([n as u8; 32]),
+                time: n,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: n,
+            },
+            txdata: vec![],
+        }
+    }
+
+    #[test]
+    fn bodies_stay_for_a_full_window_and_only_the_tail_after_that() {
+        let cache = BlockCache::with_body_depth(3);
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.body_count(), 0);
+        let mut prev = BlockHash::from_byte_array([0u8; 32]);
+        let mut hashes = Vec::new();
+        for n in 1..=3 {
+            let block = extend(prev, n);
+            let hash = block.block_hash();
+            cache.push_best(block).unwrap();
+            hashes.push(hash);
+            prev = hash;
+        }
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.body_count(), 3, "chain length == depth drops nothing");
+        assert!(cache.get_block(&hashes[0]).is_some());
+        let block = extend(prev, 4);
+        let h4 = block.block_hash();
+        cache.push_best(block).unwrap();
+        hashes.push(h4);
+        prev = h4;
+        assert!(cache.get_block(&hashes[0]).is_none());
+        assert_eq!(cache.body_count(), 3);
+        let block = extend(prev, 5);
+        let h5 = block.block_hash();
+        cache.push_best(block).unwrap();
+        hashes.push(h5);
+        assert_eq!(cache.len(), 5);
+        assert_eq!(cache.body_count(), 3);
+        assert!(cache.get_block(&hashes[0]).is_none());
+        assert!(cache.get_block(&hashes[1]).is_none());
+        assert!(cache.get_block(&hashes[2]).is_some());
+        assert!(cache.get_block(&hashes[3]).is_some());
+        assert!(cache.get_block(&hashes[4]).is_some());
+    }
+
+    #[test]
+    fn locator_doubles_its_step_and_keeps_genesis_once() {
+        let cache = BlockCache::with_body_depth(32);
+        assert_eq!(cache.locator(), vec![BlockHash::from_byte_array([0u8; 32])]);
+        let mut prev = BlockHash::from_byte_array([0u8; 32]);
+        let mut hashes = Vec::new();
+        for n in 1..=20 {
+            let block = extend(prev, n);
+            let hash = block.block_hash();
+            cache.push_best(block).unwrap();
+            hashes.push(hash);
+            prev = hash;
+        }
+        let loc = cache.locator();
+        let at = |h: usize| hashes[h];
+        assert_eq!(
+            loc,
+            vec![
+                at(19),
+                at(18),
+                at(17),
+                at(16),
+                at(15),
+                at(14),
+                at(13),
+                at(12),
+                at(11),
+                at(10),
+                at(8),
+                at(4),
+                at(0),
+            ]
+        );
+        assert_eq!(cache.locator().last().copied(), Some(at(0)));
+        assert_eq!(cache.locator().iter().filter(|h| **h == at(0)).count(), 1);
+    }
+
+    #[test]
+    fn headers_after_locator_start_at_the_next_block_and_honor_stop() {
+        let cache = BlockCache::with_body_depth(32);
+        let mut prev = BlockHash::from_byte_array([0u8; 32]);
+        let mut headers = Vec::new();
+        let mut hashes = Vec::new();
+        for n in 1..=5 {
+            let block = extend(prev, n);
+            let hash = block.block_hash();
+            headers.push(block.header);
+            cache.push_best(block).unwrap();
+            hashes.push(hash);
+            prev = hash;
+        }
+        let null = BlockHash::from_byte_array([0u8; 32]);
+        let all = cache.headers_after_locator(&[null], null);
+        assert_eq!(all, headers);
+        let from_mid = cache.headers_after_locator(&[hashes[1]], null);
+        assert_eq!(from_mid, headers[2..]);
+        // A null locator entry wins over a later real hash (start at genesis).
+        let null_then_tip = cache.headers_after_locator(&[null, hashes[3]], null);
+        assert_eq!(null_then_tip, headers);
+        let stopped = cache.headers_after_locator(&[null], hashes[2]);
+        assert_eq!(stopped, headers[..=2]);
+        assert!(cache
+            .headers_after_locator(&[hashes[4]], hashes[4])
+            .is_empty());
     }
 }

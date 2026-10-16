@@ -180,14 +180,16 @@ impl HeaderWalk {
         }
         let mut step = 1usize;
         let mut i = self.checkpoints.len();
-        while i > 0 && out.len() < 8 {
+        while out.len() < 8 {
+            // `i == 0` is the stop. The index has already been emitted, and
+            // stepping again would stay on checkpoint 0.
+            if i == 0 {
+                break;
+            }
             i = i.saturating_sub(step);
             let h = self.checkpoints[i].hash;
             if !out.contains(&h) {
                 out.push(h);
-            }
-            if i == 0 {
-                break;
             }
             step = step.saturating_mul(2);
         }
@@ -719,7 +721,8 @@ pub(crate) fn suppress_competing_chain(
     }
     // A batch that has not met the next checkpoint is not a competing chain.
     // Treating it as one would evict a real fork that has less work so far.
-    if st.header_walk.proven && !below && candidate_prev(st, prev) {
+    // `!proven && !below` already returned, so `proven` is not a second gate.
+    if !below && candidate_prev(st, prev) {
         if let Some(start_h) = height_of(st, hub, prev) {
             if matches!(path_agree(st, start_h, headers, true), PathAgree::Short) {
                 return true;
@@ -3212,6 +3215,10 @@ mod tests {
         let (s0, mut rx) = slot(0);
         let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
         fill_queue(&mut st);
+        assert!(
+            !st.header_walk.has_checkpoints(),
+            "a walk with no replies has no checkpoints"
+        );
         let before = hub.query.store().header_count();
         log_status(&mut st, &hub, 50_000);
         assert!(
@@ -6319,6 +6326,670 @@ mod tests {
             "the adopted fork becomes the download path"
         );
         assert!(!skips(&hub, 6, h6.block_hash().as_byte_array()));
+    }
+
+    fn byte_hash(n: u8) -> BlockHash {
+        BlockHash::from_byte_array([n; 32])
+    }
+
+    fn checkpoint(hash: BlockHash, height: u32) -> Checkpoint {
+        Checkpoint {
+            hash,
+            height,
+            work: [0; 32],
+            header: None,
+            times: Vec::new(),
+            diff: DiffSnap::default(),
+        }
+    }
+
+    #[test]
+    fn locator_hashes_name_the_fork_and_stop_at_eight() {
+        let mut walk = HeaderWalk::default();
+        let tip = byte_hash(1);
+        let fork = byte_hash(2);
+        walk.tip.hash = Some(tip);
+        walk.challenger = Some(Challenger {
+            fork_hash: fork,
+            fork_height: 1,
+            tip: WalkTip {
+                hash: Some(fork),
+                ..WalkTip::default()
+            },
+            checkpoints: Vec::new(),
+        });
+        for n in 0..200u8 {
+            walk.checkpoints
+                .push(checkpoint(byte_hash(n.saturating_add(10)), n as u32));
+        }
+        // The newest checkpoint repeats the tip. It must not be asked twice.
+        let dup_at = walk.checkpoints.len() - 1;
+        walk.checkpoints[dup_at].hash = tip;
+        let loc = walk.locator_hashes();
+        assert_eq!(loc.len(), 8, "a locator stops after eight hashes");
+        assert_eq!(loc[0], tip);
+        assert!(
+            loc.contains(&fork),
+            "the lighter fork is part of the locator"
+        );
+        assert_eq!(
+            loc.iter().filter(|h| **h == tip).count(),
+            1,
+            "a checkpoint that repeats the tip is not asked again"
+        );
+        assert!(
+            loc.iter().any(|h| *h != tip && *h != fork),
+            "earlier checkpoints follow the fork"
+        );
+
+        let mut one = HeaderWalk::default();
+        let oldest = byte_hash(9);
+        one.checkpoints.push(checkpoint(oldest, 0));
+        assert_eq!(
+            one.locator_hashes(),
+            vec![oldest],
+            "the walk names the only checkpoint"
+        );
+    }
+
+    #[test]
+    fn next_height_is_the_indexed_successor() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-next-height");
+        hub.ensure_genesis().unwrap();
+        let (s0, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], hub.tip_hash(), Some(0));
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = Some(byte_hash(4));
+        st.header_walk.tip.height = 4;
+        st.slots[0].peer_height = 10;
+        let next = byte_hash(5);
+        st.height_to_hash.insert(5, next);
+        st.hash_height.insert(next, 5);
+        assert_eq!(st.header_walk.next_height(), Some(5));
+        assert!(
+            !send_getheaders(&mut st, &hub).unwrap(),
+            "the header after the candidate is already indexed"
+        );
+        assert!(rx.try_recv().is_err());
+
+        st.header_walk.origin = false;
+        st.header_walk.tip.hash = Some(byte_hash(4));
+        assert_eq!(
+            st.header_walk.next_height(),
+            None,
+            "no origin means the walk has no next height"
+        );
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = None;
+        assert_eq!(
+            st.header_walk.next_height(),
+            None,
+            "a missing candidate hash is not height 0"
+        );
+    }
+
+    #[test]
+    fn indexes_through_keeps_only_the_candidate_prefix() {
+        let mut st = IbdWorkState::new(Vec::new(), None, None);
+        st.header_walk.tip.height = 5;
+        st.header_walk.tip.hash = Some(byte_hash(5));
+        st.header_walk.origin = false;
+        assert!(
+            !st.header_walk.indexes_through(5),
+            "heights before the origin are not on the candidate"
+        );
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = None;
+        assert!(!st.header_walk.indexes_through(5));
+        st.header_walk.tip.hash = Some(byte_hash(5));
+        assert!(
+            !st.header_walk.indexes_through(0),
+            "height 0 is the genesis anchor, not a queued header"
+        );
+        assert!(st.header_walk.indexes_through(5));
+        assert!(!st.header_walk.indexes_through(6));
+
+        let tail = byte_hash(1);
+        let kept = byte_hash(5);
+        let past = byte_hash(6);
+        st.record_height(tail, 1);
+        st.ordered.push_back(tail);
+        st.ordered_set.insert(tail);
+        st.record_height(kept, 5);
+        st.record_height(past, 6);
+        // Hygiene keeps hash_height only for queued, in-flight, or known
+        // headers. The past-the-queue slot then depends on indexes_through.
+        st.known_headers.insert(kept);
+        st.known_headers.insert(past);
+        st.hygiene();
+        assert_eq!(st.height_to_hash.get(&5), Some(&kept));
+        assert!(
+            !st.height_to_hash.contains_key(&6),
+            "a height past the candidate is not kept for the next ask"
+        );
+    }
+
+    #[test]
+    fn milestone_on_the_queue_keeps_a_different_anchor() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-origin-milestone");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let h1 = mine(gen, 1);
+        hub.ensure_headers_batch(&[h1]).unwrap();
+        let anchor = byte_hash(0x11);
+        let anchor_prev = byte_hash(0x22);
+        let anchor_header = mine(gen, 9);
+        let loaded = load_origin(
+            &hub,
+            &OriginInput {
+                already: false,
+                height: 0,
+                hash: Some(gen),
+                ordered_empty: false,
+                queue_tail: Some(1),
+                next_hashes: vec![(1, h1.block_hash())],
+                milestone_height: 1,
+                milestone_hash: Some(anchor),
+                milestone_prev: anchor_prev,
+                milestone_header: Some(anchor_header),
+            },
+        );
+        assert_eq!(loaded.hash, Some(h1.block_hash()));
+        assert_eq!(
+            loaded.milestone_hash,
+            Some(anchor),
+            "a queue header that is not the anchor must not replace it"
+        );
+        assert_eq!(loaded.milestone_prev, anchor_prev);
+        assert_eq!(loaded.milestone_header, Some(anchor_header));
+    }
+
+    fn work_bytes(n: u8) -> [u8; 32] {
+        let mut w = [0u8; 32];
+        w[31] = n;
+        w
+    }
+
+    #[test]
+    fn settle_walk_peer_retires_only_a_short_miss() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-settle");
+        hub.ensure_genesis().unwrap();
+        let (s0, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], hub.tip_hash(), Some(0));
+        st.header_walk.origin = true;
+        let tip = byte_hash(3);
+        st.header_walk.tip.hash = Some(tip);
+        st.header_walk.tip.work = Work::from_be_bytes(work_bytes(8));
+        hub.milestone.anchor = None;
+        st.ordered.push_back(byte_hash(1));
+        let queued = st.ordered.len();
+
+        settle_walk_peer(&mut st, &hub, 0, Some(tip), queued.saturating_sub(1), 1);
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "a longer queue extended the download"
+        );
+
+        st.header_walk.walk_quiet.clear();
+        st.header_walk.tip.hash = Some(byte_hash(4));
+        let queued = st.ordered.len();
+        settle_walk_peer(&mut st, &hub, 0, Some(tip), queued, 1);
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "a new candidate tip extended the walk"
+        );
+
+        st.header_walk.tip.hash = Some(tip);
+        st.header_walk.walk_quiet.clear();
+        let queued = st.ordered.len();
+        settle_walk_peer(
+            &mut st,
+            &hub,
+            0,
+            Some(tip),
+            queued,
+            crate::codec::MAX_HEADERS_RESULTS,
+        );
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "a full header window stays on the walk"
+        );
+
+        floor_unreachable(&mut hub);
+        let queued = st.ordered.len();
+        settle_walk_peer(&mut st, &hub, 0, Some(tip), queued, 1);
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "below the work floor a short reply does not retire the peer"
+        );
+
+        hub.milestone.anchor = None;
+        st.header_walk.challenge_open = Some(0);
+        st.header_walk.challenge_external = false;
+        let queued = st.ordered.len();
+        settle_walk_peer(&mut st, &hub, 0, Some(tip), queued, 1);
+        assert!(
+            st.header_walk.walk_quiet.contains(&0),
+            "a short reply that missed the candidate retires that peer"
+        );
+
+        let eq = work_bytes(8);
+        st.header_walk.tip.work = Work::from_be_bytes(eq);
+        hub.milestone.anchor = Some(rbitcoin_consensus::MilestoneAnchor {
+            hash: tip,
+            min_work_be: eq,
+        });
+        st.header_walk.walk_quiet.clear();
+        st.header_walk.challenge_open = None;
+        let queued = st.ordered.len();
+        settle_walk_peer(&mut st, &hub, 0, Some(tip), queued, 1);
+        assert!(
+            st.header_walk.walk_quiet.contains(&0),
+            "work equal to the floor is not below it"
+        );
+    }
+
+    #[test]
+    fn forget_and_reserve_follow_the_peer_that_answered() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-reserve");
+        hub.ensure_genesis().unwrap();
+        let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), Some(0));
+        st.header_walk.walk_quiet.insert(3);
+        st.header_walk.reserved = Some(3);
+        st.header_walk.challenge = Some(3);
+        st.header_walk.challenge_open = Some(3);
+        st.header_walk.challenge_external = true;
+        forget_walk_peer(&mut st, 3);
+        assert!(st.header_walk.walk_quiet.is_empty());
+        assert!(st.header_walk.reserved.is_none());
+        assert!(st.header_walk.challenge.is_none());
+        assert!(st.header_walk.challenge_open.is_none());
+        assert!(!st.header_walk.challenge_external);
+        assert!(!inv_challenge_due(&st));
+
+        st.header_walk.reserved = Some(4);
+        st.header_walk.challenge = Some(4);
+        st.header_walk.challenge_open = Some(4);
+        st.header_walk.challenge_external = true;
+        forget_walk_peer(&mut st, 3);
+        assert_eq!(st.header_walk.reserved, Some(4));
+        assert_eq!(st.header_walk.challenge, Some(4));
+        assert_eq!(st.header_walk.challenge_open, Some(4));
+        assert!(st.header_walk.challenge_external);
+        assert!(inv_challenge_due(&st));
+
+        let (a, _ar) = slot(0);
+        let (b, _br) = slot(1);
+        let mut st = IbdWorkState::new(vec![a, b], hub.tip_hash(), Some(0));
+        st.header_walk.reserved = Some(0);
+        assert_eq!(peers_for_blocks(&st), vec![1]);
+        st.slots.pop();
+        assert_eq!(
+            peers_for_blocks(&st),
+            vec![0],
+            "the only peer still serves blocks"
+        );
+
+        st.header_walk.challenge = Some(0);
+        st.header_walk.walk.peer = Some(0);
+        st.header_walk.walk.at = Some(Instant::now());
+        assert!(
+            !inv_challenge_due(&st),
+            "an in-flight ask is not asked again"
+        );
+        st.header_walk.walk.at = Instant::now().checked_sub(Duration::from_secs(6));
+        assert!(inv_challenge_due(&st));
+        st.header_walk.challenge = None;
+        st.header_walk.walk.peer = None;
+        assert!(!inv_challenge_due(&st));
+
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = Some(byte_hash(7));
+        st.header_walk.tip.work = Work::from_be_bytes(work_bytes(4));
+        st.header_walk.challenge_open = Some(0);
+        st.header_walk.challenge_external = false;
+        st.header_walk.reserved = Some(0);
+        hub.milestone.anchor = None;
+        note_reservation(&mut st, &hub, 0, Some(byte_hash(6)), work_bytes(4));
+        assert!(
+            st.header_walk.walk_quiet.contains(&0),
+            "equal work did not beat the candidate"
+        );
+        assert!(st.header_walk.reserved.is_none());
+
+        st.header_walk.walk_quiet.clear();
+        st.header_walk.reserved = Some(0);
+        st.header_walk.challenge_open = Some(0);
+        floor_unreachable(&mut hub);
+        note_reservation(&mut st, &hub, 0, Some(byte_hash(7)), work_bytes(4));
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "below the floor a missed challenge keeps the peer"
+        );
+        assert_eq!(st.header_walk.reserved, Some(0));
+
+        hub.milestone.anchor = None;
+        st.header_walk.challenge_open = None;
+        st.header_walk.walk_quiet.insert(0);
+        st.header_walk.reserved = Some(1);
+        note_reservation(&mut st, &hub, 0, Some(byte_hash(7)), work_bytes(4));
+        assert_eq!(
+            st.header_walk.reserved,
+            Some(1),
+            "retiring one peer does not drop the other's reservation"
+        );
+    }
+
+    #[test]
+    fn header_status_and_lookahead_follow_live_peers() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-status");
+        hub.ensure_genesis().unwrap();
+        let (mut s0, _rx) = slot(0);
+        s0.peer_height = 0;
+        let mut st = IbdWorkState::new(vec![s0], hub.tip_hash(), Some(0));
+        st.header_walk.origin = true;
+        st.header_walk.proven = true;
+        st.header_walk.tip.height = 5;
+        let quiet = header_status_view(&st, &hub);
+        assert!(!quiet.walk);
+        assert!(quiet.quiet, "proven, and nobody is ahead");
+
+        st.slots[0].peer_height = 6;
+        let ahead = header_status_view(&st, &hub);
+        assert!(ahead.walk);
+        assert!(!ahead.quiet, "a taller peer keeps the walk in lookahead");
+
+        st.header_walk.origin = false;
+        st.header_walk.proven = true;
+        st.max_peer_height = 5;
+        st.header_walk.tip.height = 5;
+        let unopened = header_status_view(&st, &hub);
+        assert!(!unopened.quiet);
+        st.header_walk.proven = false;
+        st.max_peer_height = 0;
+        let idle = header_status_view(&st, &hub);
+        assert!(!idle.walk);
+        assert!(!idle.quiet);
+
+        st.header_walk.origin = false;
+        st.header_walk.tip.height = 5;
+        st.max_peer_height = 5;
+        assert!(!wants_lookahead(&st));
+        st.max_peer_height = 6;
+        assert!(wants_lookahead(&st));
+        st.header_walk.origin = true;
+        st.slots[0].peer_height = 5;
+        st.slots[0].alive = true;
+        st.header_walk.walk_quiet.clear();
+        assert!(!wants_lookahead(&st));
+        st.slots[0].peer_height = 6;
+        assert!(wants_lookahead(&st));
+        st.header_walk.walk_quiet.insert(0);
+        assert!(!wants_lookahead(&st));
+    }
+
+    fn ask_poll(
+        st: &IbdWorkState,
+        live: usize,
+        min_cache: usize,
+        lag: u32,
+        headroom: bool,
+        fan: usize,
+    ) -> HeaderPoll {
+        header_poll(
+            st,
+            HeaderPollIn {
+                live,
+                need_ready_headroom: headroom,
+                lag,
+                min_cache,
+                fan,
+            },
+        )
+    }
+
+    #[test]
+    fn header_poll_asks_only_when_a_header_is_actually_due() {
+        let mut st = IbdWorkState::new(Vec::new(), None, None);
+        st.header_walk.origin = true;
+        st.header_walk.tip.height = 0;
+        st.max_ordered_height = 0;
+        assert!(matches!(ask_poll(&st, 1, 11, 5, false, 0), HeaderPoll::Ask));
+        assert!(
+            matches!(
+                ask_poll(&st, ORDERED_HEADERS_SOFT_CAP, 0, 5, false, 0),
+                HeaderPoll::Wait
+            ),
+            "the soft cap is closed even when peers are ahead of the stored tip"
+        );
+        assert!(matches!(
+            ask_poll(&st, 10, 11, 0, false, 0),
+            HeaderPoll::Ask
+        ));
+        assert!(matches!(
+            ask_poll(&st, 11, 11, 0, false, 0),
+            HeaderPoll::Wait
+        ));
+        assert!(matches!(
+            ask_poll(&st, 12, 11, 0, false, 0),
+            HeaderPoll::Wait
+        ));
+        assert!(matches!(ask_poll(&st, 1, 0, 0, false, 0), HeaderPoll::Wait));
+
+        st.headers_done = true;
+        assert!(matches!(
+            ask_poll(&st, 1, 11, 0, false, 0),
+            HeaderPoll::Wait
+        ));
+        st.headers_done = false;
+
+        assert!(matches!(
+            ask_poll(&st, 0, 11, 0, false, 0),
+            HeaderPoll::LatchDone
+        ));
+        st.header_walk.tip.height = 1;
+        st.max_ordered_height = 0;
+        assert!(
+            matches!(ask_poll(&st, 0, 11, 0, false, 0), HeaderPoll::Ask),
+            "stored headers behind the walk are still requested"
+        );
+    }
+
+    #[test]
+    fn a_fork_keeps_the_parent_difficulty_snapshot() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-fork-diff");
+        hub.ensure_genesis().unwrap();
+        hub.params.btc.allow_min_difficulty_blocks = true;
+        assert!(hub.params.difficulty_adjustment_interval() > 0);
+        let gen = hub.tip_hash().unwrap();
+        floor_unreachable(&mut hub);
+        let (s0, mut rx) = slot(0);
+        let addr = s0.addr;
+        let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+        fill_queue(&mut st);
+        let a1 = mine(gen, 1);
+        let a2 = mine(a1.block_hash(), 2);
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        apply(&mut st, &hub, 0, vec![a1, a2]);
+        assert_eq!(st.header_walk.tip_hash(), Some(a2.block_hash()));
+
+        let limit = hub.params.pow_limit.to_compact_lossy();
+        let hard = CompactTarget::from_consensus(limit.to_consensus().saturating_sub(1));
+        assert_ne!(hard, limit);
+        st.header_walk.base_diff.full_diff_bits = Some(hard);
+        st.header_walk.base_diff.full_diff_height = 0;
+
+        let side = mine(gen, 20);
+        apply(&mut st, &hub, 0, vec![side]);
+        assert!(st.slots[0].alive);
+        assert_eq!(st.header_walk.tip_hash(), Some(a2.block_hash()));
+        let next = mine_bits(side.block_hash(), 21, side.time.saturating_add(1), hard, 7);
+        apply(&mut st, &hub, 0, vec![next]);
+        assert!(
+            st.slots[0].alive,
+            "the fork's parent difficulty accepts the next header"
+        );
+        assert!(!st.addr_cooldown.contains_key(&addr));
+        let landed = st.header_walk.tip_hash() == Some(next.block_hash())
+            || st
+                .header_walk
+                .challenger
+                .as_ref()
+                .is_some_and(|ch| ch.tip.hash == Some(next.block_hash()));
+        assert!(
+            landed,
+            "the second batch extends the fork instead of dropping the peer"
+        );
+    }
+
+    #[test]
+    fn suppress_competing_chain_only_consumes_a_real_fork() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-suppress");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        floor_unreachable(&mut hub);
+        let (s0, _rx) = slot(0);
+        let mut bare = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+        bare.header_walk.origin = true;
+        bare.header_walk.proven = true;
+        assert!(!suppress_competing_chain(&mut bare, &hub, 0, &[]));
+
+        let (s0, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+        fill_queue(&mut st);
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let _ = rx.try_recv();
+        let a1 = mine(gen, 1);
+        let a2 = mine(a1.block_hash(), 2);
+        apply(&mut st, &hub, 0, vec![a1, a2]);
+        let tip = st.header_walk.tip_hash().unwrap();
+        assert_eq!(tip, a2.block_hash());
+        let extends = mine(tip, 3);
+        assert!(!suppress_competing_chain(&mut st, &hub, 0, &[extends]));
+        assert_eq!(
+            st.header_walk.tip_hash(),
+            Some(tip),
+            "a header on the candidate is not a competing chain"
+        );
+
+        st.header_walk.proven = false;
+        let side = mine(gen, 30);
+        assert!(suppress_competing_chain(&mut st, &hub, 0, &[side]));
+        assert!(
+            st.header_walk.challenger.is_some(),
+            "below the floor an unproved light fork is kept"
+        );
+
+        // The walk tip is ahead of a short queue. A header on that tail is
+        // stored. `len < soft cap` is what returns; one past that cap is not
+        // this case.
+        let (s_room, _rx_room) = slot(2);
+        let mut room = IbdWorkState::new(vec![s_room], Some(gen), Some(0));
+        room.header_walk.origin = true;
+        room.header_walk.proven = true;
+        room.header_walk.tip.hash = Some(a2.block_hash());
+        room.header_walk.tip.height = 2;
+        room.header_walk.base_hash = Some(gen);
+        let tail = a1.block_hash();
+        room.ordered.push_back(tail);
+        room.ordered_set.insert(tail);
+        room.record_height(tail, 1);
+        let saved_floor = hub.milestone;
+        hub.milestone.anchor = None;
+        let sibling = mine(tail, 8);
+        assert!(
+            !suppress_competing_chain(&mut room, &hub, 2, &[sibling]),
+            "a queue with room stores a header on its tail"
+        );
+        hub.milestone = saved_floor;
+
+        fill_queue(&mut st);
+        st.header_walk.checkpoints.retain(|c| c.height != 1);
+        st.header_walk.proven = true;
+        st.header_walk.challenger = None;
+        st.header_walk.base_hash = Some(gen);
+        // Height 1 already names the queued header. A one-block fork off
+        // genesis must not look like a path disagreement.
+        st.height_to_hash.remove(&1);
+        let from_base = mine(gen, 12);
+        assert!(suppress_competing_chain(&mut st, &hub, 0, &[from_base]));
+        assert!(
+            st.header_walk
+                .challenger
+                .as_ref()
+                .is_some_and(|ch| ch.tip.hash == Some(from_base.block_hash())),
+            "a proved walk below the floor still records the light fork"
+        );
+
+        hub.milestone.anchor = None;
+        st.header_walk.proven = true;
+        st.header_walk.challenger = None;
+        st.header_walk.base_hash = Some(gen);
+        st.height_to_hash.remove(&1);
+        let tip_now = st.header_walk.tip_hash();
+        let short = mine(gen, 40);
+        assert!(suppress_competing_chain(&mut st, &hub, 0, &[short]));
+        assert_eq!(st.header_walk.tip_hash(), tip_now);
+        assert!(
+            st.header_walk.challenger.is_none(),
+            "a short header on the proved chain is consumed, not adopted"
+        );
+    }
+
+    #[test]
+    fn an_external_challenge_miss_does_not_retire_the_peer() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-external");
+        hub.ensure_genesis().unwrap();
+        let (s0, _) = slot(0);
+        let mut st = IbdWorkState::new(vec![s0], hub.tip_hash(), Some(0));
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = Some(byte_hash(7));
+        st.header_walk.tip.work = Work::from_be_bytes(work_bytes(4));
+        st.header_walk.challenge_open = Some(0);
+        st.header_walk.challenge_external = true;
+        st.header_walk.reserved = Some(0);
+        hub.milestone.anchor = None;
+        note_reservation(&mut st, &hub, 0, Some(byte_hash(7)), work_bytes(4));
+        assert!(
+            !st.header_walk.walk_quiet.contains(&0),
+            "a session inv that misses does not retire the reserved peer"
+        );
+        assert_eq!(st.header_walk.reserved, Some(0));
+    }
+
+    #[test]
+    fn header_poll_each_reason_asks_on_its_own() {
+        let mut st = IbdWorkState::new(Vec::new(), None, None);
+        st.header_walk.origin = true;
+        st.header_walk.tip.height = 0;
+        st.max_ordered_height = 0;
+        let soft = ORDERED_HEADERS_SOFT_CAP;
+        assert!(
+            matches!(ask_poll(&st, soft, 0, 0, true, 0), HeaderPoll::Ask),
+            "ready headroom asks even when the queue is at the soft cap"
+        );
+        assert!(
+            matches!(ask_poll(&st, 20, 10, 1, false, 0), HeaderPoll::Ask),
+            "peers ahead of the stored tip ask on their own"
+        );
+
+        st.header_walk.origin = false;
+        st.header_walk.tip.height = 0;
+        st.max_peer_height = 1;
+        assert!(
+            matches!(ask_poll(&st, soft, 0, 0, false, 0), HeaderPoll::Ask),
+            "a peer ahead of an unopened walk still asks at the soft cap"
+        );
+
+        st.header_walk.origin = true;
+        st.max_peer_height = 0;
+        st.header_walk.tip.height = 4;
+        st.max_ordered_height = 0;
+        assert!(
+            matches!(ask_poll(&st, soft, 0, 0, false, 0), HeaderPoll::Ask),
+            "a walk ahead of the stored headers still asks at the soft cap"
+        );
     }
 
     /// Block that extends `prev` at `height`, with a real coinbase.

@@ -42,16 +42,10 @@ impl AsMap {
         Ok(Self::from_bytes(bytes))
     }
 
+    // An empty file fails sanity, so a loaded map is never empty.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
     }
 
     pub fn interpret_ip16(&self, ip16: &[u8; 16]) -> u32 {
@@ -180,9 +174,6 @@ pub fn interpret(asmap: &[u8], ip16: &[u8; 16]) -> u32 {
             if ip_bit == ip_bits_end {
                 break;
             }
-            if i64::from(jump) >= (endpos - pos) as i64 {
-                break;
-            }
             let Some(bit) = consume_bit_be(&mut ip_bit, ip16) else {
                 break;
             };
@@ -274,7 +265,6 @@ fn sanity_return(
 fn sanity_jump(
     pos: &mut usize,
     asmap: &[u8],
-    endpos: usize,
     bits: &mut i32,
     jumps: &mut Vec<(usize, i32)>,
 ) -> bool {
@@ -282,9 +272,8 @@ fn sanity_jump(
     if jump == INVALID {
         return false;
     }
-    if i64::from(jump) > (endpos - *pos) as i64 {
-        return false;
-    }
+    // A jump to EOF or past it cannot be popped onto a finishing RETURN
+    // (the target compare fails, or the walker falls off and returns false).
     if *bits == 0 {
         return false;
     }
@@ -344,7 +333,7 @@ fn sanity_check_bits(asmap: &[u8], mut bits: i32) -> bool {
                 None => prevopcode = JUMP,
             }
         } else if opcode == JUMP {
-            if !sanity_jump(&mut pos, asmap, endpos, &mut bits, &mut jumps) {
+            if !sanity_jump(&mut pos, asmap, &mut bits, &mut jumps) {
                 return false;
             }
             prevopcode = JUMP;
@@ -482,6 +471,11 @@ mod tests {
     fn asmap_two_prefix_maps_distinct_asns() {
         let bytes = two_prefix_asmap_bytes();
         let m = AsMap::from_bytes(bytes).expect("fixture sanity");
+        assert_eq!(m.len(), 35);
+        assert_ne!(m.len(), 0);
+        assert_ne!(m.len(), 1);
+        // sha256(TWO_PREFIX_ASMAP) prefix, not a second call of digest_hex8.
+        assert_eq!(m.digest_hex8(), "070965c4");
         assert_eq!(m.mapped_as(IpAddr::V4(Ipv4Addr::new(1, 2, 0, 0))), 1);
         assert_eq!(m.mapped_as(IpAddr::V4(Ipv4Addr::new(3, 4, 0, 0))), 2);
         assert_eq!(m.mapped_as(IpAddr::V4(Ipv4Addr::new(1, 2, 9, 9))), 1);
@@ -521,6 +515,8 @@ mod tests {
         let bits = instr_return(1);
         let bytes = pack_le(&bits);
         let m = AsMap::from_bytes(bytes).expect("RETURN ASN1");
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.digest_hex8(), "709e80c8");
         assert_eq!(m.interpret_ip16(&[0u8; 16]), 1);
         assert_eq!(m.interpret_ip16(&[0xff; 16]), 1);
     }
@@ -555,5 +551,131 @@ mod tests {
         bits.extend(encode_bits(1, 1, &ASN_BIT_SIZES));
         bits.extend(instr_return(1));
         assert!(AsMap::from_bytes(pack_le(&bits)).is_none());
+    }
+
+    fn load(bits: &[bool]) -> Option<AsMap> {
+        AsMap::from_bytes(pack_le(bits))
+    }
+
+    fn default_then_match_return() -> Vec<bool> {
+        let mut bits = instr_type(DEFAULT);
+        bits.extend(encode_bits(1, 1, &ASN_BIT_SIZES));
+        bits.extend(instr_match(&[false]));
+        bits.extend(instr_return(2));
+        bits
+    }
+
+    #[test]
+    fn default_match_return_uses_the_default_only_on_a_miss() {
+        let bits = default_then_match_return();
+        let m = load(&bits).expect("one default, one match, one return");
+        assert_eq!(m.interpret_ip16(&[0u8; 16]), 2, "leading zero matches");
+        let mut hi = [0u8; 16];
+        hi[0] = 0x80;
+        assert_eq!(
+            m.interpret_ip16(&hi),
+            1,
+            "leading one takes the default ASN"
+        );
+    }
+
+    #[test]
+    fn a_second_default_is_rejected() {
+        let mut bits = instr_type(DEFAULT);
+        bits.extend(encode_bits(1, 1, &ASN_BIT_SIZES));
+        bits.extend(default_then_match_return());
+        assert!(load(&bits).is_none(), "two defaults in a row");
+    }
+
+    #[test]
+    fn trailing_one_bit_after_return_is_rejected() {
+        let mut bits = instr_return(1);
+        bits.push(true);
+        assert!(load(&bits).is_none(), "padding bit must be zero");
+    }
+
+    #[test]
+    fn more_than_seven_trailing_zeros_are_rejected() {
+        let mut bits = instr_return(1);
+        bits.extend([false; 8]);
+        assert!(load(&bits).is_none(), "more than 7 unused bits");
+    }
+
+    fn match8(bit: bool) -> Vec<bool> {
+        instr_match(&[bit; 8])
+    }
+
+    #[test]
+    fn a_one_bit_match_keeps_its_width() {
+        let mut bits = instr_match(&[false]);
+        bits.extend(instr_return(4));
+        let m = load(&bits).expect("single short match");
+        assert_eq!(m.interpret_ip16(&[0u8; 16]), 4);
+    }
+
+    #[test]
+    fn two_short_matches_in_a_row_are_rejected() {
+        let mut bits = instr_match(&[false]);
+        bits.extend(instr_match(&[false]));
+        bits.extend(instr_return(1));
+        assert!(load(&bits).is_none(), "second short match");
+    }
+
+    #[test]
+    fn an_eight_bit_match_may_follow_a_short_one() {
+        let mut bits = instr_match(&[false]);
+        bits.extend(match8(false));
+        bits.extend(instr_return(1));
+        assert!(load(&bits).is_some(), "match of 8 closes the short run");
+    }
+
+    #[test]
+    fn a_match_wider_than_the_bits_left_is_rejected() {
+        let mut bits = Vec::new();
+        for _ in 0..16 {
+            bits.extend(match8(false));
+        }
+        bits.extend(instr_match(&[false]));
+        bits.extend(instr_return(1));
+        assert!(load(&bits).is_none(), "no IP bits left");
+    }
+
+    #[test]
+    fn a_match_that_uses_the_last_ip_bits_still_returns() {
+        let mut bits = Vec::new();
+        for _ in 0..15 {
+            bits.extend(match8(false));
+        }
+        bits.extend(match8(false));
+        bits.extend(instr_return(6));
+        let m = load(&bits).expect("128 IP bits exactly");
+        assert_eq!(m.interpret_ip16(&[0u8; 16]), 6);
+    }
+
+    #[test]
+    fn a_jump_past_the_file_is_rejected() {
+        let mut bits = instr_jump(5_000);
+        bits.extend(instr_return(1));
+        assert!(
+            load(&bits).is_none(),
+            "a jump that cannot land on a return is not an asmap"
+        );
+    }
+
+    #[test]
+    fn jump_leaves_too_few_bits_for_the_following_match() {
+        let ret = instr_return(1);
+        let mut bits = Vec::new();
+        for _ in 0..15 {
+            bits.extend(match8(false));
+        }
+        bits.extend(instr_jump(ret.len() as u32));
+        bits.extend(ret);
+        bits.extend(match8(false));
+        bits.extend(instr_return(2));
+        assert!(
+            load(&bits).is_none(),
+            "jump spends a bit the next match still needs"
+        );
     }
 }
