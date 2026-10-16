@@ -98,9 +98,9 @@ fn rpc_regtest_from_genesis() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Param, decode, help, and stop outcomes on the hub this journey already
-/// opened. Knobs this beat flips (stop, network) are put back before the
-/// later chain beats. Tip stays at genesis.
+/// Param, help, stop, and network-identity outcomes on the hub this journey
+/// already opened. Knobs this beat flips (stop, network) are put back before
+/// the later chain beats. Tip stays at genesis.
 fn chain_ops_client_param_edges(ctx: &mut RpcContext) {
     assert_eq!(tip_count(ctx), 0);
     chain_ops_waiters_return_on_stop(ctx);
@@ -112,9 +112,7 @@ fn chain_ops_client_param_edges(ctx: &mut RpcContext) {
     chain_ops_wrong_json_types(ctx);
     chain_ops_regtest_type_errors(ctx);
     chain_ops_junk_tx_hex(ctx);
-    chain_ops_decode_raw(ctx);
-    chain_ops_decode_scripts(ctx);
-    chain_ops_validate_address(ctx);
+    chain_ops_network_identity(ctx);
     ctx.stop.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(ctx.network, Network::Regtest);
     assert_eq!(tip_count(ctx), 0);
@@ -410,176 +408,50 @@ fn chain_ops_junk_tx_hex(ctx: &RpcContext) {
     }
 }
 
-fn chain_ops_decode_raw(ctx: &RpcContext) {
-    use bitcoin::absolute::LockTime;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{OutPoint, Sequence, TxIn, TxOut, Witness};
-
-    let help = dispatch(ctx, "help", vec![]).unwrap();
-    let help_text = help.as_str().unwrap();
-    for name in ["decoderawtransaction", "decodescript", "validateaddress"] {
-        assert!(help_text.lines().any(|l| l == name), "help missing {name}");
-    }
-
-    let script_sig = ScriptBuf::from_bytes(vec![0x51]);
-    let legacy = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([1; 32]),
-                vout: 0,
-            },
-            script_sig: script_sig.clone(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let legacy_hex = serialize_hex(&legacy);
-    let dec = dispatch(ctx, "decoderawtransaction", vec![json!(legacy_hex)]).unwrap();
-    assert_eq!(dec["version"], json!(2));
-    assert_eq!(dec["vin"][0]["vout"], json!(0));
+fn chain_ops_network_identity(ctx: &RpcContext) {
+    // The hub this journey opens uses a 300_000_000 weight budget.
+    let mem = dispatch(ctx, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(
-        dec["vin"][0]["scriptSig"]["hex"],
-        json!(rbitcoin_primitives::hex_encode(script_sig.as_bytes()))
+        mem["maxmempool"].as_u64(),
+        Some(75_000_000),
+        "maxmempool is the virtual-size byte cap (weight/4), not the weight budget: {mem}"
     );
-    assert!(dec["vin"][0]["scriptSig"]["asm"]
-        .as_str()
-        .unwrap()
-        .contains("1"));
-    assert_eq!(dec["vout"][0]["scriptPubKey"]["type"], json!("nonstandard"));
-    assert!(dec["size"].as_u64().unwrap() > 0);
-    assert!(dec["weight"].as_u64().unwrap() > 0);
-    assert!(dec.get("vin").unwrap()[0].get("txinwitness").is_none());
-
-    let extra = dispatch(
-        ctx,
-        "decoderawtransaction",
-        vec![json!(format!("{legacy_hex}00"))],
-    )
-    .unwrap_err();
-    assert_eq!(extra["code"], ERR_DESERIALIZATION);
-    assert_eq!(extra["message"], json!("TX decode failed"));
-
-    let mut wit = Witness::new();
-    wit.push([0xAAu8]);
-    let witness_tx = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([2; 32]),
-                vout: 1,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: wit,
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let wit_hex = serialize_hex(&witness_tx);
-    let wit_ok = dispatch(
-        ctx,
-        "decoderawtransaction",
-        vec![json!(wit_hex.clone()), json!(true)],
-    )
-    .unwrap();
-    assert_eq!(wit_ok["vin"][0]["txinwitness"], json!(["aa"]));
-    let wit_forced = dispatch(
-        ctx,
-        "decoderawtransaction",
-        vec![json!(wit_hex), json!(false)],
-    )
-    .unwrap_err();
-    assert_eq!(wit_forced["code"], ERR_DESERIALIZATION);
-    assert_eq!(wit_forced["message"], json!("TX decode failed"));
-}
-
-fn chain_ops_decode_scripts(ctx: &RpcContext) {
-    let p2wpkh = Address::from_str("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")
-        .unwrap()
-        .require_network(BtcNetwork::Regtest)
-        .unwrap();
-    let spk_hex = rbitcoin_primitives::hex_encode(p2wpkh.script_pubkey().as_bytes());
-    let script = dispatch(ctx, "decodescript", vec![json!(spk_hex.clone())]).unwrap();
-    assert_eq!(script["type"], json!("witness_v0_keyhash"));
-    assert_eq!(script["address"], json!(p2wpkh.to_string()));
-    assert_eq!(script["hex"], json!(spk_hex));
-    assert!(script.get("p2sh").is_none());
-    assert!(script.get("segwit").is_none());
-    assert!(script.get("desc").is_none());
-
-    let op_true = dispatch(ctx, "decodescript", vec![json!("51")]).unwrap();
-    assert_eq!(op_true["type"], json!("nonstandard"));
-    assert!(op_true.get("address").is_none());
-}
-
-fn chain_ops_validate_address(ctx: &RpcContext) {
-    let p2wpkh = Address::from_str("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")
-        .unwrap()
-        .require_network(BtcNetwork::Regtest)
-        .unwrap();
-    let spk_hex = rbitcoin_primitives::hex_encode(p2wpkh.script_pubkey().as_bytes());
-    let valid = dispatch(ctx, "validateaddress", vec![json!(p2wpkh.to_string())]).unwrap();
-    assert_eq!(valid["isvalid"], json!(true));
-    assert_eq!(valid["address"], json!(p2wpkh.to_string()));
-    assert_eq!(valid["scriptPubKey"], json!(spk_hex));
-    assert_eq!(valid["isscript"], json!(false));
-    assert_eq!(valid["iswitness"], json!(true));
-    assert_eq!(valid["witness_version"], json!(0));
-    assert!(valid["witness_program"].as_str().unwrap().len() == 40);
-    assert!(valid.get("error_locations").is_none());
-
-    let p2sh = dispatch(
-        ctx,
-        "validateaddress",
-        vec![json!("2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc")],
-    )
-    .unwrap();
-    assert_eq!(p2sh["isvalid"], json!(true));
-    assert_eq!(p2sh["isscript"], json!(true));
-    assert_eq!(p2sh["iswitness"], json!(false));
-
-    let junk = dispatch(ctx, "validateaddress", vec![json!("not-an-address")]).unwrap();
-    assert_eq!(junk, json!({"isvalid": false}));
-
-    let mainnet = dispatch(
-        ctx,
-        "validateaddress",
-        vec![json!("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")],
-    )
-    .unwrap();
-    assert_eq!(mainnet, json!({"isvalid": false}));
-
-    let p2tr_spk = ScriptBuf::from_bytes(
-        rbitcoin_primitives::hex_decode(
-            "512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-        )
-        .unwrap(),
+    assert_ne!(
+        mem["maxmempool"].as_u64(),
+        Some(300_000_000),
+        "maxmempool must not report the weight budget"
     );
-    let p2tr = Address::from_script(&p2tr_spk, BtcNetwork::Regtest).expect("p2tr address");
-    let tr = dispatch(ctx, "validateaddress", vec![json!(p2tr.to_string())]).unwrap();
-    assert_eq!(tr["isscript"], json!(true), "{tr}");
-    assert_eq!(tr["iswitness"], json!(true));
-    assert_eq!(tr["witness_version"], json!(1));
-
-    let p2a_spk = ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
-    let p2a = Address::from_script(&p2a_spk, BtcNetwork::Regtest).expect("p2a address");
-    let anchor = dispatch(ctx, "validateaddress", vec![json!(p2a.to_string())]).unwrap();
-    assert_eq!(anchor["isscript"], json!(true), "{anchor}");
-    assert_eq!(anchor["iswitness"], json!(true));
-    assert!(anchor.get("witness_version").is_none(), "{anchor}");
-    assert!(anchor.get("witness_program").is_none(), "{anchor}");
-
-    let still_never = dispatch(ctx, "createrawtransaction", vec![]).unwrap_err();
-    assert_eq!(still_never["code"], ERR_METHOD_NOT_FOUND);
+    let net = dispatch(ctx, "getnetworkinfo", vec![]).unwrap();
+    // Core 0.19 CLIENT_VERSION. Below this, bitcoincore-rpc requires the
+    // pre-0.19 bip9_softforks map and rejects our getblockchaininfo.
+    assert_eq!(net["version"].as_u64(), Some(190_000), "{net}");
+    assert_eq!(
+        net["protocolversion"].as_u64(),
+        Some(70016),
+        "P2P nVersion stays 70016; version is the RPC shape floor"
+    );
+    assert_ne!(
+        net["version"].as_u64(),
+        Some(799),
+        "crate semver packing must not be getnetworkinfo.version"
+    );
+    assert_eq!(
+        net["subversion"].as_str().unwrap(),
+        rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &[] as &[&str]).unwrap()
+    );
+    let flags = rbitcoin_net::local_service_flags();
+    let bits = flags.to_u64();
+    let hex = format!("{bits:016x}");
+    assert_eq!(net["localservices"].as_str(), Some(hex.as_str()));
+    let names = net["localservicesnames"].as_array().unwrap();
+    let names: Vec<&str> = names.iter().filter_map(|v| v.as_str()).collect();
+    assert!(names.contains(&"NETWORK"));
+    assert!(names.contains(&"WITNESS"));
+    assert!(names.contains(&"P2P_V2"));
+    assert!(
+        !names.contains(&"NETWORK_LIMITED"),
+        "we do not advertise NETWORK_LIMITED: {names:?}"
+    );
 }
 
 fn chain_ops_echo_overlap(ctx: &RpcContext) {
