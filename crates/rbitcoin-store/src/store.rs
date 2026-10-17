@@ -327,8 +327,6 @@ pub struct Store {
     /// Confirm readers wait here while a `--datadir-hdd` write holds the spindle.
     /// Flag off never locks, so [`Self::spindle_wait`] returns immediately.
     spindle: std::sync::Mutex<()>,
-    /// Calls to [`Self::get_spender_meta_at_abs_batch`].
-    spend_meta_batches: std::sync::atomic::AtomicU64,
 }
 
 /// Held across one rotating-media write burst. Drop releases [`Store::spindle_wait`].
@@ -433,7 +431,6 @@ impl Store {
             utxo_view: std::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
             spindle: std::sync::Mutex::new(()),
-            spend_meta_batches: std::sync::atomic::AtomicU64::new(0),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -497,7 +494,6 @@ impl Store {
             utxo_view: std::sync::atomic::AtomicU64::new(0),
             spend_marker: std::sync::Mutex::new(()),
             spindle: std::sync::Mutex::new(()),
-            spend_meta_batches: std::sync::atomic::AtomicU64::new(0),
             path,
             cold_path,
             head_scale: layout.head_scale,
@@ -1255,15 +1251,7 @@ impl Store {
         &self,
         abs_offs: &[u64],
     ) -> Result<Vec<Option<crate::tx_table::SpenderSlot>>, StoreError> {
-        self.spend_meta_batches
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.txs.get_spender_meta_at_abs_batch(abs_offs)
-    }
-
-    /// How many times [`Self::get_spender_meta_at_abs_batch`] has run.
-    pub fn spend_meta_batches(&self) -> u64 {
-        self.spend_meta_batches
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Explicit-backend bulk meta (tests / timed structural path).

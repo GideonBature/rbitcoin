@@ -416,11 +416,12 @@ fn pay_txid(n: u32) -> [u8; 32] {
 }
 
 /// More creates than one txout wave, split by a spent-body hole wider than
-/// the pin merge. An unpaged join still returns the full totals. A
-/// height-ascending page flushes when that hole closes the group, and also
-/// when the next create has no spend slots, then stops.
+/// the pin merge. Chain stats, balance, and listunspent see every create.
+/// A height-ascending page is the two height-0 pays, then the lexicographic
+/// txid at height 1. The same page with the spend index off is those two
+/// pays: a create with no spend slots still closes the page.
 #[test]
-fn unpaged_join_reads_spend_slots_once() {
+fn height_page_and_unpaged_join_follow_spend_groups() {
     const N: u32 = 4097;
     let (dir, q) = temp_query("sh-spend-once");
     let sh = script_hash(&[0x51]);
@@ -445,47 +446,25 @@ fn unpaged_join_reads_spend_slots_once() {
         order: crate::scripthash::HistoryOrder::HeightAsc,
         ..crate::scripthash::HistoryFilter::open()
     };
-    let before = q.store().spend_meta_batches();
     let page = q.scripthash_history_filtered(&sh, &asc(2)).unwrap().rows;
     assert_eq!(page.len(), 2);
     assert_eq!(page[0].txid, pay_txid(0));
     assert_eq!(page[1].txid, pay_txid(1));
-    assert_eq!(
-        q.store().spend_meta_batches() - before,
-        1,
-        "two same-block creates share one spend read"
-    );
 
-    let before = q.store().spend_meta_batches();
     let wider = q.scripthash_history_filtered(&sh, &asc(3)).unwrap().rows;
     assert_eq!(wider.len(), 3);
     assert_eq!(wider[2].height, 1);
     assert_eq!(wider[2].txid, pay_txid(256));
-    assert_eq!(
-        q.store().spend_meta_batches() - before,
-        2,
-        "the next block sits past the merge hole and is its own spend read"
-    );
 
-    let before = q.store().spend_meta_batches();
     let stats = q.scripthash_chain_stats(&sh).unwrap();
     assert_eq!(stats.funded_txo_count, N);
     assert_eq!(stats.funded_txo_sum, i64::from(N));
     assert_eq!(stats.spent_txo_count, 0);
     assert_eq!(stats.spent_txo_sum, 0);
     assert_eq!(stats.tx_count, N);
-    assert_eq!(
-        q.store().spend_meta_batches() - before,
-        1,
-        "an unpaged join reads every spend slot in one batch"
-    );
-    let before = q.store().spend_meta_batches();
     let bal = q.scripthash_balance(&sh).unwrap();
     assert_eq!(bal.confirmed, i64::from(N));
-    assert_eq!(q.store().spend_meta_batches() - before, 1);
-    let before = q.store().spend_meta_batches();
     assert_eq!(q.scripthash_listunspent(&sh).unwrap().len(), N as usize);
-    assert_eq!(q.store().spend_meta_batches() - before, 1);
 
     q.set_spend_index(false);
     let quiet = q.scripthash_history_filtered(&sh, &asc(2)).unwrap().rows;

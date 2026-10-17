@@ -25,6 +25,16 @@ struct SpendHit {
     vout: u32,
 }
 
+/// Strong creates that can still land on a newest-first page.
+///
+/// `bound` is the height of the limit-th counted create. `None` means the
+/// posting list is shorter than the limit, so `creates` is the whole set
+/// and the caller reads those spend slots instead of scanning blocks.
+struct NewestWindow {
+    bound: Option<u32>,
+    creates: Vec<(u32, Fk)>,
+}
+
 /// Expanded Electrum create outpoint (Class A + height joins).
 ///
 /// Store index only holds [`ScriptHashRecord`] (scripthash + create_tx_fk).
@@ -643,6 +653,9 @@ impl Query {
                 class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
             }
             let t_s = std::time::Instant::now();
+            // The whole unpaged join is this one spend-slot batch. A
+            // height-ascending page flushes one peek group at a time in
+            // `join_page_waves`.
             let joined = self.join_spends_wave(&creates, need, view)?;
             let spends_us = t_s.elapsed().as_micros();
             (joined, class_a_us, spends_us)
@@ -947,6 +960,10 @@ impl Query {
             .collect())
     }
 
+    /// One call reads every spend slot of `creates` as a single `spent.body`
+    /// batch. The unpaged join passes the whole create list. A
+    /// height-ascending page does not: it flushes one closed peek group
+    /// through [`Self::join_known_offs`].
     fn join_spends_wave(
         &self,
         creates: &[ScriptHashOutpoint],
@@ -1160,20 +1177,14 @@ impl Query {
         Ok(fks)
     }
 
-    /// `Some(low)` is the height of the limit-th counted create. `creates`
-    /// are the strong creates at `low..=high`.
-    ///
-    /// `None` means fewer than `k` creates were counted. `creates` is every
-    /// strong create at or below `high`. The caller reads those spend slots:
-    /// a scan from height 0 would read every block, and blocks below the
-    /// oldest of these creates cannot spend this script.
+    /// See [`NewestWindow`].
     fn newest_create_window(
         &self,
         fks: &[Fk],
         k: usize,
         high: u32,
         strict: bool,
-    ) -> Result<(Option<u32>, Vec<(u32, Fk)>), QueryError> {
+    ) -> Result<NewestWindow, QueryError> {
         let mut rev = Vec::new();
         let mut idx = fks.len();
         let mut counted = 0usize;
@@ -1209,10 +1220,16 @@ impl Query {
             }
         }
         let Some(low) = bound else {
-            return Ok((None, rev));
+            return Ok(NewestWindow {
+                bound: None,
+                creates: rev,
+            });
         };
         rev.retain(|(h, _)| *h >= low);
-        Ok((Some(low), rev))
+        Ok(NewestWindow {
+            bound: Some(low),
+            creates: rev,
+        })
     }
 
     /// Spends of a posting list shorter than the page limit.
@@ -1365,12 +1382,14 @@ impl Query {
             });
         };
         let members = self.strong_sh_creates(scripthash, view)?;
-        let (bound, creates) = self.newest_create_window(&members, k, scan.high, scan.strict)?;
-        let hits = match bound {
+        let window = self.newest_create_window(&members, k, scan.high, scan.strict)?;
+        let hits = match window.bound {
             Some(low) => self.spends_of_members(&members, low, scan.high)?,
-            None => self.spends_of_retained_creates(scripthash, &creates, scan.high, view)?,
+            None => {
+                self.spends_of_retained_creates(scripthash, &window.creates, scan.high, view)?
+            }
         };
-        let mut decode = creates.iter().map(|(_, fk)| *fk).collect::<Vec<_>>();
+        let mut decode = window.creates.iter().map(|(_, fk)| *fk).collect::<Vec<_>>();
         for hit in &hits {
             decode.push(hit.parent);
         }
@@ -1379,7 +1398,7 @@ impl Query {
         let matched = self.sh_matched_outs(scripthash, &decode)?;
         let mut net: HashMap<Fk, i64> = HashMap::new();
         let mut height_of: HashMap<Fk, u32> = HashMap::new();
-        for (h, fk) in creates {
+        for (h, fk) in window.creates {
             let Some(outs) = matched.get(&fk) else {
                 continue;
             };
