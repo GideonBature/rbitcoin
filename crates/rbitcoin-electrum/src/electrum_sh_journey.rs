@@ -419,6 +419,83 @@ fn from_height_window_is_served_above_the_create_cap() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A later spend of a different output of a payment is not this script's
+/// history. The output that does pay the script still is.
+#[test]
+fn from_height_ignores_a_spend_of_another_output() {
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let sh = electrum_scripthash_hex(&[0x51]);
+    let mut pay = op_true_apply(0xd0);
+    pay.tx.output_count = 2;
+    pay.tx.txid[31] = 0xce;
+    pay.outputs = vec![
+        OutputRecord::unspent(1, vec![0x51]),
+        OutputRecord::unspent(1, vec![0x00]),
+    ];
+    let pay_txid = pay.tx.txid;
+    let (mut prev, mut parent, _) = connect_script_block(&q, 0, Fk::NULL, [0u8; 32], vec![pay]);
+    for h in 1..3u32 {
+        let (fk, hash, _) = connect_script_block(&q, h, prev, parent, Vec::new());
+        prev = fk;
+        parent = hash;
+    }
+    let (create_fk, _) = q.get_tx_by_txid(&pay_txid).unwrap().unwrap();
+    let spend_of = |tag: u8, vout: u32| {
+        let mut spend = op_true_apply(tag);
+        spend.tx.txid[31] = 0xce;
+        spend.outputs = vec![OutputRecord::unspent(1, vec![0x00])];
+        spend.inputs = vec![InputRecord {
+            prev_txid: pay_txid,
+            parent: rbitcoin_store::InputParent::Prevout { create_fk, vout },
+            sequence: u32::MAX,
+            script_sig: vec![],
+            witness: vec![],
+        }];
+        spend
+    };
+    let foreign = spend_of(0xe1, 1);
+    let foreign_txid = foreign.tx.txid;
+    let (prev, parent, _) = connect_script_block(&q, 3, prev, parent, vec![foreign]);
+    let real = spend_of(0xe0, 0);
+    let real_txid = real.tx.txid;
+    let (_fk, _hash, tip_cb) = connect_script_block(&q, 4, prev, parent, vec![real]);
+
+    let mut conn = ElectrumConn::new();
+    let mut hashes_of = |from: u32, to: u32| {
+        let rows = dispatch_with_join(
+            "blockchain.scripthash.get_history",
+            &json!([sh, from, to]),
+            &q,
+            &cfg,
+            &params,
+            None,
+            &mut conn,
+        )
+        .unwrap();
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["tx_hash"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    let foreign_hex = rbitcoin_primitives::display_hash_hex(&foreign_txid);
+    let real_hex = rbitcoin_primitives::display_hash_hex(&real_txid);
+    let tip_hex = rbitcoin_primitives::display_hash_hex(&tip_cb);
+    let other = hashes_of(3, 4);
+    assert!(
+        !other.iter().any(|h| h == &foreign_hex),
+        "spend of the other output is not this script: {other:?}"
+    );
+    assert_eq!(other.len(), 1, "{other:?}");
+    let mine = hashes_of(4, 5);
+    assert!(mine.iter().any(|h| h == &real_hex), "{mine:?}");
+    assert!(mine.iter().any(|h| h == &tip_hex), "{mine:?}");
+    assert!(!mine.iter().any(|h| h == &foreign_hex), "{mine:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn electrum_sh_join() {
     let (dir, q) = tmp_store();

@@ -1526,6 +1526,7 @@ impl Query {
     /// Creates below `from_height` stay as foreign keys. Spends of those
     /// coins come from [`Self::spends_of_members`] on the window's blocks
     /// (`input.body`), not from their spend slots, and not from [`Self::sh_join`].
+    /// A hit counts only when that input's output pays this script.
     fn height_window_history(
         &self,
         scripthash: &[u8; 32],
@@ -1557,8 +1558,19 @@ impl Query {
             }
             height_of.insert(*fk, h);
         }
-        for hit in self.spends_of_members(&members, from, high)? {
+        let hits = self.spends_of_members(&members, from, high)?;
+        let mut parents: Vec<Fk> = hits.iter().map(|hit| hit.parent).collect();
+        parents.sort_unstable_by_key(|fk| fk.0);
+        parents.dedup();
+        let matched = self.sh_matched_outs(scripthash, &parents)?;
+        for hit in hits {
             if hit.height < from || hit.height > high {
+                continue;
+            }
+            let Some(outs) = matched.get(&hit.parent) else {
+                continue;
+            };
+            if !outs.iter().any(|(vout, _)| *vout == hit.vout) {
                 continue;
             }
             height_of.entry(hit.spender).or_insert(hit.height);
