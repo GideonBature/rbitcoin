@@ -10,7 +10,21 @@ fn assert_unspent_newest_page_stops(
         [tip_cb_txid],
         "newest-first page is the tip create"
     );
+}
 
+fn assert_newest_page_leaves_slot_empty(q: &Query, sh: &[u8; 32]) {
+    let view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    let page = crate::scripthash::HistoryFilter::esplora_chain_page(None);
+    let mut slot = None;
+    let rows = q
+        .scripthash_history_filtered_slot_in(sh, &page, &mut slot, &view)
+        .expect("newest page")
+        .rows;
+    assert!(!rows.is_empty());
+    assert!(
+        slot.is_none(),
+        "a limited newest-first page must not fill the full join slot"
+    );
 }
 
 fn sh_page(
@@ -163,8 +177,101 @@ fn sh_history_caps() {
 
     q.set_max_sh_creates(0);
     assert_eq!(q.scripthash_history(&sh).unwrap().len(), 7);
+    assert_newest_page_leaves_slot_empty(&q, &sh);
     q.set_max_sh_creates(7);
+    assert_newest_page_leaves_slot_empty(&q, &sh);
     let stats = q.scripthash_chain_stats(&sh).unwrap();
     assert_eq!((stats.funded_txo_count, stats.spent_txo_count), (7, 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Newest-first pages stay on the page path above, at, and below the cap.
+/// Same-height order is txid, a sibling output's spend is not a row, and the
+/// page after the tip creates is the spend of an older coin.
+#[test]
+fn newest_page_ignores_cap_and_sibling_spends() {
+    use crate::scripthash::HistoryOrder::NewestFirst;
+
+    let (dir, q) = temp_query("sh-newest-page");
+    let sh = script_hash(&[0x51]);
+    let (h0, mut cb0) = coinbase_block(0, Fk::NULL, None);
+    cb0.tx.output_count = 2;
+    cb0.outputs.push(OutputRecord::unspent(1, vec![0x99]));
+    let cb0_txid = cb0.tx.txid;
+    let h0fk = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let create0 = q.block_tx_fks(Height(0)).unwrap()[0];
+
+    let (h1, cb1) = coinbase_block(1, h0fk, Some(h0.hash));
+    let mut spend_a = cb1.clone();
+    spend_a.tx.txid[31] = 0xee;
+    spend_a.tx.output_count = 1;
+    spend_a.outputs = vec![OutputRecord::unspent(1, vec![0x00])];
+    spend_a.inputs = vec![InputRecord {
+        prev_txid: cb0_txid,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: create0,
+            vout: 0,
+        },
+        sequence: u32::MAX,
+        script_sig: vec![],
+        witness: vec![],
+    }];
+    let spend_txid = spend_a.tx.txid;
+    let mut spend_sib = spend_a.clone();
+    spend_sib.tx.txid[31] = 0x11;
+    spend_sib.inputs[0].parent = rbitcoin_store::InputParent::Prevout {
+        create_fk: create0,
+        vout: 1,
+    };
+    let sib_txid = spend_sib.tx.txid;
+    let h1fk = q
+        .connect_block(Height(1), &h1, &[cb1, spend_a, spend_sib])
+        .unwrap();
+
+    let (h2, mut hi_txid) = coinbase_block(2, h1fk, Some(h1.hash));
+    hi_txid.tx.txid[30] = 0xff;
+    let hi = hi_txid.tx.txid;
+    let mut lo_txid = hi_txid.clone();
+    lo_txid.tx.txid[30] = 0x10;
+    let lo = lo_txid.tx.txid;
+    q.connect_block(Height(2), &h2, &[hi_txid, lo_txid]).unwrap();
+
+    let page = |after| sh_page(&q, &sh, NewestFirst, after).unwrap();
+    assert_eq!(
+        page(None),
+        vec![hi],
+        "same-height order is txid, not create-fk"
+    );
+    assert_eq!(page(Some(hi)), vec![lo]);
+    assert_eq!(
+        page(Some(lo)),
+        vec![spend_txid],
+        "the next page is the spend of the older coin"
+    );
+
+    let full = q.scripthash_history(&sh).unwrap();
+    let mut newest: Vec<[u8; 32]> = full.iter().map(|i| i.txid).collect();
+    newest.reverse();
+    assert!(
+        !newest.contains(&sib_txid),
+        "sibling spend is not this script"
+    );
+    q.set_max_sh_creates(0);
+    assert_eq!(page(None), vec![hi]);
+    assert_eq!(
+        q.scripthash_history_filtered(&sh, &crate::scripthash::HistoryFilter::esplora_chain_page(None))
+            .unwrap()
+            .rows
+            .iter()
+            .map(|i| i.txid)
+            .collect::<Vec<_>>(),
+        newest,
+    );
+    assert_newest_page_leaves_slot_empty(&q, &sh);
+    q.set_max_sh_creates(100);
+    assert_newest_page_leaves_slot_empty(&q, &sh);
+    q.set_max_sh_creates(1);
+    assert_newest_page_leaves_slot_empty(&q, &sh);
+    assert_eq!(page(Some(lo)), vec![spend_txid]);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -684,9 +684,9 @@ impl Query {
         Ok(out)
     }
 
-    /// A height window never wants the whole join. A page limit skips it only
-    /// when the unpaged join would hit `--max-sh-creates`, so an under-cap
-    /// page still fills the last-1 slot.
+    /// A height window never wants the whole join. A limited newest-first page
+    /// never fills it, at every cap. A height-ascending page skips it only
+    /// when the unpaged join would hit `--max-sh-creates`.
     fn page_without_full_slot(
         &self,
         scripthash: &[u8; 32],
@@ -705,6 +705,9 @@ impl Query {
         }
         if filter.limit.is_none() {
             return Ok(false);
+        }
+        if filter.order == HistoryOrder::NewestFirst {
+            return Ok(true);
         }
         let cap = self.max_sh_creates();
         Ok(cap > 0 && self.scripthash_create_count(scripthash)? > cap)
