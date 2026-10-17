@@ -2380,8 +2380,12 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
 
     // Four independent max-weight admits at 1 sat/vB. α reaches 1. The
     // one-block cap (λ = 2, 3.2e6 WU) does not fit that inflow below the
-    // paid decade anchor. From two blocks up, λ = 1 and the larger cap
-    // fit that inflow, so those depths are min-relay and the tail holds it.
+    // paid decade anchor, so target 1 is at least 1_000 sat/kvB. Confirm
+    // memory from this journey's earlier admits can only raise that
+    // one-block quote, and whether `generate` sampled them depends on the
+    // relay-enable race, so the pin is the floor plus agreement, not one
+    // integer. From two blocks up, λ = 1 and the larger cap fits, so those
+    // depths are min-relay and the tail holds it.
     // Bare OP_N and the script-class OP_TRUE. `at_min` pays to OP_PUSHDATA4,
     // which does not parse, so it cannot fund one of these.
     let op_true_sat = script_tx.output[7].value.to_sat();
@@ -2417,10 +2421,19 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         assert_eq!(body, tx.compute_txid().to_string(), "{body}");
     }
     let floor = rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB;
-    let expect = |target: u32| if target == 1 { 1_000 } else { floor };
     let (st, body) = http_get(esplora_addr, "/fee-estimates").await;
     assert_eq!(st, 200, "GET /fee-estimates: {body}");
     let estimates: Value = serde_json::from_str(&body).expect("fee-estimates json");
+    let one = (estimates["1"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("missing target 1: {estimates}"))
+        * 1_000.0)
+        .round() as u64;
+    assert!(
+        one >= 1_000,
+        "esplora target 1 below the paid decade: {estimates}"
+    );
+    let expect = |target: u32| if target == 1 { one } else { floor };
     for target in [1u32, 2, 6, 144, 504, 1008] {
         let sat_vb = estimates[target.to_string()]
             .as_f64()
