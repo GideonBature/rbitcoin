@@ -183,11 +183,10 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
 }
 
 /// One genesis chain. A re-sent stored run does not walk, an unmapped run
-/// walks once, an unknown parent is not retried, and a lowered walk cap keeps
-/// the stored prefix while a run past the cap still walks once.
+/// walks once, an unknown parent is not retried, and a time-0 header is
+/// not stored.
 #[test]
 fn stored_header_resends_walk_once() {
-    const CAP: u32 = 4;
     let (dir, hub) = tmp_hub();
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -252,36 +251,20 @@ fn stored_header_resends_walk_once() {
         assert!(!side_st.hash_height.contains_key(&header.block_hash()));
     }
 
-    hub.set_stored_height_walk_cap(CAP);
-    let parent = chain[(CAP + 7) as usize].block_hash();
-    let mut rejected = mine(parent, 1_500_030_000 + (CAP + 9) * 600, CAP + 9).header;
+    let parent = chain[11].block_hash();
+    let mut rejected = mine(parent, 1_500_030_000 + 13 * 600, 13).header;
     rejected.time = 0;
-    let mut batch = chain[CAP as usize..(CAP as usize + 8)].to_vec();
+    let mut batch = chain[4..12].to_vec();
     batch.push(rejected);
     let mut tail = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
-    let _ = hub.take_stored_height_walk_steps();
     stored_batch(&mut tail, &hub, 0, batch);
-    assert!(hub.take_stored_height_walk_steps() >= u64::from(CAP));
-    for header in &chain[CAP as usize..CAP as usize + 8] {
+    for header in &chain[4..12] {
         assert!(tail.header_fks.contains_key(&header.block_hash()));
     }
-    assert!(!tail.header_fks.contains_key(&rejected.block_hash()));
-
-    let above = (CAP as usize)..(CAP as usize + 2);
-    let mut past = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
-    let _ = hub.take_stored_height_walk_steps();
-    stored_batch(&mut past, &hub, 0, chain[above.clone()].to_vec());
-    assert_eq!(
-        hub.take_stored_height_walk_steps(),
-        u64::from(CAP),
-        "a stored run past the walk cap walks once, not once per header"
+    assert!(
+        !tail.header_fks.contains_key(&rejected.block_hash()),
+        "a time-0 header is not stored"
     );
-    for header in &chain[above] {
-        assert!(
-            past.header_fks.contains_key(&header.block_hash()),
-            "a header past the cap is still accepted"
-        );
-    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

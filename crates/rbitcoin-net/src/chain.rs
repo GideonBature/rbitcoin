@@ -386,9 +386,6 @@ pub struct ChainHub {
     header_contextual_checks: AtomicU64,
     #[cfg(test)]
     stored_height_walk_steps: AtomicU64,
-    /// Test stand-in for the 10_000-step ancestor cap. Production uses 10_000.
-    #[cfg(test)]
-    stored_height_walk_cap: AtomicU32,
 }
 
 /// One `getchaintips` row. Status is a Core-shaped string (`active`,
@@ -415,6 +412,31 @@ fn held_branch_beats(
     let tie = !work_better(incumbent, candidate);
     work_better(candidate, incumbent)
         || (tie && !incumbent_precious && (candidate_precious || candidate_seq < incumbent_seq))
+}
+
+/// Walk `start`'s parents until a known height, a zero previous hash, or
+/// `cap` steps. `cap` steps with no known parent returns `None`.
+fn ancestor_walk(
+    start: &BlockHash,
+    cap: u32,
+    mut header_of: impl FnMut(&BlockHash) -> Option<Header>,
+    mut known_height: impl FnMut(&BlockHash) -> Option<u32>,
+) -> Option<u32> {
+    let mut cur = *start;
+    let mut delta = 0u32;
+    for _ in 0..cap {
+        let hdr = header_of(&cur)?;
+        let prev = hdr.prev_blockhash;
+        if prev.to_byte_array() == [0u8; 32] {
+            return Some(delta);
+        }
+        if let Some(ph) = known_height(&prev) {
+            return Some(ph.saturating_add(1).saturating_add(delta));
+        }
+        cur = prev;
+        delta = delta.saturating_add(1);
+    }
+    None
 }
 
 impl ChainHub {
@@ -459,8 +481,6 @@ impl ChainHub {
             header_contextual_checks: AtomicU64::new(0),
             #[cfg(test)]
             stored_height_walk_steps: AtomicU64::new(0),
-            #[cfg(test)]
-            stored_height_walk_cap: AtomicU32::new(10_000),
         }
     }
 
@@ -1502,28 +1522,17 @@ impl ChainHub {
         if let Some(h) = self.header_height(hash) {
             return Some(h);
         }
-        let mut cur = *hash;
-        let mut delta = 0u32;
-        #[cfg(test)]
-        let cap = self.stored_height_walk_cap.load(Ordering::Relaxed);
-        #[cfg(not(test))]
-        let cap = 10_000u32;
-        for _ in 0..cap {
-            #[cfg(test)]
-            self.stored_height_walk_steps
-                .fetch_add(1, Ordering::Relaxed);
-            let hdr = self.header_of(&cur)?;
-            let prev = hdr.prev_blockhash;
-            if prev.to_byte_array() == [0u8; 32] {
-                return Some(delta);
-            }
-            if let Some(ph) = self.header_height(&prev) {
-                return Some(ph.saturating_add(1).saturating_add(delta));
-            }
-            cur = prev;
-            delta = delta.saturating_add(1);
-        }
-        None
+        ancestor_walk(
+            hash,
+            10_000,
+            |cur| {
+                #[cfg(test)]
+                self.stored_height_walk_steps
+                    .fetch_add(1, Ordering::Relaxed);
+                self.header_of(cur)
+            },
+            |prev| self.header_height(prev),
+        )
     }
 
     fn mtp_off_tip(&self, parent: &Header, in_batch: &HashMap<[u8; 32], HeaderSyncNode>) -> u32 {
@@ -3142,11 +3151,6 @@ impl ChainHub {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_stored_height_walk_cap(&self, cap: u32) {
-        self.stored_height_walk_cap.store(cap, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
     pub(crate) fn test_clear_chain_work_prefix(&self) {
         self.chain_work_prefix.write().unwrap().clear();
     }
@@ -3901,6 +3905,34 @@ mod tests {
 
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
         super::tiny_regtest_hub_labeled("chain")
+    }
+
+    #[test]
+    fn ancestor_walk_stops_at_cap() {
+        let hashes: Vec<BlockHash> = (0..9u8)
+            .map(|i| BlockHash::from_byte_array([i + 1; 32]))
+            .collect();
+        let mut steps = 0u32;
+        let got = ancestor_walk(
+            &hashes[0],
+            4,
+            |hash| {
+                steps += 1;
+                let idx = hashes.iter().position(|h| h == hash)?;
+                let prev = *hashes.get(idx + 1)?;
+                Some(Header {
+                    version: Version::from_consensus(4),
+                    prev_blockhash: prev,
+                    merkle_root: bitcoin::TxMerkleNode::from_byte_array([0; 32]),
+                    time: 1,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
+                    nonce: 0,
+                })
+            },
+            |hash| (hash == &hashes[8]).then_some(0),
+        );
+        assert_eq!(got, None);
+        assert_eq!(steps, 4);
     }
 
     #[test]
