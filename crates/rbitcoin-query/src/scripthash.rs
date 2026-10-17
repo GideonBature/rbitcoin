@@ -538,18 +538,18 @@ impl Query {
         history_items_from_joined(joined, filter).rows.len() >= limit
     }
 
-    /// How many leading `rest` creates can still change a full page.
+    /// How many leading `rest` creates can still change a height-ascending page.
     ///
-    /// One height read and one spent-range read for the whole tail. The join
-    /// loop calls this once, so a full page does not re-read that tail per wave.
+    /// The join loop calls this once, so a full page does not re-read the tail
+    /// per wave.
     fn history_tail_keep(
         &self,
         joined: &[ShJoinedOut],
         filter: &HistoryFilter,
         rest: &[Fk],
     ) -> Result<usize, QueryError> {
-        if rest.is_empty() {
-            return Ok(0);
+        if rest.is_empty() || filter.order != HistoryOrder::HeightAsc {
+            return Ok(rest.len());
         }
         let page = history_items_from_joined(joined, filter).rows;
         let edge = page.last().map(|i| i.height).unwrap_or(0);
@@ -559,33 +559,10 @@ impl Query {
                 "invariant: SH create height batch length",
             ));
         }
-        match filter.order {
-            HistoryOrder::HeightAsc => Ok(heights
-                .iter()
-                .take_while(|h| i64::from(h.unwrap_or(0)) <= edge)
-                .count()),
-            HistoryOrder::NewestFirst => {
-                let ranges = self.store.tx_spent_range_batch(rest)?;
-                if ranges.len() != rest.len() {
-                    return Err(StoreError::Corrupt(
-                        "invariant: SH spent-range batch length",
-                    ));
-                }
-                let reach = self.store.spent_ranges_reach(&ranges, edge)?;
-                if reach.len() != rest.len() {
-                    return Err(StoreError::Corrupt(
-                        "invariant: SH spent-range batch length",
-                    ));
-                }
-                let mut keep = 0usize;
-                for (i, (h, hot)) in heights.iter().zip(reach).enumerate() {
-                    if i64::from(h.unwrap_or(0)) >= edge || hot {
-                        keep = i.saturating_add(1);
-                    }
-                }
-                Ok(keep)
-            }
-        }
+        Ok(heights
+            .iter()
+            .take_while(|h| i64::from(h.unwrap_or(0)) <= edge)
+            .count())
     }
 
     /// Confirmed-strong create outpoints plus confirmed spenders (create_fk join).
@@ -1039,9 +1016,7 @@ impl Query {
     }
 
     fn newest_limited_page(&self, filter: &HistoryFilter) -> bool {
-        filter.limit.is_some()
-            && filter.order == HistoryOrder::NewestFirst
-            && (filter.after_txid.is_none() || self.tx_index_enabled())
+        filter.limit.is_some() && filter.order == HistoryOrder::NewestFirst
     }
 
     fn newest_page_scan(
