@@ -121,6 +121,56 @@ async fn wallet_pages_after_txid(addr: SocketAddr, sh1: &str) {
     foreign_chain_cursor_is_not_this_page(addr, sh1, &t1, &t3).await;
 }
 
+/// Combined `/txs` with a confirmed cursor is the chain page: the mempool tx
+/// stays off the body. A mempool cursor keeps only the mempool tail, then
+/// that same confirmed page. An unknown cursor stays 422.
+async fn chain_cursor_matches_chain_page(pad: &HttpPad, mempool_tx: &bitcoin::Transaction) {
+    let sh = block_hash_hex(&script_hash(&[0x51]));
+    let mem_hex = display_txid(mempool_tx.compute_txid());
+    let confirmed = block_hash_hex(pad.cbs.last().expect("tip coinbase"));
+
+    let (st, chain) = http_get(
+        pad.addr,
+        &format!("/scripthash/{sh}/txs/chain/{confirmed}"),
+    )
+    .await;
+    assert_eq!(st, 200, "{chain}");
+    let (st, combined) = http_get(
+        pad.addr,
+        &format!("/scripthash/{sh}/txs?after_txid={confirmed}"),
+    )
+    .await;
+    assert_eq!(st, 200, "{combined}");
+    assert_eq!(combined, chain, "confirmed cursor is the chain page");
+    assert!(
+        !combined.contains(&mem_hex),
+        "mempool tx on a confirmed cursor: {combined}"
+    );
+
+    let (st, first_chain) = http_get(pad.addr, &format!("/scripthash/{sh}/txs/chain")).await;
+    assert_eq!(st, 200, "{first_chain}");
+    let (st, after_mem) = http_get(
+        pad.addr,
+        &format!("/scripthash/{sh}/txs?after_txid={mem_hex}"),
+    )
+    .await;
+    assert_eq!(st, 200, "{after_mem}");
+    assert_eq!(
+        after_mem, first_chain,
+        "one mempool tx leaves an empty tail, then the confirmed page"
+    );
+    assert!(!after_mem.contains(&mem_hex), "{after_mem}");
+
+    let unknown = "ff".repeat(32);
+    let (st, body) = http_get(
+        pad.addr,
+        &format!("/scripthash/{sh}/txs?after_txid={unknown}"),
+    )
+    .await;
+    assert_eq!(st, 422, "{body}");
+    assert!(body.contains("after_txid not found"), "{body}");
+}
+
 async fn foreign_chain_cursor_is_not_this_page(addr: SocketAddr, sh1: &str, t1: &str, t3: &str) {
     let t2 = block_hash_hex(&pay_txid(0x22));
     for path in [
@@ -496,6 +546,7 @@ async fn esplora_tcp_wallet_mempool_and_replace() {
     wallet_posts_scripthashes(pad.addr, [&a1, &a2], [&sh1, &sh2]).await;
     tip_height_overlaps_scripthash_txs(&pad).await;
     let spend = mempool_spend_is_full_json(&pad).await;
+    chain_cursor_matches_chain_page(&pad, &spend).await;
     mempool_spend_outspends_and_hex(&pad, &spend).await;
     junk_paths_asof_and_post(pad.addr, &pad.hashes[0]).await;
     same_height_replace_restamps(&mut pad).await;

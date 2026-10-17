@@ -3899,6 +3899,40 @@ impl MempoolHub {
         out
     }
 
+    /// `true` when `txid` is in the live scripthash index for `scripthash`.
+    /// The index only: no graph walk and no tx body.
+    pub fn scripthash_indexes_tx(&self, scripthash: &[u8; 32], txid: &Txid) -> bool {
+        self.sh_index
+            .lock()
+            .unwrap()
+            .by_sh
+            .get(scripthash)
+            .is_some_and(|set| set.contains(txid))
+    }
+
+    /// Live `(txid, fee_sat)` for `scripthash`, same membership and txid order
+    /// as [`Self::scripthash_mempool`]. A graph entry with no body is skipped.
+    /// Bodies are not cloned.
+    pub fn scripthash_mempool_fees(&self, scripthash: &[u8; 32]) -> Vec<([u8; 32], i64)> {
+        let want: Vec<Txid> = self.sh_index.lock().unwrap().txs_for(scripthash).collect();
+        if want.is_empty() {
+            return Vec::new();
+        }
+        let g = self.lock_read();
+        let mut out = Vec::new();
+        for txid in want {
+            let Some(e) = g.graph.get(&txid) else {
+                continue;
+            };
+            if g.get_tx(&txid).is_none() {
+                continue;
+            }
+            out.push((txid.to_byte_array(), e.fee_sat as i64));
+        }
+        out.sort_by_key(|row| row.0);
+        out
+    }
+
     /// Unconfirmed delta for Electrum balance (sats): +mempool outputs − spent confirmed.
     ///
     /// Skips txs already connected on the tip (`tx_fk_by_txid_tip`) so a leftover

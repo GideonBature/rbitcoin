@@ -32,6 +32,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MULTI_ADDRESS_LIMIT: usize = 300;
+/// Esplora mempool history on `/txs` and `/txs/mempool`.
+const MEMPOOL_TX_PAGE: usize = 50;
 
 type JoinBag = HashMap<[u8; 32], Arc<ShJoinSlot>>;
 
@@ -1177,23 +1179,18 @@ fn combined_txs(
             return after_txid_not_found();
         }
     }
-    // Membership is this script's mempool rows. A tx sitting in the pool for
-    // some other script must not restart this script's first page.
-    let mempool_rows = if asof.is_none() {
-        mempool_txs_json(st, sh)
+    // A confirmed cursor is absent from this script's mempool index, so the
+    // chain page is read without mempool tx bodies. A cursor inside the first
+    // mempool page keeps only the rows after it. A tx in the pool for some
+    // other script must not restart this script's first page.
+    let (mempool_rows, after_in_mempool) = if asof.is_none() {
+        mempool_page_json(st, sh, after)
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
-    let after_in_mempool = after.is_some_and(|id| {
-        let hex = block_hash_hex(&id);
-        mempool_rows.iter().any(|v| v["txid"] == hex)
-    });
     let mut out = Vec::new();
     if asof.is_none() && (after.is_none() || after_in_mempool) {
-        out.extend(match after {
-            Some(id) if after_in_mempool => skip_mempool_after(mempool_rows, &id),
-            _ => mempool_rows,
-        });
+        out.extend(mempool_rows);
     }
     let chain_after = if after_in_mempool { None } else { after };
     let filter = HistoryFilter::esplora_chain_page(chain_after);
@@ -1639,32 +1636,64 @@ pub async fn address_txs_mempool(
 }
 
 fn mempool_txs_json(st: &AppState, sh: &[u8; 32]) -> Vec<Value> {
+    mempool_page_json(st, sh, None).0
+}
+
+/// Mempool JSON that stays on this `/txs` page, and whether `after` is one of
+/// the first [`MEMPOOL_TX_PAGE`] rows.
+///
+/// `after` outside this script's mempool index returns an empty list and
+/// `false` without loading a mempool body. `after` inside the page returns
+/// only the tail. `after` in the index but past the page returns empty and
+/// `false`, matching take-then-miss.
+fn mempool_page_json(st: &AppState, sh: &[u8; 32], after: Option<[u8; 32]>) -> (Vec<Value>, bool) {
     let Some(mp) = st.mempool.as_ref() else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-    let mut out = Vec::new();
-    for item in mp.scripthash_mempool(sh).into_iter().take(50) {
-        if let Ok(Some((fk, _))) = st.query.get_tx_by_txid(&item.txid) {
-            if let Ok(v) = build_tx_json(&st.query, fk, st.network) {
-                out.push(v);
-                continue;
-            }
-        }
-        let txid = Txid::from_byte_array(item.txid);
-        let Some(tx) = mp.get_tx(&txid) else {
-            continue;
-        };
-        if let Ok(v) = build_tx_json_from_tx(
-            &st.query,
-            &tx,
-            st.network,
-            Some(item.fee),
-            Some(mp.as_ref()),
-        ) {
-            out.push(v);
+    if let Some(id) = after {
+        let tid = Txid::from_byte_array(id);
+        if !mp.scripthash_indexes_tx(sh, &tid) {
+            return (Vec::new(), false);
         }
     }
-    out
+    let mut rows = mp.scripthash_mempool_fees(sh);
+    rows.truncate(MEMPOOL_TX_PAGE);
+    let on_page = if let Some(id) = after {
+        let Some(i) = rows.iter().position(|(txid, _)| *txid == id) else {
+            return (Vec::new(), false);
+        };
+        rows.drain(..=i);
+        true
+    } else {
+        false
+    };
+    let mut out = Vec::new();
+    for (txid, fee) in rows {
+        push_mempool_tx_json(st, mp, txid, fee, &mut out);
+    }
+    (out, on_page)
+}
+
+fn push_mempool_tx_json(
+    st: &AppState,
+    mp: &MempoolHub,
+    txid: [u8; 32],
+    fee: i64,
+    out: &mut Vec<Value>,
+) {
+    if let Ok(Some((fk, _))) = st.query.get_tx_by_txid(&txid) {
+        if let Ok(v) = build_tx_json(&st.query, fk, st.network) {
+            out.push(v);
+            return;
+        }
+    }
+    let id = Txid::from_byte_array(txid);
+    let Some(tx) = mp.get_tx(&id) else {
+        return;
+    };
+    if let Ok(v) = build_tx_json_from_tx(&st.query, &tx, st.network, Some(fee), Some(mp)) {
+        out.push(v);
+    }
 }
 
 fn mempool_txs_for_sh(st: &AppState, sh: &[u8; 32]) -> Response {
@@ -1695,14 +1724,6 @@ fn txid_is_known(st: &AppState, id: &[u8; 32]) -> bool {
     let tid = Txid::from_byte_array(*id);
     st.mempool.as_ref().is_some_and(|m| m.contains(&tid))
         || st.query.get_tx_by_txid(id).ok().flatten().is_some()
-}
-
-fn skip_mempool_after(rows: Vec<Value>, after: &[u8; 32]) -> Vec<Value> {
-    let hex = block_hash_hex(after);
-    match rows.iter().position(|v| v["txid"] == hex) {
-        Some(i) => rows[i.saturating_add(1)..].to_vec(),
-        None => rows,
-    }
 }
 
 #[derive(Deserialize)]
