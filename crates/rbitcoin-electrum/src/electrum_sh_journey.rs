@@ -291,6 +291,134 @@ async fn tip_push_two_clients_and_late(q: Arc<Query>, hub: Option<Arc<MempoolHub
     handle.shutdown().await;
 }
 
+fn connect_script_block(
+    q: &Query,
+    height: u32,
+    prev: Fk,
+    parent: [u8; 32],
+    extra: Vec<TxApply>,
+) -> (Fk, [u8; 32], [u8; 32]) {
+    let mut merkle = [0u8; 32];
+    merkle[0..4].copy_from_slice(&height.to_le_bytes());
+    merkle[5] = 0xec;
+    let hash =
+        rbitcoin_store::block_header_hash(1, &parent, &merkle, height + 1, 0x207fffff, height);
+    let hdr = HeaderRecord {
+        prev_fk: prev,
+        version: 1,
+        timestamp: height + 1,
+        bits: 0x207fffff,
+        nonce: height,
+        merkle_root: merkle,
+        hash,
+        size: 0,
+        weight: 0,
+    };
+    let cb = op_true_apply(height as u8);
+    let cbtxid = cb.tx.txid;
+    let mut txs = vec![cb];
+    txs.extend(extra);
+    let fk = q.connect_block(Height(height), &hdr, &txs).unwrap();
+    (fk, hash, cbtxid)
+}
+
+/// Old creates, a tip create, and a tip spend of the oldest coin. A
+/// `from_height` above 0 is that window and is served above the create cap.
+/// Open history, and a window that still starts at height 0, stay capped.
+#[test]
+fn from_height_window_is_served_above_the_create_cap() {
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let sh = electrum_scripthash_hex(&[0x51]);
+    let mut prev = Fk::NULL;
+    let mut parent = [0u8; 32];
+    let mut oldest = [0u8; 32];
+    for h in 0..5u32 {
+        let (fk, hash, txid) = connect_script_block(&q, h, prev, parent, Vec::new());
+        if h == 0 {
+            oldest = txid;
+        }
+        prev = fk;
+        parent = hash;
+    }
+    let (create_fk, _) = q.get_tx_by_txid(&oldest).unwrap().unwrap();
+    let mut spend = op_true_apply(0xee);
+    spend.inputs = vec![InputRecord {
+        prev_txid: oldest,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk,
+            vout: 0,
+        },
+        sequence: u32::MAX,
+        script_sig: vec![],
+        witness: vec![],
+    }];
+    let spend_txid = spend.tx.txid;
+    let tip = 5u32;
+    let (_fk, _hash, tip_cb) = connect_script_block(&q, tip, prev, parent, vec![spend]);
+
+    q.set_max_sh_creates(2);
+    let mut conn = ElectrumConn::new();
+    let open = dispatch_with_join(
+        "blockchain.scripthash.get_history",
+        &json!([sh]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut conn,
+    )
+    .unwrap_err();
+    assert!(
+        open.contains("scripthash join exceeds --max-sh-creates"),
+        "{open}"
+    );
+    let from_zero = dispatch_with_join(
+        "blockchain.scripthash.get_history",
+        &json!([sh, 0, tip + 1]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut conn,
+    )
+    .unwrap_err();
+    assert!(
+        from_zero.contains("scripthash join exceeds --max-sh-creates"),
+        "{from_zero}"
+    );
+
+    let window = dispatch_with_join(
+        "blockchain.scripthash.get_history",
+        &json!([sh, tip, tip + 1]),
+        &q,
+        &cfg,
+        &params,
+        None,
+        &mut conn,
+    );
+    assert!(
+        window.is_ok(),
+        "a from_height window must not hit the create cap: {window:?}"
+    );
+    let rows = window.unwrap();
+    let hashes: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["tx_hash"].as_str())
+        .collect();
+    let tip_hex = rbitcoin_primitives::display_hash_hex(&tip_cb);
+    let spend_hex = rbitcoin_primitives::display_hash_hex(&spend_txid);
+    let old_hex = rbitcoin_primitives::display_hash_hex(&oldest);
+    assert!(hashes.contains(&tip_hex.as_str()), "{hashes:?}");
+    assert!(hashes.contains(&spend_hex.as_str()), "{hashes:?}");
+    assert!(!hashes.contains(&old_hex.as_str()), "{hashes:?}");
+    assert_eq!(hashes.len(), 2, "{hashes:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn electrum_sh_join() {
     let (dir, q) = tmp_store();
