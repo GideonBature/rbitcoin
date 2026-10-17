@@ -25,6 +25,7 @@ bitcoin = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 binary_sv2 = { workspace = true }
+common_messages_sv2 = { workspace = true }
 template_distribution_sv2 = { workspace = true }
 
 [[test]]

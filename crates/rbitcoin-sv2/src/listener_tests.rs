@@ -135,50 +135,6 @@ async fn authority_key_prints_in_key_utils_base58check() {
     tp.shutdown().await;
 }
 
-/// Silent sockets take every slot at accept; the setup deadline must close
-/// them so a real client gets in.
-#[tokio::test]
-async fn silent_sockets_are_dropped_at_the_setup_deadline() {
-    let tc = shared_regtest(0);
-    let chain = Arc::clone(&tc.chain);
-    use tokio::io::AsyncReadExt;
-
-    let setup_timeout = Duration::from_millis(300);
-    let tp = run_sv2_tp(Sv2TpConfig {
-        listen: "127.0.0.1:0".parse().unwrap(),
-        chain,
-        authority_secret: [7; 32],
-        cert_validity: Duration::from_secs(3600),
-        stale_grace: Duration::from_secs(10),
-        setup_timeout,
-        write_timeout: WRITE_TIMEOUT,
-        fee_delta: FEE_DELTA,
-        template_interval: TEMPLATE_INTERVAL,
-    })
-    .await
-    .expect("listen");
-    let (addr, pk) = (tp.local_addr, tp.authority_pubkey);
-
-    let mut silent = Vec::new();
-    for _ in 0..MAX_SESSIONS {
-        silent.push(tokio::net::TcpStream::connect(addr).await.expect("tcp"));
-    }
-    for s in &mut silent {
-        let mut b = [0u8; 1];
-        let closed = tokio::time::timeout(setup_timeout * 10, s.read(&mut b)).await;
-        assert!(
-            matches!(closed, Ok(Ok(0) | Err(_))),
-            "silent socket must be closed after the setup deadline"
-        );
-    }
-
-    let mut c = connect_when_free(addr, pk).await;
-    c.setup_connection(TDP, 2, 2, 0).await.unwrap();
-    let f = c.recv().await.expect("setup reply");
-    assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
-    tp.shutdown().await;
-}
-
 /// A TDP session without `CoinbaseOutputConstraints` never gets a template
 /// and never writes, so the setup deadline also covers the first constraints.
 /// Other frames before them do not reset it.
