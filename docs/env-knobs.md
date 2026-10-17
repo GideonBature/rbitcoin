@@ -51,7 +51,7 @@ for signet/mainnet sync. **Not** CLI.
 
 | Env | Use |
 |-----|-----|
-| `RBITCOIN_TEST_*` | Node/store test fixtures (`TEST_DROP_STORE`, `TEST_NO_SUCH_CAP`) |
+| `RBITCOIN_TEST_DROP_STORE` | Node/store test fixture |
 | `RBITCOIN_CORE_DATA` | Directory of Core JSON corpora for consensus tests |
 
 ## Deleted / do not reintroduce
