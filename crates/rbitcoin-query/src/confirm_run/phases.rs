@@ -45,7 +45,7 @@ fn assemble_parent_mtp_and_bits(
         "confirm: load incomplete (parent header plan missing above tip)",
     )))?;
     let period_first = retarget_first_time(query, params, height.0)?;
-    rbitcoin_consensus::check_header(
+    let mtp = rbitcoin_consensus::check_header(
         params,
         height,
         header,
@@ -55,10 +55,7 @@ fn assemble_parent_mtp_and_bits(
         period_first,
         |h| header_bits_plan_or_store(query, h),
     )?;
-    Ok((
-        rbitcoin_consensus::block::median_or_bad_header(&times)?,
-        times,
-    ))
+    Ok((mtp, times))
 }
 
 fn assemble_chained_header(
@@ -71,7 +68,7 @@ fn assemble_chained_header(
     time_window: &[u32],
 ) -> Result<u32, ConfirmError> {
     let period_first = retarget_first_time(query, params, height.0)?;
-    rbitcoin_consensus::check_header(
+    Ok(rbitcoin_consensus::check_header(
         params,
         height,
         header,
@@ -84,9 +81,6 @@ fn assemble_chained_header(
         time_window,
         period_first,
         |h| header_bits_plan_or_store(query, h),
-    )?;
-    Ok(rbitcoin_consensus::block::median_or_bad_header(
-        time_window,
     )?)
 }
 

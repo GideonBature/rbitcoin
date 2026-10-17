@@ -68,6 +68,7 @@ pub fn validate_header_hashed(
                 .map(CompactTarget::from_consensus)
         },
     )
+    .map(|_| ())
     .map_err(ConfirmError::from)
 }
 

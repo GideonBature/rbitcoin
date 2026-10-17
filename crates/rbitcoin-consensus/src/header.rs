@@ -20,6 +20,9 @@ pub struct ParentHeader {
 /// `mtp_times` ends at the parent (up to 11 timestamps). `period_first_time`
 /// is the header `interval` blocks before a retarget height. `bits_at` supplies
 /// earlier `nBits` for the testnet min-difficulty walk.
+///
+/// On success the value is that parent median, sorted once. Genesis has no
+/// parent window and returns `0`.
 #[allow(clippy::too_many_arguments)] // each argument is one caller fact
 pub fn check_header(
     params: &ChainParams,
@@ -30,7 +33,7 @@ pub fn check_header(
     mtp_times: &[u32],
     period_first_time: Option<u32>,
     mut bits_at: impl FnMut(u32) -> Option<CompactTarget>,
-) -> Result<(), ConsensusError> {
+) -> Result<u32, ConsensusError> {
     let hash_bh = bitcoin::BlockHash::from_byte_array(hash);
     if height.0 == 0 {
         if !check_genesis_hash(params, hash_bh) {
@@ -40,7 +43,8 @@ pub fn check_header(
         if header.bits != expected {
             return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
         }
-        return pow_hash_meets_target(hash, header.bits, params.pow_limit);
+        pow_hash_meets_target(hash, header.bits, params.pow_limit)?;
+        return Ok(0);
     }
 
     let parent = parent.ok_or(ConsensusError::BadPrev)?;
@@ -75,7 +79,8 @@ pub fn check_header(
     if header.bits != expected {
         return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
     }
-    pow_hash_meets_target(hash, header.bits, params.pow_limit)
+    pow_hash_meets_target(hash, header.bits, params.pow_limit)?;
+    Ok(mtp)
 }
 
 /// Validate header linkage, MTP, difficulty bits, and proof-of-work.
@@ -498,6 +503,46 @@ mod median_time_past_tests {
             matches!(retarget, ConsensusError::BadHeader(s) if s.contains("missing retarget")),
             "{retarget:?}"
         );
+    }
+
+    #[test]
+    fn check_header_returns_the_median_it_checked() {
+        let params = ChainParams::regtest();
+        let genesis = crate::params::genesis_block(&params);
+        let genesis_mtp = check_header(
+            &params,
+            Height(0),
+            &genesis.header,
+            genesis.block_hash().to_byte_array(),
+            None,
+            &[],
+            None,
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(genesis_mtp, 0);
+
+        let parent_time = genesis.header.time;
+        let block =
+            crate::regtest_pad::mine_empty_regtest(genesis.block_hash(), parent_time + 1, 1);
+        let times = [parent_time, parent_time - 1, parent_time + 2];
+        let mtp = check_header(
+            &params,
+            Height(1),
+            &block.header,
+            block.block_hash().to_byte_array(),
+            Some(ParentHeader {
+                hash: genesis.block_hash().to_byte_array(),
+                time: parent_time,
+                bits: genesis.header.bits,
+            }),
+            &times,
+            None,
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(mtp, median_time_past_times(&times).unwrap());
+        assert_eq!(mtp, parent_time);
     }
 
     #[test]
