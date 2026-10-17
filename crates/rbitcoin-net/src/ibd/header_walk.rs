@@ -18,7 +18,7 @@
 //! checkpoints is the previous checkpoint plus those stored headers. That
 //! replay runs only when a competing headers batch forks there.
 
-use super::state::IbdWorkState;
+use super::state::{ConfirmedLocatorTail, IbdWorkState};
 use super::ORDERED_HEADERS_SOFT_CAP;
 use crate::chain::ChainHub;
 use bitcoin::block::Header;
@@ -2368,11 +2368,41 @@ fn ask_header_peer(
     peer: usize,
     tips: &[BlockHash],
 ) -> Result<bool, crate::error::NetError> {
-    if !super::dial::request_headers_from(&st.slots, peer, hub, &mut st.header_req_seq, tips)? {
+    let tail = confirmed_chain_tail(st, hub)?;
+    let locator = super::dial::ibd_header_locator(hub, tips, &tail);
+    if !super::dial::request_headers_from(&st.slots, peer, &mut st.header_req_seq, locator)? {
         return Ok(false);
     }
     note_lane(st, peer);
     Ok(true)
+}
+
+/// Confirmed-chain tail for `getheaders`.
+///
+/// Rebuilt when `published_tip` height or hash changes. The work-path prefix
+/// is not part of this vec.
+fn confirmed_chain_tail(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+) -> Result<Vec<BlockHash>, crate::error::NetError> {
+    let published = hub.query.published_tip();
+    let height = published.map(|tip| tip.height);
+    let hash = published.map(|tip| tip.hash);
+    if let Some(cached) = &st.confirmed_locator_tail {
+        if cached.height == height && cached.hash == hash {
+            return Ok(cached.hashes.clone());
+        }
+    }
+    let tail = hub
+        .query
+        .locator_hashes()
+        .map_err(|e| crate::error::NetError::Consensus(e.to_string()))?;
+    st.confirmed_locator_tail = Some(ConfirmedLocatorTail {
+        height,
+        hash,
+        hashes: tail.clone(),
+    });
+    Ok(tail)
 }
 
 fn parent_header(st: &IbdWorkState, hub: &ChainHub, hash: BlockHash) -> Option<Header> {
@@ -3574,6 +3604,9 @@ mod tests {
 
     /// One ask from the stored tip. An accepted batch is written and
     /// checkpointed. A header already indexed is appended and not asked for.
+    /// On that same hub, a second ask at one confirmed tip reuses the
+    /// confirmed-chain tail. A same-height tip hash, then a taller tip, each
+    /// rebuild it.
     #[test]
     fn a_seeded_header_walk_stores_drains_and_refills() {
         let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-seeded");
@@ -3655,6 +3688,135 @@ mod tests {
         assert!(st.ordered_set.contains(&second.block_hash()));
         assert!(rx0.try_recv().is_err());
         assert!(rx1.try_recv().is_err());
+        confirmed_tail_follows_the_published_tip(&hub);
+    }
+
+    /// Same hub as the seeded walk. Two asks share one confirmed tail. A
+    /// same-height hash, then a taller tip, each rebuild it.
+    fn confirmed_tail_follows_the_published_tip(hub: &ChainHub) {
+        let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+        hub.generate_to_script(2, script.clone(), vec![]).unwrap();
+        let tip = hub.tip_hash().unwrap();
+        let tip_h = hub.tip_height().unwrap();
+        let genesis = hub.params.genesis_hash;
+        let ancestor = hub
+            .query
+            .locator_hashes()
+            .unwrap()
+            .into_iter()
+            .find(|hash| *hash != tip && *hash != genesis)
+            .expect("the confirmed chain locator has an ancestor between tip and genesis");
+        let (peer, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(tip), Some(tip_h));
+        let ahead = BlockHash::from_byte_array([0xab; 32]);
+        st.ordered.push_back(ahead);
+        st.ordered_set.insert(ahead);
+        st.hash_height.insert(ahead, tip_h.saturating_add(100));
+        assert!(st.ordered.len() < ORDERED_HEADERS_SOFT_CAP);
+        assert!(send_getheaders(&mut st, hub).unwrap());
+        let first = take_locator(&mut rx);
+        assert_eq!(
+            first.first().copied(),
+            Some(ahead),
+            "a queue with room asks from the stored path tip"
+        );
+        assert!(
+            first.contains(&ancestor),
+            "the confirmed ancestor stays in the locator"
+        );
+        assert!(first.contains(&tip));
+        same_tip_reuses_the_tail(&mut st, hub, &mut rx, &first);
+        let same_h_tip = same_height_rebuilds_the_tail(&mut st, hub, &mut rx, tip, tip_h, ahead);
+        taller_tip_rebuilds_the_tail(&mut st, hub, &mut rx, &script, same_h_tip, ahead);
+    }
+
+    fn same_tip_reuses_the_tail(
+        st: &mut IbdWorkState,
+        hub: &ChainHub,
+        rx: &mut mpsc::UnboundedReceiver<PeerCmd>,
+        first: &[BlockHash],
+    ) {
+        assert_ne!(take_header_ask(st, 0), HeaderAsk::Unsolicited);
+        let before = rbitcoin_query::header_lookup_count();
+        assert!(send_getheaders(st, hub).unwrap());
+        let second_ask = take_locator(rx);
+        assert_eq!(
+            rbitcoin_query::header_lookup_count().saturating_sub(before),
+            0,
+            "a second ask at the same confirmed tip does not walk the header store"
+        );
+        assert_eq!(second_ask, first);
+    }
+
+    fn same_height_rebuilds_the_tail(
+        st: &mut IbdWorkState,
+        hub: &ChainHub,
+        rx: &mut mpsc::UnboundedReceiver<PeerCmd>,
+        tip: BlockHash,
+        tip_h: u32,
+        ahead: BlockHash,
+    ) -> BlockHash {
+        hub.invalidate_block(tip).unwrap();
+        assert_eq!(hub.tip_height(), Some(tip_h - 1));
+        let alt_script = bitcoin::ScriptBuf::from_bytes(vec![0x52]);
+        hub.generate_to_script(1, alt_script, vec![]).unwrap();
+        let same_h_tip = hub.tip_hash().unwrap();
+        let published = hub.query.published_tip().expect("published tip");
+        assert_eq!(hub.tip_height(), Some(tip_h));
+        assert_eq!(published.height, tip_h);
+        assert_eq!(published.hash, same_h_tip.to_byte_array());
+        assert_ne!(same_h_tip, tip);
+        assert_ne!(take_header_ask(st, 0), HeaderAsk::Unsolicited);
+        let before = rbitcoin_query::header_lookup_count();
+        assert!(send_getheaders(st, hub).unwrap());
+        let reorged = take_locator(rx);
+        assert!(
+            rbitcoin_query::header_lookup_count() > before,
+            "a same-height tip hash rebuilds the tail"
+        );
+        assert_eq!(reorged.first().copied(), Some(ahead));
+        assert!(
+            reorged.contains(&same_h_tip),
+            "the rebuilt tail names the replacement tip"
+        );
+        let tail = st
+            .confirmed_locator_tail
+            .as_ref()
+            .expect("the same-height ask stored a tail");
+        assert_eq!(tail.height, Some(tip_h));
+        assert_eq!(tail.hash, Some(*same_h_tip.as_byte_array()));
+        assert!(tail.hashes.contains(&same_h_tip));
+        assert!(
+            !tail.hashes.contains(&tip),
+            "the replaced tip hash leaves the confirmed tail"
+        );
+        same_h_tip
+    }
+
+    fn taller_tip_rebuilds_the_tail(
+        st: &mut IbdWorkState,
+        hub: &ChainHub,
+        rx: &mut mpsc::UnboundedReceiver<PeerCmd>,
+        script: &bitcoin::ScriptBuf,
+        same_h_tip: BlockHash,
+        ahead: BlockHash,
+    ) {
+        hub.generate_to_script(1, script.clone(), vec![]).unwrap();
+        let new_tip = hub.tip_hash().unwrap();
+        assert_ne!(new_tip, same_h_tip);
+        assert_ne!(take_header_ask(st, 0), HeaderAsk::Unsolicited);
+        let before = rbitcoin_query::header_lookup_count();
+        assert!(send_getheaders(st, hub).unwrap());
+        let taller = take_locator(rx);
+        assert!(
+            rbitcoin_query::header_lookup_count() > before,
+            "a changed confirmed tip rebuilds the tail"
+        );
+        assert_eq!(taller.first().copied(), Some(ahead));
+        assert!(
+            taller.contains(&new_tip),
+            "the rebuilt tail names the new confirmed tip"
+        );
     }
 
     fn locator_front(rx: &mut mpsc::UnboundedReceiver<PeerCmd>) -> Option<BlockHash> {
@@ -3668,6 +3830,13 @@ mod tests {
         while st.ordered.len() > keep {
             let dropped = st.ordered.pop_front().unwrap();
             st.ordered_set.remove(&dropped);
+        }
+    }
+
+    fn take_locator(rx: &mut mpsc::UnboundedReceiver<PeerCmd>) -> Vec<BlockHash> {
+        match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => locator,
+            _ => panic!("expected one getheaders"),
         }
     }
 

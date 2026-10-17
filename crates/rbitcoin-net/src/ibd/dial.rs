@@ -415,14 +415,12 @@ pub(crate) fn replacement_available(
 pub(crate) fn request_headers_from(
     slots: &[PeerSlot],
     peer: usize,
-    hub: &ChainHub,
     _seq: &mut u32,
-    work_tips: &[BlockHash],
+    locator: Vec<BlockHash>,
 ) -> Result<bool, NetError> {
     let Some(s) = slots.iter().find(|s| s.id == peer && s.alive) else {
         return Ok(false);
     };
-    let locator = ibd_header_locator(hub, work_tips)?;
     Ok(s.cmd_tx.send(PeerCmd::GetHeaders { locator }).is_ok())
 }
 
@@ -436,7 +434,8 @@ pub(crate) fn request_headers_from(
 pub(crate) fn ibd_header_locator(
     hub: &ChainHub,
     work_tips: &[BlockHash],
-) -> Result<Vec<BlockHash>, NetError> {
+    confirmed_tail: &[BlockHash],
+) -> Vec<BlockHash> {
     let mut locator = Vec::with_capacity(32);
     // Eight hashes is the walk's own stop. This only enforces the protocol
     // maximum, so a stored tip prepended in front does not drop the oldest
@@ -449,27 +448,24 @@ pub(crate) fn ibd_header_locator(
             locator.push(*h);
         }
     }
+    // In-memory snapshot. Not a header-store walk.
     if let Some(t) = hub.tip_hash() {
-        if !locator.contains(&t) {
+        if locator.len() < crate::codec::MAX_LOCATOR_SZ && !locator.contains(&t) {
             locator.push(t);
         }
     }
-    let rest = hub
-        .query
-        .locator_hashes()
-        .map_err(|e| NetError::Consensus(e.to_string()))?;
-    for h in rest {
-        if !locator.contains(&h) {
-            locator.push(h);
-        }
+    for h in confirmed_tail {
         if locator.len() >= crate::codec::MAX_LOCATOR_SZ {
             break;
+        }
+        if !locator.contains(h) {
+            locator.push(*h);
         }
     }
     if locator.is_empty() {
         locator.push(BlockHash::from_byte_array([0u8; 32]));
     }
-    Ok(locator)
+    locator
 }
 
 /// Mark `peer` dead and drop it from every hash it holds. Returns the hashes
@@ -1836,9 +1832,9 @@ mod tests {
         let mut seq = 0u32;
         let mut dead = dummy_slot(1, addr(1), false);
         dead.alive = false;
-        assert!(!request_headers_from(&[dead], 1, &hub, &mut seq, &[]).unwrap());
+        assert!(!request_headers_from(&[dead], 1, &mut seq, vec![]).unwrap());
         // Locator alone (empty work tips + no tip) still returns genesis zero.
-        let loc = ibd_header_locator(&hub, &[]).unwrap();
+        let loc = ibd_header_locator(&hub, &[], &[]);
         assert!(!loc.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
