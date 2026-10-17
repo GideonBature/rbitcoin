@@ -213,6 +213,9 @@ fn try_enqueue_ordered_header(
     if !st.is_on_path(&hash, ht) || st.ordered.len() >= MAX_ORDERED_HEADERS {
         return false;
     }
+    if super::path::next_path_height(st, hub).is_some_and(|next| ht > next) {
+        return false;
+    }
     // The queue is a window over headers already written. Stop at the soft cap.
     if st.header_walk.has_checkpoints() && st.ordered.len() >= ORDERED_HEADERS_SOFT_CAP {
         return false;

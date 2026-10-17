@@ -21,7 +21,10 @@ pub const DEFAULT_MAX_MSGS_PER_SEC: u32 = 4_000;
 /// Max framed payload bytes per peer per window (BIP324 contents size).
 /// ~16 MiB/s: enough for concurrent block + tx relay; still caps multi-peer floods.
 pub const DEFAULT_MAX_BYTES_PER_SEC: u64 = 16_000_000;
-/// Disconnect score added when a peer exceeds rate limits (disconnect at 100).
+/// Misbehavior score added when a peer exceeds rate limits. Decoy and
+/// unknown-type frames disconnect at 100. An application message disconnects
+/// on its first overflow; a repeat from that address within an hour is a
+/// threshold exit.
 pub const RATE_LIMIT_BAN_SCORE: u32 = 50;
 /// Disconnect score for oversized protocol messages already rejected as MessageTooLarge.
 pub const OVERSIZE_BAN_SCORE: u32 = 100;

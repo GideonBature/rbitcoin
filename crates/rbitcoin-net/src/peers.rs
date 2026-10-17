@@ -1449,6 +1449,8 @@ pub struct PeerHub {
     discouraged_addrs: Mutex<HashMap<IpAddr, u64>>,
     /// Netgroup → unix second a slot-loss refusal ends.
     discouraged_groups: Mutex<HashMap<u64, u64>>,
+    /// Rate-limit disconnect address → unix second its strike ends.
+    rate_strikes: Mutex<HashMap<IpAddr, u64>>,
 }
 
 fn canonical_bind(addr: SocketAddr) -> SocketAddr {
@@ -1544,6 +1546,7 @@ impl PeerHub {
             net_perms: Mutex::new(crate::net_permissions::NetPermTable::default()),
             discouraged_addrs: Mutex::new(HashMap::new()),
             discouraged_groups: Mutex::new(HashMap::new()),
+            rate_strikes: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2031,6 +2034,8 @@ impl PeerHub {
     pub(crate) const NETGROUP_SLOT_WAIT_SECS: u64 = 10 * 60;
     /// The in-memory set does not grow past this many addresses.
     pub(crate) const DISCOURAGE_CAP: usize = 10_000;
+    /// A rate-limit strike counts toward the next one for this long.
+    pub(crate) const RATE_STRIKE_SECS: u64 = 60 * 60;
 
     fn sweep_discouraged(&self, now: u64) {
         self.discouraged_addrs
@@ -2056,6 +2061,23 @@ impl PeerHub {
             return;
         }
         g.insert(ip, until);
+    }
+
+    /// True when `ip` still has a strike from an earlier rate-limit
+    /// disconnect; that strike is spent. Otherwise records one for
+    /// [`Self::RATE_STRIKE_SECS`]. Expired strikes are dropped here. At
+    /// [`Self::DISCOURAGE_CAP`] a new address is not recorded.
+    pub(crate) fn note_rate_strike(&self, ip: IpAddr) -> bool {
+        let now = self.now_secs();
+        let mut g = self.rate_strikes.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|_, until| *until > now);
+        if g.remove(&ip).is_some() {
+            return true;
+        }
+        if g.len() < Self::DISCOURAGE_CAP {
+            g.insert(ip, now.saturating_add(Self::RATE_STRIKE_SECS));
+        }
+        false
     }
 
     /// The netgroup that just lost an inbound slot waits

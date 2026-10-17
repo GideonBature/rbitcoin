@@ -6,7 +6,7 @@
 use super::state::IbdWorkState;
 
 /// Max empty redial rounds while fully dark before giving up mid catch-up.
-pub const MAX_DARK_EMPTY_REDIALS: u32 = 4;
+const MAX_DARK_EMPTY_REDIALS: u32 = 4;
 
 /// Highest connected best-chain height we already occupy (not competing `hash_height`).
 pub(crate) fn path_high_water(st: &IbdWorkState, tip_h: u32) -> u32 {
@@ -173,17 +173,32 @@ pub enum AllPeersDead {
     GiveUpMidCatchup,
 }
 
+/// Empty redial rounds in a row with no live peer. A round that adds a peer,
+/// or an empty top-up while a peer is still up, starts the count over.
+pub(crate) fn dark_empty_after(dark: u32, added: usize, any_alive: bool) -> u32 {
+    if added > 0 || any_alive {
+        0
+    } else {
+        dark.saturating_add(1)
+    }
+}
+
+/// A live peer can always be topped up. With none, dialing stops after
+/// [`MAX_DARK_EMPTY_REDIALS`] dark empty rounds.
+pub(crate) fn may_spawn_redial(alive_n: usize, dark: u32) -> bool {
+    alive_n > 0 || dark < MAX_DARK_EMPTY_REDIALS
+}
+
 /// Decide what to do when `slots` has no live peers.
 pub fn all_peers_dead_action(
     st: &IbdWorkState,
     tip_h: u32,
     redial_in_flight: bool,
-    dark_redial_empty: u32,
 ) -> AllPeersDead {
     if ibd_caught_up(st, tip_h) {
         return AllPeersDead::CatchupComplete;
     }
-    if !redial_in_flight || dark_redial_empty >= MAX_DARK_EMPTY_REDIALS {
+    if !redial_in_flight {
         return AllPeersDead::GiveUpMidCatchup;
     }
     AllPeersDead::WaitRedial
@@ -192,6 +207,39 @@ pub fn all_peers_dead_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redial_budget_spends_only_dark_empty_rounds_and_waits_out_a_started_dial() {
+        assert_eq!(
+            dark_empty_after(MAX_DARK_EMPTY_REDIALS - 1, 0, true),
+            0,
+            "an empty top-up while a peer is up does not spend the dark budget"
+        );
+        assert_eq!(dark_empty_after(MAX_DARK_EMPTY_REDIALS, 1, false), 0);
+
+        let mut dark = 0;
+        for _ in 0..MAX_DARK_EMPTY_REDIALS {
+            assert!(may_spawn_redial(0, dark));
+            dark = dark_empty_after(dark, 0, false);
+        }
+        assert!(
+            !may_spawn_redial(0, dark),
+            "dark empty rounds stop the next dial"
+        );
+        assert!(may_spawn_redial(1, dark), "a live peer still tops up");
+
+        let mut st = IbdWorkState::new(Vec::new(), None, Some(21_792));
+        st.max_peer_height = 326_676;
+        assert_eq!(
+            all_peers_dead_action(&st, 21_792, true),
+            AllPeersDead::WaitRedial,
+            "a dial already started is waited out"
+        );
+        assert_eq!(
+            all_peers_dead_action(&st, 21_792, false),
+            AllPeersDead::GiveUpMidCatchup
+        );
+    }
 
     /// all_peers_dead + catchup_complete edge matrix (mid-chain / caught-up / tip-0).
     #[allow(clippy::cognitive_complexity)] // one fixture, many exit arms
@@ -202,11 +250,11 @@ mod tests {
         mid.max_peer_height = 958_820;
         mid.max_ready_height = 161_000;
         assert_eq!(
-            all_peers_dead_action(&mid, 161_249, false, 0),
+            all_peers_dead_action(&mid, 161_249, false),
             AllPeersDead::GiveUpMidCatchup
         );
         assert_eq!(
-            all_peers_dead_action(&mid, 161_249, true, 0),
+            all_peers_dead_action(&mid, 161_249, true),
             AllPeersDead::WaitRedial
         );
 
@@ -216,7 +264,7 @@ mod tests {
         done.max_ready_height = 100;
         done.headers_done = true;
         assert_eq!(
-            all_peers_dead_action(&done, 100, false, 0),
+            all_peers_dead_action(&done, 100, false),
             AllPeersDead::CatchupComplete
         );
 
@@ -239,13 +287,7 @@ mod tests {
         assert!(!ibd_caught_up(&zero, 0));
         assert!(!ibd_caught_up(&zero, 0));
         assert_eq!(
-            all_peers_dead_action(&zero, 0, false, 0),
-            AllPeersDead::GiveUpMidCatchup
-        );
-
-        // Dark redial budget exhausted while redial still marked in-flight.
-        assert_eq!(
-            all_peers_dead_action(&mid, 161_249, true, MAX_DARK_EMPTY_REDIALS),
+            all_peers_dead_action(&zero, 0, false),
             AllPeersDead::GiveUpMidCatchup
         );
 
@@ -487,7 +529,7 @@ mod tests {
         zero.max_ready_height = 0;
         assert!(!ibd_caught_up(&zero, 0));
         assert_eq!(
-            all_peers_dead_action(&zero, 0, false, 0),
+            all_peers_dead_action(&zero, 0, false),
             AllPeersDead::GiveUpMidCatchup
         );
 
@@ -497,7 +539,7 @@ mod tests {
         done.max_ready_height = 100;
         done.headers_done = true;
         assert_eq!(
-            all_peers_dead_action(&done, 100, false, 0),
+            all_peers_dead_action(&done, 100, false),
             AllPeersDead::CatchupComplete
         );
 

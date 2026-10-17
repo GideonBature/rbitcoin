@@ -2990,6 +2990,105 @@ async fn write_peer_msg(raw: &mut V2PlainSession, msg: NetworkMessage) {
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limited_block_request_disconnects_without_waiting_for_another_message() {
+    let mut t = paused_serve("rate-request", 1, &["/rbitcoin:test(rate-request)/"]).await;
+    let (raw, _) = &mut t.clients[0];
+    // The handshake is outside the rate window; send no follow-session replies.
+    for _ in 0..crate::peer_dos::DEFAULT_MAX_MSGS_PER_SEC {
+        write_peer_msg(raw, NetworkMessage::Ping(7)).await;
+    }
+    write_peer_msg(raw, getdata_msg(&t.hashes)).await;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match next_peer_msg(raw).await {
+                Err(_) => return true,
+                Ok(NetworkMessage::Block(_)) => return false,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    raw.close();
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        matches!(closed, Ok(true)),
+        "an over-budget block request must close the session, not disappear: {closed:?}"
+    );
+}
+
+/// A follow session that has asked for one block body it will never get.
+async fn serve_with_open_ask(label: &str) -> (PausedServe, BlockHash) {
+    let mut t = paused_serve(label, 1, &["/rbitcoin:test(open-ask)/"]).await;
+    let tip = t.node.hub.tip_header().unwrap();
+    let mut child = bitcoin::block::Header {
+        version: bitcoin::block::Version::from_consensus(4),
+        prev_blockhash: tip.block_hash(),
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array([0x33; 32]),
+        time: tip.time + 1,
+        bits: tip.bits,
+        nonce: 0,
+    };
+    rbitcoin_consensus::grind_regtest_pow(&mut child);
+    let hash = child.block_hash();
+    let (raw, _) = &mut t.clients[0];
+    write_peer_msg(raw, NetworkMessage::Headers(vec![child])).await;
+    let asked = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let NetworkMessage::GetData(inv) = next_peer_msg(raw).await.unwrap() {
+                if inv.iter().any(|i| {
+                    matches!(i, Inventory::WitnessBlock(h) | Inventory::CompactBlock(h) if *h == hash)
+                }) {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(asked.is_ok(), "the header announce must ask for its body");
+    assert!(t.node.hub.already_have_or_asked_block(&hash));
+    (t, hash)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_follow_session_releases_its_block_asks() {
+    let (mut t, hash) = serve_with_open_ask("closed-asks").await;
+    t.clients[0].0.close();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !t.node.peers.live_peers().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "closed session");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let still_asked = t.node.hub.already_have_or_asked_block(&hash);
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        !still_asked,
+        "a disconnect must release the session's body asks for other peers"
+    );
+}
+
+/// `disconnectnode`, inbound eviction, and stale-tip replacement abort the
+/// session task instead of letting it return.
+#[tokio::test]
+async fn aborted_follow_session_releases_its_block_asks() {
+    let (mut t, hash) = serve_with_open_ask("abort-asks").await;
+    assert!(t.node.peers.disconnect_id(t.clients[0].1.id));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while t.node.hub.already_have_or_asked_block(&hash) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let still_asked = t.node.hub.already_have_or_asked_block(&hash);
+    t.clients[0].0.close();
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        !still_asked,
+        "an aborted session must release its body asks for other peers"
+    );
+}
+
 /// Unknown BIP324 short id on a live follow session counts as `*other*`
 /// and the peer stays up (Core `test_msgtype`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4019,6 +4118,106 @@ fn threshold_exit_refuses_the_address_without_punish_disconnect() {
         !peers.inbound_discouraged(std::net::SocketAddr::from(([5, 6, 7, 8], 1))),
         "a manual peer is not recorded"
     );
+}
+
+#[test]
+fn second_rate_limit_disconnect_from_an_address_discourages_it() {
+    let peers = crate::peers::PeerHub::new();
+    let now = 1_700_000_200u64;
+    peers.set_mock_now(now);
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        sender: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        nonce: 5,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let flood = |addr: std::net::SocketAddr| {
+        let peer = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
+        rate_limit_disconnect(Some(peer.as_ref()))
+    };
+
+    let first = std::net::SocketAddr::from(([7, 7, 7, 7], 8333));
+    assert!(matches!(
+        flood(first),
+        crate::error::NetError::Protocol("peer rate limit")
+    ));
+    assert!(
+        !peers.inbound_discouraged(first),
+        "one rate-limit disconnect does not refuse the address"
+    );
+    assert!(matches!(
+        flood(std::net::SocketAddr::from(([7, 7, 7, 7], 9999))),
+        crate::error::NetError::Protocol("peer misbehavior threshold")
+    ));
+    assert!(
+        peers.inbound_discouraged(first),
+        "a second rate-limit disconnect from that address refuses it"
+    );
+
+    let slow = std::net::SocketAddr::from(([7, 7, 7, 8], 8333));
+    let _ = flood(slow);
+    peers.set_mock_now(now + crate::peers::PeerHub::RATE_STRIKE_SECS);
+    let _ = flood(slow);
+    assert!(
+        !peers.inbound_discouraged(slow),
+        "a strike older than the window does not count"
+    );
+}
+
+#[test]
+fn exempt_peer_rate_limit_leaves_no_strike_on_its_address() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_300);
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        sender: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        nonce: 6,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let flood = |addr: std::net::SocketAddr, conn: crate::peers::PeerConnType| {
+        let peer = peers.register(addr, addr, &ver, false, conn);
+        rate_limit_disconnect(Some(peer.as_ref()))
+    };
+
+    let manual = std::net::SocketAddr::from(([6, 6, 6, 6], 8333));
+    let _ = flood(manual, crate::peers::PeerConnType::Manual);
+    let noban = std::net::SocketAddr::from(([6, 6, 6, 7], 8333));
+    peers.set_noban(true);
+    let _ = flood(noban, crate::peers::PeerConnType::Inbound);
+    peers.set_noban(false);
+    for exempt in [manual, noban] {
+        let again = std::net::SocketAddr::from((exempt.ip(), 9999));
+        assert!(
+            matches!(
+                flood(again, crate::peers::PeerConnType::Inbound),
+                crate::error::NetError::Protocol("peer rate limit")
+            ),
+            "{exempt}: an exempt overflow leaves no strike for the next peer"
+        );
+        assert!(!peers.inbound_discouraged(again));
+    }
 }
 
 #[test]

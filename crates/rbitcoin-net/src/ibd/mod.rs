@@ -57,8 +57,9 @@ use events::{apply_confirm_events, apply_peer_event, disconnect_all_peers, updat
 #[cfg(test)]
 pub(crate) use events::{apply_confirm_reject, apply_headers_event};
 use exit::{
-    all_peers_dead_action, best_chain_remainder, empty_path_header_fan, header_lag_behind_peers,
-    ibd_caught_up, path_drained, should_unlatch_headers_done, AllPeersDead,
+    all_peers_dead_action, best_chain_remainder, dark_empty_after, empty_path_header_fan,
+    header_lag_behind_peers, ibd_caught_up, may_spawn_redial, path_drained,
+    should_unlatch_headers_done, AllPeersDead,
 };
 #[cfg(test)]
 pub(crate) use header_walk::{
@@ -785,18 +786,18 @@ pub async fn ibd_cancellable(
                         st.slots.push(s);
                         n += 1;
                     }
+                    dark_redial_empty =
+                        dark_empty_after(dark_redial_empty, n, st.slots.iter().any(|s| s.alive));
                     if n > 0 {
                         st.slots.sort_by_key(|s| s.id);
                         info!(
                             "ibd: redial added {n} peer(s); live={}",
                             st.slots.iter().filter(|s| s.alive).count()
                         );
-                        dark_redial_empty = 0;
                         if st.ordered.is_empty() && !st.headers_done {
                             enqueue_header_cmd(st, HeaderCmd::Ask);
                         }
                     } else {
-                        dark_redial_empty = dark_redial_empty.saturating_add(1);
                         warn!("ibd: redial returned 0 peers (empty_rounds={dark_redial_empty})");
                     }
                 }
@@ -818,6 +819,7 @@ pub async fn ibd_cancellable(
             };
             if redial_handle.is_none()
                 && alive_n < target
+                && may_spawn_redial(alive_n, dark_redial_empty)
                 && !peer_sess.book().is_empty()
                 && last_redial.elapsed() >= redial_interval
             {
@@ -980,7 +982,7 @@ pub async fn ibd_cancellable(
             // All peers dead — never treat mid-chain peer death as catch-up complete.
             if st.slots.iter().all(|s| !s.alive) {
                 let tip_h = hub.tip_height().unwrap_or(0);
-                match all_peers_dead_action(st, tip_h, redial_handle.is_some(), dark_redial_empty) {
+                match all_peers_dead_action(st, tip_h, redial_handle.is_some()) {
                     AllPeersDead::CatchupComplete => {
                         info!(
                         "ibd: catch-up complete (no live peers) tip={tip_h} max_peer_height={} max_ready={} — exiting IBD",

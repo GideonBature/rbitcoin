@@ -5753,6 +5753,66 @@ mod tests {
     }
 
     #[test]
+    fn new_lookahead_batch_does_not_skip_stored_queue_successors() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-no-queue-gap");
+        hub.ensure_genesis().unwrap();
+        let genesis = hub.tip_hash().unwrap();
+        floor_unreachable(&mut hub);
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(genesis), Some(0));
+        let tail = mine(genesis, 1);
+        queue_at_cap_ending_on(&mut st, &hub, tail);
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let next = mine(tail.block_hash(), 2);
+        let third = mine(next.block_hash(), 3);
+        apply(&mut st, &hub, 0, vec![next, third]);
+        for _ in 0..2 {
+            let dropped = st.ordered.pop_front().unwrap();
+            st.ordered_set.remove(&dropped);
+        }
+        let fourth = mine(third.block_hash(), 4);
+        apply(&mut st, &hub, 0, vec![fourth]);
+        super::super::path::append_stored_headers(&mut st, &hub);
+        let queued: Vec<_> = st.ordered.iter().rev().take(2).copied().collect();
+        assert_eq!(
+            queued,
+            vec![third.block_hash(), next.block_hash()],
+            "new lookahead must leave the free queue slots for already stored successors"
+        );
+        assert_eq!(st.header_walk.tip_hash(), Some(fourth.block_hash()));
+    }
+
+    #[test]
+    fn drained_queue_refills_stored_headers_after_known_header_pruning() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-pruned-refill");
+        hub.ensure_genesis().unwrap();
+        let genesis = hub.tip_hash().unwrap();
+        floor_unreachable(&mut hub);
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(genesis), Some(0));
+        let tail = mine(genesis, 1);
+        queue_at_cap_ending_on(&mut st, &hub, tail);
+        st.known_headers.extend(st.ordered.iter().copied());
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let next = mine(tail.block_hash(), 2);
+        let last = mine(next.block_hash(), 3);
+        apply(&mut st, &hub, 0, vec![next, last]);
+        assert_eq!(st.header_walk.tip_hash(), Some(last.block_hash()));
+        while st.ordered.len() > 1 {
+            let dropped = st.ordered.pop_front().unwrap();
+            st.ordered_set.remove(&dropped);
+        }
+        assert_eq!(st.ordered.back(), Some(&tail.block_hash()));
+        st.hygiene();
+        assert_eq!(
+            super::super::path::append_stored_headers(&mut st, &hub),
+            2,
+            "both stored successors must remain available to the download queue after pruning"
+        );
+        assert_eq!(path_top(&st, &hub), Some((last.block_hash(), 3)));
+    }
+
+    #[test]
     fn a_heavier_fork_below_the_floor_is_written_when_the_queue_has_room() {
         let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-stray-write");
         hub.ensure_genesis().unwrap();

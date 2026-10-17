@@ -437,8 +437,14 @@ impl IbdWorkState {
                     || (*ht > queue_tail && self.header_walk.indexes_through(*ht)))
         });
         if self.known_headers.len() > live.len().saturating_add(4096) {
-            self.known_headers
-                .retain(|h| live.contains(h) || inflight.contains_key(h));
+            self.known_headers.retain(|h| {
+                live.contains(h)
+                    || inflight.contains_key(h)
+                    || self
+                        .hash_height
+                        .get(h)
+                        .is_some_and(|ht| self.height_to_hash.get(ht) == Some(h))
+            });
             self.header_fks.retain(|h, _| {
                 live.contains(h) || inflight.contains_key(h) || self.known_headers.contains(h)
             });
