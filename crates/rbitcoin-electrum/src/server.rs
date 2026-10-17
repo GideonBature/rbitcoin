@@ -1044,13 +1044,36 @@ where
     write_raw_lines(writer, &wave.rest_notifies).await?;
     let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_serve_limits(req.historical);
-    let more = next <= last;
-    if more
-        && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), crate::tweaks::SUBSCRIBE_CHUNK, more)
-    {
+    serve_tweaks_rest(
+        reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0, &mut next,
+    )
+    .await
+}
+
+/// After wave 0: more waves while the chunk is open, then Cake `done`.
+#[allow(clippy::too_many_arguments)]
+async fn serve_tweaks_rest<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    query: &Arc<Query>,
+    chain: &Arc<ChainParams>,
+    peer: &SocketAddr,
+    last: u32,
+    limits: rbitcoin_query::ThinTweakRangeLimits,
+    min_dust: u64,
+    idle: Duration,
+    max_line: usize,
+    t0: Instant,
+    next: &mut u32,
+) -> Result<(), std::io::Error>
+where
+    R: AsyncBufReadExt + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let more = *next <= last;
+    if crate::tweaks::chunk_still_open(t0.elapsed(), more) {
         serve_tweaks_follow_waves(
-            reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0,
-            &mut next,
+            reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0, next,
         )
         .await?;
     }
@@ -1193,23 +1216,12 @@ where
         let n = batch.consumed.max(1);
         *next = batch_start.saturating_add(n);
         let more = *next <= last;
-        if more
-            && !crate::tweaks::seal_subscribe_chunk(
-                t0.elapsed(),
-                crate::tweaks::SUBSCRIBE_CHUNK,
-                more,
-            )
-        {
+        let open = crate::tweaks::chunk_still_open(t0.elapsed(), more);
+        if open {
             handle = spawn_wave(*next);
         }
         write_raw_lines(writer, &batch.lines).await?;
-        if !more
-            || crate::tweaks::seal_subscribe_chunk(
-                t0.elapsed(),
-                crate::tweaks::SUBSCRIBE_CHUNK,
-                more,
-            )
-        {
+        if !open {
             break;
         }
         batch_start = *next;
