@@ -698,3 +698,36 @@ fn core_script_tests_all_rows() {
         st.pass, st.ran
     );
 }
+
+/// Our script corpus, in addition to Core's JSON. Each `row` is Core
+/// `script_tests.json` form. The v31.1 oracle in `script-oracle/` runs the
+/// same file.
+#[test]
+fn script_corpus_rows_match_our_interpreter() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/script_corpus/script_tests.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let rows: Vec<Value> = serde_json::from_str(&text).expect("script corpus json");
+    assert!(!rows.is_empty(), "script corpus is empty");
+    for row in &rows {
+        let id = row["id"].as_str().unwrap_or("?").to_string();
+        let cells = row["row"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: missing row"));
+        assert!(
+            cells.len() >= 4,
+            "{id}: row needs scriptSig, scriptPubKey, flags, result"
+        );
+        let sig = assemble(cells[0].as_str().unwrap_or(""))
+            .unwrap_or_else(|e| panic!("{id} scriptSig: {e}"));
+        let pk = assemble(cells[1].as_str().unwrap_or(""))
+            .unwrap_or_else(|e| panic!("{id} scriptPubKey: {e}"));
+        let flags = parse_flags(cells[2].as_str().unwrap_or("NONE"));
+        let expect = cells[3].as_str().unwrap_or("");
+        let got = run_script_row(&sig, &pk, Witness::new(), Amount::ZERO, &flags);
+        assert!(
+            outcome_matches(expect, &got),
+            "{id}: expect {expect} got {got:?}"
+        );
+    }
+}
