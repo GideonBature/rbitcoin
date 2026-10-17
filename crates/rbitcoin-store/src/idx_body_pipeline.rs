@@ -111,6 +111,49 @@ pub(crate) fn outs_first_wave_len(off: u64, full_len: u64, need_vouts: &[u32]) -
     }
 }
 
+/// One `spent.body` pread. `members` are indices into the caller's offset
+/// slice, in file order. A singleton is the 8-byte slot. A merged group is
+/// the page-aligned span.
+pub(crate) struct SpendSlotPeek {
+    pub off: u64,
+    pub len: u64,
+    pub members: Vec<usize>,
+}
+
+/// Group 8-byte spend slots the way pin reads group body windows.
+///
+/// Caller order is not file order. A singleton preads its 8 bytes. A merged
+/// group preads the page-aligned span from [`group_body_peeks`].
+pub(crate) fn plan_spend_slot_peeks(offs: &[u64]) -> Vec<SpendSlotPeek> {
+    if offs.is_empty() {
+        return Vec::new();
+    }
+    let slot = crate::tx_table::OutputRecord::SPENT_SLOT_LEN as u64;
+    let mut order: Vec<usize> = (0..offs.len()).collect();
+    order.sort_by(|&a, &b| offs[a].cmp(&offs[b]).then(a.cmp(&b)));
+    let windows: Vec<(u64, u64)> = order.iter().map(|&i| (offs[i], slot)).collect();
+    group_body_peeks(&windows)
+        .into_iter()
+        .map(|(page_off, span, members)| {
+            let members: Vec<usize> = members.iter().map(|&m| order[m]).collect();
+            if members.len() == 1 {
+                let i = members[0];
+                SpendSlotPeek {
+                    off: offs[i],
+                    len: slot,
+                    members,
+                }
+            } else {
+                SpendSlotPeek {
+                    off: page_off,
+                    len: span,
+                    members,
+                }
+            }
+        })
+        .collect()
+}
+
 /// Offset-sorted `[off, off+len)` windows → `(page_off, span_len, window indices)`.
 ///
 /// Jobs that share an OS page, straddle two pages, or leave a hole of at most
@@ -472,6 +515,35 @@ mod tests {
         let straddle = group_body_peeks(&[(page - 8, 16), (page + 100, 16)]);
         assert_eq!(straddle.len(), 1, "two-page straddle");
         assert_eq!(straddle[0].2, vec![0, 1]);
+    }
+
+    #[test]
+    fn plan_spend_slot_peeks_merges_like_pin_reads() {
+        let page = BODY_OS_PAGE;
+        let slot = crate::tx_table::OutputRecord::SPENT_SLOT_LEN as u64;
+        let near = plan_spend_slot_peeks(&[page, page + slot + 8 * 1024]);
+        assert_eq!(near.len(), 1, "8 KiB hole");
+        assert_eq!(near[0].members, vec![0, 1]);
+        assert_eq!(near[0].off, page);
+        assert!(near[0].len >= slot + 8 * 1024);
+
+        let over = plan_spend_slot_peeks(&[page, page + slot + 64 * 1024 + 1]);
+        assert_eq!(over.len(), 2, "hole just over 64 KiB");
+
+        let mut wide = Vec::new();
+        let mut at = 0u64;
+        while at + slot <= 256 * 1024 {
+            wide.push(at);
+            at += 32 * 1024;
+        }
+        wide.push(at);
+        let split = plan_spend_slot_peeks(&wide);
+        assert_eq!(split.len(), 2, "a run past 256 KiB splits");
+        assert!(split.iter().all(|g| g.len <= 256 * 1024));
+
+        let same = plan_spend_slot_peeks(&[page + 100, page + 10]);
+        assert_eq!(same.len(), 1, "same page, caller order is not file order");
+        assert_eq!(same[0].members, vec![1, 0]);
     }
 
     fn stamp_txout(t: &TxTable, jobs: &mut [IdxBodyJob]) {

@@ -4720,6 +4720,43 @@ fn spent_span_matches_slot_len_times_n_out() {
 }
 
 #[test]
+fn spend_meta_batch_reads_merged_slots_past_one_ring() {
+    let dir = tempfile_dir("spend-merge");
+    let t = create_tiny(&dir);
+    let header = crate::file::FILE_HEADER_LEN as u64;
+    let groups = crate::uring_session::DEFAULT_ENTRIES as usize + 2;
+    let gap = 64 * 1024 + 128;
+    let mut offs = Vec::with_capacity(groups * 2 + 2);
+    let mut expect: Vec<Option<(Fk, u8, u32)>> = Vec::with_capacity(groups * 2 + 2);
+    let mut file_end = header;
+    for i in 0..groups {
+        let off0 = header + (i as u64) * gap;
+        let off1 = off0 + 16;
+        let a = encode_spent_slot(0, Fk(i as u64 + 1), 1).unwrap();
+        let b = encode_spent_slot(0, Fk(10_000 + i as u64), 2).unwrap();
+        t.spent.write_body_abs(off0, &a).unwrap();
+        t.spent.write_body_abs(off1, &b).unwrap();
+        file_end = off1 + OutputRecord::SPENT_SLOT_LEN as u64;
+        offs.push(off1);
+        expect.push(Some((Fk(10_000 + i as u64), 0, 2)));
+        offs.push(off0);
+        expect.push(Some((Fk(i as u64 + 1), 0, 1)));
+    }
+    t.spent.truncate_body_to(0, file_end).unwrap();
+    offs.push(file_end);
+    expect.push(None);
+    offs.reverse();
+    expect.reverse();
+    let got = t.get_spender_meta_at_abs_batch(&offs).unwrap();
+    assert_eq!(got, expect);
+    let pread = t
+        .get_spender_meta_at_abs_batch_backend(&offs, crate::io_backend::ReadIoBackend::Pread)
+        .unwrap();
+    assert_eq!(pread, got);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn reserved_flag_v17_seqsigwit_high_bits_are_corrupt() {
     let rec = InputRecord::coinbase(u32::MAX, vec![], vec![]);
     let mut raw = rec.encode();

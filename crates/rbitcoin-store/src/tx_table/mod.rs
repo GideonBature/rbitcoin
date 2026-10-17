@@ -558,6 +558,78 @@ fn pread_two_spans(
     })
 }
 
+/// Read one ring of spend peeks. `members` index `live`, which indexes `orig`.
+///
+/// A chunk is at most [`crate::uring_session::DEFAULT_ENTRIES`] groups, so a
+/// merged 256 KiB bounce is not allocated for every group in a megakey.
+fn read_spend_peek_chunk(
+    chunk: &[crate::idx_body_pipeline::SpendSlotPeek],
+    live: &[u64],
+    orig: &[usize],
+    out: &mut [Option<SpenderSlot>],
+    body_fd: crate::io_handle::IoHandle,
+    body_path: &std::path::Path,
+    backend: crate::io_backend::ReadIoBackend,
+) -> Result<(), StoreError> {
+    use crate::bulk_io::{self, ReadOp};
+    const META_LEN: usize = OutputRecord::SPENT_SLOT_LEN;
+    enum Store {
+        Single([u8; META_LEN]),
+        Bounce(Vec<u8>),
+    }
+    let mut storage: Vec<Store> = chunk
+        .iter()
+        .map(|g| {
+            if g.members.len() == 1 {
+                Store::Single([0u8; META_LEN])
+            } else {
+                let n = usize::try_from(g.len).unwrap_or(0);
+                Store::Bounce(vec![0u8; n])
+            }
+        })
+        .collect();
+    // SAFETY: each buffer is this chunk's own `storage` slot. Ops do not alias.
+    let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(chunk.len());
+    for (g, store) in chunk.iter().zip(storage.iter_mut()) {
+        let (ptr, len) = match store {
+            Store::Single(b) => (b.as_mut_ptr(), META_LEN),
+            Store::Bounce(b) => (b.as_mut_ptr(), b.len()),
+        };
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        ops.push(ReadOp {
+            fd: body_fd,
+            offset: g.off,
+            buf: slice,
+            result: i32::MIN,
+        });
+    }
+    bulk_io::pread_batch_backend(&mut ops, backend);
+    for ((g, store), ro) in chunk.iter().zip(storage.iter()).zip(ops.iter()) {
+        if ro.result < 0 {
+            return Err(StoreError::io(
+                body_path,
+                std::io::Error::from_raw_os_error(-ro.result),
+            ));
+        }
+        let raw: &[u8] = match store {
+            Store::Single(b) => b,
+            Store::Bounce(b) => b,
+        };
+        let got = ro.result as usize;
+        for &m in &g.members {
+            let rel = usize::try_from(live[m].saturating_sub(g.off)).unwrap_or(usize::MAX);
+            if rel.saturating_add(META_LEN) > got.min(raw.len()) {
+                continue;
+            }
+            let Ok((flags, field, vin)) = decode_spent_slot(&raw[rel..rel + META_LEN]) else {
+                continue;
+            };
+            out[orig[m]] = Some((field, flags, vin));
+        }
+    }
+    Ok(())
+}
+
 pub struct TxTable {
     /// `txout.body` — meta + outputs (hot).
     pub(crate) body: VarTable,
@@ -1892,13 +1964,11 @@ impl TxTable {
         abs_offs: &[u64],
         backend: crate::io_backend::ReadIoBackend,
     ) -> Result<Vec<Option<SpenderSlot>>, StoreError> {
-        use crate::bulk_io::{self, ReadOp};
         const META_LEN: usize = OutputRecord::SPENT_SLOT_LEN;
         let body_fd = self.spent.body_read_fd();
         let body_pub = self.spent.body_published_len();
         let body_path = self.spent.body_file_path();
 
-        let mut bufs: Vec<[u8; META_LEN]> = vec![[0u8; META_LEN]; abs_offs.len()];
         let mut submitted: Vec<usize> = Vec::with_capacity(abs_offs.len());
         for (i, &off) in abs_offs.iter().enumerate() {
             let end = off.saturating_add(META_LEN as u64);
@@ -1911,36 +1981,14 @@ impl TxTable {
             return Ok(vec![None; abs_offs.len()]);
         }
 
-        // SAFETY: each bufs[i] is distinct; submitted indices unique.
-        let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(submitted.len());
-        for &i in &submitted {
-            let ptr = bufs[i].as_mut_ptr();
-            let slice = unsafe { std::slice::from_raw_parts_mut(ptr, META_LEN) };
-            ops.push(ReadOp {
-                fd: body_fd,
-                offset: abs_offs[i],
-                buf: slice,
-                result: i32::MIN,
-            });
-        }
-        bulk_io::pread_batch_backend(&mut ops, backend);
-
+        let live: Vec<u64> = submitted.iter().map(|&i| abs_offs[i]).collect();
+        let plan = crate::idx_body_pipeline::plan_spend_slot_peeks(&live);
         let mut out: Vec<Option<SpenderSlot>> = vec![None; abs_offs.len()];
-        for (ro, &i) in ops.iter().zip(submitted.iter()) {
-            if ro.result < 0 {
-                return Err(StoreError::io(
-                    body_path,
-                    std::io::Error::from_raw_os_error(-ro.result),
-                ));
-            }
-            if ro.result as usize != META_LEN {
-                continue;
-            }
-            let b = &bufs[i];
-            let Ok((flags, field, vin)) = decode_spent_slot(b) else {
-                continue;
-            };
-            out[i] = Some((field, flags, vin));
+        let depth = crate::uring_session::DEFAULT_ENTRIES as usize;
+        for chunk in plan.chunks(depth.max(1)) {
+            read_spend_peek_chunk(
+                chunk, &live, &submitted, &mut out, body_fd, body_path, backend,
+            )?;
         }
         Ok(out)
     }
