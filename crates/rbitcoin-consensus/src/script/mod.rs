@@ -1512,4 +1512,68 @@ mod verify_routing_tests {
         let err = verify_job_all_inputs(&job).unwrap_err();
         assert!(matches!(err, ConsensusError::Script(_)));
     }
+
+    /// Fast path and interpreter agree on a real P2PKH signature, and both
+    /// reject the only push that `FindAndDelete` could remove from the
+    /// 25-byte template (the 20-byte pubkey hash). That stack item is not a
+    /// verifying signature, so the different sighash is not a chain split.
+    #[test]
+    fn p2pkh_fast_path_matches_interpreter_including_hash_collision() {
+        use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
+        use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[9u8; 32]).unwrap();
+        let pk = bitcoin::PublicKey::new(sk.public_key(&secp));
+        let spk = ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::hash(&pk.to_bytes()));
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: spk.clone(),
+        };
+        let shell = Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let sighash = SighashCache::new(&shell)
+            .legacy_signature_hash(0, spk.as_script(), EcdsaSighashType::All as u32)
+            .unwrap();
+        let mut sig = secp
+            .sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sk)
+            .serialize_der()
+            .to_vec();
+        sig.push(EcdsaSighashType::All as u8);
+        let mut script_sig = Vec::new();
+        script_sig.push(sig.len() as u8);
+        script_sig.extend_from_slice(&sig);
+        script_sig.push(pk.to_bytes().len() as u8);
+        script_sig.extend_from_slice(&pk.to_bytes());
+        let mut good = shell.clone();
+        good.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+        let flags = crate::block::ScriptVerifyFlags::buried(false, false, true, true, false);
+        let job = ScriptCheckJob::new(vec![prevout.clone()], good, flags);
+        assert!(verify_job_all_inputs(&job).is_ok());
+        assert!(verify_bare(&job, 0, &job.tx).is_ok());
+
+        let keyhash = bitcoin::PubkeyHash::hash(&pk.to_bytes());
+        let mut bad_sig = Vec::new();
+        bad_sig.push(20);
+        bad_sig.extend_from_slice(keyhash.as_byte_array());
+        bad_sig.push(pk.to_bytes().len() as u8);
+        bad_sig.extend_from_slice(&pk.to_bytes());
+        let mut bad = shell;
+        bad.input[0].script_sig = ScriptBuf::from_bytes(bad_sig);
+        let job = ScriptCheckJob::new(vec![prevout], bad, flags);
+        assert!(verify_job_all_inputs(&job).is_err());
+        assert!(verify_bare(&job, 0, &job.tx).is_err());
+    }
 }

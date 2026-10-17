@@ -1471,3 +1471,46 @@ fn p2sh_script_pubkey_push_counts_against_max_stack_size() {
         );
     }
 }
+
+/// Legacy `SIGHASH_SINGLE` past the last output is `uint256` one, matching Core.
+/// The in-range input is a real digest, not that constant.
+#[test]
+fn legacy_sighash_single_past_last_output_is_uint256_one() {
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let input = TxIn {
+        previous_output: OutPoint::null(),
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    };
+    let one = [
+        1u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ];
+    let past = Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![input.clone(), input.clone()],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: spk.clone(),
+        }],
+    };
+    let past_hash = SighashCache::new(&past)
+        .legacy_signature_hash(1, spk.as_script(), EcdsaSighashType::Single as u32)
+        .unwrap();
+    assert_eq!(past_hash.to_byte_array(), one);
+    let in_range = Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![input],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: spk.clone(),
+        }],
+    };
+    let in_hash = SighashCache::new(&in_range)
+        .legacy_signature_hash(0, spk.as_script(), EcdsaSighashType::Single as u32)
+        .unwrap();
+    assert_ne!(in_hash.to_byte_array(), one);
+}
