@@ -38,9 +38,8 @@ impl From<ConsensusError> for ConfirmError {
 impl From<StoreError> for ConfirmError {
     fn from(e: StoreError) -> Self {
         // A missing parent on an untrusted block is not store corruption.
-        // Cancellation is a rule-side abort so it is not cached as a bad block.
+        // Cancellation stays a store result. Callers must not cache it.
         match e {
-            StoreError::Cancelled(_) => ConfirmError::Rules(ConsensusError::Cancelled),
             StoreError::Corrupt(m) if m.contains("parent create_fk unresolved") => {
                 ConfirmError::from(rbitcoin_consensus::block::unresolved_parent_create())
             }
@@ -61,12 +60,22 @@ impl ConfirmError {
         }
     }
 
+    /// Cooperative abort. Not a verdict on the block.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(
+            self,
+            ConfirmError::Store(StoreError::Cancelled(_))
+                | ConfirmError::Rules(ConsensusError::Cancelled)
+        )
+    }
+
     /// Script-pool jobs only return [`ConsensusError`]. A store fault becomes
     /// [`ConsensusError::Internal`] so the pool does not grow a second taxonomy.
     /// io_uring text stays recognizable to [`StoreError::is_uring_session_fault_msg`].
     pub(crate) fn into_pool(self) -> ConsensusError {
         match self {
             ConfirmError::Rules(e) => e,
+            ConfirmError::Store(StoreError::Cancelled(_)) => ConsensusError::Cancelled,
             ConfirmError::Store(StoreError::Corrupt(m))
                 if StoreError::is_uring_session_fault_msg(m) =>
             {
@@ -115,9 +124,14 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_is_not_a_store_fault_string() {
+    fn cancelled_stays_a_store_error() {
         let e = ConfirmError::from(StoreError::Cancelled("stop"));
-        assert!(matches!(e, ConfirmError::Rules(ConsensusError::Cancelled)));
-        assert_eq!(e.to_string(), "confirm cancelled");
+        assert!(matches!(
+            e,
+            ConfirmError::Store(StoreError::Cancelled("stop"))
+        ));
+        assert!(e.is_cancelled());
+        assert_eq!(e.to_string(), "store: cancelled: stop");
+        assert!(matches!(e.into_pool(), ConsensusError::Cancelled));
     }
 }

@@ -414,6 +414,7 @@ impl ConfirmRejectClass {
         use rbitcoin_store::StoreError;
         match err {
             ConfirmError::Rules(e) => Self::from_consensus(e),
+            ConfirmError::Store(StoreError::Cancelled(_)) => Self::Cancelled,
             ConfirmError::Store(e) if e.is_uring_session_fault() => Self::EngineFault,
             ConfirmError::Store(StoreError::Io { .. }) => Self::EngineFault,
             ConfirmError::Store(StoreError::Corrupt(m)) => Self::from_err_str(m),
@@ -2020,8 +2021,7 @@ pub(crate) fn spawn_confirm_engine(
                         confirm_thr_stats::add_write_work(&stats, t0.elapsed());
                         let mut err = e;
                         let msg = err.to_string();
-                        if matches!(err, rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Cancelled))
-                            || feed_wb.stopped()
+                        if err.is_cancelled() || feed_wb.stopped()
                         {
                             info!("ibd: confirm write aborted: {msg}");
                             break;
@@ -2217,8 +2217,7 @@ pub(crate) fn spawn_confirm_engine(
                 |e, meta, dropped| {
                     confirm_thr_stats::add_script_work(&stats, Duration::ZERO);
                     let msg = e.to_string();
-                    if matches!(e, rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Cancelled))
-                        || feed_sc.stopped()
+                    if e.is_cancelled() || feed_sc.stopped()
                     {
                         info!("ibd: confirm scripts aborted: {msg}");
                         return false;
@@ -2456,8 +2455,7 @@ pub(crate) fn spawn_confirm_engine(
                     Ok(s) => s,
                     Err(e) => {
                         let msg = e.to_string();
-                        if matches!(e, rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Cancelled))
-                            || feed_load.stopped()
+                        if e.is_cancelled() || feed_load.stopped()
                         {
                             drop(mat_tx);
                             rbitcoin_consensus::unpark_script_publisher();

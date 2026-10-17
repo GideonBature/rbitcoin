@@ -292,6 +292,9 @@ fn connect_failed_for_header(hash: [u8; 32], e: NetError) -> NetError {
 }
 
 fn header_reject(header: &Header, e: &rbitcoin_query::ConfirmError) -> NetError {
+    if e.is_cancelled() {
+        return NetError::Cancelled;
+    }
     let rules = match e {
         rbitcoin_query::ConfirmError::Store(se) => return NetError::store(se),
         rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Internal(m)) => {
@@ -3033,9 +3036,7 @@ impl ChainHub {
                 }
             })
             .map_err(|e| match e {
-                rbitcoin_query::ConfirmError::Rules(
-                    rbitcoin_consensus::ConsensusError::Cancelled,
-                ) => NetError::Cancelled,
+                e if e.is_cancelled() => NetError::Cancelled,
                 rbitcoin_query::ConfirmError::Rules(
                     rbitcoin_consensus::ConsensusError::Internal(m),
                 ) => {
@@ -7616,6 +7617,31 @@ mod tests {
             0,
             "a row with no fence height is not decoded"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A side block whose parent header read is cancelled is not `BLOCK_FAILED`.
+    #[test]
+    fn cancelled_header_read_on_a_side_block_is_not_cached_invalid() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_050_000, 1);
+        hub.accept_block(b1.clone()).unwrap();
+        let side = mine_distinct(gen, 1_300_050_001, 1, &[b1.block_hash()]);
+        hub.query.request_confirm_cancel();
+        let err = hub
+            .accept_received_block(side.clone())
+            .expect_err("a cancelled header read is not an accept");
+        assert!(
+            err.is_local_fault(),
+            "cancel must stay a store/engine result, got {err}"
+        );
+        assert!(
+            !hub.is_block_invalid(&side.block_hash()),
+            "a cancelled header read must not be BLOCK_FAILED, err={err}"
+        );
+        hub.query.clear_confirm_cancel();
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -214,6 +214,11 @@ impl Query {
         &self,
         height: Height,
     ) -> Result<Option<(Fk, HeaderRecord)>, QueryError> {
+        // IBD SIGINT sets this flag. The read must fail as cancel, not as a
+        // missing header the caller can cache.
+        if self.confirm_cancelled() {
+            return Err(StoreError::Cancelled("header read"));
+        }
         note_header_lookup();
         #[cfg(test)]
         note_header_io_under_index_lock();
