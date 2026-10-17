@@ -140,13 +140,12 @@ pub fn check_header_version_and_future_time(
     Ok(())
 }
 
-/// Median timestamp of up to 11 blocks ending at `height` (inclusive).
+/// Expected `nBits` for the header at `height`, from the parent and the period start.
 ///
-/// **Confirm load path:** BIP68/BIP113 run during multi-block assemble while
-/// mid-batch heights are not yet in `confirmed[]`. Prefer the durable confirmed
-/// chain, then load-stage header plans (same hybrid as [`crate::confirm_run`]
-/// header MTP). Heights still above tip with no plan are retryable load
-/// incomplete — not permanent `BadPrev` (that silently split batches to n=1).
+/// `period_first_time` is the timestamp `interval` blocks earlier when `height`
+/// is a retarget boundary. `bits_at` supplies earlier `nBits` for the testnet
+/// min-difficulty walk. `None` means an ancestor is missing. Median time is
+/// [`median_time_past_times`], not this function.
 pub fn next_work_bits(
     params: &ChainParams,
     height: u32,
