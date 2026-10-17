@@ -1100,6 +1100,100 @@ fn s8_rejects_empty_or_multi_item_coinbase_witness_reserved() {
     }
 }
 
+/// Core `GetWitnessCommitmentIndex` keeps the last output whose script is at
+/// least 38 bytes and starts `6a24aa21a9ed`. An earlier match does not win.
+#[test]
+fn s8_last_witness_commitment_output_wins() {
+    let mut spend = non_coinbase_spend(17);
+    spend.input[0].witness = Witness::from_slice(&[vec![0xab]]);
+    let wtxid = spend.compute_wtxid().to_byte_array();
+    let reserved = [0x42u8; 32];
+    let good = witness_commitment_script([wtxid], &reserved);
+    let mut bad = good.clone();
+    bad[6] ^= 0xff;
+    let commit = |bytes: Vec<u8>| TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(bytes),
+    };
+
+    {
+        let mut cb = coinbase(1);
+        cb.input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
+        cb.output.push(commit(bad.clone()));
+        cb.output.push(commit(good.clone()));
+        let b = block_with(vec![cb, spend.clone()]);
+        validate_block_structure(&b, &ctx_h(1))
+            .expect("the last commitment hash is the one checked");
+    }
+    {
+        let mut cb = coinbase(1);
+        cb.input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
+        cb.output.push(commit(good.clone()));
+        cb.output.push(commit(bad));
+        let err =
+            validate_block_structure(&block_with(vec![cb, spend.clone()]), &ctx_h(1)).unwrap_err();
+        assert_bad_block(err, "witness commitment mismatch");
+    }
+    // 37 bytes is under Core's minimum, so a trailing magic prefix does not
+    // displace the earlier 38-byte commitment.
+    {
+        let mut cb = coinbase(1);
+        cb.input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
+        cb.output.push(commit(good));
+        let mut short = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        short.extend([0u8; 31]);
+        assert_eq!(short.len(), 37);
+        cb.output.push(commit(short));
+        validate_block_structure(&block_with(vec![cb, spend]), &ctx_h(1))
+            .expect("a 37-byte trailer is not a witness commitment");
+    }
+}
+
+/// Nonce length is exactly 32. Empty and multi-item stacks are pinned separately.
+#[test]
+fn s8_rejects_nonce_lengths_beside_32() {
+    let mut spend = non_coinbase_spend(19);
+    spend.input[0].witness = Witness::from_slice(&[vec![0xab]]);
+    let wtxid = spend.compute_wtxid().to_byte_array();
+    let reserved = [0x11u8; 32];
+    let spk = witness_commitment_script([wtxid], &reserved);
+    for n in [31usize, 33] {
+        let mut cb = coinbase(1);
+        cb.output.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(spk.clone()),
+        });
+        cb.input[0].witness = Witness::from_slice(&[vec![0u8; n]]);
+        let err =
+            validate_block_structure(&block_with(vec![cb, spend.clone()]), &ctx_h(1)).unwrap_err();
+        assert_bad_block(err, "bad-witness-nonce-size");
+    }
+}
+
+/// Once segwit is active, witness bytes on the coinbase alone still require a commitment.
+#[test]
+fn s8_coinbase_witness_without_commitment_is_missing() {
+    let mut cb = coinbase(1);
+    cb.input[0].witness = Witness::from_slice(&[&[0u8; 32]]);
+    let err = validate_block_structure(&block_with(vec![cb]), &ctx_h(1)).unwrap_err();
+    assert_bad_block(err, "missing witness commitment");
+}
+
+/// Length 2 is the floor. Height 1's BIP34 push is one byte (`OP_1`); the
+/// length rule rejects that encoding before the height check.
+#[test]
+fn s9_coinbase_scriptsig_length_two_accepts_one_rejects() {
+    let cb = coinbase(1);
+    assert_eq!(cb.input[0].script_sig.len(), 2);
+    validate_block_structure(&block_with(vec![cb]), &ctx_h(1)).expect("scriptSig length 2");
+
+    let mut short = coinbase(1);
+    short.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+    assert_eq!(short.input[0].script_sig.len(), 1);
+    let err = validate_block_structure(&block_with(vec![short]), &ctx_h(1)).unwrap_err();
+    assert_bad_block(err, "bad-cb-length");
+}
+
 #[test]
 fn bip34_wrong_push_encoding_rejected_after_activation() {
     let p = Box::leak(Box::new(ChainParams::signet()));

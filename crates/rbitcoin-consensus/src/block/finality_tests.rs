@@ -341,3 +341,64 @@ fn structural_bip68_height_lock_skips_missing_coin_mtp() {
     super::structural_bip68(&query, &block, &ctx, &spends, &create_heights, &mut cache)
         .expect("height-type lock must not read the coin median");
 }
+
+/// BIP68 walks `txdata[1..]`. A coinbase whose relative lock would fail still connects.
+#[test]
+fn bip68_skips_a_coinbase_whose_relative_lock_would_fail() {
+    use crate::{accept_and_connect_block, prepare_regtest_candidate, ConsensusError};
+
+    let coinbase = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(200));
+    assert!(
+        !sequence_locks_satisfied(&coinbase, &[], &[], 1, 0),
+        "the same lock fails closed when the coinbase is treated as a normal tx"
+    );
+
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("bip68-coinbase");
+    let params = crate::params::ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(
+        &q,
+        &params,
+        rbitcoin_primitives::Height::GENESIS,
+        &genesis,
+        crate::Milestone::NONE,
+    )
+    .unwrap();
+    let mut block = crate::mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+    block.txdata[0].version = bitcoin::transaction::Version::TWO;
+    block.txdata[0].input[0].sequence = Sequence::from_consensus(200);
+    prepare_regtest_candidate(&mut block, genesis.block_hash(), genesis.header.time + 600);
+    accept_and_connect_block(
+        &q,
+        &params,
+        rbitcoin_primitives::Height(1),
+        &block,
+        crate::Milestone::NONE,
+    )
+    .expect("coinbase sequence is not a BIP68 input");
+    assert_eq!(q.tip_height(), Some(rbitcoin_primitives::Height(1)));
+
+    let params = Box::leak(Box::new(crate::params::ChainParams::regtest()));
+    let ctx = super::ValidationContext::at(
+        params,
+        rbitcoin_primitives::Height(6),
+        crate::milestone::Milestone::NONE,
+    );
+    let (_dir, query) = rbitcoin_query::testutil::tiny_query_labeled("bip68-noncb");
+    let create = rbitcoin_primitives::Fk(3);
+    let mut create_heights = rbitcoin_query::FkMap::default();
+    create_heights.insert(create, 5);
+    let block = csv_block(vec![
+        bare_tx(1, LockTime::ZERO, Sequence::MAX),
+        bare_tx(2, LockTime::ZERO, Sequence::from_consensus(200)),
+    ]);
+    let spends = [([0u8; 32], 0u32, rbitcoin_primitives::Fk::NULL, create, 0u32)];
+    let mut cache = rbitcoin_query::U32Map::default();
+    cache.insert(5, 1_500_000);
+    let err = super::structural_bip68(&query, &block, &ctx, &spends, &create_heights, &mut cache)
+        .expect_err("the same lock rejects a non-coinbase");
+    assert!(
+        matches!(err, ConsensusError::BadTx(s) if s.contains("nonfinal")),
+        "{err:?}"
+    );
+}
