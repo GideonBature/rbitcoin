@@ -5009,61 +5009,28 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_dropped_for_off_path_headers_hands_back_its_block_requests() {
-        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-drop-release");
-        hub.ensure_genesis().unwrap();
-        let gen = hub.tip_hash().unwrap();
-        floor_unreachable(&mut hub);
-        let owed = BlockHash::from_byte_array([0x5a; 32]);
-        let (path_peer, _rx0) = slot(0);
-        let (mut side_peer, _rx1) = slot(1);
-        side_peer.track_insert(owed);
-        let mut st = IbdWorkState::new(vec![path_peer, side_peer], Some(gen), Some(0));
-        super::super::assign::inflight_add_peer(&mut st.inflight, owed, 1);
-        let h1 = mine(gen, 1);
-        let h2 = mine(h1.block_hash(), 2);
-        apply(&mut st, &hub, 0, vec![h1, h2]);
-
-        let mut prev = gen;
-        let mut side = Vec::with_capacity(4_001);
-        for n in 0..4_001 {
-            let hdr = mine(prev, 10_000 + n);
-            prev = hdr.block_hash();
-            side.push(hdr);
-        }
-        apply(&mut st, &hub, 1, side);
-        assert!(
-            st.slots.iter().all(|s| s.id != 1 || !s.alive),
-            "a peer over the off-path budget is disconnected"
-        );
-        assert!(
-            !st.inflight.contains_key(&owed),
-            "the disconnected peer's block getdata is free to ask another peer"
-        );
-    }
-
-    #[test]
     fn off_path_headers_disconnect_the_peer_and_path_headers_do_not() {
         let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("header-walk-8");
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
         let h1 = mine(gen, 1);
         let h2 = mine(h1.block_hash(), 2);
-        hub.milestone = rbitcoin_consensus::Milestone {
-            height: 840_000,
-            anchor: Some(rbitcoin_consensus::MilestoneAnchor {
-                hash: BlockHash::from_byte_array([0xab; 32]),
-                min_work_be: [0xff; 32],
-            }),
-        };
+        floor_unreachable(&mut hub);
+        let owed = BlockHash::from_byte_array([0x5a; 32]);
         let (path_peer, _rx0) = slot(0);
-        let (side_peer, _rx1) = slot(1);
+        let (mut side_peer, _rx1) = slot(1);
         let path_addr = path_peer.addr;
         let side_addr = side_peer.addr;
+        side_peer.track_insert(owed);
         let mut st = IbdWorkState::new(vec![path_peer, side_peer], Some(gen), Some(0));
+        super::super::assign::inflight_add_peer(&mut st.inflight, owed, 1);
         apply(&mut st, &hub, 0, vec![h1, h2]);
         assert!(st.slots.iter().any(|s| s.id == 0 && s.alive));
         assert!(!st.addr_cooldown.contains_key(&path_addr));
+        assert!(
+            st.inflight.contains_key(&owed),
+            "the side peer still owes the block while it is connected"
+        );
 
         let mut prev = gen;
         let mut side = Vec::with_capacity(4_001);
@@ -5079,6 +5046,10 @@ mod tests {
         );
         assert!(st.addr_cooldown.contains_key(&side_addr));
         assert!(st.slots.iter().any(|s| s.id == 0 && s.alive));
+        assert!(
+            !st.inflight.contains_key(&owed),
+            "the disconnected peer's block getdata is free to ask another peer"
+        );
     }
 
     fn push_dummy(st: &mut IbdWorkState, n: u32) {
