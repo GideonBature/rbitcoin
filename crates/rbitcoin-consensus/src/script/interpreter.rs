@@ -1960,6 +1960,20 @@ mod success_and_disabled_tests {
         eval(&script_ok, SigVersion::WitnessV0).expect("0-of-0 empty dummy");
     }
 
+    /// Witness v0 rejects a non-empty dummy even though `EvalContext::new`
+    /// leaves NULLDUMMY off. Core would accept that. Base with the flag off
+    /// accepts it, which is the version confirm actually runs before segwit.
+    #[test]
+    fn witness_v0_nulldummy_rejects_when_flag_is_off() {
+        let script = vec![0x01, 0xff, 0x00, 0x00, 0xae];
+        let err = eval(&script, SigVersion::WitnessV0).unwrap_err();
+        assert!(
+            format!("{err}").contains("NULLDUMMY"),
+            "witness v0 is stricter than the flag, got {err}"
+        );
+        eval(&script, SigVersion::Base).expect("base with NULLDUMMY off allows the dummy");
+    }
+
     /// BIP112: OP_CSV fails when tx.nVersion < 2 (unsigned), matching Core.
     /// (`docs/external_findings/004-csv-nop-and-scriptnum-width.md`).
     #[test]

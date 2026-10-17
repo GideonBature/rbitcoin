@@ -287,6 +287,47 @@ fn witness_p2wpkh_counts_one() {
     assert_eq!(witness_sigop_count(&tx, &spks(&prevouts)), 1);
 }
 
+/// Empty P2WSH has no witness script to count. A v1 program is not P2WPKH or P2WSH.
+#[test]
+fn witness_empty_p2wsh_and_v1_program_cost_zero() {
+    let spend = |spk: Vec<u8>| {
+        let prevouts = vec![TxOut {
+            value: Amount::from_sat(10),
+            script_pubkey: ScriptBuf::from_bytes(spk),
+        }];
+        let tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([5; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        (tx, prevouts)
+    };
+
+    let mut p2wsh = vec![0x00, 0x20];
+    p2wsh.extend([0u8; 32]);
+    let (tx, prevouts) = spend(p2wsh);
+    assert_eq!(witness_sigop_count(&tx, &spks(&prevouts)), 0);
+    assert_eq!(tx_sigop_cost(&tx, &spks(&prevouts), true, true), 0);
+
+    let mut v1 = vec![0x51, 0x20];
+    v1.extend([0xab; 32]);
+    let (tx, prevouts) = spend(v1);
+    assert_eq!(witness_sigop_count(&tx, &spks(&prevouts)), 0);
+    assert_eq!(tx_sigop_cost(&tx, &spks(&prevouts), true, true), 0);
+}
+
 #[test]
 fn witness_sigops_gated_on_witness_flag() {
     let mut spk = vec![0x00, 0x14];

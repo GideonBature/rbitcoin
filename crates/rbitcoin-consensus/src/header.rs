@@ -358,6 +358,71 @@ mod median_time_past_tests {
         );
     }
 
+    /// Mainnet block 32256 (`000000004f2886a170adb7204cb0c7a824217dd24d11a74423d564c4e0904967`).
+    ///
+    /// Parent 32255 time `1262152739`, bits `0x1d00ffff`. Period start is
+    /// height 30240, time `1261130161`. Timespan `1022578` is inside the
+    /// clamp, so the compact is Core's `GetCompact` of that product:
+    /// `0x1d00d86a`. The literal is not produced by calling the function
+    /// under test.
+    #[test]
+    fn mainnet_retarget_32256_matches_core_compact() {
+        let params = ChainParams::mainnet();
+        let got = next_work_bits(
+            &params,
+            32_256,
+            CompactTarget::from_consensus(0x1d00_ffff),
+            1_262_152_739,
+            1_262_152_739,
+            Some(1_261_130_161),
+            |_| None,
+        );
+        assert_eq!(got, Some(CompactTarget::from_consensus(0x1d00_d86a)));
+    }
+
+    /// Clamp and pow-limit cap, with expected compacts written as integers.
+    ///
+    /// Core order: timespan clamped to `[target/4, target*4]` (1_209_600 is
+    /// two weeks), `target * timespan / 1_209_600`, then cap at the pow
+    /// limit, then `GetCompact`.
+    ///
+    /// - Quarter floor from `0x1d00ffff` and a 1-second span. Clamped span is
+    ///   302_400. `0xffff << 208` * 302_400 / 1_209_600 compacts to
+    ///   `0x1c3fffc0`. Without the floor the compact is `0x1a0ddead`.
+    /// - 4× ceiling from `0x1c1fffe0` (`0xffff << 205`) and a span one second
+    ///   past four periods. Clamped product compacts to `0x1c7fff80`, still
+    ///   under the pow limit. Without the ceiling the compact is `0x1c7fff81`.
+    /// - Pow-limit cap from `0x1d007fff` (`0x7fff << 208`) and an exact 4×
+    ///   span. The product exceeds the limit. Compact is `0x1d00ffff`.
+    ///   Without the cap it is `0x1d01fffc`.
+    #[test]
+    fn retarget_clamps_timespan_and_caps_at_pow_limit() {
+        let params = ChainParams::mainnet();
+        let bits = |prev: u32, prev_time: u32, first: u32| {
+            next_work_bits(
+                &params,
+                2_016,
+                CompactTarget::from_consensus(prev),
+                prev_time,
+                prev_time,
+                Some(first),
+                |_| None,
+            )
+        };
+        assert_eq!(
+            bits(0x1d00_ffff, 2, 1),
+            Some(CompactTarget::from_consensus(0x1c3f_ffc0))
+        );
+        assert_eq!(
+            bits(0x1c1f_ffe0, 4_838_402, 1),
+            Some(CompactTarget::from_consensus(0x1c7f_ff80))
+        );
+        assert_eq!(
+            bits(0x1d00_7fff, 4_838_401, 1),
+            Some(CompactTarget::from_consensus(0x1d00_ffff))
+        );
+    }
+
     #[test]
     fn mtp_times_picks_middle_of_sorted() {
         assert_eq!(median_time_past_times(&[3, 1, 2]).unwrap(), 2);

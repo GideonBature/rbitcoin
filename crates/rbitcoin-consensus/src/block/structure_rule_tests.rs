@@ -1100,6 +1100,100 @@ fn s8_rejects_empty_or_multi_item_coinbase_witness_reserved() {
     }
 }
 
+/// Core `GetWitnessCommitmentIndex` keeps the last output whose script is at
+/// least 38 bytes and starts `6a24aa21a9ed`. An earlier match does not win.
+#[test]
+fn s8_last_witness_commitment_output_wins() {
+    let mut spend = non_coinbase_spend(17);
+    spend.input[0].witness = Witness::from_slice(&[vec![0xab]]);
+    let wtxid = spend.compute_wtxid().to_byte_array();
+    let reserved = [0x42u8; 32];
+    let good = witness_commitment_script([wtxid], &reserved);
+    let mut bad = good.clone();
+    bad[6] ^= 0xff;
+    let commit = |bytes: Vec<u8>| TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::from_bytes(bytes),
+    };
+
+    {
+        let mut cb = coinbase(1);
+        cb.input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
+        cb.output.push(commit(bad.clone()));
+        cb.output.push(commit(good.clone()));
+        let b = block_with(vec![cb, spend.clone()]);
+        validate_block_structure(&b, &ctx_h(1))
+            .expect("the last commitment hash is the one checked");
+    }
+    {
+        let mut cb = coinbase(1);
+        cb.input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
+        cb.output.push(commit(good.clone()));
+        cb.output.push(commit(bad));
+        let err =
+            validate_block_structure(&block_with(vec![cb, spend.clone()]), &ctx_h(1)).unwrap_err();
+        assert_bad_block(err, "witness commitment mismatch");
+    }
+    // 37 bytes is under Core's minimum, so a trailing magic prefix does not
+    // displace the earlier 38-byte commitment.
+    {
+        let mut cb = coinbase(1);
+        cb.input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
+        cb.output.push(commit(good));
+        let mut short = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        short.extend([0u8; 31]);
+        assert_eq!(short.len(), 37);
+        cb.output.push(commit(short));
+        validate_block_structure(&block_with(vec![cb, spend]), &ctx_h(1))
+            .expect("a 37-byte trailer is not a witness commitment");
+    }
+}
+
+/// Nonce length is exactly 32. Empty and multi-item stacks are pinned separately.
+#[test]
+fn s8_rejects_nonce_lengths_beside_32() {
+    let mut spend = non_coinbase_spend(19);
+    spend.input[0].witness = Witness::from_slice(&[vec![0xab]]);
+    let wtxid = spend.compute_wtxid().to_byte_array();
+    let reserved = [0x11u8; 32];
+    let spk = witness_commitment_script([wtxid], &reserved);
+    for n in [31usize, 33] {
+        let mut cb = coinbase(1);
+        cb.output.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(spk.clone()),
+        });
+        cb.input[0].witness = Witness::from_slice(&[vec![0u8; n]]);
+        let err =
+            validate_block_structure(&block_with(vec![cb, spend.clone()]), &ctx_h(1)).unwrap_err();
+        assert_bad_block(err, "bad-witness-nonce-size");
+    }
+}
+
+/// Once segwit is active, witness bytes on the coinbase alone still require a commitment.
+#[test]
+fn s8_coinbase_witness_without_commitment_is_missing() {
+    let mut cb = coinbase(1);
+    cb.input[0].witness = Witness::from_slice(&[&[0u8; 32]]);
+    let err = validate_block_structure(&block_with(vec![cb]), &ctx_h(1)).unwrap_err();
+    assert_bad_block(err, "missing witness commitment");
+}
+
+/// Length 2 is the floor. Height 1's BIP34 push is one byte (`OP_1`); the
+/// length rule rejects that encoding before the height check.
+#[test]
+fn s9_coinbase_scriptsig_length_two_accepts_one_rejects() {
+    let cb = coinbase(1);
+    assert_eq!(cb.input[0].script_sig.len(), 2);
+    validate_block_structure(&block_with(vec![cb]), &ctx_h(1)).expect("scriptSig length 2");
+
+    let mut short = coinbase(1);
+    short.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+    assert_eq!(short.input[0].script_sig.len(), 1);
+    let err = validate_block_structure(&block_with(vec![short]), &ctx_h(1)).unwrap_err();
+    assert_bad_block(err, "bad-cb-length");
+}
+
 #[test]
 fn bip34_wrong_push_encoding_rejected_after_activation() {
     let p = Box::leak(Box::new(ChainParams::signet()));
@@ -1637,6 +1731,114 @@ fn genesis_coinbase_is_never_a_coin() {
         );
         assert_eq!(q.tip_height(), Some(Height(maturity)));
     }
+}
+
+/// An anchored milestone skips a script that fails, and only on that header path.
+///
+/// The spent output is P2PKH and the scriptSig is empty, so the interpreter
+/// rejects it. `OP_TRUE` and `OP_RETURN` are not this case.
+#[test]
+fn anchored_milestone_skips_a_failing_p2pkh_script() {
+    use crate::milestone::MilestoneAnchor;
+    use crate::{accept_and_connect_block, mine_regtest_paying, pad_empty_from};
+    use bitcoin::hashes::Hash;
+
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("anchor-skip-p2pkh");
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+
+    let mut spk = vec![0x76, 0xa9, 0x14];
+    spk.extend_from_slice(&[0x11; 20]);
+    spk.extend_from_slice(&[0x88, 0xac]);
+    let created = mine_regtest_paying(
+        genesis.block_hash(),
+        genesis.header.time + 600,
+        1,
+        ScriptBuf::from_bytes(spk),
+        Vec::new(),
+    );
+    accept_and_connect_block(&q, &params, Height(1), &created, Milestone::NONE).unwrap();
+    let coin_txid = created.txdata[0].compute_txid();
+    let coin_value = created.txdata[0].output[0].value;
+
+    let maturity = params.coinbase_maturity();
+    let (tip, time, _) = pad_empty_from(
+        &q,
+        &params,
+        created.block_hash(),
+        created.header.time,
+        2,
+        maturity,
+        0,
+    );
+    let h = maturity + 1;
+    let spend = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coin_txid,
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: coin_value - Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let block = mine_regtest_paying(
+        tip,
+        time + 600,
+        h,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend],
+    );
+    let block_hash = block.block_hash().to_byte_array();
+    let parent_hash = tip.to_byte_array();
+    let one = {
+        let mut w = [0u8; 32];
+        w[31] = 1;
+        bitcoin::Work::from_be_bytes(w)
+    };
+    let note = |height: u32, hash: [u8; 32]| {
+        q.note_milestone_header(height, hash, [0; 32], one, Some(one));
+    };
+    let anchored = |height: u32, hash: [u8; 32]| Milestone {
+        height,
+        anchor: Some(MilestoneAnchor {
+            hash: bitcoin::BlockHash::from_byte_array(hash),
+            min_work_be: [0xff; 32],
+        }),
+    };
+
+    note(maturity, parent_hash);
+    let above = anchored(maturity, parent_hash);
+    let err = accept_and_connect_block(&q, &params, Height(h), &block, above)
+        .expect_err("one height above the anchor still runs the failing script");
+    assert!(
+        matches!(err, ConsensusError::Script(_)),
+        "expected a script failure, got {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(maturity)));
+
+    q.clear_milestone_path_above(0);
+    let mut wrong = block_hash;
+    wrong[0] ^= 0xff;
+    note(h, wrong);
+    let err = accept_and_connect_block(&q, &params, Height(h), &block, anchored(h, block_hash))
+        .expect_err("a different hash at the anchor height does not skip");
+    assert!(matches!(err, ConsensusError::Script(_)), "{err:?}");
+    assert_eq!(q.tip_height(), Some(Height(maturity)));
+
+    q.clear_milestone_path_above(0);
+    note(h, block_hash);
+    accept_and_connect_block(&q, &params, Height(h), &block, anchored(h, block_hash))
+        .expect("the anchor hash skips the failing P2PKH script");
+    assert_eq!(q.tip_height(), Some(Height(h)));
 }
 
 /// An output whose script starts with `OP_RETURN`, or is longer than 10_000
@@ -2764,6 +2966,109 @@ fn script_flags_follow_core_exception_table() {
     let f = ScriptVerifyFlags::consensus_at(&ctx, &TAPROOT_EXCEPTION_MAINNET, true);
     assert!(f.bip16_active && f.witness_active && !f.taproot_active);
     assert!(f.null_dummy && f.bip66_active);
+    for f in [
+        ScriptVerifyFlags::consensus_at(
+            &ValidationContext::at(main, Height(692_262), Milestone::NONE),
+            &[1u8; 32],
+            true,
+        ),
+        ScriptVerifyFlags::consensus_at(
+            &ValidationContext::at(main, Height(170_060), Milestone::NONE),
+            &BIP16_EXCEPTION_MAINNET,
+            false,
+        ),
+        f,
+    ] {
+        assert!(
+            !f.cleanstack && !f.low_s && !f.minimal_data && !f.strictenc && !f.const_scriptcode,
+            "policy flags stay off: {f:?}"
+        );
+    }
+}
+
+/// The exception hashes change execution, not only the flag bits.
+///
+/// A taproot key-path signature with hashtype byte `0x00` is invalid when
+/// taproot is on and ignored when the mainnet exception turns taproot off.
+/// A P2SH redeem of `OP_0` matches the template hash either way. On the BIP16
+/// exception the redeem is not executed. On the next hash it is, and fails.
+#[test]
+fn exception_hashes_change_which_scripts_run() {
+    let main = Box::leak(Box::new(ChainParams::mainnet()));
+
+    let mut program = vec![0x51, 0x20];
+    program.extend_from_slice(&[0xff; 32]);
+    let mut sig = vec![0x11u8; 65];
+    sig[64] = 0x00;
+    let tap_tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[sig.as_slice()]),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let tap_prev = vec![TxOut {
+        value: Amount::from_sat(2),
+        script_pubkey: ScriptBuf::from_bytes(program),
+    }];
+    let tap_flags = |hash: &[u8; 32]| ScriptVerifyFlags::for_block(main, 692_261, hash, 0);
+    let accept = ScriptCheckJob::new(
+        tap_prev.clone(),
+        tap_tx.clone(),
+        tap_flags(&TAPROOT_EXCEPTION_MAINNET),
+    );
+    crate::script::verify_job_all_inputs(&accept)
+        .expect("taproot exception does not run the key path");
+    let reject = ScriptCheckJob::new(tap_prev, tap_tx, tap_flags(&[1u8; 32]));
+    let err = crate::script::verify_job_all_inputs(&reject).expect_err("neighbor enforces taproot");
+    assert!(
+        format!("{err}").contains("sighash"),
+        "expected hashtype 0x00 reject, got {err}"
+    );
+
+    let redeem = [0x00u8];
+    let redeem_hash = bitcoin::hashes::hash160::Hash::hash(&redeem);
+    let mut p2sh = vec![0xa9, 0x14];
+    p2sh.extend_from_slice(redeem_hash.as_byte_array());
+    p2sh.push(0x87);
+    let p2sh_tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![0x01, 0x00]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let p2sh_prev = vec![TxOut {
+        value: Amount::from_sat(2),
+        script_pubkey: ScriptBuf::from_bytes(p2sh),
+    }];
+    let p2sh_flags = |hash: &[u8; 32]| ScriptVerifyFlags::for_block(main, 170_060, hash, 0);
+    let bare = ScriptCheckJob::new(
+        p2sh_prev.clone(),
+        p2sh_tx.clone(),
+        p2sh_flags(&BIP16_EXCEPTION_MAINNET),
+    );
+    crate::script::verify_job_all_inputs(&bare)
+        .expect("BIP16 exception checks the hash and does not run the redeem");
+    let enforced = ScriptCheckJob::new(p2sh_prev, p2sh_tx, p2sh_flags(&[2u8; 32]));
+    assert!(
+        crate::script::verify_job_all_inputs(&enforced).is_err(),
+        "neighbor executes the OP_0 redeem"
+    );
 }
 
 /// Confirm jobs share wire Arc — same Transaction address, no deep clone.

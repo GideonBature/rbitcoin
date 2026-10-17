@@ -395,6 +395,112 @@ mod bip341_tests {
         script::verify_job_all_inputs(&job_for(0x50, true)).expect("leaf 0x50 with annex");
     }
 
+    /// Unknown leaf versions succeed before the 520-byte and 1000-stack checks.
+    #[test]
+    fn unknown_leaf_succeeds_past_witness_limits() {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::key::TapTweak;
+        use bitcoin::secp256k1::Parity;
+
+        fn job(stack: Vec<Vec<u8>>) -> ScriptCheckJob {
+            let secp = Secp256k1::new();
+            let internal_sk = SecretKey::from_slice(&[3u8; 32]).unwrap();
+            let internal_kp = Keypair::from_secret_key(&secp, &internal_sk);
+            let (internal, _) = internal_kp.x_only_public_key();
+            let leaf = ScriptBuf::from_bytes(vec![0x51]);
+            let leaf_ver = 0xc2u8;
+            let mut eng = TapLeafHash::engine();
+            leaf_ver.consensus_encode(&mut eng).expect("engine");
+            leaf.as_script().consensus_encode(&mut eng).expect("engine");
+            let node = TapNodeHash::from_byte_array(TapLeafHash::from_engine(eng).to_byte_array());
+            let (tweaked, parity) = internal.tap_tweak(&secp, Some(node));
+            let output_key = tweaked.to_x_only_public_key();
+            let parity_bit = match parity {
+                Parity::Even => 0u8,
+                Parity::Odd => 1,
+            };
+            let mut control = Vec::with_capacity(33);
+            control.push(leaf_ver | parity_bit);
+            control.extend_from_slice(&internal.serialize());
+            let mut wit = stack;
+            wit.push(leaf.as_bytes().to_vec());
+            wit.push(control);
+            let refs: Vec<&[u8]> = wit.iter().map(|v| v.as_slice()).collect();
+            let prevout = TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: p2tr_spk(output_key),
+            };
+            let tx = Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::from_slice(&refs),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(49_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                }],
+            };
+            ScriptCheckJob {
+                txid: [0u8; 32],
+                prevouts: crate::block::JobPrevouts::owned(vec![prevout]),
+                tx: crate::block::JobTx::owned(tx),
+                flags: crate::block::ScriptVerifyFlags {
+                    bip65_active: true,
+                    bip112_active: true,
+                    bip66_active: true,
+                    bip16_active: true,
+                    taproot_active: true,
+                    minimal_if: false,
+                    nullfail: false,
+                    low_s: false,
+                    strictenc: false,
+                    null_dummy: false,
+                    minimal_data: false,
+                    witness_pubkeytype: false,
+                    witness_active: true,
+                    discourage_upgradable_witness: false,
+                    const_scriptcode: false,
+                    cleanstack: false,
+                },
+                pre: std::sync::OnceLock::new(),
+            }
+        }
+
+        let ones: Vec<Vec<u8>> = (0..1001).map(|_| vec![0x01]).collect();
+        script::verify_job_all_inputs(&job(ones)).expect("unknown leaf ignores the 1000 stack cap");
+        script::verify_job_all_inputs(&job(vec![vec![0u8; 521]]))
+            .expect("unknown leaf ignores the 520-byte element cap");
+    }
+
+    #[test]
+    fn tapscript_sighash_single_without_output_fails() {
+        let (mut job, _) = make_script_path_spend();
+        let mut tx = (*job.tx).clone();
+        tx.output.clear();
+        job.tx = crate::block::JobTx::owned(tx);
+        let spent = super::crypto::TapSpentHashes::default();
+        let leaf = bitcoin::TapLeafHash::from_byte_array([0u8; 32]);
+        let single = std::cell::OnceCell::new();
+        let err = super::crypto::tap_signature_hash(
+            &job,
+            0,
+            TapSighashType::Single,
+            &spent,
+            None,
+            Some((leaf, 0xffff_ffff)),
+            &single,
+        )
+        .expect_err("SIGHASH_SINGLE with no output");
+        assert!(
+            format!("{err}").contains("sighash single"),
+            "expected missing output, got {err}"
+        );
+    }
+
     /// Core ExecuteWitnessScript (TAPSCRIPT): initial stack > 1000 is
     /// SCRIPT_ERR_STACK_SIZE even if the leaf would drain it.
     #[test]

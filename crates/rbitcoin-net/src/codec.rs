@@ -587,6 +587,36 @@ mod tests {
         }
     }
 
+    /// Post-IBD `FramedMessage::decode` rejects a trailing byte. The same
+    /// bytes without it are a block. Decode does not touch the invalid-hash set.
+    #[test]
+    fn trailing_byte_on_a_regtest_block_is_unknown() {
+        let genesis = genesis_block(Network::Regtest);
+        let payload = serialize(&genesis);
+        let clean = FramedMessage {
+            magic: Magic::from(Network::Regtest),
+            command: *b"block\0\0\0\0\0\0\0",
+            payload: payload.clone(),
+        };
+        match clean.decode().payload() {
+            NetworkMessage::Block(b) => assert_eq!(b.block_hash(), genesis.block_hash()),
+            other => panic!("expected block, got {other:?}"),
+        }
+        let mut extra = payload;
+        extra.push(0);
+        let trailed = FramedMessage {
+            magic: Magic::from(Network::Regtest),
+            command: *b"block\0\0\0\0\0\0\0",
+            payload: extra,
+        };
+        match trailed.decode().payload() {
+            NetworkMessage::Unknown { command, .. } => {
+                assert_eq!(command.to_string(), "block");
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
     #[test]
     fn command_bytes_ok_accepts_null_padded() {
         assert!(command_bytes_ok(b"version\0\0\0\0\0"));
