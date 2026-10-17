@@ -8060,5 +8060,1070 @@
       "P2SH,WITNESS,TAPROOT",
       "OK"
     ]
+  },
+  {
+    "id": "num-max-roundtrip-legacy",
+    "row": [
+      "",
+      "0x04ffffff7f009304ffffff7f9c",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "num-max-roundtrip-v0",
+    "row": [
+      [
+        "04ffffff7f009304ffffff7f9c",
+        0.0
+      ],
+      "",
+      "0x0020f36eeff3c84cd539913d459c121b6bd819b9c685ee74f917cbb90604115292d6",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "num-max-roundtrip-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x04ffffff7f009304ffffff7f9c",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "num-5byte-arith-legacy",
+    "row": [
+      "",
+      "0x0501000000005193",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "num-5byte-arith-v0",
+    "row": [
+      [
+        "0501000000005193",
+        0.0
+      ],
+      "",
+      "0x0020b848ed18f7f29997c3d53a95e2feef843e4377d6f68ff3063048ecda5bacdcbe",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "num-5byte-arith-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x0501000000005193",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "add-result-may-be-wide-legacy",
+    "row": [
+      "",
+      "0x04ffffff7f5193",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "add-result-may-be-wide-v0",
+    "row": [
+      [
+        "04ffffff7f5193",
+        0.0
+      ],
+      "",
+      "0x0020eb566edbbe7488b6e24071232356ae5fb75e4cd9e06f15aefe7e75260d482636",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "add-result-may-be-wide-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x04ffffff7f5193",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "add-wide-result-not-reused-legacy",
+    "row": [
+      "",
+      "0x04ffffff7f51930093",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "add-wide-result-not-reused-v0",
+    "row": [
+      [
+        "04ffffff7f51930093",
+        0.0
+      ],
+      "",
+      "0x00205da300a12b9f082a4aed5382e52a1dc284e5e70f03e4f2f94fb2ae110b11c909",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "add-wide-result-not-reused-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x04ffffff7f51930093",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "add-two-max-legacy",
+    "row": [
+      "",
+      "0x04ffffff7f04ffffff7f93",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "add-two-max-v0",
+    "row": [
+      [
+        "04ffffff7f04ffffff7f93",
+        0.0
+      ],
+      "",
+      "0x002046e0ad53bffd35244b4f78fc636ea98247a9cc4d0fb18db8c9ca31f2034f940d",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "add-two-max-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x04ffffff7f04ffffff7f93",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "sub-underflow-wide-legacy",
+    "row": [
+      "",
+      "0x0004ffffff7f94",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "sub-underflow-wide-v0",
+    "row": [
+      [
+        "0004ffffff7f94",
+        0.0
+      ],
+      "",
+      "0x0020de395c1340ee9f7c727f8647602560deec4c8c6051aa0e03110a59c83c36e933",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "sub-underflow-wide-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x0004ffffff7f94",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "negate-negzero-legacy",
+    "row": [
+      "",
+      "0x04000000808f009c",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "negate-negzero-v0",
+    "row": [
+      [
+        "04000000808f009c",
+        0.0
+      ],
+      "",
+      "0x002069f299d1070ae52101ba7e8f14553e9c55a0038440717839e3a159f1d890cac8",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "negate-negzero-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x04000000808f009c",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "negate-i32-min-5byte-legacy",
+    "row": [
+      "",
+      "0x0500000080808f",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "negate-i32-min-5byte-v0",
+    "row": [
+      [
+        "0500000080808f",
+        0.0
+      ],
+      "",
+      "0x0020088e143671148f974c9d87d93f6caf952edb58b1468c40d98702ad0f78546b95",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "negate-i32-min-5byte-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x0500000080808f",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "zero-negzero-numequal-legacy",
+    "row": [
+      "",
+      "0x0001809c",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "zero-negzero-numequal-v0",
+    "row": [
+      [
+        "0001809c",
+        0.0
+      ],
+      "",
+      "0x002059a58326f03632f470edc13e65ac88ba36fd0597c0fb21017b09d2bdabc8b848",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "zero-negzero-numequal-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x0001809c",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "zero-negzero-equal-legacy",
+    "row": [
+      "",
+      "0x00018087",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "zero-negzero-equal-v0",
+    "row": [
+      [
+        "00018087",
+        0.0
+      ],
+      "",
+      "0x002061448309f75f9cd3c0b28e3832c381f2cd381c2ece03d33e1f51a05b92f7dbe4",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "zero-negzero-equal-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x00018087",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "within-inside-legacy",
+    "row": [
+      "",
+      "0x510052a5",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "within-inside-v0",
+    "row": [
+      [
+        "510052a5",
+        0.0
+      ],
+      "",
+      "0x0020ad7b54286e1f00dcdb6d0070c21328e628e6ab5dc256de5b8ec3a1b03c35ee6f",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "within-inside-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x510052a5",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "within-low-legacy",
+    "row": [
+      "",
+      "0x000052a5",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "within-low-v0",
+    "row": [
+      [
+        "000052a5",
+        0.0
+      ],
+      "",
+      "0x002054d2e7408cc5d69f532f4e712be6040af48f9e284cccfd7b14dc554e545c94cc",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "within-low-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x000052a5",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "within-high-legacy",
+    "row": [
+      "",
+      "0x520052a5",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "within-high-v0",
+    "row": [
+      [
+        "520052a5",
+        0.0
+      ],
+      "",
+      "0x0020a2fd7d2d67433e055845421b805c09d6729b504de68f54a38257eee66f1b94ce",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "within-high-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x520052a5",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "pick-zero-legacy",
+    "row": [
+      "",
+      "0x51007975",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "pick-zero-v0",
+    "row": [
+      [
+        "51007975",
+        0.0
+      ],
+      "",
+      "0x0020e1e0aed811c3ebd42ba1036be5751fd2957a3bdbe1f1991267dc994164bd85da",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "pick-zero-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x51007975",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "pick-negative-legacy",
+    "row": [
+      "",
+      "0x514f79",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "pick-negative-v0",
+    "row": [
+      [
+        "514f79",
+        0.0
+      ],
+      "",
+      "0x0020f845c3104e1332bc8d28501aa5eda5f93d8b1c4d5ac0fab5283aa2136d52eb9b",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "pick-negative-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x514f79",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "pick-depth-legacy",
+    "row": [
+      "",
+      "0x515179",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "pick-depth-v0",
+    "row": [
+      [
+        "515179",
+        0.0
+      ],
+      "",
+      "0x0020e288d1b232a6ecd2a9ff1af9e3f8fda051543e9d3c972b4dba49d9e79e07c5ce",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "pick-depth-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x515179",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "roll-zero-legacy",
+    "row": [
+      "",
+      "0x51007a",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "roll-zero-v0",
+    "row": [
+      [
+        "51007a",
+        0.0
+      ],
+      "",
+      "0x0020e83c265afd4c5661bce837e472b204589d6ba1f7a0f3c867c15eb970f35c04ad",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "roll-zero-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x51007a",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "roll-negative-legacy",
+    "row": [
+      "",
+      "0x514f7a",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "roll-negative-v0",
+    "row": [
+      [
+        "514f7a",
+        0.0
+      ],
+      "",
+      "0x00205c703b539b59b18687356025f58cb5622472b4d97fa191846f7ff5945207f2db",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "roll-negative-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x514f7a",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "roll-depth-legacy",
+    "row": [
+      "",
+      "0x51517a",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "roll-depth-v0",
+    "row": [
+      [
+        "51517a",
+        0.0
+      ],
+      "",
+      "0x002097539582bfe6cda9a019fc7f592957e574d572d502acaacb12e480564f29bad4",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "roll-depth-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x51517a",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "if-minimal-true-legacy",
+    "row": [
+      "",
+      "0x51635168",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "if-minimal-true-v0",
+    "row": [
+      [
+        "51635168",
+        0.0
+      ],
+      "",
+      "0x0020d7b825146d3d522e489fa9eea62fe3158d776e7fa72f49cf7fd95710cb9fc82f",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "if-minimal-true-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x51635168",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "if-minimal-empty-legacy",
+    "row": [
+      "",
+      "0x006300675168",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "if-minimal-empty-v0",
+    "row": [
+      [
+        "006300675168",
+        0.0
+      ],
+      "",
+      "0x0020171421719cc1ebfab76857f1f37bb78c233a96edab2a8b29f2f29e861429a31a",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "if-minimal-empty-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x006300675168",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimalif-00-legacy",
+    "row": [
+      "",
+      "0x010063516851",
+      "MINIMALIF",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimalif-00-v0-off",
+    "row": [
+      [
+        "010063516851",
+        0.0
+      ],
+      "",
+      "0x00205788e80c07f4bf3a9c5558051311ea48c24312c7ba5aff1bfb8c5850cfe0b1b3",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimalif-00-v0-on",
+    "row": [
+      [
+        "010063516851",
+        0.0
+      ],
+      "",
+      "0x00205788e80c07f4bf3a9c5558051311ea48c24312c7ba5aff1bfb8c5850cfe0b1b3",
+      "P2SH,WITNESS,MINIMALIF",
+      "ERR"
+    ]
+  },
+  {
+    "id": "minimalif-00-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x010063516851",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "minimalif-negzero-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x018063516851",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "minimalif-negzero-v0-off",
+    "row": [
+      [
+        "018063516851",
+        0.0
+      ],
+      "",
+      "0x0020f61b664d9fc625e048ed2c0b6a8e1290f1d46462542c6cc8bd125d2b4722da21",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimalif-02-legacy",
+    "row": [
+      "",
+      "0x52635168",
+      "MINIMALIF",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimalif-02-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x52635168",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "bool-leading-zero-legacy",
+    "row": [
+      "",
+      "0x020001635168",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "bool-leading-zero-v0",
+    "row": [
+      [
+        "020001635168",
+        0.0
+      ],
+      "",
+      "0x0020eb5b2d9f5196dd8ed770d207c18376abae1aa806b7c9b29437e987a4d56e2832",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "bool-leading-zero-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x020001635168",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "bool-negzero-legacy",
+    "row": [
+      "",
+      "0x01806300675168",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "bool-negzero-v0",
+    "row": [
+      [
+        "01806300675168",
+        0.0
+      ],
+      "",
+      "0x00202039179af7f617660023e2227b19b7626a06b7ee3438306fb18a54c7a58535e4",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "unexec-does-not-push-legacy",
+    "row": [
+      "",
+      "0x006352675168",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "unexec-does-not-push-v0",
+    "row": [
+      [
+        "006352675168",
+        0.0
+      ],
+      "",
+      "0x0020f27d633d8174c84c5a8f14c98e688e06b4990f017aed42d2b681af29755c3627",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "unexec-does-not-push-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x006352675168",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimaldata-unexec-legacy",
+    "row": [
+      "",
+      "0x006301016851",
+      "MINIMALDATA",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimaldata-exec-legacy",
+    "row": [
+      "",
+      "0x0101",
+      "MINIMALDATA",
+      "ERR"
+    ]
+  },
+  {
+    "id": "minimaldata-unexec-v0",
+    "row": [
+      [
+        "006301016851",
+        0.0
+      ],
+      "",
+      "0x0020544fcd0cd9123b0eab0e4ad22dcf783e010945af307ac2034dc0fa5890bb7432",
+      "P2SH,WITNESS,MINIMALDATA",
+      "OK"
+    ]
+  },
+  {
+    "id": "minimaldata-exec-v0",
+    "row": [
+      [
+        "0101",
+        0.0
+      ],
+      "",
+      "0x00209dcf97a184f32623d11a73124ceb99a5709b083721e878a16d78f596718ba7b2",
+      "P2SH,WITNESS,MINIMALDATA",
+      "ERR"
+    ]
+  },
+  {
+    "id": "unexec-checksigverify-legacy",
+    "row": [
+      "",
+      "0x00630000ad6851",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "unexec-checksigverify-v0",
+    "row": [
+      [
+        "00630000ad6851",
+        0.0
+      ],
+      "",
+      "0x0020a48b3c2e59851f3fbc3c3ad1a96d42def150b49180680fd0671f542a78288043",
+      "P2SH,WITNESS",
+      "OK"
+    ]
+  },
+  {
+    "id": "unexec-checksigverify-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x00630000ad6851",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "OK"
+    ]
+  },
+  {
+    "id": "exec-checksigverify-empty-legacy",
+    "row": [
+      "",
+      "0x51630000ad6851",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "exec-checksigverify-empty-v0",
+    "row": [
+      [
+        "51630000ad6851",
+        0.0
+      ],
+      "",
+      "0x00208c8d851279e92464452acf309f20cdef4795723b1cbf892ef5a006e6ea813584",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "exec-checksigverify-empty-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x51630000ad6851",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
   }
 ]
