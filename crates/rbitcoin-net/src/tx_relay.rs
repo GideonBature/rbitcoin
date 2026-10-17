@@ -3163,12 +3163,17 @@ impl MempoolHub {
     /// Drop live txs that are non-final / immature at the new tip (invalidate
     /// of empty blocks still has to evict mempool coinbase spends).
     pub fn evict_after_reorg(&self) {
-        self.evict_after_reorg_between(|_| {});
+        self.reorg_evict(|_| {});
     }
 
     /// Same as [`Self::evict_after_reorg`]. `between` runs after each removal
     /// and before the next coin check, while no mempool write lock is held.
-    fn evict_after_reorg_between(&self, mut between: impl FnMut(&Self)) {
+    #[cfg(test)]
+    fn evict_after_reorg_between(&self, between: impl FnMut(&Self)) {
+        self.reorg_evict(between);
+    }
+
+    fn reorg_evict(&self, mut between: impl FnMut(&Self)) {
         let utxo = self.utxo_provider();
         let tip = self.chain_tip_ctx();
         loop {
