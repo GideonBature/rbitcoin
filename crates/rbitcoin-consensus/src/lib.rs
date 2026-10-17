@@ -88,8 +88,8 @@ pub use convert::header_to_record;
 pub(crate) use convert::{block_to_apply, block_to_apply_with_txids_prev};
 pub use error::{block_reject_log_line, block_reject_reason, script_flag_paren, ConsensusError};
 pub use header::{
-    difficulty_from_bits, expected_next_bits, median_time_past, next_work_bits, validate_header,
-    validate_header_on_parent,
+    check_header, difficulty_from_bits, expected_next_bits, median_time_past, next_work_bits,
+    validate_header, validate_header_on_parent, ParentHeader,
 };
 pub use index_writebehind::{
     build_indexes_released, index_tip_entry, prepare_live_indexes, spawn_index_writebehind,

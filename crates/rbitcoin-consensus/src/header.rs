@@ -6,6 +6,77 @@ use bitcoin::{CompactTarget, Target};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 
+/// Parent header facts for [`check_header`]. Copied so a height above zero can
+/// use the same parent for linkage and for the work calculation.
+#[derive(Clone, Copy)]
+pub struct ParentHeader {
+    pub hash: [u8; 32],
+    pub time: u32,
+    pub bits: CompactTarget,
+}
+
+/// Header rules from the header bytes plus caller facts. No datadir.
+///
+/// `mtp_times` ends at the parent (up to 11 timestamps). `period_first_time`
+/// is the header `interval` blocks before a retarget height. `bits_at` supplies
+/// earlier `nBits` for the testnet min-difficulty walk.
+pub fn check_header(
+    params: &ChainParams,
+    height: Height,
+    header: &Header,
+    hash: [u8; 32],
+    parent: Option<ParentHeader>,
+    mtp_times: &[u32],
+    period_first_time: Option<u32>,
+    mut bits_at: impl FnMut(u32) -> Option<CompactTarget>,
+) -> Result<(), ConsensusError> {
+    let hash_bh = bitcoin::BlockHash::from_byte_array(hash);
+    if height.0 == 0 {
+        if !check_genesis_hash(params, hash_bh) {
+            return Err(ConsensusError::BadHeader("genesis hash mismatch"));
+        }
+        let expected = crate::params::genesis_block(params).header.bits;
+        if header.bits != expected {
+            return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
+        }
+        return pow_hash_meets_target(hash, header.bits, params.pow_limit);
+    }
+
+    let parent = parent.ok_or(ConsensusError::BadPrev)?;
+    if parent.hash != header.prev_blockhash.to_byte_array() {
+        return Err(ConsensusError::BadPrev);
+    }
+    let mtp = median_time_past_times(mtp_times)
+        .map_err(|_| ConsensusError::BadHeader("empty median time"))?;
+    if header.time <= mtp {
+        return Err(ConsensusError::BadHeader("timestamp <= median-time-past"));
+    }
+    check_header_version_and_future_time(params, height, header)?;
+
+    let interval = params.difficulty_adjustment_interval();
+    if interval > 0
+        && height.0.is_multiple_of(interval)
+        && !params.no_pow_retargeting()
+        && period_first_time.is_none()
+    {
+        return Err(ConsensusError::BadHeader("missing retarget first header"));
+    }
+    let expected = next_work_bits(
+        params,
+        height.0,
+        parent.bits,
+        parent.time,
+        header.time,
+        period_first_time,
+        &mut bits_at,
+    )
+    .ok_or(ConsensusError::BadPrev)?;
+    if header.bits != expected {
+        return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
+    }
+    pow_hash_meets_target(hash, header.bits, params.pow_limit)
+}
+
 /// Validate header linkage, MTP, difficulty bits, and proof-of-work.
 pub fn validate_header(
     query: &Query,
@@ -30,34 +101,41 @@ pub(crate) fn validate_header_hashed(
     header: &Header,
     hash: [u8; 32],
 ) -> Result<(), ConsensusError> {
-    let hash_bh = bitcoin::BlockHash::from_byte_array(hash);
-
-    if height.0 == 0 {
-        if !check_genesis_hash(params, hash_bh) {
-            return Err(ConsensusError::BadHeader("genesis hash mismatch"));
-        }
+    let parent = if height.0 == 0 {
+        None
     } else {
-        let prev_height = Height(height.0 - 1);
-        let (_prev_fk, prev_rec) = query
-            .header_at_height(prev_height)?
-            .ok_or(ConsensusError::BadPrev)?;
-        if prev_rec.hash != header.prev_blockhash.to_byte_array() {
-            return Err(ConsensusError::BadPrev);
-        }
-
-        let mtp = median_time_past(query, prev_height)?;
-        if header.time <= mtp {
-            return Err(ConsensusError::BadHeader("timestamp <= median-time-past"));
-        }
-        check_header_version_and_future_time(params, height, header)?;
-    }
-
-    let expected_bits = expected_next_bits(query, params, height, header.time)?;
-    if header.bits != expected_bits {
-        return Err(ConsensusError::BadHeader("incorrect proof of work bits"));
-    }
-
-    pow_hash_meets_target(hash, header.bits, params.pow_limit)
+        query
+            .header_at_height(Height(height.0 - 1))?
+            .map(|(_fk, prev)| ParentHeader {
+                hash: prev.hash,
+                time: prev.timestamp,
+                bits: CompactTarget::from_consensus(prev.bits),
+            })
+    };
+    let times = if parent.is_some() {
+        mtp_times_ending_at(query, Height(height.0 - 1))?
+    } else {
+        Vec::new()
+    };
+    let period_first = if parent.is_some() {
+        period_first_time(query, params, height.0)?
+    } else {
+        None
+    };
+    check_header(
+        params,
+        height,
+        header,
+        hash,
+        parent,
+        &times,
+        period_first,
+        |h| {
+            header_bits_at(query, Height(h))
+                .ok()
+                .map(CompactTarget::from_consensus)
+        },
+    )
 }
 
 /// Contextual checks when the parent is a known header, not necessarily on the
@@ -131,9 +209,16 @@ pub(crate) fn check_header_version_and_future_time(
 /// header MTP). Heights still above tip with no plan are retryable load
 /// incomplete — not permanent `BadPrev` (that silently split batches to n=1).
 pub fn median_time_past(query: &Query, height: Height) -> Result<u32, ConsensusError> {
+    let times = mtp_times_ending_at(query, height)?;
+    median_time_past_times(&times).map_err(|_| ConsensusError::BadHeader("empty median time"))
+}
+
+/// Timestamps ending at `height` for [`median_time_past`]. A missing plan above
+/// the confirmed tip stays a retryable load fault. A gap at or below the tip
+/// is [`ConsensusError::BadPrev`].
+fn mtp_times_ending_at(query: &Query, height: Height) -> Result<Vec<u32>, ConsensusError> {
     if let Some((n, buf)) = query.store().mtp_times_at(height) {
-        return median_time_past_times(&buf[..n as usize])
-            .map_err(|_| ConsensusError::BadHeader("empty median time"));
+        return Ok(buf[..n as usize].to_vec());
     }
     let mut times = Vec::with_capacity(11);
     let start = height.0.saturating_sub(10);
@@ -154,7 +239,7 @@ pub fn median_time_past(query: &Query, height: Height) -> Result<u32, ConsensusE
         }
         return Err(ConsensusError::BadPrev);
     }
-    median_time_past_times(&times).map_err(|_| ConsensusError::BadHeader("empty median time"))
+    Ok(times)
 }
 
 /// MTP from the confirmed chain only (write structural). Tip-ahead heights
@@ -265,10 +350,9 @@ fn period_first_time(
     if interval == 0 || !height.is_multiple_of(interval) || params.no_pow_retargeting() {
         return Ok(None);
     }
-    let (_fk, first_rec) = query
+    Ok(query
         .header_at_height(Height(height - interval))?
-        .ok_or(ConsensusError::BadHeader("missing retarget first header"))?;
-    Ok(Some(first_rec.timestamp))
+        .map(|(_fk, first_rec)| first_rec.timestamp))
 }
 
 fn min_diff_bits(
@@ -701,6 +785,130 @@ mod median_time_past_tests {
         )
         .unwrap();
         assert_eq!(kept, full);
+    }
+
+    #[test]
+    fn check_header_rejects_without_a_store() {
+        let params = ChainParams::mainnet();
+        let genesis = crate::params::genesis_block(&params);
+        let mut bad = genesis.header;
+        bad.nonce = bad.nonce.wrapping_add(1);
+        let err = check_header(
+            &params,
+            Height(0),
+            &bad,
+            bad.block_hash().to_byte_array(),
+            None,
+            &[],
+            None,
+            |_| None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConsensusError::BadHeader(s) if s.contains("genesis")),
+            "{err:?}"
+        );
+
+        let parent = ParentHeader {
+            hash: [1u8; 32],
+            time: genesis.header.time,
+            bits: genesis.header.bits,
+        };
+        let mut child = genesis.header;
+        child.time = parent.time + 1;
+        let missing = check_header(
+            &params,
+            Height(1),
+            &child,
+            [0xff; 32],
+            None,
+            &[parent.time],
+            None,
+            |_| None,
+        )
+        .unwrap_err();
+        assert!(matches!(missing, ConsensusError::BadPrev), "{missing:?}");
+
+        child.prev_blockhash = bitcoin::BlockHash::from_byte_array([2u8; 32]);
+        let bad_prev = check_header(
+            &params,
+            Height(1),
+            &child,
+            [0xff; 32],
+            Some(parent),
+            &[parent.time],
+            None,
+            |_| None,
+        )
+        .unwrap_err();
+        assert!(matches!(bad_prev, ConsensusError::BadPrev), "{bad_prev:?}");
+
+        child.prev_blockhash = bitcoin::BlockHash::from_byte_array(parent.hash);
+        child.time = parent.time;
+        let mtp = check_header(
+            &params,
+            Height(1),
+            &child,
+            [0xff; 32],
+            Some(parent),
+            &[parent.time],
+            None,
+            |_| None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(mtp, ConsensusError::BadHeader(s) if s.contains("median-time-past")),
+            "{mtp:?}"
+        );
+
+        child.time = parent.time + 1;
+        child.bits = CompactTarget::from_consensus(0x1d00_eeee);
+        let bits = check_header(
+            &params,
+            Height(1),
+            &child,
+            [0xff; 32],
+            Some(parent),
+            &[parent.time],
+            None,
+            |_| None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(bits, ConsensusError::BadHeader(s) if s.contains("proof of work bits")),
+            "{bits:?}"
+        );
+
+        child.bits = parent.bits;
+        let pow = check_header(
+            &params,
+            Height(1),
+            &child,
+            [0xff; 32],
+            Some(parent),
+            &[parent.time],
+            None,
+            |_| None,
+        )
+        .unwrap_err();
+        assert!(matches!(pow, ConsensusError::InvalidPow), "{pow:?}");
+
+        let interval = params.difficulty_adjustment_interval();
+        let retarget = check_header(
+            &params,
+            Height(interval),
+            &child,
+            [0xff; 32],
+            Some(parent),
+            &[parent.time],
+            None,
+            |_| Some(parent.bits),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(retarget, ConsensusError::BadHeader(s) if s.contains("missing retarget")),
+            "{retarget:?}"
+        );
     }
 
     #[test]
