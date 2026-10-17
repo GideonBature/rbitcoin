@@ -260,6 +260,43 @@ async fn multi_page_is_one_newest_window_per_script() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn same_height_pay(mark: u8, second: u8, spk: bitcoin::ScriptBuf) -> TxApply {
+    let mut txid = [0u8; 32];
+    txid[0] = mark;
+    txid[1] = second;
+    txid[31] = 0xaa;
+    let mut pay = pay_height(0, spk);
+    pay.tx.txid = txid;
+    pay
+}
+
+/// Same-height rows are ordered by internal txid, the key the next page
+/// uses. Display hex would put a different row last and repeat the others.
+#[tokio::test]
+async fn multi_page_same_height_follows_internal_txid() {
+    let (_a, spk) = regtest_p2wpkh();
+    let sh = block_hash_hex(&script_hash(spk.as_bytes()));
+    let (dir, q) = temp_query("same-height-page");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let prev = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let w = same_height_pay(0x10, 0x00, spk.clone());
+    let c = same_height_pay(0x02, 0x00, spk.clone());
+    let v = same_height_pay(0x01, 0xff, spk);
+    let ids = [w.tx.txid, c.tx.txid, v.tx.txid].map(|id| block_hash_hex(&id));
+    let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+    q.connect_block(Height(1), &h1, &[cb1, w, c, v]).unwrap();
+    let q = Arc::new(q);
+    let app = app_with_join(q, Arc::new(Mutex::new(JoinCache::default())), true);
+    let body = serde_json::to_vec(&json!([sh])).unwrap();
+    for path in ["/scripthashes/txs", "/scripthashes/txs/summary"] {
+        let rows = post_wallet_rows(&app, path, &body, None).await;
+        assert_eq!(row_txids(&rows), ids.iter().map(String::as_str).collect::<Vec<_>>(), "{path}");
+        let rows = post_wallet_rows(&app, path, &body, Some(&ids[2])).await;
+        assert!(row_txids(&rows).is_empty(), "{path} page 2: {rows:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 async fn untrusted_header_is_ignored(q: Arc<Query>, sh1: [u8; 32]) {
     let h1hex = block_hash_hex(&sh1);
     let public = Arc::new(Mutex::new(JoinCache::default()));

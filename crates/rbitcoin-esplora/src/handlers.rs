@@ -1356,15 +1356,37 @@ fn truncate_page(rows: &mut Vec<Value>, limit: usize) {
     }
 }
 
+/// Higher block first, then the larger internal txid. The next page cuts
+/// on that key. Display hex is the byte reverse, so it would pick a
+/// different last row at the same height.
+fn newer_internal_txid(left_hex: &str, right_hex: &str) -> std::cmp::Ordering {
+    let left = parse_hash32(left_hex).unwrap_or([0u8; 32]);
+    let right = parse_hash32(right_hex).unwrap_or([0u8; 32]);
+    right.cmp(&left)
+}
+
+fn sort_confirmed_txs(rows: &mut [Value]) {
+    rows.sort_by(|a, b| {
+        let ha = a["status"]["block_height"].as_u64().unwrap_or(0);
+        let hb = b["status"]["block_height"].as_u64().unwrap_or(0);
+        hb.cmp(&ha).then_with(|| {
+            newer_internal_txid(
+                a["txid"].as_str().unwrap_or(""),
+                b["txid"].as_str().unwrap_or(""),
+            )
+        })
+    });
+}
+
 fn sort_summaries_newest(rows: &mut [Value]) {
     rows.sort_by(|a, b| {
         let ha = a["height"].as_i64().unwrap_or(0);
         let hb = b["height"].as_i64().unwrap_or(0);
         hb.cmp(&ha).then_with(|| {
-            b["txid"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(a["txid"].as_str().unwrap_or(""))
+            newer_internal_txid(
+                a["txid"].as_str().unwrap_or(""),
+                b["txid"].as_str().unwrap_or(""),
+            )
         })
     });
 }
@@ -1434,7 +1456,7 @@ fn multi_txs(
         return after_txid_not_found();
     }
     let mut chain = dedup_txid(chain);
-    sort_txs_newest_first(&mut chain);
+    sort_confirmed_txs(&mut chain);
     truncate_page(&mut chain, limit);
     mempool_rows.extend(chain);
     Json(mempool_rows).into_response()
