@@ -145,18 +145,24 @@ async fn accept_received_from_peer(
     })
 }
 
-/// One-day in-memory refusal. Noban and manual peers are not recorded.
-/// A loopback address is every local connection, so Core disconnects that
-/// peer and does not discourage the address.
-fn note_threshold_refusal(session: Option<&crate::peers::LivePeer>) {
-    let Some(s) = session.filter(|s| !misbehavior_exempt(s)) else {
-        return;
-    };
-    if local_addr_skips_discourage(s.addr.ip()) {
-        return;
+/// The hub and address a misbehavior exit may record. Noban and manual peers
+/// are not recorded. A loopback address is every local connection, so Core
+/// disconnects that peer and does not discourage the address.
+fn refusable_addr(
+    session: Option<&crate::peers::LivePeer>,
+) -> Option<(Arc<crate::peers::PeerHub>, std::net::IpAddr)> {
+    let s = session.filter(|s| !misbehavior_exempt(s))?;
+    let ip = s.addr.ip();
+    if local_addr_skips_discourage(ip) {
+        return None;
     }
-    if let Some(hub) = s.peer_hub() {
-        hub.note_misbehavior_addr(s.addr.ip());
+    Some((s.peer_hub()?, ip))
+}
+
+/// One-day in-memory refusal.
+fn note_threshold_refusal(session: Option<&crate::peers::LivePeer>) {
+    if let Some((hub, ip)) = refusable_addr(session) {
+        hub.note_misbehavior_addr(ip);
     }
 }
 
@@ -174,15 +180,11 @@ fn threshold_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
     NetError::Protocol("peer misbehavior threshold")
 }
 
-/// The first rate-limit exit from an address leaves a strike. A second one
-/// within [`crate::peers::PeerHub::RATE_STRIKE_SECS`] is a threshold exit, as
-/// two overflows in one session were.
+/// The first rate-limit exit from a recordable address leaves a strike. A
+/// second one within [`crate::peers::PeerHub::RATE_STRIKE_SECS`] is a
+/// threshold exit, as two overflows in one session were.
 fn rate_limit_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
-    let repeat = session.is_some_and(|s| {
-        s.peer_hub()
-            .is_some_and(|hub| hub.note_rate_strike(s.addr.ip()))
-    });
-    if repeat {
+    if refusable_addr(session).is_some_and(|(hub, ip)| hub.note_rate_strike(ip)) {
         return threshold_disconnect(session);
     }
     NetError::Protocol("peer rate limit")
@@ -1802,7 +1804,7 @@ pub async fn peer_session_with(
                         if follow.ban_score >= BAN_SCORE_THRESHOLD {
                             return Err(threshold_disconnect(session.as_deref()));
                         }
-                        // EOF lets the peer retry a request we cannot accept.
+                        // Close to free this session's asks. A second strike refuses the address.
                         return Err(rate_limit_disconnect(session.as_deref()));
                     }
                     // Ping/pong: cheap 8-byte path — never leave the I/O task for decode.

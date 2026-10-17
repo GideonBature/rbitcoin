@@ -4156,6 +4156,51 @@ fn second_rate_limit_disconnect_from_an_address_discourages_it() {
 }
 
 #[test]
+fn exempt_peer_rate_limit_leaves_no_strike_on_its_address() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_300);
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        sender: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        nonce: 6,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let flood = |addr: std::net::SocketAddr, conn: crate::peers::PeerConnType| {
+        let peer = peers.register(addr, addr, &ver, false, conn);
+        rate_limit_disconnect(Some(peer.as_ref()))
+    };
+
+    let manual = std::net::SocketAddr::from(([6, 6, 6, 6], 8333));
+    let _ = flood(manual, crate::peers::PeerConnType::Manual);
+    let noban = std::net::SocketAddr::from(([6, 6, 6, 7], 8333));
+    peers.set_noban(true);
+    let _ = flood(noban, crate::peers::PeerConnType::Inbound);
+    peers.set_noban(false);
+    for exempt in [manual, noban] {
+        let again = std::net::SocketAddr::from((exempt.ip(), 9999));
+        assert!(
+            matches!(
+                flood(again, crate::peers::PeerConnType::Inbound),
+                crate::error::NetError::Protocol("peer rate limit")
+            ),
+            "{exempt}: an exempt overflow leaves no strike for the next peer"
+        );
+        assert!(!peers.inbound_discouraged(again));
+    }
+}
+
+#[test]
 fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
     let peers = crate::peers::PeerHub::new();
     let now = 1_800_000_000u64;
