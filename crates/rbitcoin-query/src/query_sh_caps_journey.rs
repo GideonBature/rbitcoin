@@ -275,3 +275,78 @@ fn newest_page_ignores_cap_and_sibling_spends() {
     assert_eq!(page(Some(lo)), vec![spend_txid]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Limit 2 at the tip is the tip create plus the spend of the oldest coin.
+/// The create between them is a real row and is not on that page.
+#[test]
+fn newest_page_is_tip_events_not_creates_between() {
+    use crate::scripthash::HistoryOrder::NewestFirst;
+
+    let (dir, q) = temp_query("sh-newest-window");
+    let sh = script_hash(&[0x51]);
+    let (h0, cb0) = coinbase_block(0, Fk::NULL, None);
+    let old_txid = cb0.tx.txid;
+    let h0fk = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let old = q.block_tx_fks(Height(0)).unwrap()[0];
+
+    let (h1, cb1) = coinbase_block(1, h0fk, Some(h0.hash));
+    let mid = cb1.tx.txid;
+    let h1fk = q.connect_block(Height(1), &h1, &[cb1]).unwrap();
+
+    let (h2, tip) = coinbase_block(2, h1fk, Some(h1.hash));
+    let tip_txid = tip.tx.txid;
+    let mut spend = tip.clone();
+    spend.tx.txid[31] = 0xff;
+    spend.tx.output_count = 1;
+    spend.outputs = vec![OutputRecord::unspent(1, vec![0x00])];
+    spend.inputs = vec![InputRecord {
+        prev_txid: old_txid,
+        parent: rbitcoin_store::InputParent::Prevout {
+            create_fk: old,
+            vout: 0,
+        },
+        sequence: u32::MAX,
+        script_sig: vec![],
+        witness: vec![],
+    }];
+    let spend_txid = spend.tx.txid;
+    q.connect_block(Height(2), &h2, &[tip, spend]).unwrap();
+
+    let filter = crate::scripthash::HistoryFilter {
+        limit: Some(2),
+        order: NewestFirst,
+        ..crate::scripthash::HistoryFilter::open()
+    };
+    let rows = q.scripthash_history_filtered(&sh, &filter).unwrap().rows;
+    let txids: Vec<[u8; 32]> = rows.iter().map(|r| r.txid).collect();
+    assert_eq!(txids, vec![spend_txid, tip_txid]);
+    assert!(!txids.contains(&mid), "a create between the tip events is not on the page");
+
+    let view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    let sums = q
+        .scripthash_history_summary_filtered_in(&sh, &filter, &view)
+        .unwrap()
+        .rows;
+    assert_eq!(sums.len(), 2);
+    assert_eq!(sums[0].txid, spend_txid);
+    assert_eq!(sums[0].value, -50_0000_0000);
+    assert_eq!(sums[1].txid, tip_txid);
+    assert_eq!(sums[1].value, 50_0000_0000);
+    assert_eq!(
+        sh_page(&q, &sh, NewestFirst, Some(spend_txid)).unwrap(),
+        vec![tip_txid]
+    );
+
+    q.set_max_sh_creates(1);
+    assert_eq!(
+        q.scripthash_history_filtered(&sh, &filter)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.txid)
+            .collect::<Vec<_>>(),
+        vec![spend_txid, tip_txid]
+    );
+    assert_newest_page_leaves_slot_empty(&q, &sh);
+    let _ = std::fs::remove_dir_all(&dir);
+}

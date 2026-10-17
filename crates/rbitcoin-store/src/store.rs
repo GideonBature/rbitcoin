@@ -839,6 +839,17 @@ impl Store {
         self.txs.input.edges(fk)
     }
 
+    /// Parent edges for contiguous creates `first..=last` (1-based ids).
+    ///
+    /// One locator read and one `input.body` read. `None` is an unstamped create.
+    pub fn input_edges_span(
+        &self,
+        first: u64,
+        last: u64,
+    ) -> Result<Vec<Option<Vec<crate::input::InputEdge>>>, StoreError> {
+        self.txs.input.edges_span(first, last)
+    }
+
     /// Copy parent edges onto seqsigwit records that do not store them.
     pub fn stamp_input_prevouts(
         &self,
