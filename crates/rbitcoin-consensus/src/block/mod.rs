@@ -185,7 +185,7 @@ pub fn validate_block_structure_with_pres(
     // Core CheckMerkleRoot runs before any body rule. A body the header does
     // not commit to is the peer's fault, not the block hash's.
     let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
-    let (merkle, mutated) = rbitcoin_store::merkle_root_mutated(&txids);
+    let (merkle, mutated) = rbitcoin_primitives::merkle_root_mutated(&txids);
     if merkle != block.header.merkle_root.to_byte_array() {
         return Err(ConsensusError::BadBlock("merkle root mismatch"));
     }
@@ -583,7 +583,7 @@ fn check_witness_commitment_with_wtxids(
 
 /// Merkle root over 32-byte leaves (txid or wtxid tree). Public for tests.
 pub(crate) fn merkle_root_bytes(leaves: &[[u8; 32]]) -> [u8; 32] {
-    rbitcoin_store::merkle_root_from_txids(leaves)
+    rbitcoin_primitives::merkle_root_from_txids(leaves)
 }
 
 /// BIP34: coinbase scriptSig must start with the block height as a script integer

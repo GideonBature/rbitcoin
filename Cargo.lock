@@ -1019,6 +1019,9 @@ dependencies = [
 [[package]]
 name = "rbitcoin-primitives"
 version = "0.8.99"
+dependencies = [
+ "bitcoin_hashes 0.14.101",
+]
 
 [[package]]
 name = "rbitcoin-query"
