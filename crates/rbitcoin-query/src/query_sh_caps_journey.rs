@@ -12,6 +12,21 @@ fn assert_unspent_newest_page_stops(
     );
 }
 
+fn short_newest_summary(
+    q: &Query,
+    sh: &[u8; 32],
+    after: Option<[u8; 32]>,
+) -> Vec<([u8; 32], i64)> {
+    let filter = crate::scripthash::HistoryFilter::esplora_chain_page(after);
+    let view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    q.scripthash_history_summary_filtered_in(sh, &filter, &view)
+        .expect("short newest page")
+        .rows
+        .into_iter()
+        .map(|row| (row.txid, row.value))
+        .collect()
+}
+
 fn assert_newest_page_leaves_slot_empty(q: &Query, sh: &[u8; 32]) {
     let view = q.pin_sh_chain_view().unwrap().expect("sh view");
     let page = crate::scripthash::HistoryFilter::esplora_chain_page(None);
@@ -256,22 +271,42 @@ fn newest_page_ignores_cap_and_sibling_spends() {
         !newest.contains(&sib_txid),
         "sibling spend is not this script"
     );
+    let open = short_newest_summary(&q, &sh, None);
+    assert_eq!(
+        open.iter().map(|(txid, _)| *txid).collect::<Vec<_>>(),
+        newest,
+        "fewer creates than the limit is the whole history, including the spend"
+    );
+    assert!(open
+        .iter()
+        .any(|(txid, value)| *txid == spend_txid && *value == -50_0000_0000));
+    assert!(open
+        .iter()
+        .any(|(txid, value)| *txid == hi && *value == 50_0000_0000));
+    let after_hi = short_newest_summary(&q, &sh, Some(hi));
+    assert!(!after_hi.iter().any(|(txid, _)| *txid == hi));
+    assert!(after_hi
+        .iter()
+        .any(|(txid, value)| *txid == spend_txid && *value == -50_0000_0000));
     q.set_max_sh_creates(0);
     assert_eq!(page(None), vec![hi]);
-    assert_eq!(
-        q.scripthash_history_filtered(&sh, &crate::scripthash::HistoryFilter::esplora_chain_page(None))
-            .unwrap()
-            .rows
-            .iter()
-            .map(|i| i.txid)
-            .collect::<Vec<_>>(),
-        newest,
-    );
+    assert_eq!(short_newest_summary(&q, &sh, None), open);
     assert_newest_page_leaves_slot_empty(&q, &sh);
     q.set_max_sh_creates(100);
     assert_newest_page_leaves_slot_empty(&q, &sh);
     q.set_max_sh_creates(1);
+    assert_eq!(
+        short_newest_summary(&q, &sh, None),
+        open,
+        "a short page over the cap matches the uncapped page"
+    );
+    assert_eq!(short_newest_summary(&q, &sh, Some(hi)), after_hi);
     assert_newest_page_leaves_slot_empty(&q, &sh);
+    let err = q.scripthash_chain_stats(&sh).unwrap_err();
+    assert!(
+        err.to_string() == "scripthash join exceeds --max-sh-creates (4 creates, cap 1)",
+        "{err}"
+    );
     assert_eq!(page(Some(lo)), vec![spend_txid]);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1156,15 +1156,20 @@ impl Query {
         Ok(fks)
     }
 
-    /// `low` is the height of the limit-th create that can still land on the
-    /// page. `creates` are the strong creates at `low..=high`.
+    /// `Some(low)` is the height of the limit-th counted create. `creates`
+    /// are the strong creates at `low..=high`.
+    ///
+    /// `None` means fewer than `k` creates were counted. `creates` is every
+    /// strong create at or below `high`. The caller reads those spend slots:
+    /// a scan from height 0 would read every block, and blocks below the
+    /// oldest of these creates cannot spend this script.
     fn newest_create_window(
         &self,
         fks: &[Fk],
         k: usize,
         high: u32,
         strict: bool,
-    ) -> Result<(u32, Vec<(u32, Fk)>), QueryError> {
+    ) -> Result<(Option<u32>, Vec<(u32, Fk)>), QueryError> {
         let mut rev = Vec::new();
         let mut idx = fks.len();
         let mut counted = 0usize;
@@ -1199,9 +1204,55 @@ impl Query {
                 }
             }
         }
-        let low = bound.unwrap_or(0);
+        let Some(low) = bound else {
+            return Ok((None, rev));
+        };
         rev.retain(|(h, _)| *h >= low);
-        Ok((low, rev))
+        Ok((Some(low), rev))
+    }
+
+    /// Spends of a posting list shorter than the page limit.
+    ///
+    /// Every create that can still land on the page is in `creates`, so the
+    /// spend slots of those creates are the whole answer. One
+    /// [`Self::join_spends_wave`] is that batch. A spender above `high`
+    /// belongs on an earlier page. This is not [`Self::sh_join`]: a short
+    /// list can still sit above `--max-sh-creates`, and the page must not
+    /// fill the join slot.
+    fn spends_of_retained_creates(
+        &self,
+        scripthash: &[u8; 32],
+        creates: &[(u32, Fk)],
+        high: u32,
+        view: &ChainView,
+    ) -> Result<Vec<SpendHit>, QueryError> {
+        if creates.is_empty() || !self.spend_index_enabled() {
+            return Ok(Vec::new());
+        }
+        let fks: Vec<Fk> = creates.iter().map(|(_, fk)| *fk).collect();
+        let need = ShJoinNeed {
+            create_identity: false,
+            spender_identity: true,
+        };
+        let mut outs = Vec::new();
+        for wave in fks.chunks(SH_JOIN_WAVE) {
+            outs.extend(self.expand_create_fks_wave(scripthash, wave, need)?);
+        }
+        let mut hits = Vec::new();
+        for row in self.join_spends_wave(&outs, need, view)? {
+            for spender in row.spenders {
+                if spender.height > high {
+                    continue;
+                }
+                hits.push(SpendHit {
+                    spender: spender.fk,
+                    height: spender.height,
+                    parent: row.out.create_tx_fk,
+                    vout: row.out.vout,
+                });
+            }
+        }
+        Ok(hits)
     }
 
     fn spends_of_members(
@@ -1310,8 +1361,11 @@ impl Query {
             });
         };
         let members = self.strong_sh_creates(scripthash, view)?;
-        let (low, creates) = self.newest_create_window(&members, k, scan.high, scan.strict)?;
-        let hits = self.spends_of_members(&members, low, scan.high)?;
+        let (bound, creates) = self.newest_create_window(&members, k, scan.high, scan.strict)?;
+        let hits = match bound {
+            Some(low) => self.spends_of_members(&members, low, scan.high)?,
+            None => self.spends_of_retained_creates(scripthash, &creates, scan.high, view)?,
+        };
         let mut decode = creates.iter().map(|(_, fk)| *fk).collect::<Vec<_>>();
         for hit in &hits {
             decode.push(hit.parent);
@@ -1389,9 +1443,12 @@ impl Query {
 
     /// Confirmed history for a scripthash, filtered by height window / limit / cursor.
     ///
-    /// A limited newest-first page walks the posting tail and the blocks from
-    /// the cursor (or the tip) down to that page's height bound. Other filters
-    /// assemble the confirmed history, then apply [`apply_history_filter`].
+    /// A limited newest-first page walks the posting tail. When that walk
+    /// counts `limit` creates, it reads `input.body` from the cursor (or the
+    /// tip) down to that height so a spend of an older coin is included.
+    /// When the list is shorter, it reads the spend slots of the creates it
+    /// kept. Other filters assemble the confirmed history, then apply
+    /// [`apply_history_filter`].
     /// Pins the SH watermark, not live tip.
     pub fn scripthash_history_filtered(
         &self,
