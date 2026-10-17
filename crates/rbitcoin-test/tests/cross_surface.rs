@@ -2721,6 +2721,8 @@ struct FakeTor {
     addr: SocketAddr,
     methods: Arc<Mutex<&'static str>>,
     log: Arc<Mutex<Vec<String>>>,
+    /// Lines written back to the controller, including `250-ServiceID=`.
+    replies: Arc<Mutex<Vec<String>>>,
     minted: Arc<Mutex<Vec<String>>>,
 }
 
@@ -2747,11 +2749,13 @@ impl FakeTor {
             addr: listener.local_addr().unwrap(),
             methods: Arc::new(Mutex::new("SAFECOOKIE")),
             log: Arc::default(),
+            replies: Arc::default(),
             minted: Arc::default(),
         };
-        let (methods, log, minted) = (
+        let (methods, log, replies, minted) = (
             Arc::clone(&tor.methods),
             Arc::clone(&tor.log),
+            Arc::clone(&tor.replies),
             Arc::clone(&tor.minted),
         );
         tokio::spawn(async move {
@@ -2760,6 +2764,7 @@ impl FakeTor {
                     s,
                     Arc::clone(&methods),
                     Arc::clone(&log),
+                    Arc::clone(&replies),
                     Arc::clone(&minted),
                 ));
             }
@@ -2770,12 +2775,17 @@ impl FakeTor {
     fn take_log(&self) -> Vec<String> {
         std::mem::take(&mut *self.log.lock().unwrap())
     }
+
+    fn take_replies(&self) -> Vec<String> {
+        std::mem::take(&mut *self.replies.lock().unwrap())
+    }
 }
 
 async fn fake_tor_session(
     s: TcpStream,
     methods: Arc<Mutex<&'static str>>,
     log: Arc<Mutex<Vec<String>>>,
+    replies: Arc<Mutex<Vec<String>>>,
     minted: Arc<Mutex<Vec<String>>>,
 ) {
     use bitcoin::hex::{DisplayHex, FromHex};
@@ -2835,6 +2845,7 @@ async fn fake_tor_session(
         } else {
             "510 Unrecognized command\r\n".to_string()
         };
+        replies.lock().unwrap().push(reply.clone());
         if w.write_all(reply.as_bytes()).await.is_err() {
             break;
         }
@@ -2846,19 +2857,14 @@ async fn fake_tor_session(
 struct FakeSam {
     addr: SocketAddr,
     log: Arc<Mutex<Vec<String>>>,
+    /// Lines written back to the client, including `DESTINATION=`.
+    replies: Arc<Mutex<Vec<String>>>,
 }
 
-/// A 387-byte public destination with no certificate, distinct per `n`:
-/// I2P base64 of `fake_i2p_public(n)`.
+/// A 516-character I2P destination, distinct per `n`.
 fn fake_i2p_destination(n: usize) -> String {
     let first = char::from(b'B' + u8::try_from(n).unwrap());
     format!("{first}{}", "A".repeat(515))
-}
-
-fn fake_i2p_public(n: usize) -> Vec<u8> {
-    let mut raw = vec![0u8; 387];
-    raw[0] = (u8::try_from(n).unwrap() + 1) << 2;
-    raw
 }
 
 impl FakeSam {
@@ -2867,12 +2873,18 @@ impl FakeSam {
         let sam = Self {
             addr: listener.local_addr().unwrap(),
             log: Arc::default(),
+            replies: Arc::default(),
         };
         let log = Arc::clone(&sam.log);
+        let replies = Arc::clone(&sam.replies);
         let transient = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         tokio::spawn(async move {
             while let Ok((s, _)) = listener.accept().await {
-                let (log, transient) = (Arc::clone(&log), Arc::clone(&transient));
+                let (log, replies, transient) = (
+                    Arc::clone(&log),
+                    Arc::clone(&replies),
+                    Arc::clone(&transient),
+                );
                 tokio::spawn(async move {
                     let (r, mut w) = s.into_split();
                     let mut lines = BufReader::new(r).lines();
@@ -2897,6 +2909,7 @@ impl FakeSam {
                         } else {
                             "SESSION STATUS RESULT=I2P_ERROR".to_string()
                         };
+                        replies.lock().unwrap().push(reply.clone());
                         if w.write_all(format!("{reply}\n").as_bytes()).await.is_err() {
                             break;
                         }
@@ -2910,6 +2923,30 @@ impl FakeSam {
     fn take_log(&self) -> Vec<String> {
         std::mem::take(&mut *self.log.lock().unwrap())
     }
+
+    fn take_replies(&self) -> Vec<String> {
+        std::mem::take(&mut *self.replies.lock().unwrap())
+    }
+}
+
+fn tor_reply_fields(replies: &[String], field: &str) -> Vec<String> {
+    let prefix = format!("250-{field}=");
+    replies
+        .iter()
+        .flat_map(|reply| reply.split(['\r', '\n']))
+        .filter_map(|line| line.strip_prefix(&prefix).map(str::to_string))
+        .collect()
+}
+
+fn sam_destinations(replies: &[String]) -> Vec<String> {
+    replies
+        .iter()
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|tok| tok.strip_prefix("DESTINATION="))
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 fn starts_with_any(lines: &[String], prefix: &str) -> Vec<String> {
@@ -2923,8 +2960,9 @@ fn starts_with_any(lines: &[String], prefix: &str) -> Vec<String> {
 /// An operator publishes P2P, Electrum, and Esplora as onion and I2P
 /// services through a local Tor control port and SAM bridge. A bad or short
 /// cookie, or a Tor that does not offer SAFECOOKIE, stops the start before
-/// any AUTHENTICATE; password auth mints and saves a key per service; a
-/// SAFECOOKIE restart reuses every saved key and destination.
+/// any AUTHENTICATE; password auth saves each `PrivateKey` and SAM
+/// destination the control port wrote; a SAFECOOKIE restart reuses those
+/// saved values. `getnetworkinfo` lists the `ServiceID`s from those replies.
 #[tokio::test(flavor = "multi_thread")]
 async fn tor_control_onion_lifecycle() {
     let td = TestDatadir::new().unwrap();
@@ -2970,6 +3008,9 @@ async fn tor_control_onion_lifecycle() {
         starts_with_any(&refused, "ADD_ONION ").is_empty(),
         "{refused:?}"
     );
+    // Those boots also wrote control replies. The password boot's replies
+    // are the ones the datadir and getnetworkinfo must match.
+    let _ = tor.take_replies();
 
     // Password auth. Each service gets a fresh onion key, saved 0600 under
     // the datadir, and an I2P destination; getnetworkinfo lists them all.
@@ -3011,17 +3052,26 @@ async fn tor_control_onion_lifecycle() {
         })
         .collect();
     let regtest_port = Network::Regtest.default_p2p_port();
-    for (n, port) in [(0, regtest_port), (1, electrum.port()), (2, esplora.port())] {
-        let host = format!("{}.onion", fake_onion_service_id(n));
-        assert!(local.contains(&(host, u64::from(port))), "{local:?}");
-    }
-    let i2p_p2p = rbitcoin_net::NetAddr::I2p {
-        dest: bitcoin::hashes::sha256::Hash::hash(&fake_i2p_public(0)).to_byte_array(),
-        port: 0,
-    }
-    .host_str();
-    assert!(local.iter().any(|(a, _)| *a == i2p_p2p), "{local:?}");
     stop_run_p2p(rpc, node).await;
+    let tor_replies = tor.take_replies();
+    let service_ids = tor_reply_fields(&tor_replies, "ServiceID");
+    let private_keys = tor_reply_fields(&tor_replies, "PrivateKey");
+    assert_eq!(service_ids.len(), 3, "{tor_replies:?}");
+    assert_eq!(private_keys.len(), 3, "{tor_replies:?}");
+    for (id, port) in service_ids.iter().zip([
+        u64::from(regtest_port),
+        u64::from(electrum.port()),
+        u64::from(esplora.port()),
+    ]) {
+        assert!(local.contains(&(format!("{id}.onion"), port)), "{local:?}");
+    }
+    let sam_replies = sam.take_replies();
+    let dests = sam_destinations(&sam_replies);
+    assert_eq!(dests.len(), 3, "{sam_replies:?}");
+    let i2p_p2p = rbitcoin_net::i2p_addr_from_sam_b64(&dests[0])
+        .expect("sam destination")
+        .host_str();
+    assert!(local.iter().any(|(a, _)| *a == i2p_p2p), "{local:?}");
 
     let first = tor.take_log();
     assert!(first.contains(&format!("AUTHENTICATE \"{TOR_PASSWORD}\"")));
@@ -3039,7 +3089,7 @@ async fn tor_control_onion_lifecycle() {
         let key = dir.join("onion").join(format!("{name}.priv"));
         assert_eq!(
             std::fs::read_to_string(&key).unwrap().trim(),
-            format!("ED25519-V3:key{n}")
+            private_keys[n]
         );
         #[cfg(unix)]
         {
@@ -3048,10 +3098,7 @@ async fn tor_control_onion_lifecycle() {
             assert_eq!(mode, 0o600, "{name} onion key mode");
         }
         let dest = dir.join("i2p").join(format!("{name}.priv"));
-        assert_eq!(
-            std::fs::read_to_string(&dest).unwrap().trim(),
-            fake_i2p_destination(n)
-        );
+        assert_eq!(std::fs::read_to_string(&dest).unwrap().trim(), dests[n]);
     }
     let forwards = starts_with_any(&sam.take_log(), "STREAM FORWARD");
     for port in [p2p.port(), electrum.port(), esplora.port()] {
@@ -3077,15 +3124,14 @@ async fn tor_control_onion_lifecycle() {
     );
     let onions = starts_with_any(&second, "ADD_ONION ");
     assert_eq!(onions.len(), 3, "{onions:?}");
-    for (n, (line, target)) in onions.iter().zip(&targets).enumerate() {
-        assert_eq!(*line, format!("ADD_ONION ED25519-V3:key{n} {target}"));
+    for (key, (line, target)) in private_keys.iter().zip(onions.iter().zip(&targets)) {
+        assert_eq!(*line, format!("ADD_ONION {key} {target}"));
     }
-    assert_eq!(tor.minted.lock().unwrap().len(), 3, "no key minted twice");
     let creates = starts_with_any(&sam.take_log(), "SESSION CREATE");
     assert_eq!(creates.len(), 3, "{creates:?}");
-    for n in 0..3 {
-        let dest = format!("DESTINATION={} ", fake_i2p_destination(n));
-        assert!(creates.iter().any(|c| c.contains(&dest)), "{creates:?}");
+    for dest in &dests {
+        let needle = format!("DESTINATION={dest} ");
+        assert!(creates.iter().any(|c| c.contains(&needle)), "{creates:?}");
     }
 }
 

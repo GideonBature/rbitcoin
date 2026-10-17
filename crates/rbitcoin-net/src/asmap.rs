@@ -518,6 +518,27 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
+    fn asmap_rejected_bytecodes_fail_sanity() {
+        for bytes in [
+            ASMAP_SECOND_DEFAULT,
+            ASMAP_TRAILING_ONE,
+            ASMAP_EIGHT_TRAILING_ZEROS,
+            ASMAP_TWO_SHORT_MATCHES,
+            ASMAP_MATCH_PAST_END,
+            ASMAP_JUMP_PAST_FILE,
+            ASMAP_JUMP_SHORT_TAIL,
+            ASMAP_JUMP_OFF_END,
+            &[],
+            &[0],
+        ] {
+            assert!(
+                AsMap::from_bytes(bytes.to_vec()).is_none(),
+                "accepted {bytes:?}"
+            );
+        }
+    }
+
+    #[test]
     fn asmap_interpret_garbage_returns_zero_no_panic() {
         assert_eq!(interpret(&[], &[0u8; 16]), 0);
         assert_eq!(interpret(&[0xff, 0xff], &[0u8; 16]), 0);

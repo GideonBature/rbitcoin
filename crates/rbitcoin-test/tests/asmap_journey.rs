@@ -8,12 +8,12 @@ use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use rbitcoin_net::V2PlainSession;
-use rbitcoin_node::{run_p2p, NodeConfig};
-use rbitcoin_primitives::Network;
 use rbitcoin_test::TestDatadir;
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn llvm_cov_wall(default_secs: u64, llvm_secs: u64) -> Duration {
@@ -21,39 +21,6 @@ fn llvm_cov_wall(default_secs: u64, llvm_secs: u64) -> Duration {
         Duration::from_secs(llvm_secs)
     } else {
         Duration::from_secs(default_secs)
-    }
-}
-
-type StartupLogs = Vec<(rbitcoin_log::Level, String)>;
-
-fn spawn_run_p2p_logs(
-    cfg: NodeConfig,
-) -> tokio::task::JoinHandle<(Result<(), rbitcoin_node::NodeError>, StartupLogs)> {
-    match std::fs::remove_dir_all(cfg.datadir.path().join("run")) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => panic!("clear published listeners: {e}"),
-    }
-    tokio::task::spawn_blocking(move || {
-        let _block = rbitcoin_net::BlockingRegion::enter();
-        rbitcoin_log::capture_logs(true);
-        let result = tokio::runtime::Handle::current().block_on(run_p2p(cfg));
-        let logs = rbitcoin_log::take_logs();
-        rbitcoin_log::capture_logs(false);
-        (result, logs)
-    })
-}
-
-async fn stop_logged(
-    rpc: SocketAddr,
-    node: tokio::task::JoinHandle<(Result<(), rbitcoin_node::NodeError>, StartupLogs)>,
-) -> StartupLogs {
-    let _ = jsonrpc(rpc, "stop", json!([])).await;
-    match tokio::time::timeout(Duration::from_secs(20), node).await {
-        Ok(Ok((Ok(()), logs))) => logs,
-        Ok(Ok((Err(e), _))) => panic!("run_p2p error after stop: {e}"),
-        Ok(Err(e)) => panic!("run_p2p join: {e}"),
-        Err(_) => panic!("run_p2p did not exit after stop"),
     }
 }
 
@@ -82,24 +49,8 @@ async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
     rbitcoin_test::jsonrpc::jsonrpc(addr, method, params).await
 }
 
-fn base_cfg(dir: &Path) -> NodeConfig {
-    let mut cfg = NodeConfig::default()
-        .with_datadir(dir)
-        .with_network(Network::Regtest)
-        .with_tiny_heads();
-    cfg.listen.use_seeds = false;
-    cfg
-}
-
 fn write_token(dir: &Path) {
     std::fs::write(dir.join("rpc.token"), "pass\n").unwrap();
-}
-
-fn log_text(logs: &StartupLogs) -> String {
-    logs.iter()
-        .map(|(_, line)| line.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 async fn handshake(bind_ip: Ipv4Addr, to: SocketAddr, agent: &str) -> V2PlainSession {
@@ -164,11 +115,132 @@ async fn wait_peers(rpc: SocketAddr, n: usize) -> Value {
     }
 }
 
-fn assert_opened(logs: &StartupLogs, len: usize, digest: &str) {
-    let text = log_text(logs);
+/// `rbitcoin-node` child. Stderr is the operator log.
+struct NodeProc {
+    child: Option<Child>,
+    stderr: Arc<Mutex<String>>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for NodeProc {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn node_bin() -> PathBuf {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let target = match std::env::var("CARGO_TARGET_DIR") {
+        Ok(dir) => {
+            let path = PathBuf::from(dir);
+            if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(path)
+            }
+        }
+        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/dev"),
+    };
+    let plain = target.join(profile).join("journey-node");
+    // `cargo llvm-cov` keeps `CARGO_TARGET_DIR` and builds under
+    // `$CARGO_TARGET_DIR/llvm-cov-target`. The plain `debug/` bin is absent there.
+    let covered = target
+        .join("llvm-cov-target")
+        .join(profile)
+        .join("journey-node");
+    let bin = if covered.is_file()
+        && (std::env::var_os("CARGO_LLVM_COV").is_some() || !plain.is_file())
+    {
+        covered
+    } else {
+        plain
+    };
+    assert!(
+        bin.is_file(),
+        "operator CLI missing at {} (journey-node is rbitcoin_node::cli_main)",
+        bin.display()
+    );
+    bin
+}
+
+fn spawn_node(dir: &Path, extra: &[&str]) -> NodeProc {
+    let mut cmd = Command::new(node_bin());
+    cmd.arg("--datadir")
+        .arg(dir)
+        .arg("--network")
+        .arg("regtest")
+        .arg("--no-seeds")
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--rpc-listen")
+        .arg("127.0.0.1:0")
+        .arg("--log-level")
+        .arg("info")
+        .arg("--milestone")
+        .arg("0");
+    cmd.args(extra);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn rbitcoin-node: {e}"));
+    let pipe = child.stderr.take().expect("stderr piped");
+    let stderr = Arc::new(Mutex::new(String::new()));
+    let buf = Arc::clone(&stderr);
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut lines = std::io::BufReader::new(pipe);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match lines.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => buf.lock().unwrap().push_str(&line),
+            }
+        }
+    });
+    NodeProc {
+        child: Some(child),
+        stderr,
+        reader: Some(reader),
+    }
+}
+
+async fn finish_node(mut node: NodeProc) -> String {
+    let mut child = node.child.take().expect("child");
+    let status = tokio::task::spawn_blocking(move || child.wait())
+        .await
+        .expect("wait join")
+        .unwrap_or_else(|e| panic!("wait node: {e}"));
+    assert!(status.success(), "rbitcoin-node exit {status}");
+    if let Some(reader) = node.reader.take() {
+        let _ = tokio::task::spawn_blocking(move || reader.join()).await;
+    }
+    node.stderr.lock().unwrap().clone()
+}
+
+async fn stop_node(rpc: SocketAddr, node: NodeProc) -> String {
+    let _ = jsonrpc(rpc, "stop", json!([])).await;
+    finish_node(node).await
+}
+
+fn assert_stderr_opened(text: &str, len: usize, digest: &str) {
     assert!(
         text.contains(&format!("({len} bytes, digest {digest})")),
-        "opened line missing from {text}"
+        "opened line missing from process stderr: {text}"
     );
     assert!(
         !text.contains("Sanity check of asmap file"),
@@ -186,9 +258,7 @@ async fn asmap_loopback_peers_report_their_asn() {
         let dir = td.path();
         std::fs::write(dir.join("ip_asn.dat"), rbitcoin_net::LOOPBACK_ASMAP).unwrap();
         write_token(&dir);
-        let mut cfg = base_cfg(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.rpc.listen = Some("127.0.0.1:0".parse().unwrap());
-        let node = spawn_run_p2p_logs(cfg);
+        let node = spawn_node(&dir, &[]);
         let rpc = published_listener(&dir, "rpc").await;
         let p2p = published_listener(&dir, "p2p").await;
         let _a = handshake(Ipv4Addr::new(127, 0, 0, 1), p2p, "/asmap-1/").await;
@@ -198,129 +268,65 @@ async fn asmap_loopback_peers_report_their_asn() {
         assert_eq!(mapped_as(&rows, Ipv4Addr::new(127, 0, 0, 1)), 1, "{rows}");
         assert_eq!(mapped_as(&rows, Ipv4Addr::new(127, 0, 0, 2)), 2, "{rows}");
         assert_eq!(mapped_as(&rows, Ipv4Addr::new(127, 0, 0, 3)), 9, "{rows}");
-        let logs = stop_logged(rpc, node).await;
-        assert_opened(&logs, rbitcoin_net::LOOPBACK_ASMAP.len(), "0d2045c8");
+        let stderr = stop_node(rpc, node).await;
+        assert_stderr_opened(&stderr, rbitcoin_net::LOOPBACK_ASMAP.len(), "0d2045c8");
 
         let td = TestDatadir::new().unwrap();
         let dir = td.path();
         std::fs::write(dir.join("asn1.dat"), rbitcoin_net::LONE_RETURN_ASMAP).unwrap();
         write_token(&dir);
-        let mut cfg = base_cfg(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.asmap = Some(PathBuf::from("asn1.dat"));
-        cfg.rpc.listen = Some("127.0.0.1:0".parse().unwrap());
-        let node = spawn_run_p2p_logs(cfg);
+        let node = spawn_node(&dir, &["--asmap", "asn1.dat"]);
         let rpc = published_listener(&dir, "rpc").await;
         let p2p = published_listener(&dir, "p2p").await;
         let _peer = handshake(Ipv4Addr::new(127, 0, 0, 1), p2p, "/asmap-lone/").await;
         let rows = wait_peers(rpc, 1).await;
         assert_eq!(mapped_as(&rows, Ipv4Addr::new(127, 0, 0, 1)), 1, "{rows}");
-        let logs = stop_logged(rpc, node).await;
-        assert_opened(&logs, 3, "709e80c8");
+        let stderr = stop_node(rpc, node).await;
+        assert_stderr_opened(&stderr, 3, "709e80c8");
     };
     tokio::time::timeout(wall, fut).await.unwrap_or_else(|_| {
         panic!("asmap_loopback_peers_report_their_asn wall timeout ({wall:?})")
     });
 }
 
-fn assert_refused(logs: &StartupLogs, phrase: &str) {
-    let text = log_text(logs);
-    assert!(text.contains(phrase), "missing {phrase:?} in {text}");
+fn assert_stderr_refused(text: &str, phrase: &str) {
+    assert!(
+        text.contains(phrase),
+        "missing {phrase:?} on process stderr: {text}"
+    );
     assert!(
         !text.contains("Opened asmap file"),
         "a refused asmap loaded: {text}"
     );
 }
 
-async fn boot_refused(cfg: NodeConfig, phrase: &str) {
-    let node = spawn_run_p2p_logs(cfg);
-    match tokio::time::timeout(Duration::from_secs(20), node).await {
-        Ok(Ok((Ok(()), logs))) => assert_refused(&logs, phrase),
-        Ok(Ok((Err(e), logs))) => panic!("run_p2p error: {e}; logs={}", log_text(&logs)),
-        Ok(Err(e)) => panic!("run_p2p join: {e}"),
-        Err(_) => panic!("refused asmap boot did not exit"),
-    }
+/// One datadir, one `rbitcoin-node --max-run-secs 0`. Exit success is not
+/// enough: the warning on stderr is the refusal.
+async fn boot_refused(dir: &Path, file: &str, phrase: &str) {
+    let node = spawn_node(dir, &["--asmap", file, "--max-run-secs", "0"]);
+    let stderr = tokio::time::timeout(Duration::from_secs(40), finish_node(node))
+        .await
+        .unwrap_or_else(|_| panic!("refused asmap boot did not exit ({file})"));
+    assert_stderr_refused(&stderr, phrase);
 }
 
-/// Each bad asmap is refused at startup. The node exits once tip entry is
-/// ready (`max_run_secs` 0) and never dials a peer.
+/// One rejected bytecode and a missing path. Each is its own process. The
+/// other rejected bytecodes are `asmap_rejected_bytecodes_fail_sanity`.
 #[tokio::test(flavor = "multi_thread")]
 async fn asmap_refused_file_uses_prefix_netgroups() {
     let wall = llvm_cov_wall(20, 60);
-    let cases: &[(&str, &[u8], &str)] = &[
-        (
-            "second-default.dat",
-            rbitcoin_net::ASMAP_SECOND_DEFAULT,
-            "Sanity check of asmap file",
-        ),
-        (
-            "trailing-one.dat",
-            rbitcoin_net::ASMAP_TRAILING_ONE,
-            "Sanity check of asmap file",
-        ),
-        (
-            "eight-zeros.dat",
-            rbitcoin_net::ASMAP_EIGHT_TRAILING_ZEROS,
-            "Sanity check of asmap file",
-        ),
-        (
-            "two-short.dat",
-            rbitcoin_net::ASMAP_TWO_SHORT_MATCHES,
-            "Sanity check of asmap file",
-        ),
-        (
-            "match-past.dat",
-            rbitcoin_net::ASMAP_MATCH_PAST_END,
-            "Sanity check of asmap file",
-        ),
-        (
-            "jump-past.dat",
-            rbitcoin_net::ASMAP_JUMP_PAST_FILE,
-            "Sanity check of asmap file",
-        ),
-        (
-            "jump-short.dat",
-            rbitcoin_net::ASMAP_JUMP_SHORT_TAIL,
-            "Sanity check of asmap file",
-        ),
-        (
-            "jump-off.dat",
-            rbitcoin_net::ASMAP_JUMP_OFF_END,
-            "Sanity check of asmap file",
-        ),
-    ];
     let fut = async {
-        for (name, bytes, phrase) in cases {
-            let td = TestDatadir::new().unwrap();
-            let dir = td.path();
-            std::fs::write(dir.join(name), bytes).unwrap();
-            let mut cfg = base_cfg(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
-            cfg.asmap = Some(PathBuf::from(name));
-            cfg.max_run_secs = Some(0);
-            boot_refused(cfg, phrase).await;
-        }
-
         let td = TestDatadir::new().unwrap();
         let dir = td.path();
-        std::fs::write(dir.join("empty.dat"), []).unwrap();
-        let mut cfg = base_cfg(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.asmap = Some(PathBuf::from("empty.dat"));
-        cfg.max_run_secs = Some(0);
-        boot_refused(cfg, "Sanity check of asmap file").await;
+        std::fs::write(
+            dir.join("second-default.dat"),
+            rbitcoin_net::ASMAP_SECOND_DEFAULT,
+        )
+        .unwrap();
+        boot_refused(&dir, "second-default.dat", "Sanity check of asmap file").await;
 
         let td = TestDatadir::new().unwrap();
-        let dir = td.path();
-        std::fs::write(dir.join("one.dat"), [0u8]).unwrap();
-        let mut cfg = base_cfg(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.asmap = Some(PathBuf::from("one.dat"));
-        cfg.max_run_secs = Some(0);
-        boot_refused(cfg, "Sanity check of asmap file").await;
-
-        let td = TestDatadir::new().unwrap();
-        let dir = td.path();
-        let mut cfg = base_cfg(&dir).with_p2p_listen("127.0.0.1:0".parse().unwrap());
-        cfg.asmap = Some(PathBuf::from("no-such-asmap"));
-        cfg.max_run_secs = Some(0);
-        boot_refused(cfg, "Failed to open asmap file").await;
+        boot_refused(&td.path(), "no-such-asmap", "Failed to open asmap file").await;
     };
     tokio::time::timeout(wall, fut).await.unwrap_or_else(|_| {
         panic!("asmap_refused_file_uses_prefix_netgroups wall timeout ({wall:?})")
