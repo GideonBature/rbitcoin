@@ -17,6 +17,11 @@ libc = "0.2"
 # Datadir store.secret CSPRNG.
 getrandom = "0.4"
 
+[features]
+# Consensus tests interleave a disconnect inside a spend checkpoint.
+# A downstream dev-dependency turns this on. A production build leaves it off.
+test-hooks = []
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Bulk pread submission for head-resolve / confirm body load (Linux).
 io-uring = "0.7"

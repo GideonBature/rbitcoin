@@ -23,6 +23,9 @@ mutants = "0.0.4"
 serde_json = { workspace = true }
 # Test-only zstd decode for Floresta historical block packs (not on the node graph).
 ruzstd = "0.9"
+# Spend-checkpoint tests call the store hooks. This feature stays off for
+# dependents of this crate.
+rbitcoin-store = { workspace = true, features = ["test-hooks"] }
 
 [lints]
 workspace = true

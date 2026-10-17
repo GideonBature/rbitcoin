@@ -151,6 +151,7 @@ pub fn drop_unsynced_tx_head_pages(root: &Path) {
 }
 
 /// Checkpoint an explicit height, running `between` after `sync_data`.
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn checkpoint_spend_through_between(
     store: &Store,
     height: u32,
@@ -161,6 +162,7 @@ pub fn checkpoint_spend_through_between(
 
 /// Disconnect-generation sample, then snapshot height, with a hook between
 /// them and a hook during `sync_data`.
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn checkpoint_observed_spend_gap(
     store: &Store,
     after_first_read: impl FnOnce(&Store),

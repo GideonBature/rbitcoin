@@ -1831,7 +1831,7 @@ impl Store {
     /// height, so open still replays it. With pending from genesis, nothing is
     /// published.
     pub fn checkpoint_spend_through(&self, height: u32) -> Result<(), StoreError> {
-        self.checkpoint_spend_through_between(height, |_| {})
+        self.spend_through_checkpoint(height, |_| {})
     }
 
     /// Sample the disconnect generation, then the snapshot height, then sync.
@@ -1840,12 +1840,10 @@ impl Store {
     /// was current before it, even when the replacement is annotated during
     /// the sync.
     pub fn checkpoint_observed_spend(&self) -> Result<(), StoreError> {
-        self.checkpoint_observed_spend_gap(|_| {}, |_| {})
+        self.observe_spend_checkpoint(|_| {}, |_| {})
     }
 
-    /// [`Self::checkpoint_observed_spend`] with hooks around the two reads
-    /// and the sync. Test-only callers live in [`crate::testutil`].
-    pub(crate) fn checkpoint_observed_spend_gap(
+    fn observe_spend_checkpoint(
         &self,
         after_first_read: impl FnOnce(&Self),
         during_sync: impl FnOnce(&Self),
@@ -1859,13 +1857,10 @@ impl Store {
         self.sync_spend_checkpoint(height, gen, during_sync)
     }
 
-    /// [`Self::checkpoint_spend_through`] with `between` invoked after
-    /// `sync_data` and before the marker publish.
-    ///
     /// Appends above `height` do not bump the disconnect generation, so a
     /// block connected in `between` still allows the snapshot to publish.
     /// A disconnect in `between` does not.
-    pub(crate) fn checkpoint_spend_through_between(
+    fn spend_through_checkpoint(
         &self,
         height: u32,
         between: impl FnOnce(&Self),
@@ -1902,6 +1897,28 @@ impl Store {
             _ => height,
         };
         self.store_spend_marker(height, height, gen)
+    }
+
+    /// [`Self::checkpoint_observed_spend`] with hooks around the two reads
+    /// and the sync.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn checkpoint_observed_spend_gap(
+        &self,
+        after_first_read: impl FnOnce(&Self),
+        during_sync: impl FnOnce(&Self),
+    ) -> Result<(), StoreError> {
+        self.observe_spend_checkpoint(after_first_read, during_sync)
+    }
+
+    /// [`Self::checkpoint_spend_through`] with `between` invoked after
+    /// `sync_data` and before the marker publish.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn checkpoint_spend_through_between(
+        &self,
+        height: u32,
+        between: impl FnOnce(&Self),
+    ) -> Result<(), StoreError> {
+        self.spend_through_checkpoint(height, between)
     }
 
     /// A disconnect below the marker lowers both heights to the new tip.
