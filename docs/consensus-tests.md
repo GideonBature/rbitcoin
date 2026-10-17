@@ -2,7 +2,7 @@
 
 Every consensus rule **we implement** (not delegated wholesale to rust-bitcoin) has an automated test that would fail if the check were removed or inverted.
 
-**Out of scope:** full secp256k1 / script-interpreter opcode parity vs Core; rust-bitcoin PoW / `CompactTarget` retarget math; full mainnet retarget golden vectors.
+**Out of scope:** full secp256k1 / script-interpreter opcode parity vs Core; every historical mainnet retarget. One boundary is pinned: height 32256 compact `0x1d00d86a`, plus the quarter, 4×, and pow-limit clamp literals (`mainnet_retarget_32256_matches_core_compact`, `retarget_clamps_timespan_and_caps_at_pow_limit`).
 
 ## Running
 
@@ -107,7 +107,7 @@ The Test column is the witness. Do not copy it into [`TESTING.md`](../TESTING.md
 | H1 | Genesis hash matches params | `BadHeader("genesis hash mismatch")` | `header_and_spending_boundaries` |
 | H2 | `prev` links to height−1 | `BadPrev` | `header_and_spending_boundaries` |
 | H3 | `time > median_time_past` | `timestamp <= median-time-past` | `header_and_spending_boundaries` (`time==mtp` / `mtp+1`) |
-| H5 | `bits == expected_next_bits` | `incorrect proof of work bits` | `header_and_spending_boundaries` (regtest: must equal prev) |
+| H5 | `bits == expected_next_bits` | `incorrect proof of work bits` | `header_and_spending_boundaries` (regtest: must equal prev). Mainnet compact and clamps: `mainnet_retarget_32256_matches_core_compact`, `retarget_clamps_timespan_and_caps_at_pow_limit` |
 | H6 | Target ≤ `pow_limit` | `target above pow limit` | `header_and_spending_boundaries` (`validate_header` with mainnet `pow_limit`) |
 | H7 | PoW valid for claimed bits | `InvalidPow` | `h7_rejects_header_hash_above_target` + smoke via `mine_regtest_block` accept |
 | H8 | Time not > now + 2h | `timestamp too far in future` | `h8_rejects_timestamp_too_far_in_future` + `h8_timestamp_exactly_two_hours_accepts_plus_one_rejects` (exact +2h is the header unit; not duplicated on the connect journey) |
