@@ -17,7 +17,7 @@ use rbitcoin_consensus::{
     mine_op_true_signet_paying, mine_regtest_paying, validate_header, validate_header_on_parent,
     ChainParams, Milestone, PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
 };
-use rbitcoin_log::{debug, info};
+use rbitcoin_log::{debug, info, warn};
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
@@ -3752,57 +3752,23 @@ fn seed_confirmed_tip(query: &Query) -> HashSet<BlockHash> {
     set
 }
 
-/// Headers in `batch` that are still the store header at that height.
-fn confirmed_hashes_still_there(query: &Query, batch: &[(u32, BlockHash)]) -> Vec<BlockHash> {
-    batch
-        .iter()
-        .filter(|(h, hash)| {
-            query
-                .header_at_height(Height(*h))
-                .ok()
-                .flatten()
-                .is_some_and(|(_, rec)| rec.hash == hash.to_byte_array())
-        })
-        .map(|(_, hash)| *hash)
-        .collect()
-}
-
-fn read_confirmed_chunk(query: &Query, heights: &[u32]) -> Vec<(u32, BlockHash)> {
-    let mut batch = Vec::with_capacity(heights.len());
-    for &h in heights {
-        if let Ok(Some((_, rec))) = query.header_at_height(Height(h)) {
-            batch.push((h, BlockHash::from_byte_array(rec.hash)));
-        }
-    }
-    batch
-}
-
-/// Insert one scanned chunk. A hash read before a disconnect is dropped
-/// when that height now has a different header, or none.
-fn commit_confirmed_chunk(
-    query: &Query,
-    confirmed: &RwLock<HashSet<BlockHash>>,
-    batch: &[(u32, BlockHash)],
-) {
-    // Disconnect removes from this set only while it holds the tip commit.
+/// Publish the best chain into `confirmed` from the height index.
+///
+/// Open already read each header to build that index. The copy holds the tip
+/// commit, which a disconnect also holds while it drops hashes above the new
+/// tip, so a block removed before the copy is not inserted again.
+fn publish_confirmed_heights(query: &Query, confirmed: &RwLock<HashSet<BlockHash>>) -> bool {
     let _commit = query.lock_tip_commit();
-    let live = confirmed_hashes_still_there(query, batch);
+    let Some(hashes) = query.indexed_chain_hashes() else {
+        warn!("ibd: confirmed-set seed skipped; height index does not match the tip");
+        return false;
+    };
     let mut g = confirmed.write().unwrap();
-    for hash in live {
-        g.insert(hash);
+    g.reserve(hashes.len());
+    for hash in hashes {
+        g.insert(BlockHash::from_byte_array(hash));
     }
-}
-
-fn publish_confirmed_heights(query: &Query, confirmed: &RwLock<HashSet<BlockHash>>) {
-    let mut h = 0u32;
-    loop {
-        let batch = read_confirmed_chunk(query, &[h]);
-        if batch.is_empty() {
-            break;
-        }
-        commit_confirmed_chunk(query, confirmed, &batch);
-        h = h.saturating_add(1);
-    }
+    true
 }
 
 /// Fill the rest of the confirmed set without blocking P2P start.
@@ -3815,12 +3781,13 @@ fn spawn_confirmed_seed(query: Arc<Query>, confirmed: Arc<RwLock<HashSet<BlockHa
     }
     let run = move || {
         let t0 = std::time::Instant::now();
-        publish_confirmed_heights(&query, &confirmed);
-        info!(
-            "ibd: confirmed-set seed complete tip={} in {:?}",
-            tip.0,
-            t0.elapsed()
-        );
+        if publish_confirmed_heights(&query, &confirmed) {
+            info!(
+                "ibd: confirmed-set seed complete tip={} in {:?}",
+                tip.0,
+                t0.elapsed()
+            );
+        }
     };
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn_blocking(run);
@@ -5259,20 +5226,15 @@ mod tests {
             hub.accept_block(b).unwrap();
         }
         let gone = prev;
-        let scanned = read_confirmed_chunk(&hub.query, &[0, 1, 2, 3]);
-        assert!(
-            scanned.iter().any(|(_, hash)| *hash == gone),
-            "the seed read the tip while it was still connected"
-        );
         hub.rewind_to_height(0).unwrap();
         assert!(
             !hub.has_block(&gone),
             "rewind drops the disconnected tip from the confirmed set"
         );
-        commit_confirmed_chunk(&hub.query, &hub.confirmed, &scanned);
+        publish_confirmed_heights(&hub.query, &hub.confirmed);
         assert!(
             !hub.has_block(&gone),
-            "a seed chunk scanned before the rewind must not put that block back"
+            "the seed copy must not put that block back"
         );
         assert!(
             hub.has_block(&genesis_block(&hub.params).block_hash()),
