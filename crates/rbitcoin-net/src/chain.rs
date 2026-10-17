@@ -439,6 +439,25 @@ fn ancestor_walk(
     None
 }
 
+/// Record an already-stored header, including a walk that returned `None`.
+///
+/// Omitting that row made every later header in the run walk to the cap again.
+fn remember_stored_header(
+    in_batch: &mut HashMap<[u8; 32], HeaderSyncNode>,
+    hash: [u8; 32],
+    prev: [u8; 32],
+    fk: Fk,
+    header: Header,
+    walk: impl FnOnce() -> Option<u32>,
+) {
+    let parent_height = in_batch.get(&prev).map(|parent| parent.height);
+    let height = match parent_height {
+        Some(parent) => parent.map(|h| h.saturating_add(1)),
+        None => walk(),
+    };
+    in_batch.insert(hash, HeaderSyncNode { fk, header, height });
+}
+
 impl ChainHub {
     pub fn new(query: Query, params: ChainParams, milestone: Milestone) -> Self {
         let (tip_tx, _) = broadcast::channel(64);
@@ -1379,21 +1398,9 @@ impl ChainHub {
             {
                 out[i] = fk;
                 let prev = header.prev_blockhash.to_byte_array();
-                // A walk that returns `None` is still recorded. Omitting it
-                // made every later header in the run walk to the cap again.
-                let height = if let Some(parent) = in_batch.get(&prev) {
-                    parent.height.map(|h| h.saturating_add(1))
-                } else {
+                remember_stored_header(&mut in_batch, hash, prev, fk, *header, || {
                     self.stored_header_height(&header.block_hash())
-                };
-                in_batch.insert(
-                    hash,
-                    HeaderSyncNode {
-                        fk,
-                        header: *header,
-                        height,
-                    },
-                );
+                });
                 continue;
             }
             let prev_fk = self.header_sync_prev_fk(header, &in_batch)?;
@@ -3933,6 +3940,82 @@ mod tests {
         );
         assert_eq!(got, None);
         assert_eq!(steps, 4);
+    }
+
+    /// A stored header past the cap is still kept, and the next header does
+    /// not walk those steps again.
+    #[test]
+    fn stored_run_past_the_cap_is_kept_and_walks_once() {
+        let hashes: Vec<BlockHash> = (0..9u8)
+            .map(|i| BlockHash::from_byte_array([i + 1; 32]))
+            .collect();
+        let header_for = |prev: BlockHash| Header {
+            version: Version::from_consensus(4),
+            prev_blockhash: prev,
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        };
+        let lookup = |hash: &BlockHash| {
+            let idx = hashes.iter().position(|h| h == hash)?;
+            let prev = *hashes.get(idx + 1)?;
+            Some(header_for(prev))
+        };
+        let known = |hash: &BlockHash| (hash == &hashes[8]).then_some(0);
+        let mut steps = 0u32;
+        let mut batch = HashMap::new();
+        let cap = 4;
+        remember_stored_header(
+            &mut batch,
+            hashes[0].to_byte_array(),
+            hashes[1].to_byte_array(),
+            rbitcoin_primitives::Fk::NULL,
+            header_for(hashes[1]),
+            || {
+                ancestor_walk(
+                    &hashes[0],
+                    cap,
+                    |hash| {
+                        steps += 1;
+                        lookup(hash)
+                    },
+                    known,
+                )
+            },
+        );
+        let child = BlockHash::from_byte_array([0x44; 32]);
+        remember_stored_header(
+            &mut batch,
+            child.to_byte_array(),
+            hashes[0].to_byte_array(),
+            rbitcoin_primitives::Fk(1),
+            header_for(hashes[0]),
+            || {
+                ancestor_walk(
+                    &child,
+                    cap,
+                    |hash| {
+                        steps += 1;
+                        lookup(hash)
+                    },
+                    known,
+                )
+            },
+        );
+        assert_eq!(
+            steps, 4,
+            "the run walks one capped chain, not one per header"
+        );
+        assert_eq!(
+            batch.get(&hashes[0].to_byte_array()).map(|n| n.height),
+            Some(None),
+            "a header past the cap is still kept"
+        );
+        assert_eq!(
+            batch.get(&child.to_byte_array()).map(|n| n.height),
+            Some(None)
+        );
     }
 
     #[test]
