@@ -1875,9 +1875,13 @@ impl ChainHub {
         ))
     }
 
+    /// One `generate` call refuses more than this many blocks.
+    const GENERATE_MAX_BLOCKS: u32 = 10_000;
+
     /// Mine `nblocks` paying `script_pubkey` and accept each via [`Self::accept_block`].
     ///
     /// Regtest harness only. Extra txs go in the first block. Ensures genesis.
+    /// More than [`Self::GENERATE_MAX_BLOCKS`] is refused before any block is mined.
     ///
     /// PoW runs on the caller, not on `tip-accept`, so an `OP_TRUE` signet
     /// grind can use extra cores. Accept stays on the lane. A peer block that
@@ -1888,11 +1892,31 @@ impl ChainHub {
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
     ) -> Result<Vec<BlockHash>, NetError> {
+        self.generate_to_script_limited(
+            nblocks,
+            script_pubkey,
+            extra_txs,
+            Self::GENERATE_MAX_BLOCKS,
+        )
+    }
+
+    /// [`Self::generate_to_script`] with an explicit cap. Production passes
+    /// [`Self::GENERATE_MAX_BLOCKS`]. Tests pass a small cap so the same
+    /// comparison is pinned without mining ten thousand blocks.
+    fn generate_to_script_limited(
+        &self,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+        limit: u32,
+    ) -> Result<Vec<BlockHash>, NetError> {
         if nblocks == 0 {
             return Ok(Vec::new());
         }
-        if nblocks > 10_000 {
-            return Err(NetError::Consensus("nblocks too large (max 10000)".into()));
+        if nblocks > limit {
+            return Err(NetError::Consensus(format!(
+                "nblocks too large (max {limit})"
+            )));
         }
         self.ensure_genesis()?;
         // Serialize tip-read + mine + accept so concurrent generateblock
@@ -4226,18 +4250,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Production cap is 10_000. One past it is refused before genesis is
+    /// touched. The inclusive bound uses a stand-in cap of 2: the same `>`
+    /// comparison, two blocks mined, one more refused.
     #[test]
-    fn generate_accepts_ten_thousand_and_refuses_one_more() {
+    fn generate_accepts_its_cap_and_refuses_one_more() {
         let (_dir, hub) = tmp_hub();
         let err = hub
-            .generate_to_script(10_001, ScriptBuf::from_bytes(vec![0x51]), vec![])
-            .expect_err("10001 blocks is past the cap");
-        assert!(err.to_string().contains("nblocks too large"), "{err}");
+            .generate_to_script(
+                ChainHub::GENERATE_MAX_BLOCKS + 1,
+                ScriptBuf::from_bytes(vec![0x51]),
+                vec![],
+            )
+            .expect_err("one past the production cap");
+        assert!(
+            err.to_string().contains("nblocks too large (max 10000)"),
+            "{err}"
+        );
+        assert_eq!(hub.tip_height(), None, "refusal must not mine");
         let mined = hub
-            .generate_to_script(10_000, ScriptBuf::from_bytes(vec![0x51]), vec![])
-            .expect("10000 blocks is the cap");
-        assert_eq!(mined.len(), 10_000);
-        assert_eq!(hub.tip_height(), Some(10_000));
+            .generate_to_script_limited(2, ScriptBuf::from_bytes(vec![0x51]), vec![], 2)
+            .expect("the cap itself");
+        assert_eq!(mined.len(), 2);
+        assert_eq!(hub.tip_height(), Some(2));
+        let err = hub
+            .generate_to_script_limited(3, ScriptBuf::from_bytes(vec![0x51]), vec![], 2)
+            .expect_err("one past the stand-in cap");
+        assert!(
+            err.to_string().contains("nblocks too large (max 2)"),
+            "{err}"
+        );
+        assert_eq!(hub.tip_height(), Some(2));
     }
 
     #[test]
