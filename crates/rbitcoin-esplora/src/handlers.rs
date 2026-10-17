@@ -1181,18 +1181,26 @@ fn combined_txs(
     }
     // A confirmed cursor is absent from this script's mempool index, so the
     // chain page is read without mempool tx bodies. A cursor inside the first
-    // mempool page keeps only the rows after it. A tx in the pool for some
-    // other script must not restart this script's first page.
-    let (mempool_rows, after_in_mempool) = if asof.is_none() {
+    // mempool page keeps only the rows after it. A mempool-only cursor past
+    // that page is not a chain cursor. A tx in the pool for some other script
+    // must not restart this script's first page.
+    let mempool = if asof.is_none() {
         mempool_page_json(st, sh, after)
     } else {
-        (Vec::new(), false)
+        MempoolPage::Absent
     };
     let mut out = Vec::new();
-    if asof.is_none() && (after.is_none() || after_in_mempool) {
-        out.extend(mempool_rows);
-    }
-    let chain_after = if after_in_mempool { None } else { after };
+    let chain_after = match mempool {
+        MempoolPage::OnPage(rows) => {
+            out.extend(rows);
+            None
+        }
+        MempoolPage::PastPage => match after {
+            Some(id) if !txid_on_chain(st, &id) => None,
+            other => other,
+        },
+        MempoolPage::Absent => after,
+    };
     let filter = HistoryFilter::esplora_chain_page(chain_after);
     let (page, view) = match sh_at_view(
         st,
@@ -1417,7 +1425,16 @@ fn multi_txs(
         let hex = block_hash_hex(&id);
         mempool_rows.iter().any(|v| v["txid"] == hex)
     });
-    let chain_after = if after_in_mempool { None } else { after };
+    let past_unconfirmed = after.is_some_and(|id| {
+        !after_in_mempool
+            && scripts.iter().any(|sh| mempool_indexes(st, sh, &id))
+            && !txid_on_chain(st, &id)
+    });
+    let chain_after = if after_in_mempool || past_unconfirmed {
+        None
+    } else {
+        after
+    };
     if after.is_some() && !after_in_mempool {
         mempool_rows.clear();
     } else if let Some(id) = after {
@@ -1702,42 +1719,60 @@ pub async fn address_txs_mempool(
 }
 
 fn mempool_txs_json(st: &AppState, sh: &[u8; 32]) -> Vec<Value> {
-    mempool_page_json(st, sh, None).0
+    match mempool_page_json(st, sh, None) {
+        MempoolPage::OnPage(rows) => rows,
+        MempoolPage::Absent | MempoolPage::PastPage => Vec::new(),
+    }
 }
 
-/// Mempool JSON that stays on this `/txs` page, and whether `after` is one of
-/// the first [`MEMPOOL_TX_PAGE`] rows.
-///
-/// `after` outside this script's mempool index returns an empty list and
-/// `false` without loading a mempool body. `after` inside the page returns
-/// only the tail. `after` in the index but past the page returns empty and
-/// `false`, matching take-then-miss.
-fn mempool_page_json(st: &AppState, sh: &[u8; 32], after: Option<[u8; 32]>) -> (Vec<Value>, bool) {
+/// Where `after` sits in this script's mempool index.
+enum MempoolPage {
+    /// Not in the index. The caller keeps `after` as a chain cursor.
+    Absent,
+    /// Rows that stay on the page. A cursor on the page is already dropped.
+    OnPage(Vec<Value>),
+    /// In the index, past the first [`MEMPOOL_TX_PAGE`] rows. No body loaded.
+    PastPage,
+}
+
+fn mempool_indexes(st: &AppState, sh: &[u8; 32], id: &[u8; 32]) -> bool {
     let Some(mp) = st.mempool.as_ref() else {
-        return (Vec::new(), false);
+        return false;
+    };
+    mp.scripthash_indexes_tx(sh, &Txid::from_byte_array(*id))
+}
+
+fn txid_on_chain(st: &AppState, id: &[u8; 32]) -> bool {
+    st.query.get_tx_by_txid(id).ok().flatten().is_some()
+}
+
+/// Mempool JSON that stays on this `/txs` page.
+///
+/// A cursor outside the index loads nothing. A cursor on the first page
+/// keeps the tail. A cursor past that page loads nothing and is [`MempoolPage::PastPage`],
+/// so a mempool-only tx is not mistaken for a chain cursor.
+fn mempool_page_json(st: &AppState, sh: &[u8; 32], after: Option<[u8; 32]>) -> MempoolPage {
+    let Some(mp) = st.mempool.as_ref() else {
+        return MempoolPage::Absent;
     };
     if let Some(id) = after {
-        let tid = Txid::from_byte_array(id);
-        if !mp.scripthash_indexes_tx(sh, &tid) {
-            return (Vec::new(), false);
+        if !mempool_indexes(st, sh, &id) {
+            return MempoolPage::Absent;
         }
     }
     let mut rows = mp.scripthash_mempool_fees(sh);
     rows.truncate(MEMPOOL_TX_PAGE);
-    let on_page = if let Some(id) = after {
+    if let Some(id) = after {
         let Some(i) = rows.iter().position(|(txid, _)| *txid == id) else {
-            return (Vec::new(), false);
+            return MempoolPage::PastPage;
         };
         rows.drain(..=i);
-        true
-    } else {
-        false
-    };
+    }
     let mut out = Vec::new();
     for (txid, fee) in rows {
         push_mempool_tx_json(st, mp, txid, fee, &mut out);
     }
-    (out, on_page)
+    MempoolPage::OnPage(out)
 }
 
 fn push_mempool_tx_json(
