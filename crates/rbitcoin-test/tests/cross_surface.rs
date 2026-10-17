@@ -1031,8 +1031,10 @@ fn pad_tx_to_weight(mut tx: Transaction, want: u64) -> Transaction {
     if base >= want {
         return tx;
     }
+    // 400_000 WU is about 100_000 script bytes. The package rejects below
+    // ask for ~200_000 WU and still finish under this ceiling.
     let mut lo = 0usize;
-    let mut hi = 80_000usize;
+    let mut hi = 130_000usize;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         let mut probe = tx.clone();
@@ -1050,6 +1052,33 @@ fn pad_tx_to_weight(mut tx: Transaction, want: u64) -> Transaction {
         tx.output.push(op_return_output(lo));
     }
     tx
+}
+
+/// Max-standard spend of one confirmed output at exactly 1_000 sat/kvB.
+///
+/// Four of these clear the ~1.44e6 WU fullness denominator, so a node with
+/// no block history still publishes a rate. The paid rate is a decade anchor.
+fn one_sat_vb_max_weight(prev: Txid, vout: u32, input_sat: u64, spk: ScriptBuf) -> Transaction {
+    let mut tx = pad_tx_to_weight(
+        acs_spend(prev, input_sat, input_sat / 2, spk),
+        rbitcoin_consensus::policy::MAX_STANDARD_TX_WEIGHT,
+    );
+    tx.input[0].previous_output.vout = vout;
+    let weight = tx_wu(&tx);
+    assert!(
+        (390_000..=rbitcoin_consensus::policy::MAX_STANDARD_TX_WEIGHT).contains(&weight),
+        "pad missed max standard weight: {weight}"
+    );
+    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    assert!(input_sat > vsize, "input {input_sat} cannot pay {vsize}");
+    tx.output[0].value = Amount::from_sat(input_sat - vsize);
+    let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(vsize, tx_wu(&tx));
+    assert_eq!(rate, 1_000, "weight {weight} vsize {vsize}");
+    tx
+}
+
+fn btc_per_kb_to_sat_kvb(btc_per_kb: f64) -> u64 {
+    (btc_per_kb * 100_000_000.0).round() as u64
 }
 
 fn mempool_has(mem: &Value, txid: &str) -> bool {
@@ -2057,6 +2086,18 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         body.contains("fee estimates unavailable"),
         "an empty estimator must not invent a target: {body}"
     );
+    let cold_est = electrum_rpc(&mut el, 40, "blockchain.estimatefee", json!([2])).await;
+    assert_eq!(cold_est["result"].as_f64(), Some(-1.0), "{cold_est}");
+    let cold_smart = jsonrpc(rpc_addr, "estimatesmartfee", json!([2])).await;
+    assert!(
+        cold_smart["result"].get("feerate").is_none(),
+        "{cold_smart}"
+    );
+    assert_eq!(
+        cold_smart["result"]["errors"][0], "Insufficient data or no feerate found",
+        "{cold_smart}"
+    );
+    assert_eq!(cold_smart["result"]["blocks"], 2, "{cold_smart}");
 
     let metrics_in_ibd = pin_metrics_equal_rpc(health_addr, rpc_addr, false).await;
     assert!(
@@ -2336,6 +2377,98 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         fat_msg.contains("package too large") || fat_err.contains("package too large"),
         "RPC over-weight package: {fat}"
     );
+
+    // Four independent max-weight admits at 1 sat/vB. α reaches 1. The
+    // one-block cap (λ = 2, 3.2e6 WU) does not fit that inflow below the
+    // paid decade anchor. From two blocks up, λ = 1 and the larger cap
+    // fit that inflow, so those depths are min-relay and the tail holds it.
+    // Bare OP_N and the script-class OP_TRUE. `at_min` pays to OP_PUSHDATA4,
+    // which does not parse, so it cannot fund one of these.
+    let op_true_sat = script_tx.output[7].value.to_sat();
+    let warm_txs = [
+        one_sat_vb_max_weight(
+            child.compute_txid(),
+            0,
+            child.output[0].value.to_sat(),
+            ScriptBuf::from_bytes(vec![0x41]),
+        ),
+        one_sat_vb_max_weight(
+            chain_txs[24].compute_txid(),
+            0,
+            chain_txs[24].output[0].value.to_sat(),
+            ScriptBuf::from_bytes(vec![0x42]),
+        ),
+        one_sat_vb_max_weight(
+            pkg_child.compute_txid(),
+            0,
+            pkg_child.output[0].value.to_sat(),
+            ScriptBuf::from_bytes(vec![0x43]),
+        ),
+        one_sat_vb_max_weight(
+            script_tx.compute_txid(),
+            7,
+            op_true_sat,
+            ScriptBuf::from_bytes(vec![0x44]),
+        ),
+    ];
+    for tx in &warm_txs {
+        let (st, body) = http_post(esplora_addr, "/tx", &encode_tx(tx)).await;
+        assert_eq!(st, 200, "warm admit: {body}");
+        assert_eq!(body, tx.compute_txid().to_string(), "{body}");
+    }
+    let floor = rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB;
+    let expect = |target: u32| if target == 1 { 1_000 } else { floor };
+    let (st, body) = http_get(esplora_addr, "/fee-estimates").await;
+    assert_eq!(st, 200, "GET /fee-estimates: {body}");
+    let estimates: Value = serde_json::from_str(&body).expect("fee-estimates json");
+    for target in [1u32, 2, 6, 144, 504, 1008] {
+        let sat_vb = estimates[target.to_string()]
+            .as_f64()
+            .unwrap_or_else(|| panic!("missing target {target}: {estimates}"));
+        assert_eq!(
+            (sat_vb * 1_000.0).round() as u64,
+            expect(target),
+            "esplora target {target}: {estimates}"
+        );
+    }
+    let mut warm_el = TcpStream::connect(electrum_addr).await.unwrap();
+    for (id, target) in [(50u64, 1u32), (51, 2), (52, 6), (53, 144)] {
+        let est = electrum_rpc(&mut warm_el, id, "blockchain.estimatefee", json!([target])).await;
+        let btc = est["result"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("electrum estimatefee: {est}"));
+        assert_eq!(
+            btc_per_kb_to_sat_kvb(btc),
+            expect(target),
+            "electrum target {target}: {est}"
+        );
+    }
+    for (method, target) in [
+        ("estimatesmartfee", 1u32),
+        ("estimatesmartfee", 2),
+        ("estimatesmartfee", 6),
+        ("estimatesmartfee", 144),
+        ("estimaterawfee", 1),
+        ("estimaterawfee", 2),
+        ("estimaterawfee", 6),
+        ("estimaterawfee", 144),
+    ] {
+        let fee = jsonrpc(rpc_addr, method, json!([target])).await;
+        let btc = fee["result"]["feerate"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{method} {target}: {fee}"));
+        assert_eq!(
+            btc_per_kb_to_sat_kvb(btc),
+            expect(target),
+            "{method} target {target}: {fee}"
+        );
+        assert_eq!(fee["result"]["blocks"], target, "{method} {target}: {fee}");
+        let errs = fee["result"].get("errors");
+        assert!(
+            errs.is_none() || errs.is_some_and(Value::is_null),
+            "{method} {target}: {fee}"
+        );
+    }
 
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
