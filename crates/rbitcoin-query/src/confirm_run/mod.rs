@@ -34,7 +34,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::Block;
 use rbitcoin_consensus::block::{block_has_witness_from_pres, ScriptCheckJob, ValidationContext};
 use rbitcoin_consensus::header::pow_hash_meets_target;
-use rbitcoin_consensus::{genesis_block, ChainParams, ConsensusError, Milestone};
+use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone};
 use rbitcoin_primitives::Height;
 use rbitcoin_store::{StoreError, WriteIoBackend};
 use std::sync::atomic::Ordering;

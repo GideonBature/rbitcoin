@@ -463,6 +463,7 @@ pub(super) fn post_commit(
     Ok(spend_ann_ns)
 }
 
+#[cfg(test)]
 pub(super) fn expected_bits_extending(
     query: &Query,
     params: &ChainParams,
@@ -471,6 +472,7 @@ pub(super) fn expected_bits_extending(
     prev_time: u32,
     header_time: u32,
 ) -> Result<bitcoin::CompactTarget, ConfirmError> {
+    use rbitcoin_consensus::genesis_block;
     if height.0 == 0 {
         return Ok(genesis_block(params).header.bits);
     }

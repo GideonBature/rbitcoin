@@ -3,7 +3,6 @@ use crate::{Query, TxApply};
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::Transaction;
-use rbitcoin_consensus::ConsensusError;
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
@@ -128,6 +127,7 @@ mod tests {
         Amount, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
         TxMerkleNode, TxOut, Witness,
     };
+    use rbitcoin_consensus::ConsensusError;
 
     #[test]
     fn header_to_record_stores_caller_hash() {

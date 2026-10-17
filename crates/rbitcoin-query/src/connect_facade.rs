@@ -4,7 +4,7 @@ use crate::ConfirmError;
 use bitcoin::hashes::Hash;
 use bitcoin::Block;
 use rbitcoin_consensus::block::{validate_block_structure_hashed, ValidationContext};
-use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone};
+use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_store::HeaderRecord;
 use std::sync::Arc;
@@ -214,7 +214,9 @@ mod coverage_tests {
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness};
     use rbitcoin_consensus::block::ScriptCheckJob;
-    use rbitcoin_consensus::{genesis_block, mine_empty_regtest, ChainParams, Milestone};
+    use rbitcoin_consensus::{
+        genesis_block, mine_empty_regtest, ChainParams, ConsensusError, Milestone,
+    };
     use rbitcoin_primitives::Height;
     use std::path::PathBuf;
     fn temp_store() -> (PathBuf, Query) {
