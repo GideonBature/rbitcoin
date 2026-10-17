@@ -1326,58 +1326,47 @@ fn dedup_txid(rows: Vec<Value>) -> Vec<Value> {
     out
 }
 
-#[allow(clippy::result_large_err)] // public error enum
-fn combined_tx_vec(
-    st: &AppState,
-    sh: &[u8; 32],
-    asof: Option<[u8; 32]>,
-    bag: Option<&mut JoinBag>,
-) -> Result<Vec<Value>, Response> {
-    let mut out = Vec::new();
-    if asof.is_none() {
-        out.extend(mempool_txs_json(st, sh));
-    }
-    let filter = HistoryFilter::esplora_chain_page(None);
-    let (page, _) = sh_at_view(
-        st,
-        sh,
-        asof,
-        |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
-        |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
-        cursor_page(None),
-        None,
-        bag,
-    )?;
-    let items = page.rows;
-    let chain = history_items_to_tx_json(&st.query, &items, st.network).map_err(store_err)?;
-    out.extend(chain);
-    Ok(out)
+/// One newest window per script. More than one script keeps a cursor that
+/// is absent from some of them. One script stays the single-address rule:
+/// a foreign cursor is 422.
+fn multi_page_filter(after: Option<[u8; 32]>, script_count: usize) -> HistoryFilter {
+    let mut filter = HistoryFilter::esplora_chain_page(after);
+    filter.after_absent_keeps_older = after.is_some() && script_count > 1;
+    filter
 }
 
 #[allow(clippy::result_large_err)] // public error enum
-fn summary_vec(
-    st: &AppState,
-    sh: &[u8; 32],
-    asof: Option<[u8; 32]>,
-    bag: Option<&mut JoinBag>,
-) -> Result<Vec<Value>, Response> {
-    let filter = HistoryFilter::esplora_chain_page(None);
-    let (page, _) = sh_at_view(
-        st,
-        sh,
-        asof,
-        |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
-        |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
-        cursor_page(None),
-        None,
-        bag,
-    )?;
-    let items = page.rows;
-    match summaries_json(&st.query, &items) {
-        Ok(Value::Array(v)) => Ok(v),
-        Ok(_) => Ok(Vec::new()),
-        Err(e) => Err(store_err(e)),
+fn accept_script_page<T>(
+    page: rbitcoin_query::FilteredHistory<T>,
+    keep_absent: bool,
+    saw_cursor: &mut bool,
+) -> Result<Vec<T>, Response> {
+    if page.cursor_missing && !keep_absent {
+        return Err(after_txid_not_found());
     }
+    if !page.cursor_missing {
+        *saw_cursor = true;
+    }
+    Ok(page.rows)
+}
+
+fn truncate_page(rows: &mut Vec<Value>, limit: usize) {
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+}
+
+fn sort_summaries_newest(rows: &mut [Value]) {
+    rows.sort_by(|a, b| {
+        let ha = a["height"].as_i64().unwrap_or(0);
+        let hb = b["height"].as_i64().unwrap_or(0);
+        hb.cmp(&ha).then_with(|| {
+            b["txid"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(a["txid"].as_str().unwrap_or(""))
+        })
+    });
 }
 
 fn multi_txs(
@@ -1394,20 +1383,61 @@ fn multi_txs(
     }
     let mut bag = JoinBag::new();
     st.seed_bulk(client, &mut bag);
-    let mut rows = Vec::new();
+    let mut mempool_rows = Vec::new();
+    if asof.is_none() {
+        for sh in &scripts {
+            mempool_rows.extend(mempool_txs_json(st, sh));
+        }
+        mempool_rows = dedup_txid(mempool_rows);
+        sort_txs_newest_first(&mut mempool_rows);
+    }
+    let after_in_mempool = after.is_some_and(|id| {
+        let hex = block_hash_hex(&id);
+        mempool_rows.iter().any(|v| v["txid"] == hex)
+    });
+    let chain_after = if after_in_mempool { None } else { after };
+    if after.is_some() && !after_in_mempool {
+        mempool_rows.clear();
+    } else if let Some(id) = after {
+        mempool_rows = skip_rows_after(mempool_rows, Some(id)).unwrap_or_default();
+    }
+    let filter = multi_page_filter(chain_after, scripts.len());
+    let limit = filter.limit.unwrap_or(25);
+    let mut saw_cursor = chain_after.is_none();
+    let mut chain = Vec::new();
     for sh in &scripts {
-        match combined_tx_vec(st, sh, asof, Some(&mut bag)) {
-            Ok(part) => rows.extend(part),
+        let (page, _) = match sh_at_view(
+            st,
+            sh,
+            asof,
+            |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
+            |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
+            cursor_page(chain_after),
+            client,
+            Some(&mut bag),
+        ) {
+            Ok(x) => x,
             Err(r) => return r,
+        };
+        let items = match accept_script_page(page, filter.after_absent_keeps_older, &mut saw_cursor)
+        {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match history_items_to_tx_json(&st.query, &items, st.network) {
+            Ok(part) => chain.extend(part),
+            Err(e) => return store_err(e),
         }
     }
     st.promote_bulk(client, bag);
-    let mut rows = dedup_txid(rows);
-    sort_txs_newest_first(&mut rows);
-    let Some(rows) = skip_rows_after(rows, after) else {
+    if !saw_cursor {
         return after_txid_not_found();
-    };
-    Json(rows).into_response()
+    }
+    let mut chain = dedup_txid(chain);
+    sort_txs_newest_first(&mut chain);
+    truncate_page(&mut chain, limit);
+    mempool_rows.extend(chain);
+    Json(mempool_rows).into_response()
 }
 
 fn multi_summary(
@@ -1424,28 +1454,42 @@ fn multi_summary(
     }
     let mut bag = JoinBag::new();
     st.seed_bulk(client, &mut bag);
+    let filter = multi_page_filter(after, scripts.len());
+    let limit = filter.limit.unwrap_or(25);
+    let mut saw_cursor = after.is_none();
     let mut rows = Vec::new();
     for sh in &scripts {
-        match summary_vec(st, sh, asof, Some(&mut bag)) {
-            Ok(part) => rows.extend(part),
+        let (page, _) = match sh_at_view(
+            st,
+            sh,
+            asof,
+            |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
+            |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
+            cursor_page(after),
+            client,
+            Some(&mut bag),
+        ) {
+            Ok(x) => x,
             Err(r) => return r,
+        };
+        let items = match accept_script_page(page, filter.after_absent_keeps_older, &mut saw_cursor)
+        {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match summaries_json(&st.query, &items) {
+            Ok(Value::Array(v)) => rows.extend(v),
+            Ok(_) => {}
+            Err(e) => return store_err(e),
         }
     }
     st.promote_bulk(client, bag);
-    let mut rows = dedup_txid(rows);
-    rows.sort_by(|a, b| {
-        let ha = a["height"].as_i64().unwrap_or(0);
-        let hb = b["height"].as_i64().unwrap_or(0);
-        hb.cmp(&ha).then_with(|| {
-            b["txid"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(a["txid"].as_str().unwrap_or(""))
-        })
-    });
-    let Some(rows) = skip_rows_after(rows, after) else {
+    if !saw_cursor {
         return after_txid_not_found();
-    };
+    }
+    let mut rows = dedup_txid(rows);
+    sort_summaries_newest(&mut rows);
+    truncate_page(&mut rows, limit);
     Json(rows).into_response()
 }
 

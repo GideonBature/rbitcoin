@@ -97,6 +97,15 @@ pub struct HistoryFilter {
     /// Esplora `last_seen_txid`: after sort, drop through this txid (inclusive), keep following.
     pub after_txid: Option<[u8; 32]>,
     pub order: HistoryOrder,
+    /// A missing `after_txid` keeps rows strictly older than that tx in
+    /// newest-first order instead of clearing the page. `cursor_missing`
+    /// stays set so the caller can see this scripthash did not contain it.
+    /// Single-address pages leave this false.
+    pub after_absent_keeps_older: bool,
+    /// Confirmed height of `after_txid`. The newest-page walk fills this
+    /// when `after_absent_keeps_older` is set. `None` keeps every row the
+    /// walk already bounded.
+    pub after_height: Option<i64>,
 }
 
 impl Default for HistoryFilter {
@@ -107,6 +116,8 @@ impl Default for HistoryFilter {
             limit: None,
             after_txid: None,
             order: HistoryOrder::HeightAsc,
+            after_absent_keeps_older: false,
+            after_height: None,
         }
     }
 }
@@ -124,6 +135,8 @@ impl HistoryFilter {
             limit: None,
             after_txid: None,
             order: HistoryOrder::HeightAsc,
+            after_absent_keeps_older: false,
+            after_height: None,
         }
     }
 
@@ -135,6 +148,8 @@ impl HistoryFilter {
             limit: Some(25),
             after_txid,
             order: HistoryOrder::NewestFirst,
+            after_absent_keeps_older: false,
+            after_height: None,
         }
     }
 }
@@ -143,8 +158,9 @@ impl HistoryFilter {
 ///
 /// `cursor_missing` is set when `after_txid` was given and that tx is not in
 /// the history. `rows` is then empty, so a caller that serves them does not
-/// restart the first page. A cursor that is the last row is not missing:
-/// `rows` is empty and `cursor_missing` is false (the next page).
+/// restart the first page, unless `after_absent_keeps_older` kept the older
+/// window. A cursor that is the last row is not missing: `rows` is empty and
+/// `cursor_missing` is false (the next page).
 #[derive(Debug)]
 pub struct FilteredHistory<T> {
     pub rows: Vec<T>,
@@ -189,6 +205,14 @@ pub fn apply_history_filter(
     if let Some(after) = filter.after_txid {
         if let Some(pos) = out.iter().position(|i| i.txid == after) {
             out = out.split_off(pos.saturating_add(1));
+        } else if filter.after_absent_keeps_older {
+            // Not this scripthash. Keep rows strictly older than the cursor
+            // so a merged page can still use them. `cursor_missing` tells
+            // the caller the cursor itself was absent.
+            cursor_missing = true;
+            if let Some(high) = filter.after_height {
+                out.retain(|i| i.height < high || (i.height == high && i.txid < after));
+            }
         } else {
             // Not this history. Empty, not the first page: a wallet that
             // retries the same cursor must not loop.
@@ -1447,7 +1471,11 @@ impl Query {
                 fee: None,
             });
         }
-        let filtered = apply_history_filter(&items, filter);
+        let mut applied = filter.clone();
+        if applied.after_absent_keeps_older && scan.strict {
+            applied.after_height = Some(i64::from(scan.high));
+        }
+        let filtered = apply_history_filter(&items, &applied);
         let rows = filtered
             .rows
             .into_iter()
@@ -2023,6 +2051,8 @@ mod history_filter_tests {
             limit: Some(1),
             after_txid: Some(after),
             order: HistoryOrder::NewestFirst,
+            after_absent_keeps_older: false,
+            after_height: None,
         };
         let got = apply_history_filter(&items, &f);
         assert!(!got.cursor_missing);
@@ -2043,6 +2073,8 @@ mod history_filter_tests {
             limit: Some(1),
             after_txid: Some([0xff; 32]),
             order: HistoryOrder::NewestFirst,
+            after_absent_keeps_older: false,
+            after_height: None,
         };
         let got = apply_history_filter(&items, &f);
         assert!(got.cursor_missing);
@@ -2066,6 +2098,8 @@ mod history_filter_tests {
             limit: Some(3),
             after_txid: None,
             order: HistoryOrder::HeightAsc,
+            after_absent_keeps_older: false,
+            after_height: None,
         };
         let got = apply_history_filter(&items, &f);
         assert_eq!(got.rows.len(), 3);

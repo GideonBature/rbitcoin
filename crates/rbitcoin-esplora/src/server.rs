@@ -1667,6 +1667,10 @@ mod tests {
             )
             .route("/address/{addr}/utxo", get(handlers::address_utxo))
             .route("/scripthashes/txs", post(handlers::post_scripthashes_txs))
+            .route(
+                "/scripthashes/txs/summary",
+                post(handlers::post_scripthashes_txs_summary),
+            )
             .with_state(state)
     }
 
