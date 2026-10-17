@@ -2896,7 +2896,7 @@ mod untaken_consensus_arms {
             Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
         );
         let matched = ecdsa_sig_matches(&sig, &pk.to_bytes(), &ctx, &[0x51], PreTapscript::Base);
-        assert_eq!(matched.unwrap(), false);
+        assert!(!matched.unwrap());
     }
 
     #[test]

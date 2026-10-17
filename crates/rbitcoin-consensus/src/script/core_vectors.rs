@@ -337,10 +337,6 @@ fn script_row_job(
                 .extra
                 .iter()
                 .any(|e| e == "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
-            discourage_upgradable_taproot: flags
-                .extra
-                .iter()
-                .any(|e| e == "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"),
             const_scriptcode: flags.extra.iter().any(|e| e == "CONST_SCRIPTCODE"),
             cleanstack: flags.cleanstack,
         },

@@ -475,5 +475,3 @@ BIP16 and Taproot exception hashes change which scripts run. They are block-hash
 | `p2wpkh-low-s-witness-len` | LOW_S sends P2WPKH through the interpreter, which still rejects a one-item witness. |
 | `checksigverify-empty-32-tap` | Tapscript CHECKSIGVERIFY rejects an empty signature for a 32-byte key. |
 | `schnorr-bad-len-tap` | A tapscript signature that is neither 64 nor 65 bytes fails CHECKSIG. |
-| `tapleaf-unknown-discourage` | DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM does not reject an unknown tapleaf version. The spend still accepts. |
-| `tapleaf-unknown-taproot-discourage` | DISCOURAGE_UPGRADABLE_TAPROOT_VERSION rejects an unknown tapleaf version. |

@@ -788,9 +788,6 @@ pub struct ScriptVerifyFlags {
     pub witness_pubkeytype: bool,
     pub witness_active: bool,
     pub discourage_upgradable_witness: bool,
-    /// `SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION`. Unknown tapleaf
-    /// versions only. Confirm leaves this off. It is not the witness-program bit.
-    pub discourage_upgradable_taproot: bool,
     pub const_scriptcode: bool,
     /// SCRIPT_VERIFY_CLEANSTACK for legacy bare and P2SH. Witness v0 already
     /// requires a clean stack. Production confirm leaves this off.
@@ -821,7 +818,6 @@ impl ScriptVerifyFlags {
             witness_pubkeytype: false,
             witness_active: true,
             discourage_upgradable_witness: false,
-            discourage_upgradable_taproot: false,
             const_scriptcode: false,
             cleanstack: false,
         }
@@ -856,7 +852,6 @@ impl ScriptVerifyFlags {
             witness_pubkeytype: false,
             witness_active,
             discourage_upgradable_witness: false,
-            discourage_upgradable_taproot: false,
             const_scriptcode: false,
             cleanstack: false,
         }

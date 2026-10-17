@@ -45,8 +45,6 @@ struct TxFlags {
     null_dummy: bool,
     minimal_data: bool,
     discourage_upgradable_witness: bool,
-    /// Parsed when a row names it. Left out of the 16-flag toggle matrix.
-    discourage_upgradable_taproot: bool,
     witness_pubkeytype: bool,
     /// SCRIPT_VERIFY_CONST_SCRIPTCODE: reject CODESEPARATOR / FindAndDelete hits.
     const_scriptcode: bool,
@@ -75,7 +73,6 @@ fn all_implemented_flags() -> TxFlags {
         null_dummy: true,
         minimal_data: true,
         discourage_upgradable_witness: true,
-        discourage_upgradable_taproot: false,
         witness_pubkeytype: true,
         const_scriptcode: true,
         cleanstack: true,
@@ -243,7 +240,6 @@ fn flags_to_job(tx: Transaction, prevouts: Vec<TxOut>, flags: &TxFlags) -> Scrip
             witness_pubkeytype: flags.witness_pubkeytype,
             witness_active: flags.witness,
             discourage_upgradable_witness: flags.discourage_upgradable_witness,
-            discourage_upgradable_taproot: flags.discourage_upgradable_taproot,
             const_scriptcode: flags.const_scriptcode,
             cleanstack: flags.cleanstack,
         },

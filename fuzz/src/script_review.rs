@@ -180,7 +180,6 @@ pub fn flags_to_ours(flags: u32) -> ScriptVerifyFlags {
         witness_pubkeytype: flags & WITNESS_PUBKEYTYPE != 0,
         witness_active: flags & VERIFY_WITNESS != 0,
         discourage_upgradable_witness: flags & DISCOURAGE_UPGRADABLE_WITNESS != 0,
-        discourage_upgradable_taproot: false,
         const_scriptcode: flags & CONST_SCRIPTCODE != 0,
         cleanstack: flags & CLEANSTACK != 0,
     }

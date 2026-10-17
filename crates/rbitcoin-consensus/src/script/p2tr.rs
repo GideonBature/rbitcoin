@@ -192,14 +192,9 @@ fn verify_script_path(
     // rejects 0x50, which Core accepts as a future leaf.
     let (leaf, tapleaf_hash) = verify_control_commitment(&control_bytes, output_key_bytes, script)?;
 
+    // Unknown leaf versions are valid consensus spends. The script is not run.
+    // DISCOURAGE_UPGRADABLE_TAPROOT_VERSION is standardness. Confirm never sets it.
     if leaf != TAPSCRIPT_LEAF {
-        // Core uses DISCOURAGE_UPGRADABLE_TAPROOT_VERSION here, not the
-        // witness-program bit. That bit still rejects unknown witness versions.
-        if job.flags.discourage_upgradable_taproot {
-            return Err(ConsensusError::Script(
-                "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION".into(),
-            ));
-        }
         return Ok(());
     }
 
@@ -304,7 +299,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -387,7 +381,6 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
-                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -467,7 +460,6 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
-                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -741,7 +733,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -812,7 +803,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -880,7 +870,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -968,7 +957,6 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
-                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -1014,7 +1002,6 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
-                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -1090,7 +1077,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1190,7 +1176,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1483,7 +1468,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1607,7 +1591,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1662,7 +1645,6 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
-                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
