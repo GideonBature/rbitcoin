@@ -9,17 +9,17 @@ Signet’s default milestone height is 0. Signet IBD runs every script.
 The mainnet default is still height 840000, anchored to the block this
 repository treats as mainnet block 840000
 (`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`,
-Core assumeutxo). Script checks are skipped only when that hash occupies
-the header path at 840000, the block under connect occupies the path at
-its own height, and published header-path work is at least Core
-`nMinimumChainWork`. A missing lookup does not skip. Explicit
-`--milestone HEIGHT` stays a height-only skip. Omitted mainnet
-`--min-chain-work` is that floor.
+Core assumeutxo). Script checks are skipped when that hash occupies the
+header path at 840000 and the block under connect occupies the path at
+its own height. The stored minimum chain work is not a script-skip gate.
+The header walk and adopt-file retirement still compare against it.
+A missing lookup does not skip. Explicit `--milestone HEIGHT` stays a
+height-only skip.
+How that differs from Core assumevalid: [`COMPAT.md`](../../COMPAT.md).
 
-The gate is two height-keyed lookups plus the stored work total
-(`ibd: perf_dbg milestone_us`). It does not walk ancestors. The path map
-is a second copy of the IBD header path so confirm threads do not take
-the IBD state lock.
+The gate is two height-keyed lookups (`ibd: perf_dbg milestone_us`). It
+does not walk ancestors. The path map is a second copy of the IBD header
+path so confirm threads do not take the IBD state lock.
 
 **Regression:** `rbitcoin-consensus` `milestone::tests::low_work_fork_does_not_skip_even_at_the_milestone_height`,
 `block::structure_rule_tests::p3_default_milestone_heights`,

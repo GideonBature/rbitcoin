@@ -4,6 +4,6 @@
 **Status:** fixed
 **Found by:** Stephan Livera, 2026-10-02 (M6)
 
-An omitted milestone on testnet was height-only, so script checks were skipped below that height on any chain. The default is now anchored to Bitcoin Core's testnet3 assumeutxo block at height 2_500_000 and Core's testnet3 minimum chain work. Scripts run unless that header path and work floor match. An explicit `--milestone HEIGHT` stays height-only. Omitted mainnet stays anchored the same way. NixOS `services.rbitcoin.milestone` is unset by default and passes `--milestone` only when set.
+An omitted milestone on testnet was height-only, so script checks were skipped below that height on any chain. The default is now anchored to Bitcoin Core's testnet3 assumeutxo block at height 2_500_000. Scripts skip when that hash and this block are the header-path occupants at their heights. The stored minimum chain work is not a script gate. An explicit `--milestone HEIGHT` stays height-only. Omitted mainnet stays anchored the same way. NixOS `services.rbitcoin.milestone` is unset by default and passes `--milestone` only when set. The difference from Core assumevalid is in [`COMPAT.md`](../../COMPAT.md).
 
 **Regression:** `rbitcoin-node` `p3_default_milestone_heights`, `testnet3_default_milestone_is_anchored`, `operator_conf_and_argv`.

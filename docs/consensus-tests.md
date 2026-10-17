@@ -107,7 +107,6 @@ The Test column is the witness. Do not copy it into [`TESTING.md`](../TESTING.md
 | H1 | Genesis hash matches params | `BadHeader("genesis hash mismatch")` | `header_and_spending_boundaries` |
 | H2 | `prev` links to height−1 | `BadPrev` | `header_and_spending_boundaries` |
 | H3 | `time > median_time_past` | `timestamp <= median-time-past` | `header_and_spending_boundaries` (`time==mtp` / `mtp+1`) |
-| H4 | Checkpoint hash at height | `checkpoint mismatch` | `header_and_spending_boundaries` (match at height 1; mismatch) |
 | H5 | `bits == expected_next_bits` | `incorrect proof of work bits` | `header_and_spending_boundaries` (regtest: must equal prev) |
 | H6 | Target ≤ `pow_limit` | `target above pow limit` | `header_and_spending_boundaries` (`validate_header` with mainnet `pow_limit`) |
 | H7 | PoW valid for claimed bits | `InvalidPow` | `h7_rejects_header_hash_above_target` + smoke via `mine_regtest_block` accept |
@@ -147,6 +146,7 @@ version floors and exact +2h).
 | C40 | A tx's output sum ≤ its input sum | `in==out` accepts | `in+1` rejects. `header_and_spending_boundaries` |
 | C41 | BIP68 relative finality | `nSequence=10` at height 101 accepts; time-type after MTP | `nSequence=200` at 101 rejects; `finality_tests` 109/110 |
 | C42 | An input binds only to an output from an earlier block or an earlier tx in its own block, also inside one multi-block confirm batch (Core connects one block at a time) | `MissingPrevout` (`bad-txns-inputs-missingorspent`) | `consensus_rules::same_batch_spend_of_a_later_block_is_missing`; IBD isolation `batched_spend_of_a_later_block_is_rejected_alone` ([087](./external_findings/087-forward-spend-in-batch.md)); same block: `header_and_spending_boundaries` ([005](./external_findings/005-non-topological-block-accepted.md)) |
+| C43 | An output whose script starts with `OP_RETURN`, or is longer than 10,000 bytes, is not a coin. A 10,000-byte script that does not start with `OP_RETURN` is a coin. The archive still stores the output | `MissingPrevout` / `bad-txns-inputs-missingorspent`, with scripts on and under a height-only milestone | `spending_an_unspendable_output_is_missing_prevout`; `resolve_prevout_rejects_an_unspendable_script`; `proposal_spend_of_an_unspendable_output_is_missing` |
 
 ## Adding a new rule
 

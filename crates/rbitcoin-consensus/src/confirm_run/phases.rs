@@ -8,7 +8,6 @@ fn assemble_parent_mtp_and_bits(
     params: &ChainParams,
     height: Height,
     header: &bitcoin::block::Header,
-    block_hash: [u8; 32],
 ) -> Result<(u32, Vec<u32>), ConsensusError> {
     let prev_h = Height(height.0 - 1);
     let start = prev_h.0.saturating_sub(10);
@@ -55,11 +54,6 @@ fn assemble_parent_mtp_and_bits(
             "confirm: load incomplete (parent header plan missing above tip)",
         )));
     };
-    if let Some(cp) = params.checkpoint_at(height) {
-        if cp.to_byte_array() != block_hash {
-            return Err(ConsensusError::BadHeader("checkpoint mismatch"));
-        }
-    }
     let prev_bits = bitcoin::CompactTarget::from_consensus(prev_bits_raw);
     let expected =
         expected_bits_extending(query, params, height, prev_bits, prev_time, header.time)?;
@@ -74,7 +68,6 @@ fn assemble_chained_header(
     params: &ChainParams,
     height: Height,
     header: &bitcoin::block::Header,
-    block_hash: [u8; 32],
     prev: &Prepared,
     time_window: &[u32],
 ) -> Result<u32, ConsensusError> {
@@ -87,11 +80,6 @@ fn assemble_chained_header(
         return Err(ConsensusError::BadHeader("timestamp <= median-time-past"));
     }
     check_header_version_and_future_time(params, height, header)?;
-    if let Some(cp) = params.checkpoint_at(height) {
-        if cp.to_byte_array() != block_hash {
-            return Err(ConsensusError::BadHeader("checkpoint mismatch"));
-        }
-    }
     let expected =
         expected_bits_extending(query, params, height, prev.bits, prev.time, header.time)?;
     if header.bits != expected {
@@ -143,7 +131,7 @@ pub(super) fn assemble_run(
         if i == 0 {
             if height.0 >= 1 {
                 let (mtp, times) =
-                    assemble_parent_mtp_and_bits(query, params, height, &block.header, block_hash)?;
+                    assemble_parent_mtp_and_bits(query, params, height, &block.header)?;
                 prev_mtp = mtp;
                 time_window = times;
             } else {
@@ -156,7 +144,6 @@ pub(super) fn assemble_run(
                 params,
                 height,
                 &block.header,
-                block_hash,
                 &prepared[i - 1],
                 &time_window,
             )?;
@@ -471,9 +458,9 @@ pub(super) fn expected_bits_extending(
 mod tests {
     use super::*;
     use crate::regtest_pad::mine_empty_regtest;
-    use crate::{accept_and_connect_block, ChainParams, Checkpoint, Milestone};
+    use crate::{accept_and_connect_block, ChainParams, Milestone};
     use bitcoin::blockdata::constants;
-    use bitcoin::{BlockHash, ScriptBuf};
+    use bitcoin::ScriptBuf;
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::TxPrecompute;
     use rbitcoin_store::HeaderRecord;
@@ -495,65 +482,6 @@ mod tests {
 
     fn tiny() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
         rbitcoin_query::testutil::tiny_query_labeled("phases-pin")
-    }
-
-    #[test]
-    fn checkpoint_mismatch_rejects_parent_and_chained_headers() {
-        let (path, q) = tiny();
-        let mut params = ChainParams::regtest();
-        let genesis = constants::genesis_block(bitcoin::Network::Regtest);
-        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
-        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
-        params.checkpoints = vec![Checkpoint {
-            height: 1,
-            hash: BlockHash::from_byte_array([0xab; 32]),
-        }];
-        let err = assemble_parent_mtp_and_bits(
-            &q,
-            &params,
-            Height(1),
-            &b1.header,
-            b1.block_hash().to_byte_array(),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, ConsensusError::BadHeader("checkpoint mismatch")),
-            "parent header: {err}"
-        );
-
-        params.checkpoints = vec![Checkpoint {
-            height: 2,
-            hash: BlockHash::from_byte_array([0xcd; 32]),
-        }];
-        let prev = Prepared {
-            height: Height(1),
-            header_fk: Fk(1),
-            tx_fks: Vec::new(),
-            jobs: Vec::new(),
-            spends: Vec::new(),
-            fees: 0,
-            check_scripts: false,
-            time: b1.header.time,
-            bits: b1.header.bits,
-            hash: b1.block_hash().to_byte_array(),
-            prev_mtp: 0,
-        };
-        let b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
-        let err = assemble_chained_header(
-            &q,
-            &params,
-            Height(2),
-            &b2.header,
-            b2.block_hash().to_byte_array(),
-            &prev,
-            &[b1.header.time],
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, ConsensusError::BadHeader("checkpoint mismatch")),
-            "chained header: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

@@ -1639,6 +1639,181 @@ fn genesis_coinbase_is_never_a_coin() {
     }
 }
 
+/// An output whose script starts with `OP_RETURN`, or is longer than 10_000
+/// bytes, is not a coin. Spending it is a missing prevout with scripts on
+/// and under a height-only milestone. A 10_000-byte script that does not
+/// start with `OP_RETURN` stays a coin. Leaving the output unspent still
+/// connects, and the archive keeps the script bytes.
+#[test]
+fn spending_an_unspendable_output_is_missing_prevout() {
+    use crate::{
+        accept_and_connect_block, mine_empty_regtest, pad_empty_from, prepare_regtest_candidate,
+    };
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("unspendable-not-a-coin");
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+
+    /// 10_000 bytes, 20 pushes, top of stack truthy. Under the 201-opcode cap,
+    /// so a spend executes when scripts run and still connects when they do not.
+    fn spendable_10k() -> Vec<u8> {
+        let mut script = Vec::with_capacity(10_000);
+        let chunk = [0x11u8; 520];
+        for _ in 0..19 {
+            script.push(0x4d);
+            script.extend_from_slice(&520u16.to_le_bytes());
+            script.extend_from_slice(&chunk);
+        }
+        script.push(0x4c);
+        script.push(61);
+        script.extend_from_slice(&[0x11u8; 61]);
+        assert_eq!(script.len(), 10_000);
+        script
+    }
+    fn pay(sats: u64, script: Vec<u8>) -> TxOut {
+        TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: ScriptBuf::from_bytes(script),
+        }
+    }
+    fn spend_to(txid: bitcoin::Txid, vout: u32, sats: u64) -> Transaction {
+        Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint { txid, vout },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![pay(sats, vec![0x51])],
+        }
+    }
+
+    let subsidy = block_subsidy(1, &params) as u64;
+    let op_return = vec![0x6a];
+    let coin = spendable_10k();
+    let mut oversize = coin.clone();
+    oversize.push(0x00);
+    let mut created = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+    created.txdata[0].output = vec![
+        pay(subsidy - 4, vec![0x51]),
+        pay(1, op_return.clone()),
+        pay(1, oversize.clone()),
+        pay(1, coin.clone()),
+        pay(1, coin.clone()),
+    ];
+    prepare_regtest_candidate(
+        &mut created,
+        genesis.block_hash(),
+        genesis.header.time + 600,
+    );
+    accept_and_connect_block(&q, &params, Height(1), &created, Milestone::NONE)
+        .expect("creating an unspendable output still connects");
+    let cb_txid = created.txdata[0].compute_txid();
+    let stored = q
+        .connected_tx_outputs(&cb_txid.to_byte_array())
+        .unwrap()
+        .expect("the create stays in the archive");
+    assert_eq!(stored.2[1].script, op_return);
+    assert!(!q.is_outpoint_spent(&cb_txid.to_byte_array(), 1).unwrap());
+
+    let maturity = params.coinbase_maturity();
+    let (mut tip, mut time, _) = pad_empty_from(
+        &q,
+        &params,
+        created.block_hash(),
+        created.header.time,
+        2,
+        maturity,
+        0,
+    );
+    assert_eq!(q.tip_height(), Some(Height(maturity)));
+
+    let reject = |q: &rbitcoin_query::Query,
+                  tip: BlockHash,
+                  time: u32,
+                  height: u32,
+                  txs: Vec<Transaction>,
+                  ms: Milestone| {
+        let mut block = mine_empty_regtest(tip, time + 600, height);
+        block.txdata.extend(txs);
+        prepare_regtest_candidate(&mut block, tip, time + 600);
+        let err = accept_and_connect_block(q, &params, Height(height), &block, ms)
+            .expect_err("unspendable output is not a coin");
+        assert!(
+            matches!(err, ConsensusError::MissingPrevout),
+            "{ms:?} h={height}: {err:?}"
+        );
+        assert_eq!(q.tip_height(), Some(Height(height - 1)));
+    };
+    let connect = |q: &rbitcoin_query::Query,
+                   tip: BlockHash,
+                   time: u32,
+                   height: u32,
+                   txs: Vec<Transaction>,
+                   ms: Milestone|
+     -> (BlockHash, u32) {
+        let mut block = mine_empty_regtest(tip, time + 600, height);
+        block.txdata.extend(txs);
+        prepare_regtest_candidate(&mut block, tip, time + 600);
+        accept_and_connect_block(q, &params, Height(height), &block, ms)
+            .unwrap_or_else(|e| panic!("{ms:?} h={height} spend of a 10000-byte coin: {e:?}"));
+        let next = block.block_hash();
+        let stamped = block.header.time;
+        (next, stamped)
+    };
+
+    let h = maturity + 1;
+    for ms in [Milestone::NONE, Milestone::height(h)] {
+        reject(&q, tip, time, h, vec![spend_to(cb_txid, 1, 1)], ms);
+        reject(&q, tip, time, h, vec![spend_to(cb_txid, 2, 1)], ms);
+    }
+    (tip, time) = connect(
+        &q,
+        tip,
+        time,
+        h,
+        vec![spend_to(cb_txid, 3, 1)],
+        Milestone::NONE,
+    );
+    let h = h + 1;
+    (tip, time) = connect(
+        &q,
+        tip,
+        time,
+        h,
+        vec![spend_to(cb_txid, 4, 1)],
+        Milestone::height(h),
+    );
+
+    let anchor_value = subsidy - 4;
+    let h = h + 1;
+    let same_block = |burn: Vec<u8>| {
+        let parent = Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: cb_txid,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![pay(1, burn), pay(anchor_value - 1, vec![0x51])],
+        };
+        let child = spend_to(parent.compute_txid(), 0, 1);
+        vec![parent, child]
+    };
+    for ms in [Milestone::NONE, Milestone::height(h)] {
+        reject(&q, tip, time, h, same_block(vec![0x6a]), ms);
+        reject(&q, tip, time, h, same_block(oversize.clone()), ms);
+    }
+    let _ = connect(&q, tip, time, h, same_block(coin), Milestone::height(h));
+}
+
 #[test]
 fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     use super::assemble_block_prevouts;
@@ -1975,10 +2150,11 @@ fn bip30_ignores_unspendable_outputs() {
     let _ = std::fs::remove_dir_all(&path);
 }
 
-/// An unspendable script is still a coin. Core drops it from the UTXO set;
-/// we do not, so the spend resolves and fails in the script.
+/// Leading `OP_RETURN` and a script longer than 10_000 bytes are not coins.
+/// The pin returns an empty `script_pubkey`; the check uses the archived bytes
+/// with and without a script job.
 #[test]
-fn spending_an_unspendable_output_still_resolves() {
+fn resolve_prevout_rejects_an_unspendable_script() {
     use super::resolve_prevout;
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::BatchParents;
@@ -2006,7 +2182,7 @@ fn spending_an_unspendable_output_still_resolves() {
     };
     let block = block_with(vec![coinbase(1)]);
     let txid_index = super::TxidMap::<usize>::default();
-    let try_spend = |script: Vec<u8>| {
+    let try_spend = |script: Vec<u8>, need_script_buf: bool| {
         let mut parents = BatchParents::new();
         parents.put_resolved(
             fk,
@@ -2025,7 +2201,7 @@ fn spending_an_unspendable_output_still_resolves() {
             &parents,
             false,
             true,
-            true,
+            need_script_buf,
             None,
             &mut super::AsmPrevoutAcc::default(),
         )
@@ -2034,24 +2210,26 @@ fn spending_an_unspendable_output_still_resolves() {
         Ok(_) => "resolved as a coin".to_string(),
         Err(e) => format!("{e:?}"),
     };
-    let oversized = try_spend(vec![0x51; 10_001]);
-    assert!(
-        oversized.is_ok(),
-        "oversized scriptPubKey is still a coin, got {}",
-        show(&oversized)
-    );
-    let op_return = try_spend(vec![0x6a, 0x01, 0x42]);
-    assert!(
-        op_return.is_ok(),
-        "OP_RETURN is still a coin, got {}",
-        show(&op_return)
-    );
-    let max = try_spend(vec![0x51; 10_000]);
-    assert!(
-        max.is_ok(),
-        "MAX_SCRIPT_SIZE scriptPubKey is still a coin, got {}",
-        show(&max)
-    );
+    for need_script_buf in [false, true] {
+        let oversized = try_spend(vec![0x51; 10_001], need_script_buf);
+        assert!(
+            matches!(oversized, Err(ConsensusError::MissingPrevout)),
+            "need_script_buf={need_script_buf} oversized: {}",
+            show(&oversized)
+        );
+        let op_return = try_spend(vec![0x6a, 0x01, 0x42], need_script_buf);
+        assert!(
+            matches!(op_return, Err(ConsensusError::MissingPrevout)),
+            "need_script_buf={need_script_buf} OP_RETURN: {}",
+            show(&op_return)
+        );
+        let max = try_spend(vec![0x51; 10_000], need_script_buf);
+        assert!(
+            max.is_ok(),
+            "need_script_buf={need_script_buf} 10000-byte script is still a coin, got {}",
+            show(&max)
+        );
+    }
 }
 
 #[test]

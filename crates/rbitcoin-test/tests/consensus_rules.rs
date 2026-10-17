@@ -6,7 +6,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Amount, BlockHash, CompactTarget};
 use rbitcoin_consensus::{
     accept_and_connect_block, confirm_wire_run, expected_next_bits, genesis_block,
-    median_time_past, validate_header, ChainParams, Checkpoint, ConsensusError, Milestone,
+    median_time_past, validate_header, ChainParams, ConsensusError, Milestone,
 };
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
@@ -151,30 +151,7 @@ fn empty_through_100_copy_keeps_the_other_tip() {
 
 // ─── Header rules ───────────────────────────────────────────────────────────
 
-fn pin_h4_checkpoint_and_h6_pow_limit(
-    q: &Query,
-    params: &ChainParams,
-    genesis: &bitcoin::Block,
-    b1: &bitcoin::Block,
-) {
-    let mut matched = params.clone();
-    matched.checkpoints.push(Checkpoint {
-        height: 1,
-        hash: b1.block_hash(),
-    });
-    validate_header(q, &matched, Height(1), &b1.header).expect("h4 checkpoint match");
-
-    let mut mismatch = params.clone();
-    mismatch.checkpoints.push(Checkpoint {
-        height: 1,
-        hash: BlockHash::from_byte_array([0xcc; 32]),
-    });
-    let err = validate_header(q, &mismatch, Height(1), &b1.header).unwrap_err();
-    assert!(
-        matches!(err, ConsensusError::BadHeader(s) if s.contains("checkpoint")),
-        "h4 mismatch: {err:?}"
-    );
-
+fn pin_h6_pow_limit(q: &Query, params: &ChainParams, genesis: &bitcoin::Block) {
     let near = mine_regtest_block(genesis.block_hash(), genesis.header.time + 1, 1, vec![]);
     let mut tight = params.clone();
     tight.pow_limit = ChainParams::mainnet().pow_limit;
@@ -516,7 +493,7 @@ fn header_and_spending_boundaries() {
     );
 
     let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
-    pin_h4_checkpoint_and_h6_pow_limit(&q, &params, &g, &b1);
+    pin_h6_pow_limit(&q, &params, &g);
     validate_header(&q, &params, Height(1), &b1.header).expect("valid parent, pow, bits");
     accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
     let cb_txid = b1.txdata[0].compute_txid();

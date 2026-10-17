@@ -2510,6 +2510,11 @@ fn resolve_prevout(
             let tx = block.txdata.get(pj).ok_or(ConsensusError::MissingPrevout)?;
             let v = op.vout as usize;
             let o = tx.output.get(v).ok_or(ConsensusError::MissingPrevout)?;
+            // Core never puts this script in the coin view. The returned
+            // `txout` is often empty; the wire output holds the real bytes.
+            if crate::policy::is_unspendable(o.script_pubkey.as_bytes()) {
+                return Err(ConsensusError::MissingPrevout);
+            }
             acc.in_n = acc.in_n.saturating_add(1);
             acc.same_n = acc.same_n.saturating_add(1);
             let shared = if need_script_buf {
@@ -2548,14 +2553,18 @@ fn resolve_prevout(
                     "invariant: pin parent create identity mismatch wire prev_txid",
                 )));
             }
-            let (value, input_sigops) = {
-                let (value, script) = pinned.parts().ok_or(ConsensusError::Store(
-                    rbitcoin_store::StoreError::Corrupt(
-                        "invariant: pin incomplete outs for spent parent vout",
-                    ),
-                ))?;
-                (value, prevout_spk_sigops(inp, script, bip16, witness))
-            };
+            let (value, script) = pinned.parts().ok_or(ConsensusError::Store(
+                rbitcoin_store::StoreError::Corrupt(
+                    "invariant: pin incomplete outs for spent parent vout",
+                ),
+            ))?;
+            // Same rule as the same-block arm. `txout.script_pubkey` below is
+            // empty; `script` is the archived bytes, including when scripts
+            // are not executed.
+            if crate::policy::is_unspendable(script) {
+                return Err(ConsensusError::MissingPrevout);
+            }
+            let input_sigops = prevout_spk_sigops(inp, script, bip16, witness);
             acc.in_n = acc.in_n.saturating_add(1);
             acc.batch_n = acc.batch_n.saturating_add(1);
             #[cfg(test)]

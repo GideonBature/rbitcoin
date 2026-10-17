@@ -98,7 +98,7 @@ pub use index_writebehind::{
 pub use milestone::{Milestone, MilestoneAnchor};
 pub use params::{
     default_milestone_anchor, default_milestone_height, default_min_chain_work_be, genesis_block,
-    ChainParams, Checkpoint,
+    ChainParams,
 };
 pub use policy::PolicyResult;
 pub use regtest_pad::{

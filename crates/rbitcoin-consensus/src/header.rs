@@ -6,7 +6,7 @@ use bitcoin::{CompactTarget, Target};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 
-/// Validate header linkage, checkpoint, MTP, difficulty bits, and proof-of-work.
+/// Validate header linkage, MTP, difficulty bits, and proof-of-work.
 pub fn validate_header(
     query: &Query,
     params: &ChainParams,
@@ -50,12 +50,6 @@ pub(crate) fn validate_header_hashed(
             return Err(ConsensusError::BadHeader("timestamp <= median-time-past"));
         }
         check_header_version_and_future_time(params, height, header)?;
-    }
-
-    if let Some(cp) = params.checkpoint_at(height) {
-        if cp != hash_bh {
-            return Err(ConsensusError::BadHeader("checkpoint mismatch"));
-        }
     }
 
     let expected_bits = expected_next_bits(query, params, height, header.time)?;

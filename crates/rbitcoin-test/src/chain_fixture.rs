@@ -65,7 +65,6 @@ fn plain_regtest(params: &ChainParams) -> bool {
     params.network == base.network
         && params.genesis_hash == base.genesis_hash
         && params.pow_limit == base.pow_limit
-        && params.checkpoints.is_empty()
         && params.signet_challenge.is_none()
         && params.bip34_hash.is_none()
         && params.csv_height() == base.csv_height()

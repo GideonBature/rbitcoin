@@ -3449,6 +3449,11 @@ fn proposal_connect(
             } else {
                 return Err("bad-txns-inputs-missingorspent".into());
             };
+            // Core never stores this script as a coin. Reject before fee
+            // math, ahead of the script check.
+            if rbitcoin_consensus::policy::is_unspendable(txout.script_pubkey.as_bytes()) {
+                return Err("bad-txns-inputs-missingorspent".into());
+            }
             in_val = in_val
                 .checked_add(txout.value.to_sat())
                 .ok_or("bad-txns-inputvalues-outofrange")?;
@@ -7559,6 +7564,108 @@ mod tests {
         assert_eq!(
             hub.check_block_proposal(&block).unwrap_err(),
             "bad-blk-sigops"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Core `HaveInputs` drops a leading `OP_RETURN` and a script longer than
+    /// 10_000 bytes before fee math. A 10_000-byte non-`OP_RETURN` script is
+    /// still a coin. Creating the output and not spending it connects.
+    #[test]
+    fn proposal_spend_of_an_unspendable_output_is_missing() {
+        fn spendable_10k() -> Vec<u8> {
+            let mut script = Vec::with_capacity(10_000);
+            let chunk = [0x11u8; 520];
+            for _ in 0..19 {
+                script.push(0x4d);
+                script.extend_from_slice(&520u16.to_le_bytes());
+                script.extend_from_slice(&chunk);
+            }
+            script.push(0x4c);
+            script.push(61);
+            script.extend_from_slice(&[0x11u8; 61]);
+            script
+        }
+        fn one_sat(txid: bitcoin::Txid, vout: u32, script: Vec<u8>) -> Transaction {
+            Transaction {
+                version: TxVersion::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint { txid, vout },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(1),
+                    script_pubkey: ScriptBuf::from_bytes(script),
+                }],
+            }
+        }
+
+        let (dir, hub) = tmp_hub();
+        let op_true = ScriptBuf::from_bytes(vec![0x51]);
+        hub.generate_to_script(101, op_true.clone(), vec![])
+            .unwrap();
+        let mut op_return = one_sat(
+            mature_spend_tx(&hub, 1).input[0].previous_output.txid,
+            0,
+            vec![0x6a],
+        );
+        // The coinbase pays 50 BTC. One sat in the output leaves the rest unclaimed.
+        op_return.input = mature_spend_tx(&hub, 1).input;
+        let mut oversize_script = spendable_10k();
+        oversize_script.push(0x00);
+        let mut oversize = one_sat(
+            mature_spend_tx(&hub, 2).input[0].previous_output.txid,
+            0,
+            oversize_script,
+        );
+        oversize.input = mature_spend_tx(&hub, 2).input;
+        let mut coin = one_sat(
+            mature_spend_tx(&hub, 3).input[0].previous_output.txid,
+            0,
+            spendable_10k(),
+        );
+        coin.input = mature_spend_tx(&hub, 3).input;
+        hub.generate_to_script(1, op_true.clone(), vec![op_return.clone()])
+            .expect("an unspent OP_RETURN output still connects");
+        hub.generate_to_script(1, op_true.clone(), vec![oversize.clone()])
+            .unwrap();
+        hub.generate_to_script(1, op_true.clone(), vec![coin.clone()])
+            .unwrap();
+
+        let missing = |tx: Transaction| {
+            let block = hub
+                .assemble_block_to_script(op_true.clone(), vec![tx])
+                .unwrap();
+            assert_eq!(
+                hub.check_block_proposal(&block).unwrap_err(),
+                "bad-txns-inputs-missingorspent"
+            );
+        };
+        missing(one_sat(op_return.compute_txid(), 0, vec![0x51]));
+        missing(one_sat(oversize.compute_txid(), 0, vec![0x51]));
+        let block = hub
+            .assemble_block_to_script(
+                op_true.clone(),
+                vec![one_sat(coin.compute_txid(), 0, vec![0x51])],
+            )
+            .unwrap();
+        assert_eq!(hub.check_block_proposal(&block), Ok(0));
+
+        let parent = one_sat(
+            mature_spend_tx(&hub, 4).input[0].previous_output.txid,
+            0,
+            vec![0x6a],
+        );
+        let child = one_sat(parent.compute_txid(), 0, vec![0x51]);
+        let block = hub
+            .assemble_block_to_script(op_true.clone(), vec![parent, child])
+            .unwrap();
+        assert_eq!(
+            hub.check_block_proposal(&block).unwrap_err(),
+            "bad-txns-inputs-missingorspent"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
