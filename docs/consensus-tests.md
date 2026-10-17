@@ -147,6 +147,7 @@ version floors and exact +2h).
 | C41 | BIP68 relative finality | `nSequence=10` at height 101 accepts; time-type after MTP | `nSequence=200` at 101 rejects; `finality_tests` 109/110 |
 | C42 | An input binds only to an output from an earlier block or an earlier tx in its own block, also inside one multi-block confirm batch (Core connects one block at a time) | `MissingPrevout` (`bad-txns-inputs-missingorspent`) | `consensus_rules::same_batch_spend_of_a_later_block_is_missing`; IBD isolation `batched_spend_of_a_later_block_is_rejected_alone` ([087](./external_findings/087-forward-spend-in-batch.md)); same block: `header_and_spending_boundaries` ([005](./external_findings/005-non-topological-block-accepted.md)) |
 | C43 | An output whose script starts with `OP_RETURN`, or is longer than 10,000 bytes, is not a coin. A 10,000-byte script that does not start with `OP_RETURN` is a coin. The archive still stores the output | `MissingPrevout` / `bad-txns-inputs-missingorspent`, with scripts on and under a height-only milestone | `spending_an_unspendable_output_is_missing_prevout`; `resolve_prevout_rejects_an_unspendable_script`; `proposal_spend_of_an_unspendable_output_is_missing` |
+| C44 | Anchored script skip requires this block's hash and the anchor hash on the header path. A failing script above the anchor, or under a different hash, still runs | confirm accepts only when both hashes match | `anchored_milestone_skips_a_failing_p2pkh_script` (empty P2PKH scriptSig) |
 
 ## Adding a new rule
 

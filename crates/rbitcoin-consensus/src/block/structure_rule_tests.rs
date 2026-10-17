@@ -1639,6 +1639,114 @@ fn genesis_coinbase_is_never_a_coin() {
     }
 }
 
+/// An anchored milestone skips a script that fails, and only on that header path.
+///
+/// The spent output is P2PKH and the scriptSig is empty, so the interpreter
+/// rejects it. `OP_TRUE` and `OP_RETURN` are not this case.
+#[test]
+fn anchored_milestone_skips_a_failing_p2pkh_script() {
+    use crate::milestone::MilestoneAnchor;
+    use crate::{accept_and_connect_block, mine_regtest_paying, pad_empty_from};
+    use bitcoin::hashes::Hash;
+
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("anchor-skip-p2pkh");
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+
+    let mut spk = vec![0x76, 0xa9, 0x14];
+    spk.extend_from_slice(&[0x11; 20]);
+    spk.extend_from_slice(&[0x88, 0xac]);
+    let created = mine_regtest_paying(
+        genesis.block_hash(),
+        genesis.header.time + 600,
+        1,
+        ScriptBuf::from_bytes(spk),
+        Vec::new(),
+    );
+    accept_and_connect_block(&q, &params, Height(1), &created, Milestone::NONE).unwrap();
+    let coin_txid = created.txdata[0].compute_txid();
+    let coin_value = created.txdata[0].output[0].value;
+
+    let maturity = params.coinbase_maturity();
+    let (tip, time, _) = pad_empty_from(
+        &q,
+        &params,
+        created.block_hash(),
+        created.header.time,
+        2,
+        maturity,
+        0,
+    );
+    let h = maturity + 1;
+    let spend = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: coin_txid,
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: coin_value - Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let block = mine_regtest_paying(
+        tip,
+        time + 600,
+        h,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![spend],
+    );
+    let block_hash = block.block_hash().to_byte_array();
+    let parent_hash = tip.to_byte_array();
+    let one = {
+        let mut w = [0u8; 32];
+        w[31] = 1;
+        bitcoin::Work::from_be_bytes(w)
+    };
+    let note = |height: u32, hash: [u8; 32]| {
+        q.note_milestone_header(height, hash, [0; 32], one, Some(one));
+    };
+    let anchored = |height: u32, hash: [u8; 32]| Milestone {
+        height,
+        anchor: Some(MilestoneAnchor {
+            hash: bitcoin::BlockHash::from_byte_array(hash),
+            min_work_be: [0xff; 32],
+        }),
+    };
+
+    note(maturity, parent_hash);
+    let above = anchored(maturity, parent_hash);
+    let err = accept_and_connect_block(&q, &params, Height(h), &block, above)
+        .expect_err("one height above the anchor still runs the failing script");
+    assert!(
+        matches!(err, ConsensusError::Script(_)),
+        "expected a script failure, got {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(maturity)));
+
+    q.clear_milestone_path_above(0);
+    let mut wrong = block_hash;
+    wrong[0] ^= 0xff;
+    note(h, wrong);
+    let err = accept_and_connect_block(&q, &params, Height(h), &block, anchored(h, block_hash))
+        .expect_err("a different hash at the anchor height does not skip");
+    assert!(matches!(err, ConsensusError::Script(_)), "{err:?}");
+    assert_eq!(q.tip_height(), Some(Height(maturity)));
+
+    q.clear_milestone_path_above(0);
+    note(h, block_hash);
+    accept_and_connect_block(&q, &params, Height(h), &block, anchored(h, block_hash))
+        .expect("the anchor hash skips the failing P2PKH script");
+    assert_eq!(q.tip_height(), Some(Height(h)));
+}
+
 /// An output whose script starts with `OP_RETURN`, or is longer than 10_000
 /// bytes, is not a coin. Spending it is a missing prevout with scripts on
 /// and under a height-only milestone. A 10_000-byte script that does not
