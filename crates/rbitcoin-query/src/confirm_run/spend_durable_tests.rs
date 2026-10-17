@@ -11,8 +11,9 @@ use bitcoin::{
     Txid, Witness,
 };
 
-use crate::block::bip34_height_script;
-use crate::{accept_and_connect_block, ChainParams, ConsensusError, Milestone};
+use crate::{accept_and_connect_block, ConfirmError};
+use rbitcoin_consensus::block::bip34_height_script;
+use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone};
 use rbitcoin_primitives::Height;
 use rbitcoin_store::spent_abs;
 
@@ -89,7 +90,7 @@ fn mine(prev: bitcoin::BlockHash, time: u32, height: u32, extra: Vec<Transaction
 
 #[test]
 fn zeroed_spend_slot_after_tip_seal_rejects_respend() {
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-durable");
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-durable");
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -134,7 +135,7 @@ fn zeroed_spend_slot_after_tip_seal_rejects_respend() {
     }
     let _ = std::fs::remove_file(store.join(rbitcoin_store::SPEND_DURABLE_NAME));
 
-    let q = rbitcoin_query::Query::open_or_create_tiny(&store).unwrap();
+    let q = crate::Query::open_or_create_tiny(&store).unwrap();
     q.set_spend_index(true);
     let tip_h = q.tip_height().unwrap();
     let replayed = crate::replay_spend_annotations(&q).unwrap();
@@ -152,7 +153,7 @@ fn zeroed_spend_slot_after_tip_seal_rejects_respend() {
     let err = accept_and_connect_block(&q, &params, Height(tip_h.0 + 1), &respend, ms)
         .expect_err("a sealed spend must stay spent after its slot is zeroed");
     assert!(
-        matches!(err, ConsensusError::PrevoutSpent),
+        matches!(err, ConfirmError::Rules(ConsensusError::PrevoutSpent)),
         "reopen must reject the respend, got {err}"
     );
     let _ = dir;
@@ -162,7 +163,7 @@ fn zeroed_spend_slot_after_tip_seal_rejects_respend() {
 /// those spends were never device-flushed.
 #[test]
 fn missing_marker_replays_a_spend_below_the_tip_window() {
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-window");
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-window");
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -208,7 +209,7 @@ fn missing_marker_replays_a_spend_below_the_tip_window() {
         f.write_all(&[0u8; 8]).unwrap();
     }
     let _ = std::fs::remove_file(store.join(rbitcoin_store::SPEND_DURABLE_NAME));
-    let q = rbitcoin_query::Query::open_or_create_tiny(&store).unwrap();
+    let q = crate::Query::open_or_create_tiny(&store).unwrap();
     q.set_spend_index(true);
     let tip_h = q.tip_height().unwrap();
     let replayed = crate::replay_spend_annotations(&q).unwrap();
@@ -226,7 +227,7 @@ fn missing_marker_replays_a_spend_below_the_tip_window() {
     let err = accept_and_connect_block(&q, &params, Height(tip_h.0 + 1), &respend, ms)
         .expect_err("a spend below the tip window must stay spent when the marker is missing");
     assert!(
-        matches!(err, ConsensusError::PrevoutSpent),
+        matches!(err, ConfirmError::Rules(ConsensusError::PrevoutSpent)),
         "reopen must reject the respend, got {err}"
     );
     let _ = dir;
@@ -238,7 +239,7 @@ fn missing_marker_replays_a_spend_below_the_tip_window() {
 fn spender_below_its_create_height_is_corrupt() {
     use std::io::Read;
 
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-below-create");
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-below-create");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let maturity = params.coinbase_maturity();
@@ -283,7 +284,7 @@ fn spender_below_its_create_height_is_corrupt() {
         f.write_all(&slot).unwrap();
     }
 
-    let q = rbitcoin_query::Query::open_or_create_tiny(&store).unwrap();
+    let q = crate::Query::open_or_create_tiny(&store).unwrap();
     let tip_h = q.tip_height().unwrap();
     let spend = mine(
         tip,
@@ -296,7 +297,7 @@ fn spender_below_its_create_height_is_corrupt() {
     assert!(
         matches!(
             &err,
-            ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(m))
+            ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(m))
                 if m.starts_with("invariant:")
         ),
         "got {err}"
@@ -307,7 +308,7 @@ fn spender_below_its_create_height_is_corrupt() {
 
 #[test]
 fn confirms_past_eight_batches_wait_for_an_explicit_checkpoint() {
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-checkpoint");
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-checkpoint");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -345,7 +346,7 @@ fn confirms_past_eight_batches_wait_for_an_explicit_checkpoint() {
 /// the spend, or a later block can spend the same output again.
 #[test]
 fn rerun_without_archive_plan_annotates_a_spend_of_a_run_create() {
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-rerun");
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-rerun");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let maturity = params.coinbase_maturity();
@@ -394,7 +395,10 @@ fn rerun_without_archive_plan_annotates_a_spend_of_a_run_create() {
     )
     .expect_err("an immature coinbase spend must reject the batch");
     assert!(
-        matches!(err, ConsensusError::BadTx("coinbase immature")),
+        matches!(
+            err,
+            ConfirmError::Rules(ConsensusError::BadTx("coinbase immature"))
+        ),
         "{err}"
     );
     assert_eq!(q.tip_height(), Some(Height(hx)));
@@ -428,7 +432,10 @@ fn rerun_without_archive_plan_annotates_a_spend_of_a_run_create() {
     );
     let err = accept_and_connect_block(&q, &params, Height(hx + 2), &respend, ms)
         .expect_err("an output spent at the tip must not be spent again");
-    assert!(matches!(err, ConsensusError::PrevoutSpent), "{err}");
+    assert!(
+        matches!(err, ConfirmError::Rules(ConsensusError::PrevoutSpent)),
+        "{err}"
+    );
     let _ = dir;
 }
 
@@ -439,8 +446,8 @@ fn rerun_without_archive_plan_annotates_a_spend_of_a_run_create() {
 /// watermark at 0, so the live seal for Y fails after Class C.
 #[test]
 fn failed_post_tip_stage_does_not_let_the_next_block_respend() {
-    let _gate = crate::script_pool::steal_test_gate();
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-post-tip");
+    let _gate = rbitcoin_consensus::script_pool::steal_test_gate();
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-post-tip");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let maturity = params.coinbase_maturity();
@@ -477,7 +484,7 @@ fn failed_post_tip_stage_does_not_let_the_next_block_respend() {
     assert!(
         matches!(
             err,
-            ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+            ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: live index commit"
             ))
         ),
@@ -494,7 +501,10 @@ fn failed_post_tip_stage_does_not_let_the_next_block_respend() {
     let err = accept_and_connect_block(&q, &params, Height(hy + 1), &respend, ms)
         .expect_err("an output Y spent must not be spent again");
     assert_eq!(q.tip_height(), Some(Height(hy)), "{err}");
-    assert!(matches!(err, ConsensusError::PrevoutSpent), "{err}");
+    assert!(
+        matches!(err, ConfirmError::Rules(ConsensusError::PrevoutSpent)),
+        "{err}"
+    );
     assert!(q.is_outpoint_spent(c1.as_byte_array(), 0).unwrap());
     assert!(
         q.confirm_stats().take_window().spend_replay_ns > 0,
@@ -508,8 +518,8 @@ fn failed_post_tip_stage_does_not_let_the_next_block_respend() {
 /// over the reconnected height, or the next open does not replay its spends.
 #[test]
 fn checkpoint_after_reorg_does_not_skip_the_reconnected_spends() {
-    let _gate = crate::script_pool::steal_test_gate();
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-reorg-snapshot");
+    let _gate = rbitcoin_consensus::script_pool::steal_test_gate();
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-reorg-snapshot");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let maturity = params.coinbase_maturity();
@@ -549,7 +559,7 @@ fn checkpoint_after_reorg_does_not_skip_the_reconnected_spends() {
     assert!(
         matches!(
             err,
-            ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+            ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: live index commit"
             ))
         ),
@@ -558,11 +568,11 @@ fn checkpoint_after_reorg_does_not_skip_the_reconnected_spends() {
     assert_eq!(q.tip_height(), Some(Height(hy)), "Class C committed Y");
 
     let q = std::sync::Arc::new(q);
-    rbitcoin_query::SpendSync::spawn(std::sync::Arc::clone(&q)).shutdown();
+    crate::SpendSync::spawn(std::sync::Arc::clone(&q)).shutdown();
     let store = q.store().path().to_path_buf();
     drop(q);
 
-    let q = rbitcoin_query::Query::open_or_create_tiny(&store).unwrap();
+    let q = crate::Query::open_or_create_tiny(&store).unwrap();
     crate::replay_spend_annotations(&q).unwrap();
     assert!(
         q.is_outpoint_spent(c1.as_byte_array(), 0).unwrap(),
@@ -577,7 +587,10 @@ fn checkpoint_after_reorg_does_not_skip_the_reconnected_spends() {
     let err = accept_and_connect_block(&q, &params, Height(hy + 1), &respend, ms)
         .expect_err("an output Y spent must not be spent again");
     assert_eq!(q.tip_height(), Some(Height(hy)), "{err}");
-    assert!(matches!(err, ConsensusError::PrevoutSpent), "{err}");
+    assert!(
+        matches!(err, ConfirmError::Rules(ConsensusError::PrevoutSpent)),
+        "{err}"
+    );
     let _ = dir;
 }
 
@@ -594,7 +607,7 @@ fn marker_heights(store: &std::path::Path) -> Option<(u32, u32)> {
 }
 
 fn connect_until(
-    q: &rbitcoin_query::Query,
+    q: &crate::Query,
     params: &ChainParams,
     ms: Milestone,
     tip: &mut bitcoin::BlockHash,
@@ -622,7 +635,7 @@ fn shrink_input_loc_hwm(store: &std::path::Path, keep: u64) {
     f.write_all(&logical.to_le_bytes()).unwrap();
 }
 
-fn input_body_off(q: &rbitcoin_query::Query, spend_fk: rbitcoin_primitives::Fk) -> u64 {
+fn input_body_off(q: &crate::Query, spend_fk: rbitcoin_primitives::Fk) -> u64 {
     let mut before = 0u64;
     for id in 1..spend_fk.0 {
         let (_, ins, _) = q.store().get_tx_full(rbitcoin_primitives::Fk(id)).unwrap();
@@ -632,8 +645,8 @@ fn input_body_off(q: &rbitcoin_query::Query, spend_fk: rbitcoin_primitives::Fk) 
 }
 
 fn sealed_spend_chain() -> (
-    rbitcoin_query::testutil::TempDir,
-    rbitcoin_query::Query,
+    crate::testutil::TempDir,
+    crate::Query,
     ChainParams,
     Milestone,
     u32,
@@ -641,7 +654,7 @@ fn sealed_spend_chain() -> (
     Block,
     u32,
 ) {
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("spend-edge-loss");
+    let (dir, q) = crate::testutil::tiny_query_labeled("spend-edge-loss");
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -672,7 +685,7 @@ fn short_input_hwm_shrinks_below_the_edgeless_create() {
     drop(q);
     shrink_input_loc_hwm(&store, keep);
 
-    let q = rbitcoin_query::Query::open_or_create_tiny(&store).unwrap();
+    let q = crate::Query::open_or_create_tiny(&store).unwrap();
     q.set_spend_index(true);
     let tip_h = q.tip_height().expect("a prefix of the chain stays");
     assert!(
@@ -709,7 +722,7 @@ fn short_input_hwm_shrinks_below_the_edgeless_create() {
     let err = accept_and_connect_block(&q, &params, Height(tip_h.0 + 2), &respend, ms)
         .expect_err("reconnecting the spend keeps the output spent");
     assert!(
-        matches!(err, ConsensusError::PrevoutSpent),
+        matches!(err, ConfirmError::Rules(ConsensusError::PrevoutSpent)),
         "respend after reconnect: {err}"
     );
     let _ = dir;
@@ -735,7 +748,7 @@ fn zeroed_input_body_shrinks_and_is_not_a_coinbase() {
         f.write_all(&[0u8; 8]).unwrap();
     }
 
-    let q = rbitcoin_query::Query::open_or_create_tiny(&store).unwrap();
+    let q = crate::Query::open_or_create_tiny(&store).unwrap();
     q.set_spend_index(true);
     let tip_h = q.tip_height().unwrap();
     assert!(
@@ -778,7 +791,7 @@ fn replay_rejects_coinbase_edge_on_a_non_coinbase() {
     assert!(
         matches!(
             err,
-            ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(_))
+            ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(_))
         ),
         "{err}"
     );
@@ -788,11 +801,8 @@ fn replay_rejects_coinbase_edge_on_a_non_coinbase() {
     let _ = dir;
 }
 
-fn chain_at_height(
-    label: &str,
-    height: u32,
-) -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
-    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled(label);
+fn chain_at_height(label: &str, height: u32) -> (crate::testutil::TempDir, crate::Query) {
+    let (dir, q) = crate::testutil::tiny_query_labeled(label);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);

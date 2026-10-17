@@ -6,11 +6,11 @@ use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, ScriptBuf, Target, Transaction, TxOut};
 use rbitcoin_consensus::{
-    bip34_height_script, block_subsidy, expected_next_bits, median_time_past,
-    witness_commitment_script, MAX_BLOCK_WEIGHT,
+    bip34_height_script, block_subsidy, witness_commitment_script, MAX_BLOCK_WEIGHT,
 };
 use rbitcoin_net::{ChainHub, SelectBudget};
 use rbitcoin_primitives::Height;
+use rbitcoin_query::{expected_next_bits, median_time_past};
 use std::io;
 use std::sync::Arc;
 use template_distribution_sv2::{NewTemplate, SetNewPrevHash};

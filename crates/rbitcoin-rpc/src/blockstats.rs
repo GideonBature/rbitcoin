@@ -571,7 +571,7 @@ fn stats_for_stamped(
     height: Height,
     stamped: &StampedTxstatBlock,
 ) -> Result<BlockStats, Value> {
-    let mediantime = rbitcoin_consensus::median_time_past(ctx.query.as_ref(), height)
+    let mediantime = rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
         .unwrap_or(stamped.rec.timestamp);
     let params = match ctx.chain.as_ref() {
         Some(c) => c.params.clone(),
@@ -621,8 +621,8 @@ fn stats_for_connected(
     block: &Block,
     parents: &PrevoutMap,
 ) -> Result<BlockStats, Value> {
-    let mediantime = rbitcoin_consensus::median_time_past(ctx.query.as_ref(), height)
-        .unwrap_or(block.header.time);
+    let mediantime =
+        rbitcoin_query::median_time_past(ctx.query.as_ref(), height).unwrap_or(block.header.time);
     let params = match ctx.chain.as_ref() {
         Some(c) => c.params.clone(),
         None => rbitcoin_consensus::ChainParams::for_network(ctx.network),

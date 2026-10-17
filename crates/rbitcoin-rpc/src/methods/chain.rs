@@ -74,8 +74,8 @@ pub(crate) fn getblockchaininfo(ctx: &RpcContext) -> Result<Value, Value> {
     };
     let (time, mediantime) = if let Some(h) = ctx.query.tip_height() {
         if let Ok(Some((_, rec))) = ctx.query.header_at_height(h) {
-            let mtp = rbitcoin_consensus::median_time_past(ctx.query.as_ref(), h)
-                .unwrap_or(rec.timestamp);
+            let mtp =
+                rbitcoin_query::median_time_past(ctx.query.as_ref(), h).unwrap_or(rec.timestamp);
             (rec.timestamp, mtp)
         } else {
             (0u32, 0u32)
@@ -285,7 +285,7 @@ fn active_block_header(ctx: &RpcContext, height: Height, verbose: bool) -> Resul
         "versionHex": format!("{:08x}", rec.version),
         "merkleroot": hash_hex_display(&rec.merkle_root),
         "time": rec.timestamp,
-        "mediantime": rbitcoin_consensus::median_time_past(ctx.query.as_ref(), height)
+        "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
             .unwrap_or(rec.timestamp),
         "nonce": rec.nonce,
         "bits": format!("{:08x}", rec.bits),
@@ -715,7 +715,7 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
             "version": rec.version,
             "merkleroot": hash_hex_display(&rec.merkle_root),
             "time": rec.timestamp,
-            "mediantime": rbitcoin_consensus::median_time_past(ctx.query.as_ref(), height)
+            "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
                 .unwrap_or(rec.timestamp),
             "nonce": rec.nonce,
             "bits": format!("{:08x}", rec.bits),
@@ -755,7 +755,7 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         "version": block.header.version.to_consensus(),
         "merkleroot": hash_hex_display(&block.header.merkle_root.to_byte_array()),
         "time": block.header.time,
-        "mediantime": rbitcoin_consensus::median_time_past(ctx.query.as_ref(), height)
+        "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
             .unwrap_or(block.header.time),
         "nonce": block.header.nonce,
         "bits": format!("{:08x}", block.header.bits.to_consensus()),

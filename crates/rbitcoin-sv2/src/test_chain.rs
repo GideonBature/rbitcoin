@@ -1,8 +1,9 @@
 use bitcoin::{Network, Txid};
-use rbitcoin_consensus::{accept_and_connect_block, pad_empty_from, ChainParams, Milestone};
+use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_net::{ChainHub, MempoolHub};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::testutil::{tiny_query_labeled, TempDir};
+use rbitcoin_query::{accept_and_connect_block, pad_empty_from};
 use std::path::Path;
 use std::sync::Arc;
 

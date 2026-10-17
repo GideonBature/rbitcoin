@@ -45,7 +45,7 @@ fn electrum_maturity() -> &'static ElectrumMaturity {
         let q = Query::open_or_create_tiny(&store).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        rbitcoin_consensus::accept_and_connect_block(
+        rbitcoin_query::accept_and_connect_block(
             &q,
             &params,
             rbitcoin_primitives::Height::GENESIS,
@@ -53,7 +53,7 @@ fn electrum_maturity() -> &'static ElectrumMaturity {
             Milestone::NONE,
         )
         .unwrap();
-        let (tip, tip_time, coinbases) = rbitcoin_consensus::pad_empty_from(
+        let (tip, tip_time, coinbases) = rbitcoin_query::pad_empty_from(
             &q,
             &params,
             genesis.block_hash(),
@@ -687,7 +687,7 @@ async fn electrum_server_version_history_balance() {
         next_h,
         vec![],
     );
-    rbitcoin_consensus::accept_and_connect_block(
+    rbitcoin_query::accept_and_connect_block(
         q.as_ref(),
         &params,
         rbitcoin_primitives::Height(next_h),
@@ -739,7 +739,7 @@ async fn electrum_server_version_history_balance() {
         bitcoin::script::ScriptBuf::from_bytes(vec![0x00]),
         vec![],
     );
-    rbitcoin_consensus::accept_and_connect_block(
+    rbitcoin_query::accept_and_connect_block(
         q.as_ref(),
         &params,
         rbitcoin_primitives::Height(miss_h),
@@ -1026,8 +1026,8 @@ fn block_touch_sees_spend_only_heights() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::accept_and_connect_block;
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
     use rbitcoin_store::script_hash;
 
     let dir = TempDir::new().unwrap();
@@ -1382,9 +1382,10 @@ async fn electrum_leftover_mempool_does_not_double_count() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_net::MempoolHub;
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
 
     let dir = TempDir::new().unwrap();
     let params = ChainParams::regtest();
@@ -1670,8 +1671,9 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
 
     const ASOF: &str = "1.4.2-asof";
     let dir = TempDir::new().unwrap();
@@ -2230,8 +2232,9 @@ async fn electrum_tweaks_subscribe_streams_then_done() {
     use bitcoin::hashes::{hash160, Hash};
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{accept_and_connect_block, tweak_from_tx, Milestone};
+    use rbitcoin_consensus::{tweak_from_tx, Milestone};
     use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_query::accept_and_connect_block;
     use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
@@ -2587,8 +2590,9 @@ fn pin_tip_follow_after_materialize(
     tip: bitcoin::BlockHash,
     time: u32,
 ) {
-    use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
     use rbitcoin_test::mine::mine_regtest_block;
 
     let params = ChainParams::regtest();
@@ -2628,8 +2632,9 @@ fn pin_tip_follow_after_materialize(
 #[test]
 fn direct_indexes_then_sh_bulk_at_tip() {
     use bitcoin::hashes::Hash;
-    use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis};
 
     let dir = TempDir::new().unwrap();

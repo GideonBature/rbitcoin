@@ -7,9 +7,10 @@ use bitcoin::consensus::encode::deserialize;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash};
 use rbitcoin_cli::cli_main as cli_cli_main;
-use rbitcoin_consensus::{accept_and_connect_block, genesis_block, ChainParams, Milestone};
+use rbitcoin_consensus::{genesis_block, ChainParams, Milestone};
 use rbitcoin_node::{cli_main as node_cli_main, run_node, NodeConfig};
 use rbitcoin_primitives::{Fk, Height, Network, VERSION};
+use rbitcoin_query::accept_and_connect_block;
 use rbitcoin_query::testutil::FixtureChain;
 use rbitcoin_query::{stamp_external_parents, InFlight, Query};
 use rbitcoin_store::{HeaderRecord, Store, StoreError, TxRecord};
@@ -1165,9 +1166,8 @@ fn chain_connect_reorg_and_growth() {
 /// false-positive PrevoutSpent (tip is the Class C commit point).
 #[test]
 fn confirm_survives_partial_class_c_without_tip_advance() {
-    use rbitcoin_consensus::{
-        accept_and_connect_block, commit_class_a_block, confirm_wire_run, ChainParams, Milestone,
-    };
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::{accept_and_connect_block, commit_class_a_block, confirm_wire_run};
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
     let td = TestDatadir::new().unwrap();
@@ -1317,7 +1317,7 @@ fn pin_head_parent_via_waves_and_leftover_stamp(
     spend_h: u32,
 ) {
     use bitcoin::consensus::encode::serialize;
-    use rbitcoin_consensus::{
+    use rbitcoin_query::{
         confirm_bq_resolve_wave_capped, confirm_wire_lookup_stamp, take_wave_items_for_load,
         WireLoadPipeline, BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
     };
@@ -1422,7 +1422,7 @@ fn pin_plan_none_stamp_of_archived_spend(
     b_spend: &Block,
     spend_h: u32,
 ) {
-    use rbitcoin_consensus::{confirm_wire_lookup_stamp, ConsensusError};
+    use rbitcoin_query::confirm_wire_lookup_stamp;
 
     let hash = b_spend.block_hash().to_byte_array();
     let (hfk, _) = q.get_header_by_hash(&hash).unwrap().unwrap();
@@ -1449,7 +1449,7 @@ fn pin_plan_none_stamp_of_archived_spend(
     let n = fks.len() as u32;
     q.store().header_txs.put_range(hfk, fks[0], n + 1).unwrap();
     match confirm_wire_lookup_stamp(q, params, ms, &items, None) {
-        Err(ConsensusError::Store(StoreError::Corrupt(m))) => {
+        Err(rbitcoin_query::ConfirmError::Store(StoreError::Corrupt(m))) => {
             assert_eq!(m, "invariant: archived stamp tx_fks/txids length");
         }
         Err(e) => panic!("list/wire length mismatch must be Corrupt, got {e}"),
@@ -1461,9 +1461,8 @@ fn pin_plan_none_stamp_of_archived_spend(
 /// Resume: spend archived with create_fk (archive sticky/head); confirm spends.
 #[test]
 fn resume_tx_head_resolves_external_prev() {
-    use rbitcoin_consensus::{
-        accept_and_connect_block, commit_class_a_block, confirm_wire_run, ChainParams, Milestone,
-    };
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::{accept_and_connect_block, commit_class_a_block, confirm_wire_run};
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
     let td = TestDatadir::new().unwrap();
@@ -1562,8 +1561,8 @@ fn resume_tx_head_resolves_external_prev() {
 #[test]
 fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     use bitcoin::p2p::ServiceFlags;
-    use rbitcoin_consensus::{commit_class_a_block, confirm_wire_run};
     use rbitcoin_net::local_service_flags;
+    use rbitcoin_query::{commit_class_a_block, confirm_wire_run};
     use rbitcoin_store::script_hash;
 
     let td = TestDatadir::new().unwrap();
@@ -1846,10 +1845,9 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     assert!(flags.has(ServiceFlags::WITNESS));
 
     // Consensus header helpers on the same pad (no second open).
-    let mtp = rbitcoin_consensus::median_time_past(&q, Height(sample_tip)).unwrap();
+    let mtp = rbitcoin_query::median_time_past(&q, Height(sample_tip)).unwrap();
     assert!(mtp > 0, "mtp={mtp}");
-    let bits =
-        rbitcoin_consensus::expected_next_bits(&q, &params, Height(sample_tip + 1), 0).unwrap();
+    let bits = rbitcoin_query::expected_next_bits(&q, &params, Height(sample_tip + 1), 0).unwrap();
     let tip_bits = q
         .header_at_height(Height(sample_tip))
         .unwrap()
@@ -1879,7 +1877,7 @@ fn pin_abandoned_fork_is_not_a_parent(
     chain: &rbitcoin_test::MatureRegtestChain,
 ) {
     use bitcoin::consensus::encode::serialize;
-    use rbitcoin_consensus::{
+    use rbitcoin_query::{
         confirm_bq_resolve_wave_capped, take_wave_items_for_load, BQ_RESOLVE_WAVE_MAX_BLOCKS,
         BQ_RESOLVE_WAVE_MAX_INPUTS,
     };
@@ -1953,7 +1951,7 @@ fn pin_archived_sibling_bodies(
 ) {
     use bitcoin::consensus::encode::serialize;
     use bitcoin::{ScriptBuf, TxOut};
-    use rbitcoin_consensus::commit_class_a_block;
+    use rbitcoin_query::commit_class_a_block;
 
     let tip_h = chain.tip_height();
     let bad_hash = double_spend.block_hash().to_byte_array();
@@ -2010,7 +2008,7 @@ fn pin_reconnect_archived_run_extends_height_index(
     blocks: &[Block],
     tip_h: u32,
 ) {
-    use rbitcoin_consensus::confirm_wire_run;
+    use rbitcoin_query::confirm_wire_run;
 
     let from_h = q.tip_height().unwrap().0;
     assert_eq!(
@@ -2213,7 +2211,7 @@ fn pin_scripthash_views_on_pad(
 #[allow(clippy::cognitive_complexity)] // one pad, many block/tx surface arms
 fn pin_block_and_tx_surface_on_pad(q: &Query, chain: &rbitcoin_test::MatureRegtestChain) {
     use bitcoin::consensus::encode::serialize;
-    use rbitcoin_consensus::header_to_record;
+    use rbitcoin_query::header_to_record;
     use rbitcoin_query::ConfirmPrepared;
 
     let spend_h = Height(chain.spend_height);
@@ -2347,7 +2345,7 @@ fn pin_same_run_create_then_spend(
     parent_cb: bitcoin::Txid,
     create_h: u32,
 ) -> (BlockHash, u32) {
-    use rbitcoin_consensus::{commit_class_a_run, confirm_wire_run};
+    use rbitcoin_query::{commit_class_a_run, confirm_wire_run};
 
     let mk_parent = spend_anyone_can_spend(parent_cb, 0, Amount::from_sat(49_0000_0000));
     let b_create = mine_regtest_block(tip, tip_time + 600, create_h, vec![mk_parent]);
@@ -2387,7 +2385,7 @@ fn pin_both_vouts_of_one_input_parent(
     use bitcoin::absolute::LockTime;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{commit_class_a_block, commit_class_a_run, confirm_wire_run};
+    use rbitcoin_query::{commit_class_a_block, commit_class_a_run, confirm_wire_run};
     use rbitcoin_test::mine::{spend_many_anyone_can_spend, split_anyone_can_spend};
 
     let split = split_anyone_can_spend(
@@ -2577,9 +2575,10 @@ fn pin_already_at_height_retry_annotates_spend(
 /// Also exercises parent pin stats + tip advance, and load ready timeout/cancel.
 #[test]
 fn three_stage_confirm_and_parent_pin_surface() {
-    use rbitcoin_consensus::{
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::{
         accept_and_connect_block, commit_class_a_run, confirm_scripts_phase,
-        confirm_wire_load_phase, confirm_write_phase, ChainParams, Milestone, ScriptPreverified,
+        confirm_wire_load_phase, confirm_write_phase, ScriptPreverified,
     };
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
@@ -2711,10 +2710,11 @@ fn three_stage_confirm_and_parent_pin_surface() {
 /// from the prior load batch. Mixed store(≤tip)+plan(>tip) must succeed.
 #[test]
 fn confirm_load_ahead_of_write_does_not_badprev() {
-    use rbitcoin_consensus::{
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::{
         accept_and_connect_block, commit_class_a_block, confirm_scripts_phase,
         confirm_wire_load_phase, confirm_wire_load_phase_pipelined, confirm_write_phase,
-        ChainParams, Milestone, ScriptPreverified, WireLoadPipeline,
+        ScriptPreverified, WireLoadPipeline,
     };
     use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis};
 
@@ -2928,9 +2928,10 @@ fn block_cache_and_mempool_hub_surface() {
 /// Multi-height raw wire → tip via split load/scripts/commit (no pre-archive reload).
 #[test]
 fn unified_wire_pipeline_multi_block_to_tip() {
-    use rbitcoin_consensus::{
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_query::{
         commit_class_a_block, confirm_scripts_phase, confirm_wire_load_phase, confirm_wire_run,
-        confirm_write_phase, ChainParams, Milestone, ScriptPreverified,
+        confirm_write_phase, ScriptPreverified,
     };
 
     let td = TestDatadir::new().unwrap();
@@ -3049,15 +3050,17 @@ fn pin_confirm_refuses_without_advancing_tip(
     ms: Milestone,
     b1: &Block,
 ) {
-    use rbitcoin_consensus::{confirm_wire_load_phase, header_to_record, ScriptPreverified};
     use rbitcoin_query::ConfirmPrepared;
+    use rbitcoin_query::{confirm_wire_load_phase, header_to_record, ScriptPreverified};
 
     let none = ScriptPreverified::new();
     let g = regtest_genesis();
     let non_contiguous = [(Height(1), g.clone()), (Height(3), g)];
     for batch in [&[][..], &non_contiguous[..]] {
         match confirm_wire_load_phase(q, params, ms, batch, &none) {
-            Err(rbitcoin_consensus::ConsensusError::BadBlock(_)) => {}
+            Err(rbitcoin_query::ConfirmError::Rules(
+                rbitcoin_consensus::ConsensusError::BadBlock(_),
+            )) => {}
             Err(e) => panic!("expected BadBlock, got {e}"),
             Ok(_) => panic!("load of {} blocks must refuse", batch.len()),
         }
@@ -3102,7 +3105,7 @@ fn pin_bq_wave_then_stamp_confirms_empty_block(
     tip_time: u32,
 ) {
     use bitcoin::consensus::encode::serialize;
-    use rbitcoin_consensus::{
+    use rbitcoin_query::{
         confirm_bq_resolve_wave_capped, confirm_scripts_phase, confirm_wire_load_from_plan,
         confirm_wire_lookup_stamp, confirm_write_phase, take_wave_items_for_load,
         ScriptPreverified, BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
@@ -3147,7 +3150,7 @@ fn pin_wire_prep_ahead_cross_batch(
     cb: bitcoin::Txid,
     ha: u32,
 ) -> (BlockHash, u32) {
-    use rbitcoin_consensus::{
+    use rbitcoin_query::{
         confirm_scripts_phase, confirm_wire_load_phase_pipelined, confirm_write_phase,
         ScriptPreverified, WireLoadPipeline,
     };
@@ -3294,7 +3297,7 @@ fn pin_wire_prep_already_archived(
     cb: bitcoin::Txid,
     ha: u32,
 ) -> (BlockHash, u32) {
-    use rbitcoin_consensus::{
+    use rbitcoin_query::{
         commit_class_a_run, confirm_scripts_phase, confirm_wire_load_phase, confirm_write_phase,
         ScriptPreverified,
     };
@@ -3346,7 +3349,7 @@ fn pin_wire_prep_cold_class_a_denserels(
     cb: bitcoin::Txid,
     h_split: u32,
 ) {
-    use rbitcoin_consensus::{
+    use rbitcoin_query::{
         confirm_scripts_phase, confirm_wire_load_phase, confirm_write_phase, ScriptPreverified,
     };
     use rbitcoin_test::mine::split_anyone_can_spend;
@@ -3361,8 +3364,7 @@ fn pin_wire_prep_cold_class_a_denserels(
     );
     let b_split = mine_regtest_block(tip, tip_time + 600, h_split, vec![split]);
     let parent_txid = b_split.txdata[1].compute_txid();
-    rbitcoin_consensus::confirm_wire_run(q, params, ms, &[(Height(h_split), b_split.clone())])
-        .unwrap();
+    rbitcoin_query::confirm_wire_run(q, params, ms, &[(Height(h_split), b_split.clone())]).unwrap();
     assert!(
         q.store()
             .get_fk_by_txid(parent_txid.as_byte_array())

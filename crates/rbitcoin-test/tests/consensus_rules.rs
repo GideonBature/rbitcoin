@@ -4,12 +4,12 @@
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, BlockHash, CompactTarget};
-use rbitcoin_consensus::{
-    accept_and_connect_block, confirm_wire_run, expected_next_bits, genesis_block,
-    median_time_past, validate_header, ChainParams, ConsensusError, Milestone,
-};
+use rbitcoin_consensus::{genesis_block, ChainParams, ConsensusError, Milestone};
 use rbitcoin_primitives::Height;
-use rbitcoin_query::Query;
+use rbitcoin_query::{
+    accept_and_connect_block, confirm_wire_run, expected_next_bits, median_time_past,
+    validate_header, ConfirmError, Query,
+};
 use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 use rbitcoin_test::{pad_empty_from, TestDatadir};
 
@@ -157,7 +157,7 @@ fn pin_h6_pow_limit(q: &Query, params: &ChainParams, genesis: &bitcoin::Block) {
     tight.pow_limit = ChainParams::mainnet().pow_limit;
     let err = validate_header(q, &tight, Height(1), &near.header).unwrap_err();
     assert!(
-        matches!(err, ConsensusError::BadHeader(s) if s.contains("pow limit")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadHeader(s)) if s.contains("pow limit")),
         "h6: {err:?}"
     );
 }
@@ -191,7 +191,7 @@ fn pin_bip68_time_lock(
     let early = mine_regtest_block(tip, time + 600, early_h, vec![csv_time.clone()]);
     let err = accept_and_connect_block(q, params, Height(early_h), &early, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("nonfinal")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("nonfinal")),
         "bip68 time just short: {err:?}"
     );
 
@@ -236,7 +236,7 @@ fn h8_rejects_timestamp_too_far_in_future() {
     }
     let err = validate_header(&q, &params, Height(1), &bad.header).unwrap_err();
     assert!(
-        matches!(err, ConsensusError::BadHeader(s) if s.contains("future")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadHeader(s)) if s.contains("future")),
         "{err:?}"
     );
 }
@@ -265,7 +265,7 @@ fn pin_subsidy_interval_two_overlay() {
     let old_floor = mine_regtest_block(h1.block_hash(), h1.header.time + 599, 2, vec![]);
     let err = accept_and_connect_block(&q, &params, Height(2), &old_floor, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadBlock(s)) if s.contains("coinbase excess")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadBlock(s))) if s.contains("coinbase excess")),
         "50 BTC at interval must exceed the new 25 BTC floor: {err:?}"
     );
 
@@ -275,7 +275,7 @@ fn pin_subsidy_interval_two_overlay() {
     grind_pow(&mut excess);
     let err = accept_and_connect_block(&q, &params, Height(2), &excess, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadBlock(s)) if s.contains("coinbase excess")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadBlock(s))) if s.contains("coinbase excess")),
         "subsidy+1 at new floor: {err:?}"
     );
 
@@ -312,7 +312,7 @@ fn h7_rejects_header_hash_above_target() {
     }
     let err = validate_header(&q, &params, Height(1), &h).unwrap_err();
     assert!(
-        matches!(err, ConsensusError::InvalidPow),
+        matches!(err, ConfirmError::Rules(ConsensusError::InvalidPow)),
         "expected InvalidPow, got {err:?}"
     );
 }
@@ -357,7 +357,7 @@ fn coinbase_maturity_holds_inside_one_confirm_batch() {
             assert_eq!(q.tip_height(), Some(Height(spend_h)));
         } else {
             assert!(
-                matches!(res, Err(ConsensusError::BadTx(s)) if s.contains("immature")),
+                matches!(res, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("immature")),
                 "coinbase spent at created+99 in the same batch: {res:?}"
             );
             assert_eq!(q.tip_height(), Some(Height::GENESIS));
@@ -402,7 +402,10 @@ fn same_batch_spend_of_a_later_block_is_missing() {
         ],
     );
     assert!(
-        matches!(err, Err(ConsensusError::MissingPrevout)),
+        matches!(
+            err,
+            Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+        ),
         "spend of an output created one block later in the batch: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(100)));
@@ -410,7 +413,10 @@ fn same_batch_spend_of_a_later_block_is_missing() {
     // Both bodies are archived now, and the parent is not connected.
     let err = confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(101), child_first)]);
     assert!(
-        matches!(err, Err(ConsensusError::MissingPrevout)),
+        matches!(
+            err,
+            Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+        ),
         "the spending block retried alone: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(100)));
@@ -431,7 +437,7 @@ fn same_batch_spend_of_a_later_block_is_missing() {
     let b103 = mine_regtest_block(b102_hash, time + 1800, 103, vec![again]);
     let err = confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(103), b103)]);
     assert!(
-        matches!(err, Err(ConsensusError::PrevoutSpent)),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::PrevoutSpent))),
         "second spend of the parent output: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(102)));
@@ -451,7 +457,7 @@ fn header_and_spending_boundaries() {
     bad_g.header.nonce = g.header.nonce.wrapping_add(1);
     let err = validate_header(&q, &params, Height::GENESIS, &bad_g.header).unwrap_err();
     assert!(
-        matches!(err, ConsensusError::BadHeader(s) if s.contains("genesis")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadHeader(s)) if s.contains("genesis")),
         "h1: {err:?}"
     );
     accept_and_connect_block(&q, &params, Height::GENESIS, &g, Milestone::NONE).unwrap();
@@ -472,7 +478,9 @@ fn header_and_spending_boundaries() {
     assert!(
         matches!(
             err,
-            Err(ConsensusError::BadBlock("unexpected witness before segwit"))
+            Err(ConfirmError::Rules(ConsensusError::BadBlock(
+                "unexpected witness before segwit"
+            )))
         ),
         "pre-activation witness block must hit the SegWit gate: {err:?}"
     );
@@ -481,14 +489,17 @@ fn header_and_spending_boundaries() {
     bad_prev.header.prev_blockhash = BlockHash::from_byte_array([0xee; 32]);
     grind_pow(&mut bad_prev);
     let err = validate_header(&q, &params, Height(1), &bad_prev.header).unwrap_err();
-    assert!(matches!(err, ConsensusError::BadPrev), "h2: {err:?}");
+    assert!(
+        matches!(err, ConfirmError::Rules(ConsensusError::BadPrev)),
+        "h2: {err:?}"
+    );
 
     let mut bad_bits = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
     bad_bits.header.bits = CompactTarget::from_consensus(0x207f_fffe);
     grind_pow(&mut bad_bits);
     let err = validate_header(&q, &params, Height(1), &bad_bits.header).unwrap_err();
     assert!(
-        matches!(err, ConsensusError::BadHeader(s) if s.contains("bits") || s.contains("proof")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadHeader(s)) if s.contains("bits") || s.contains("proof")),
         "h5: {err:?}"
     );
 
@@ -513,7 +524,7 @@ fn header_and_spending_boundaries() {
     grind_pow(&mut eq);
     let err = validate_header(&q11, &params, Height(12), &eq.header).unwrap_err();
     assert!(
-        matches!(err, ConsensusError::BadHeader(s) if s.contains("median-time")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadHeader(s)) if s.contains("median-time")),
         "time==mtp: {err:?}"
     );
 
@@ -534,7 +545,7 @@ fn header_and_spending_boundaries() {
     );
     let err = accept_and_connect_block(&q99, &params, Height(100), &bad100, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("immature")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("immature")),
         "immature at created+99: {err:?}"
     );
     assert_eq!(q99.tip_height(), Some(Height(99)));
@@ -558,7 +569,10 @@ fn header_and_spending_boundaries() {
         let miss_block = mine_regtest_block(tip, time, 101, vec![missing]);
         let err = accept_and_connect_block(&q, &params, Height(101), &miss_block, Milestone::NONE);
         assert!(
-            matches!(err, Err(ConsensusError::MissingPrevout)),
+            matches!(
+                err,
+                Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+            ),
             "{case} must reject as MissingPrevout: {err:?}"
         );
     }
@@ -571,7 +585,10 @@ fn header_and_spending_boundaries() {
         let oob_block = mine_regtest_block(tip, time, 101, vec![oob]);
         let err = accept_and_connect_block(&q, &params, Height(101), &oob_block, Milestone::NONE);
         assert!(
-            matches!(err, Err(ConsensusError::MissingPrevout)),
+            matches!(
+                err,
+                Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+            ),
             "confirmed txid vout {vout} past n_out must reject as MissingPrevout: {err:?}"
         );
         assert_eq!(q.tip_height(), Some(Height(100)));
@@ -589,7 +606,10 @@ fn header_and_spending_boundaries() {
         &[(Height(101), b101), (Height(102), b102)],
     );
     assert!(
-        matches!(err, Err(ConsensusError::MissingPrevout)),
+        matches!(
+            err,
+            Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+        ),
         "same-batch parent vout past n_out must reject as MissingPrevout: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(100)));
@@ -600,7 +620,7 @@ fn header_and_spending_boundaries() {
     let nf_block = mine_regtest_block(tip, time, 101, vec![nonfinal]);
     let err = accept_and_connect_block(&q, &params, Height(101), &nf_block, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("nonfinal") || s.contains("not final")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("nonfinal") || s.contains("not final")),
         "locktime==height: {err:?}"
     );
 
@@ -610,7 +630,12 @@ fn header_and_spending_boundaries() {
     let csv_block = mine_regtest_block(tip, time, 101, vec![csv_early]);
     let err = accept_and_connect_block(&q, &params, Height(101), &csv_block, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadTx("bad-txns-nonfinal"))),
+        matches!(
+            err,
+            Err(ConfirmError::Rules(ConsensusError::BadTx(
+                "bad-txns-nonfinal"
+            )))
+        ),
         "relative lock 200 at height 101 must reject, got {err:?}"
     );
 
@@ -618,7 +643,7 @@ fn header_and_spending_boundaries() {
     let over_block = mine_regtest_block(tip, time, 101, vec![over]);
     let err = accept_and_connect_block(&q, &params, Height(101), &over_block, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("in < out")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("in < out")),
         "in < out: {err:?}"
     );
 
@@ -628,7 +653,7 @@ fn header_and_spending_boundaries() {
     grind_pow(&mut excess);
     let err = accept_and_connect_block(&q, &params, Height(101), &excess, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadBlock(s)) if s.contains("coinbase excess")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadBlock(s))) if s.contains("coinbase excess")),
         "subsidy+1: {err:?}"
     );
 
@@ -637,7 +662,7 @@ fn header_and_spending_boundaries() {
     let dup = mine_regtest_block(tip, time, 101, vec![s1, s2]);
     let err = accept_and_connect_block(&q, &params, Height(101), &dup, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("double spend")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("double spend")),
         "same-block double spend: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(100)));
@@ -647,7 +672,10 @@ fn header_and_spending_boundaries() {
     let bad_order = mine_regtest_block(tip, time, 101, vec![child, parent]);
     let err = accept_and_connect_block(&q, &params, Height(101), &bad_order, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::MissingPrevout)),
+        matches!(
+            err,
+            Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+        ),
         "child-before-parent must not become tip: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(100)));
@@ -657,7 +685,7 @@ fn header_and_spending_boundaries() {
     let empty_block = mine_regtest_block(tip, time, 101, vec![empty_out]);
     let err = accept_and_connect_block(&q, &params, Height(101), &empty_block, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::BadTx(s)) if s.contains("no outputs")),
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("no outputs")),
         "non-coinbase empty vout: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(100)));
@@ -678,10 +706,10 @@ fn header_and_spending_boundaries() {
     let again = mine_regtest_block(good.block_hash(), time + 600, 102, vec![spent_again]);
     let err = accept_and_connect_block(&q, &params, Height(102), &again, Milestone::NONE);
     assert!(
-        matches!(err, Err(ConsensusError::PrevoutSpent))
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::PrevoutSpent)))
             || matches!(
                 err,
-                Err(ConsensusError::BadTx(s)) if s.contains("double spend") || s.contains("spent")
+                Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("double spend") || s.contains("spent")
             ),
         "already spent: {err:?}"
     );
@@ -740,7 +768,7 @@ fn witness_program_rules_bind_below_segwit_height() {
         let block = mine_regtest_block(tip, time + 600, 101, vec![fund, spend]);
         let err = accept_and_connect_block(&q, &params, Height(101), &block, Milestone::NONE);
         assert!(
-            matches!(err, Err(ConsensusError::Script(_))),
+            matches!(err, Err(ConfirmError::Rules(ConsensusError::Script(_)))),
             "{case} below segwit height: {err:?}"
         );
         assert_eq!(q.tip_height(), Some(Height(100)));

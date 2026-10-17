@@ -144,7 +144,9 @@ fn confirm_reject_class_matches_substring_table() {
         ConfirmRejectClass::Cancelled
     );
     assert_eq!(
-        ConfirmRejectClass::from_consensus(&ConsensusError::from(StoreError::Cancelled("stop"))),
+        ConfirmRejectClass::from_confirm(&rbitcoin_query::ConfirmError::from(
+            StoreError::Cancelled("stop"),
+        )),
         ConfirmRejectClass::Cancelled
     );
     assert_eq!(
@@ -152,21 +154,21 @@ fn confirm_reject_class_matches_substring_table() {
         ConfirmRejectClass::ConsensusInvalid
     );
     assert_eq!(
-        ConfirmRejectClass::from_consensus(&ConsensusError::Store(StoreError::Corrupt(
-            "tx put_full_batch fk mismatch (plan not committed in order)"
-        ))),
+        ConfirmRejectClass::from_confirm(&rbitcoin_query::ConfirmError::Store(
+            StoreError::Corrupt("tx put_full_batch fk mismatch (plan not committed in order)")
+        )),
         ConfirmRejectClass::Cascade
     );
     assert_eq!(
-        ConfirmRejectClass::from_consensus(&ConsensusError::Store(StoreError::Corrupt(
-            "invariant: spend annotate missing pin denserels/abs"
-        ))),
+        ConfirmRejectClass::from_confirm(&rbitcoin_query::ConfirmError::Store(
+            StoreError::Corrupt("invariant: spend annotate missing pin denserels/abs")
+        )),
         ConfirmRejectClass::EngineFault
     );
     assert_eq!(
-        ConfirmRejectClass::from_consensus(&ConsensusError::Store(StoreError::Corrupt(
-            "invariant: io_uring undrained"
-        ))),
+        ConfirmRejectClass::from_confirm(&rbitcoin_query::ConfirmError::Store(
+            StoreError::Corrupt("invariant: io_uring undrained")
+        )),
         ConfirmRejectClass::EngineFault
     );
     assert_eq!(
@@ -1875,7 +1877,8 @@ fn wire_pad() -> &'static WirePad {
     use std::sync::OnceLock;
     static PAD: OnceLock<WirePad> = OnceLock::new();
     PAD.get_or_init(|| {
-        use rbitcoin_consensus::{pad_empty_from, ChainParams};
+        use rbitcoin_consensus::ChainParams;
+        use rbitcoin_query::pad_empty_from;
         let (dir, hub0) = crate::chain::tiny_regtest_hub_labeled("wire-pad");
         hub0.query.enter_direct_index_mode().unwrap();
         let hub = std::sync::Arc::new(hub0);
@@ -1931,7 +1934,8 @@ impl WireRig {
     /// A fresh regtest pad like [`wire_pad`], on a store whose `tx.head`
     /// segments roll every 204 creates.
     fn new_small_head(label: &str, peers: usize) -> Self {
-        use rbitcoin_consensus::{pad_empty_from, ChainParams};
+        use rbitcoin_consensus::ChainParams;
+        use rbitcoin_query::pad_empty_from;
         let dir = rbitcoin_query::testutil::TempDir::labeled(label).expect("small-head dir");
         drop(rbitcoin_store::testutil::create_tiny_with_head_bits(
             dir.path(),

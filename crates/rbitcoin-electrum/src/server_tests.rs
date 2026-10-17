@@ -543,8 +543,9 @@ async fn electrum_fee_reports_follow_configured_and_enforced_floor() {
 /// a real blocking store query (`blockchain.block.headers`).
 #[tokio::test(flavor = "current_thread")]
 async fn ping_overlaps_blocking_headers_on_one_worker() {
-    use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
     use std::sync::atomic::AtomicU64;
 
     let (dir, q) = tmp_store();
@@ -552,7 +553,7 @@ async fn ping_overlaps_blocking_headers_on_one_worker() {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
     // Enough headers that a serial walk stays in-flight after ping is scheduled.
-    let _ = rbitcoin_consensus::pad_empty_from(
+    let _ = rbitcoin_query::pad_empty_from(
         &q,
         &params,
         genesis.block_hash(),

@@ -416,9 +416,10 @@ mod tests {
     use crate::server::{run_esplora, EsploraConfig, EsploraListen};
     use bitcoin::absolute::LockTime;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_net::MempoolHub;
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
     use rbitcoin_query::Query;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -475,7 +476,7 @@ mod tests {
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
-        let (_tip, _time, cbs) = rbitcoin_consensus::pad_empty_from(
+        let (_tip, _time, cbs) = rbitcoin_query::pad_empty_from(
             &q,
             &params,
             genesis.block_hash(),

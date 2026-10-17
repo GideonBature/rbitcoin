@@ -5,14 +5,14 @@ use super::*;
 /// Lookup-stamped external parent material for load body denserels.
 ///
 /// **Lookup** fills this via `tx.head` / `create.loc` / `txid.body` (never `txout.body`).
-/// **Load** denserels by range using only [`rbitcoin_query::ParentIdent`] (+ plan offline pins).
+/// **Load** denserels by range using only [`crate::ParentIdent`] (+ plan offline pins).
 /// Integer create_fk map uses [`U64Map`] (identity hasher) — pack-scale win over SipHash.
 #[derive(Debug, Default, Clone)]
 pub struct ParentPinStamp {
     /// prev_txid → create_fk_id (plan=None edges; empty after `take_from_plan`).
-    pub resolved: rbitcoin_query::TxidMap<u64>,
+    pub resolved: crate::TxidMap<u64>,
     /// create_fk_id → identity (txid + optional body/spent/pin).
-    pub idents: rbitcoin_query::U64Map<rbitcoin_query::ParentIdent>,
+    pub idents: crate::U64Map<crate::ParentIdent>,
     /// create_fk_id → spent need-vouts (packed at lookup; load pin reuses).
     pub parent_vouts: U64Map<Vec<u32>>,
 }
@@ -21,9 +21,9 @@ impl ParentPinStamp {
     /// Move plan stamp identity into the load stamp (no 100k-entry clone).
     ///
     /// `resolved` stays empty: plan path pins from packed `create_fk`.
-    pub(crate) fn take_from_plan(plan: &mut rbitcoin_query::ArchiveWritePlan) -> Self {
+    pub(crate) fn take_from_plan(plan: &mut crate::ArchiveWritePlan) -> Self {
         Self {
-            resolved: rbitcoin_query::TxidMap::with_hasher(Default::default()),
+            resolved: crate::TxidMap::with_hasher(Default::default()),
             idents: std::mem::take(&mut plan.external_parents),
             parent_vouts: std::mem::take(&mut plan.external_parent_vouts),
         }
@@ -53,18 +53,14 @@ impl ParentPinStamp {
     }
 
     #[inline]
-    pub(super) fn create_pin(&self, create_fk_id: u64) -> Option<&rbitcoin_query::CreatePin> {
+    pub(super) fn create_pin(&self, create_fk_id: u64) -> Option<&crate::CreatePin> {
         self.idents.get(&create_fk_id).and_then(|p| p.pin.as_ref())
     }
 }
 
-pub type WireBlockIn = (
-    Height,
-    Arc<Block>,
-    Option<Arc<[rbitcoin_query::TxPrecompute]>>,
-);
+pub type WireBlockIn = (Height, Arc<Block>, Option<Arc<[crate::TxPrecompute]>>);
 type LookupPhaseOut = (
-    Option<rbitcoin_query::ArchiveWritePlan>,
+    Option<crate::ArchiveWritePlan>,
     Vec<BodyMeta>,
     Vec<Arc<Block>>,
     u64,
@@ -75,7 +71,7 @@ type LookupPhaseOut = (
 /// **No `tx.body` denserels on lookup.** Load denserels by range from
 /// [`ParentPinStamp`] / plan ranges. Handoff is owned plan + parent pin stamp.
 pub struct PlanStampOutcome {
-    pub plan: Option<rbitcoin_query::ArchiveWritePlan>,
+    pub plan: Option<crate::ArchiveWritePlan>,
     /// External parent fk/range/txid stamped at lookup (always; including plan=None).
     pub parent_pin: ParentPinStamp,
     /// Wall ns for structure + plan_batch (head stamp).
@@ -100,14 +96,14 @@ impl PlanStampOutcome {
 
 pub(super) fn archived_create_pairs(
     metas: &[BodyMeta],
-) -> Result<Vec<([u8; 32], rbitcoin_primitives::Fk)>, ConsensusError> {
+) -> Result<Vec<([u8; 32], rbitcoin_primitives::Fk)>, ConfirmError> {
     let mut pairs = Vec::new();
     for m in metas {
         if m.tx_fks.is_empty() {
             continue;
         }
         if m.tx_fks.len() != m.txids.len() {
-            return Err(ConsensusError::Store(StoreError::Corrupt(
+            return Err(ConfirmError::Store(StoreError::Corrupt(
                 "invariant: archived stamp tx_fks/txids length",
             )));
         }
@@ -134,9 +130,9 @@ pub fn confirm_wire_lookup_stamp(
     milestone: Milestone,
     blocks: &[WireBlockIn],
     pipeline: Option<&WireLoadPipeline>,
-) -> Result<PlanStampOutcome, ConsensusError> {
+) -> Result<PlanStampOutcome, ConfirmError> {
     let t0 = Instant::now();
-    query.on_load_pack().map_err(ConsensusError::from)?;
+    query.on_load_pack().map_err(ConfirmError::from)?;
     let (mut plan, metas, wire_blocks, plan_ns) =
         wire_lookup_phase(query, params, milestone, blocks, pipeline)?;
     let ifo = pipeline.map(|p| p.in_flight);
@@ -156,10 +152,10 @@ pub fn confirm_wire_lookup_stamp(
             (pin, pairs)
         }
     };
-    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_blocks, blocks.len() as u64);
-    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_head_ns, plan_ns);
+    crate::note_confirm(&query.confirm_stats().lookup_blocks, blocks.len() as u64);
+    crate::note_confirm(&query.confirm_stats().lookup_head_ns, plan_ns);
     let work_ns = t0.elapsed().as_nanos() as u64;
-    rbitcoin_query::note_confirm(&query.confirm_stats().lookup_total_ns, work_ns);
+    crate::note_confirm(&query.confirm_stats().lookup_total_ns, work_ns);
     Ok(PlanStampOutcome {
         plan,
         parent_pin,
@@ -180,11 +176,11 @@ pub(super) fn stamp_parent_pin_archived(
     params: &ChainParams,
     metas: &[BodyMeta],
     wire_blocks: &[Arc<Block>],
-    in_flight: Option<&rbitcoin_query::InFlight>,
-    skeleton: Option<&rbitcoin_query::BatchParentIds>,
+    in_flight: Option<&crate::InFlight>,
+    skeleton: Option<&crate::BatchParentIds>,
     carried_need: Option<&[[u8; 32]]>,
-) -> Result<ParentPinStamp, ConsensusError> {
-    let mut same_batch: rbitcoin_query::TxidMap<u64> = rbitcoin_query::TxidMap::default();
+) -> Result<ParentPinStamp, ConfirmError> {
+    let mut same_batch: crate::TxidMap<u64> = crate::TxidMap::default();
     for m in metas {
         for (tid, fk) in m.txids.iter().zip(m.tx_fks.iter()) {
             if let Some(id) = fk.get() {
@@ -193,7 +189,7 @@ pub(super) fn stamp_parent_pin_archived(
         }
     }
     // Value: a wire input spends this txid (BIP30 probes are `false`).
-    let mut need_external: rbitcoin_query::TxidMap<bool> = rbitcoin_query::TxidMap::default();
+    let mut need_external: crate::TxidMap<bool> = crate::TxidMap::default();
     if skeleton.is_some() {
         for &prev in carried_need.unwrap_or(&[]) {
             if same_batch.contains_key(&prev) {
@@ -228,25 +224,25 @@ pub(super) fn stamp_parent_pin_archived(
             }
         }
     }
-    let empty = rbitcoin_query::InFlight::new();
+    let empty = crate::InFlight::new();
     let ifo = in_flight.unwrap_or(&empty);
     let need_vec: Vec<[u8; 32]> = need_external.keys().copied().collect();
-    let ext = rbitcoin_query::stamp_external_parents(
+    let ext = crate::stamp_external_parents(
         query.store(),
         &need_vec,
         ifo,
         skeleton,
         query.confirm_stats(),
     )
-    .map_err(ConsensusError::from)?;
+    .map_err(ConfirmError::from)?;
     if need_external
         .iter()
         .any(|(txid, &spent)| spent && !ext.resolved.contains_key(txid))
     {
-        return Err(ConsensusError::MissingPrevout);
+        rbitcoin_consensus::block::reject_unresolved_spend(true)?;
     }
     let mut stamp = ParentPinStamp {
-        resolved: rbitcoin_query::TxidMap::with_capacity_and_hasher(
+        resolved: crate::TxidMap::with_capacity_and_hasher(
             ext.resolved.len().saturating_add(same_batch.len()),
             Default::default(),
         ),
@@ -263,23 +259,23 @@ pub(super) fn stamp_parent_pin_archived(
         stamp
             .idents
             .entry(id)
-            .or_insert_with(|| rbitcoin_query::ParentIdent::new(tid))
+            .or_insert_with(|| crate::ParentIdent::new(tid))
             .txid = tid;
     }
     // Identities are stamped from wire prev_txid at insert time — never soft-fill
     // from txid.body here (that would be a dual path after lookup promised identity).
     if skeleton.is_none() {
-        rbitcoin_query::fill_missing_parent_ranges(
+        crate::fill_missing_parent_ranges(
             query.store(),
             ifo,
             &mut stamp.idents,
             query.confirm_stats(),
         )
-        .map_err(ConsensusError::from)?;
+        .map_err(ConfirmError::from)?;
     }
     for ident in stamp.idents.values() {
         if ident.txid == [0u8; 32] {
-            return Err(ConsensusError::Store(StoreError::Corrupt(
+            return Err(ConfirmError::Store(StoreError::Corrupt(
                 "invariant: plan=None parent stamp zero create identity",
             )));
         }
@@ -300,8 +296,8 @@ pub fn parent_missing_from_chain(
     query: &Query,
     block: &Block,
     stop: impl Fn() -> bool,
-) -> Result<Option<[u8; 32]>, ConsensusError> {
-    let created: rbitcoin_query::TxidSet = block
+) -> Result<Option<[u8; 32]>, ConfirmError> {
+    let created: crate::TxidSet = block
         .txdata
         .iter()
         .map(|tx| tx.compute_txid().to_byte_array())
@@ -317,10 +313,10 @@ pub fn parent_missing_from_chain(
     need.sort_unstable();
     need.dedup();
     let unsynced_from = query.store().head_unsynced_first_fk();
-    let hits: rbitcoin_query::TxidSet = query
+    let hits: crate::TxidSet = query
         .store()
         .get_fk_by_txid_batch(&need)
-        .map_err(ConsensusError::from)?
+        .map_err(ConfirmError::from)?
         .into_iter()
         .filter_map(|(txid, row)| row.map(|_| txid))
         .collect();
@@ -333,7 +329,7 @@ pub fn parent_missing_from_chain(
         .connected_in_unsynced_head(unsynced_from, &need, stop)?
         .is_empty()
     {
-        return Err(ConsensusError::Store(StoreError::Corrupt(
+        return Err(ConfirmError::Store(StoreError::Corrupt(
             "invariant: tx.head misses a connected create",
         )));
     }
@@ -352,7 +348,7 @@ pub fn confirm_wire_load_from_plan(
     stamped: PlanStampOutcome,
     pipeline: Option<&WireLoadPipeline>,
     preverified: &ScriptPreverified,
-) -> Result<ConfirmLoadOutcome, ConsensusError> {
+) -> Result<ConfirmLoadOutcome, ConfirmError> {
     let t_work = Instant::now();
     let t_load = Instant::now();
     let PlanStampOutcome {
@@ -376,7 +372,7 @@ pub fn confirm_wire_load_from_plan(
         ifo,
     )?;
 
-    rbitcoin_query::note_confirm(
+    crate::note_confirm(
         &query.confirm_stats().load_ns,
         t_load.elapsed().as_nanos() as u64,
     );
@@ -398,12 +394,12 @@ pub fn confirm_wire_load_from_plan(
     if let Some(ref mut plan) = plan {
         if !plan.packed.is_empty() {
             if tx_fees.len() != plan.packed.len() {
-                return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+                return Err(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                     "invariant: assemble tx fees length",
                 )));
             }
             if tx_sizes.len() != plan.packed.len() {
-                return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+                return Err(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                     "invariant: txstat size length",
                 )));
             }
@@ -434,7 +430,7 @@ pub(super) fn wire_lookup_phase(
     milestone: Milestone,
     blocks: &[WireBlockIn],
     pipeline: Option<&WireLoadPipeline>,
-) -> Result<LookupPhaseOut, ConsensusError> {
+) -> Result<LookupPhaseOut, ConfirmError> {
     lookup_require_contiguous(blocks)?;
 
     let mut wire_blocks: Vec<Arc<Block>> = Vec::with_capacity(blocks.len());
@@ -457,11 +453,15 @@ pub(super) fn wire_lookup_phase(
         let hash = block.block_hash().to_byte_array();
         let ctx = ValidationContext::at(params, *height, milestone);
         let t_struct = Instant::now();
-        let pres = crate::block::validate_block_structure_with_pres(
+        let stats = query.confirm_stats();
+        let mut note = |txid_ns, wtxid_ns, walk_ns| {
+            stats.note_struct_parts(txid_ns, wtxid_ns, walk_ns);
+        };
+        let pres = rbitcoin_consensus::block::validate_block_structure_with_pres(
             block.as_ref(),
             &ctx,
             caller_pres.as_ref().map(Arc::clone),
-            Some(query.confirm_stats()),
+            Some(&mut note),
         )?;
         let txids: Vec<[u8; 32]> = pres.iter().map(|p| p.txid).collect();
         struct_ns = struct_ns.saturating_add(t_struct.elapsed().as_nanos() as u64);
@@ -487,16 +487,17 @@ pub(super) fn wire_lookup_phase(
             if block.header.prev_blockhash.to_byte_array() == [0u8; 32] {
                 rbitcoin_primitives::Fk::NULL
             } else {
-                query
-                    .get_header_by_hash(block.header.prev_blockhash.as_byte_array())
-                    .map_err(ConsensusError::from)?
-                    .map(|(fk, _)| fk)
-                    .ok_or(ConsensusError::BadPrev)?
+                rbitcoin_consensus::block::require_linked_parent(
+                    query
+                        .get_header_by_hash(block.header.prev_blockhash.as_byte_array())
+                        .map_err(ConfirmError::from)?
+                        .map(|(fk, _)| fk),
+                )?
             }
         } else {
             metas[i - 1].header_fk
         };
-        let header_rec = crate::header_to_record(prev_fk, &block.header, hash);
+        let header_rec = crate::convert::header_to_record(prev_fk, &block.header, hash);
         prepare_ns = prepare_ns.saturating_add(t_prep.elapsed().as_nanos() as u64);
         let t_put = Instant::now();
         let header_fk = stamp_header_fk(query, &header_rec, carried.map(|(fk, _)| fk))?;
@@ -525,14 +526,14 @@ pub(super) fn wire_lookup_phase(
 fn check_carried_header_lens(
     pipeline: Option<&WireLoadPipeline>,
     n_blocks: usize,
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     let Some(p) = pipeline else {
         return Ok(());
     };
     if (!p.carried_header_fks.is_empty() || !p.carried_header_hashes.is_empty())
         && (p.carried_header_fks.len() != n_blocks || p.carried_header_hashes.len() != n_blocks)
     {
-        return Err(ConsensusError::Store(StoreError::Corrupt(
+        return Err(ConfirmError::Store(StoreError::Corrupt(
             "invariant: carried header length",
         )));
     }
@@ -565,24 +566,23 @@ fn stamp_check_header_link(
     hash: [u8; 32],
     carried: Option<(rbitcoin_primitives::Fk, [u8; 32])>,
     prev_meta_hash: Option<[u8; 32]>,
-) -> Result<(), ConsensusError> {
-    if i == 0 && height.0 != path_lo {
-        return Err(ConsensusError::BadPrev);
+) -> Result<(), ConfirmError> {
+    if i == 0 {
+        rbitcoin_consensus::block::reject_batch_starts_at(height.0, path_lo)?;
     }
     let prev_bytes = header.prev_blockhash.to_byte_array();
     if let Some((_, expect)) = carried {
-        if hash != expect {
-            return Err(ConsensusError::BadBlock("carried header hash mismatch"));
-        }
+        rbitcoin_consensus::block::reject_carried_header_hash(&hash, &expect)?;
         if i == 0 {
             if path_lo != store_path_lo {
                 let expect_prev = pipeline.and_then(|p| p.parent_hash).unwrap_or([0u8; 32]);
-                if prev_bytes != expect_prev {
-                    return Err(ConsensusError::BadPrev);
-                }
+                rbitcoin_consensus::block::reject_prev_link(&prev_bytes, &expect_prev)?;
             }
-        } else if prev_bytes != prev_meta_hash.unwrap_or([0u8; 32]) {
-            return Err(ConsensusError::BadPrev);
+        } else {
+            rbitcoin_consensus::block::reject_prev_link(
+                &prev_bytes,
+                &prev_meta_hash.unwrap_or([0u8; 32]),
+            )?;
         }
         return Ok(());
     }
@@ -591,16 +591,12 @@ fn stamp_check_header_link(
             validate_header_hashed(query, params, height, header, hash)?;
         } else {
             let expect_prev = pipeline.and_then(|p| p.parent_hash).unwrap_or([0u8; 32]);
-            if prev_bytes != expect_prev {
-                return Err(ConsensusError::BadPrev);
-            }
+            rbitcoin_consensus::block::reject_prev_link(&prev_bytes, &expect_prev)?;
             pow_hash_meets_target(hash, header.bits, params.pow_limit)?;
         }
         return Ok(());
     }
-    if prev_bytes != prev_meta_hash.unwrap_or([0u8; 32]) {
-        return Err(ConsensusError::BadPrev);
-    }
+    rbitcoin_consensus::block::reject_prev_link(&prev_bytes, &prev_meta_hash.unwrap_or([0u8; 32]))?;
     pow_hash_meets_target(hash, header.bits, params.pow_limit)?;
     Ok(())
 }
@@ -609,40 +605,35 @@ fn stamp_header_fk(
     query: &Query,
     header_rec: &rbitcoin_store::HeaderRecord,
     carried: Option<rbitcoin_primitives::Fk>,
-) -> Result<rbitcoin_primitives::Fk, ConsensusError> {
+) -> Result<rbitcoin_primitives::Fk, ConfirmError> {
     if let Some(fk) = carried {
         match query.store().get_header(fk) {
             Ok(rec) if rec.hash == header_rec.hash => {
-                rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_header_skip_n, 1);
+                crate::note_confirm(&query.confirm_stats().phase_prep_header_skip_n, 1);
                 return Ok(fk);
             }
             Ok(_) | Err(StoreError::NotFound) => {}
-            Err(e) => return Err(ConsensusError::from(e)),
+            Err(e) => return Err(ConfirmError::from(e)),
         }
     }
     if let Some((fk, _)) = query
         .get_header_by_hash(&header_rec.hash)
-        .map_err(ConsensusError::from)?
+        .map_err(ConfirmError::from)?
     {
         Ok(fk)
     } else {
         query
             .store()
             .put_header(header_rec)
-            .map_err(ConsensusError::from)
+            .map_err(ConfirmError::from)
     }
 }
 
-fn lookup_require_contiguous(blocks: &[WireBlockIn]) -> Result<(), ConsensusError> {
-    if blocks.is_empty() {
-        return Err(ConsensusError::BadBlock("empty confirm batch"));
-    }
-    for w in blocks.windows(2) {
-        if w[1].0 .0 != w[0].0 .0.saturating_add(1) {
-            return Err(ConsensusError::BadBlock("confirm run not contiguous"));
-        }
-    }
-    Ok(())
+fn lookup_require_contiguous(blocks: &[WireBlockIn]) -> Result<(), ConfirmError> {
+    rbitcoin_consensus::block::reject_confirm_batch(
+        &blocks.iter().map(|(h, _, _)| h.0).collect::<Vec<_>>(),
+    )
+    .map_err(ConfirmError::from)
 }
 
 fn lookup_note_stamp(
@@ -659,23 +650,23 @@ fn lookup_note_stamp(
         .note_stamp(struct_ns, prepare_ns, filter_ns, batch_ns);
     // `note_confirm` already ignores a zero add. A `> 0` gate here is the
     // same call, and `>` versus `==` would drop a real sample.
-    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_struct_ns, struct_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_header_ns, header_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_prepare_ns, prepare_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_filter_plan_ns, plan_ns);
+    crate::note_confirm(&query.confirm_stats().phase_prep_struct_ns, struct_ns);
+    crate::note_confirm(&query.confirm_stats().phase_prep_header_ns, header_ns);
+    crate::note_confirm(&query.confirm_stats().phase_prep_prepare_ns, prepare_ns);
+    crate::note_confirm(&query.confirm_stats().phase_prep_filter_plan_ns, plan_ns);
 }
 
 fn lookup_bind_have_body(
     query: &Query,
     metas: &mut [BodyMeta],
     wire_blocks: &[Arc<Block>],
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     for (i, m) in metas.iter_mut().enumerate() {
         if let Some(list) = query
             .store()
             .header_txs
             .get_list(m.header_fk)
-            .map_err(ConsensusError::from)?
+            .map_err(ConfirmError::from)?
         {
             m.tx_fks = list;
         }
@@ -697,13 +688,13 @@ fn lookup_bind_need_body<'a>(
     metas: &'a mut [BodyMeta],
     wire_blocks: &'a [Arc<Block>],
     need_fks: &[rbitcoin_primitives::Fk],
-) -> Result<rbitcoin_query::ArchiveWritePlan, ConsensusError> {
+) -> Result<crate::ArchiveWritePlan, ConfirmError> {
     let mut need = Vec::with_capacity(need_fks.len());
     for fk in need_fks {
         let i = metas
             .iter()
             .position(|m| m.header_fk == *fk)
-            .ok_or(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+            .ok_or(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: need-body header_fk not in batch",
             )))?;
         need.push((*fk, &wire_blocks[i], metas[i].txids.as_slice()));
@@ -717,16 +708,16 @@ fn lookup_bind_need_body<'a>(
                 p.skeleton.as_ref(),
                 p.skeleton.is_some().then_some(p.carried_need.as_slice()),
             )
-            .map_err(ConsensusError::from)?,
+            .map_err(ConfirmError::from)?,
         None => query
             .archive_plan_batch_from_wire(
                 &need,
                 query.tx_body_count().saturating_add(1).max(1),
-                &rbitcoin_query::InFlight::new(),
+                &crate::InFlight::new(),
                 None,
                 None,
             )
-            .map_err(ConsensusError::from)?,
+            .map_err(ConfirmError::from)?,
     };
     let by_header = create_fks_from_header_ranges(&plan.per_header_ranges);
     for (i, m) in metas.iter_mut().enumerate() {
@@ -752,12 +743,12 @@ fn lookup_bind_archive_plan(
     pipeline: Option<&WireLoadPipeline>,
     metas: &mut [BodyMeta],
     wire_blocks: &[Arc<Block>],
-) -> Result<(Option<rbitcoin_query::ArchiveWritePlan>, u64, u64), ConsensusError> {
+) -> Result<(Option<crate::ArchiveWritePlan>, u64, u64), ConfirmError> {
     let t_filter = Instant::now();
     let header_fks: Vec<rbitcoin_primitives::Fk> = metas.iter().map(|m| m.header_fk).collect();
     let need_fks = query
         .archive_filter_need_header_fks(&header_fks)
-        .map_err(ConsensusError::from)?;
+        .map_err(ConfirmError::from)?;
     confirm_archive_kind(header_fks.len(), need_fks.len())?;
     let filter_ns = t_filter.elapsed().as_nanos() as u64;
     let t_batch = Instant::now();
@@ -786,13 +777,13 @@ pub(super) enum ConfirmArchiveKind {
 pub(super) fn confirm_archive_kind(
     n_headers: usize,
     n_need: usize,
-) -> Result<ConfirmArchiveKind, ConsensusError> {
+) -> Result<ConfirmArchiveKind, ConfirmError> {
     if n_need == 0 {
         Ok(ConfirmArchiveKind::AllHaveBody)
     } else if n_need == n_headers {
         Ok(ConfirmArchiveKind::AllNeedBody)
     } else {
-        Err(ConsensusError::Store(StoreError::Corrupt(
+        Err(ConfirmError::Store(StoreError::Corrupt(
             "invariant: confirm batch mixed archived",
         )))
     }
@@ -818,6 +809,7 @@ pub(super) fn create_fks_from_header_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IdMap;
     use bitcoin::absolute::LockTime;
     use bitcoin::hashes::Hash;
     use bitcoin::transaction::Version as TxVersion;
@@ -825,10 +817,9 @@ mod tests {
         Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
         TxMerkleNode, TxOut, Txid, Witness,
     };
-    use rbitcoin_query::IdMap;
     use rbitcoin_store::HeaderRecord;
-    fn tmp_query() -> (rbitcoin_query::testutil::TempDir, Query) {
-        rbitcoin_query::testutil::tiny_query_labeled("stamp-archived")
+    fn tmp_query() -> (crate::testutil::TempDir, Query) {
+        crate::testutil::tiny_query_labeled("stamp-archived")
     }
 
     fn spend_block(prev: [u8; 32]) -> Block {
@@ -864,7 +855,7 @@ mod tests {
     /// plan=None rehydrate and the query helper stamp the same skeleton parent.
     #[test]
     fn archived_stamp_matches_shared_helper_on_skeleton() {
-        use rbitcoin_query::BatchParentIds;
+        use crate::BatchParentIds;
         let (path, q) = tmp_query();
         let params = ChainParams::regtest();
         let parent_txid = {
@@ -876,15 +867,15 @@ mod tests {
         m.insert(parent_txid, (rbitcoin_primitives::Fk(88), (4000, 32)));
         let skel = BatchParentIds {
             ids: std::sync::Arc::new(m),
-            spent: std::sync::Arc::new(rbitcoin_query::U64Map::default()),
+            spent: std::sync::Arc::new(crate::U64Map::default()),
             n_out: Default::default(),
-            need_vouts: rbitcoin_query::U64Map::default(),
+            need_vouts: crate::U64Map::default(),
         };
 
-        let helper = rbitcoin_query::stamp_external_parents(
+        let helper = crate::stamp_external_parents(
             q.store(),
             &[parent_txid],
-            &rbitcoin_query::InFlight::new(),
+            &crate::InFlight::new(),
             Some(&skel),
             q.confirm_stats(),
         )
@@ -949,8 +940,8 @@ mod tests {
     #[test]
     fn stamp_uses_caller_pres() {
         use crate::accept_and_connect_block;
-        use crate::regtest_pad::mine_empty_regtest;
-        use rbitcoin_query::TxPrecompute;
+        use crate::TxPrecompute;
+        use rbitcoin_consensus::mine_empty_regtest;
 
         let (path, q) = tmp_query();
         let params = ChainParams::regtest();
@@ -1003,7 +994,7 @@ mod tests {
     #[test]
     fn stamp_skips_header_ensure_when_pipeline_carries_fk() {
         use crate::accept_and_connect_block;
-        use crate::regtest_pad::mine_empty_regtest;
+        use rbitcoin_consensus::mine_empty_regtest;
         use std::sync::atomic::Ordering;
 
         let (path, q) = tmp_query();
@@ -1020,7 +1011,7 @@ mod tests {
         let rec = crate::header_to_record(genesis_fk, &b1.header, hash);
         let hfk = q.store().put_header(&rec).unwrap();
         let n_headers = q.store().headers.count();
-        let inflight = rbitcoin_query::InFlight::new();
+        let inflight = crate::InFlight::new();
         let pipe = WireLoadPipeline {
             path_lo: 1,
             parent_hash: None,
@@ -1060,7 +1051,7 @@ mod tests {
             carried_header_hashes: vec![[0x11; 32]],
         };
         match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&pipe_bad)) {
-            Err(ConsensusError::BadBlock("carried header hash mismatch")) => {}
+            Err(ConfirmError::Rules(ConsensusError::BadBlock("carried header hash mismatch"))) => {}
             Err(e) => panic!("expected hash mismatch, got {e}"),
             Ok(_) => panic!("expected hash mismatch, got Ok"),
         }
@@ -1070,7 +1061,7 @@ mod tests {
     #[test]
     fn stamp_does_not_bind_carried_fk_when_store_hash_differs() {
         use crate::accept_and_connect_block;
-        use crate::regtest_pad::mine_empty_regtest;
+        use rbitcoin_consensus::mine_empty_regtest;
         use std::sync::atomic::Ordering;
 
         let (path, q) = tmp_query();
@@ -1085,7 +1076,7 @@ mod tests {
         let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
         let hash = b1.block_hash().to_byte_array();
         let n_headers = q.store().headers.count();
-        let inflight = rbitcoin_query::InFlight::new();
+        let inflight = crate::InFlight::new();
         let pipe = WireLoadPipeline {
             path_lo: 1,
             parent_hash: None,
@@ -1117,7 +1108,7 @@ mod tests {
     #[test]
     fn stamp_rejects_carried_header_length_mismatch() {
         use crate::accept_and_connect_block;
-        use crate::regtest_pad::mine_empty_regtest;
+        use rbitcoin_consensus::mine_empty_regtest;
 
         let (path, q) = tmp_query();
         let params = ChainParams::regtest();
@@ -1125,7 +1116,7 @@ mod tests {
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
         let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
         let hash = b1.block_hash().to_byte_array();
-        let inflight = rbitcoin_query::InFlight::new();
+        let inflight = crate::InFlight::new();
         let pipe = WireLoadPipeline {
             path_lo: 1,
             parent_hash: None,
@@ -1148,14 +1139,12 @@ mod tests {
         };
         let items = [(Height(1), Arc::new(b1), None)];
         match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&pipe)) {
-            Err(ConsensusError::Store(StoreError::Corrupt("invariant: carried header length"))) => {
-            }
+            Err(ConfirmError::Store(StoreError::Corrupt("invariant: carried header length"))) => {}
             Err(e) => panic!("expected carried header length, got {e}"),
             Ok(_) => panic!("expected carried header length, got Ok"),
         }
         match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &items, Some(&fks_only)) {
-            Err(ConsensusError::Store(StoreError::Corrupt("invariant: carried header length"))) => {
-            }
+            Err(ConfirmError::Store(StoreError::Corrupt("invariant: carried header length"))) => {}
             Err(e) => panic!("one carried side must still be checked, got {e}"),
             Ok(_) => panic!("empty fks with a hash must fail the length check"),
         }
@@ -1192,7 +1181,7 @@ mod tests {
     fn archived_create_pairs_len_mismatch_is_corrupt() {
         let meta = meta_with(vec![[1u8; 32], [2u8; 32]], vec![rbitcoin_primitives::Fk(1)]);
         match archived_create_pairs(std::slice::from_ref(&meta)) {
-            Err(ConsensusError::Store(StoreError::Corrupt(m))) => {
+            Err(ConfirmError::Store(StoreError::Corrupt(m))) => {
                 assert_eq!(m, "invariant: archived stamp tx_fks/txids length");
             }
             other => panic!("expected length Corrupt, got {other:?}"),

@@ -4,10 +4,10 @@ use super::{
     confirm_archive_kind, write_batch_vs_tip, write_height_needed, ConfirmArchiveKind,
     WriteBatchVsTip,
 };
-use rbitcoin_query::testutil::FixtureChain;
+use crate::testutil::FixtureChain;
 
-fn tmp_query() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
-    rbitcoin_query::testutil::tiny_query_labeled("write-idemp")
+fn tmp_query() -> (crate::testutil::TempDir, crate::Query) {
+    crate::testutil::tiny_query_labeled("write-idemp")
 }
 
 #[test]
@@ -85,10 +85,10 @@ fn script_ok_append_contiguous_and_gap() {
     fn batch_one(h: u32) -> ScriptOkBatch {
         ScriptOkBatch {
             prepared: vec![empty_prepared(h, h as u8)],
-            wire_blocks: vec![Arc::new(crate::params::genesis_block(
-                &crate::params::ChainParams::regtest(),
+            wire_blocks: vec![Arc::new(rbitcoin_consensus::genesis_block(
+                &rbitcoin_consensus::ChainParams::regtest(),
             ))],
-            batch_parents: rbitcoin_query::BatchParents::new(),
+            batch_parents: crate::BatchParents::new(),
             archive_plan: None,
             index_seal: super::index::IndexSeal::default(),
         }
@@ -111,7 +111,7 @@ fn script_ok_append_contiguous_and_gap() {
         .append_contiguous(ScriptOkBatch {
             prepared: vec![],
             wire_blocks: vec![],
-            batch_parents: rbitcoin_query::BatchParents::new(),
+            batch_parents: crate::BatchParents::new(),
             archive_plan: None,
             index_seal: super::index::IndexSeal::default(),
         })
@@ -122,7 +122,7 @@ fn script_ok_append_contiguous_and_gap() {
     let mut empty = ScriptOkBatch {
         prepared: vec![],
         wire_blocks: vec![],
-        batch_parents: rbitcoin_query::BatchParents::new(),
+        batch_parents: crate::BatchParents::new(),
         archive_plan: None,
         index_seal: super::index::IndexSeal::default(),
     };
@@ -142,9 +142,9 @@ fn script_ok_append_contiguous_and_gap() {
 
     // archive_plan merge: Some+Some concatenates; mixed polarity is leftover.
     let mut with_plan = batch_one(70);
-    with_plan.archive_plan = Some(rbitcoin_query::ArchiveWritePlan::empty());
+    with_plan.archive_plan = Some(crate::ArchiveWritePlan::empty());
     let mut next = batch_one(71);
-    next.archive_plan = Some(rbitcoin_query::ArchiveWritePlan::empty());
+    next.archive_plan = Some(crate::ArchiveWritePlan::empty());
     assert!(with_plan.append_contiguous(next).is_ok());
     assert!(with_plan.archive_plan.is_some());
     let mut only_other = batch_one(72);
@@ -157,7 +157,7 @@ fn script_ok_append_contiguous_and_gap() {
     assert!(with_plan.archive_plan.is_some());
     let mut no_plan = batch_one(80);
     let mut has = batch_one(81);
-    has.archive_plan = Some(rbitcoin_query::ArchiveWritePlan::empty());
+    has.archive_plan = Some(crate::ArchiveWritePlan::empty());
     let err = no_plan
         .append_contiguous(has)
         .expect_err("None+Some polarity");
@@ -201,11 +201,11 @@ fn three_stage_write_filter_and_scripts_surface() {
     let batch = LoadedBatch {
         prepared: Vec::new(),
         wire_blocks: Vec::new(),
-        batch_parents: rbitcoin_query::BatchParents::new(),
+        batch_parents: crate::BatchParents::new(),
         script_preverified: ScriptPreverified::new(),
         archive_plan: None,
         index_want: super::index::IndexWant::default(),
-        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
+        stats: std::sync::Arc::new(crate::ConfirmStats::default()),
     };
     assert!(batch.is_empty());
     assert_eq!(batch.approx_wire_bytes(), 0);
@@ -214,11 +214,11 @@ fn three_stage_write_filter_and_scripts_surface() {
     let mut metered = LoadedBatch {
         prepared: Vec::new(),
         wire_blocks: vec![std::sync::Arc::new(genesis)],
-        batch_parents: rbitcoin_query::BatchParents::new(),
+        batch_parents: crate::BatchParents::new(),
         script_preverified: ScriptPreverified::new(),
         archive_plan: None,
         index_want: super::index::IndexWant::default(),
-        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
+        stats: std::sync::Arc::new(crate::ConfirmStats::default()),
     };
     assert!(metered.approx_wire_bytes() > 0);
     let mut txid = [0u8; 32];
@@ -280,7 +280,7 @@ fn confirm_archive_kind_refuses_mixed() {
     );
     let err = confirm_archive_kind(3, 2).unwrap_err();
     match err {
-        crate::error::ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(m)) => {
+        crate::ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(m)) => {
             assert_eq!(m, "invariant: confirm batch mixed archived");
         }
         other => panic!("expected mixed archived, got {other:?}"),
@@ -293,11 +293,11 @@ fn empty_loaded_batch() -> super::LoadedBatch {
     super::LoadedBatch {
         prepared: Vec::new(),
         wire_blocks: Vec::new(),
-        batch_parents: rbitcoin_query::BatchParents::new(),
+        batch_parents: crate::BatchParents::new(),
         script_preverified: super::ScriptPreverified::new(),
         archive_plan: None,
         index_want: super::index::IndexWant::default(),
-        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
+        stats: std::sync::Arc::new(crate::ConfirmStats::default()),
     }
 }
 
@@ -365,7 +365,7 @@ fn drive_script_waves_ordered_without_coordinator_threads() {
 fn prepared_at(
     height: u32,
     hash: [u8; 32],
-    jobs: Vec<crate::block::ScriptCheckJob>,
+    jobs: Vec<rbitcoin_consensus::block::ScriptCheckJob>,
     check_scripts: bool,
 ) -> super::Prepared {
     use bitcoin::CompactTarget;
@@ -388,21 +388,21 @@ fn prepared_at(
 fn loaded_at(
     height: u32,
     hash: [u8; 32],
-    jobs: Vec<crate::block::ScriptCheckJob>,
+    jobs: Vec<rbitcoin_consensus::block::ScriptCheckJob>,
     check_scripts: bool,
 ) -> super::LoadedBatch {
     super::LoadedBatch {
         prepared: vec![prepared_at(height, hash, jobs, check_scripts)],
         wire_blocks: Vec::new(),
-        batch_parents: rbitcoin_query::BatchParents::new(),
+        batch_parents: crate::BatchParents::new(),
         script_preverified: super::ScriptPreverified::new(),
         archive_plan: None,
         index_want: super::index::IndexWant::default(),
-        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
+        stats: std::sync::Arc::new(crate::ConfirmStats::default()),
     }
 }
 
-fn bad_p2pkh_job() -> crate::block::ScriptCheckJob {
+fn bad_p2pkh_job() -> rbitcoin_consensus::block::ScriptCheckJob {
     use bitcoin::absolute::LockTime;
     use bitcoin::hashes::Hash;
     use bitcoin::script::ScriptBuf;
@@ -433,11 +433,11 @@ fn bad_p2pkh_job() -> crate::block::ScriptCheckJob {
         }],
     };
     let tid = tx.compute_txid().to_byte_array();
-    crate::block::ScriptCheckJob::with_txid(
+    rbitcoin_consensus::block::ScriptCheckJob::with_txid(
         tid,
         prevouts,
         tx,
-        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        rbitcoin_consensus::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     )
 }
 
@@ -517,9 +517,10 @@ fn script_jobs_shrink_after_take() {
 #[test]
 fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     use crate::accept_and_connect_block;
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
-    use crate::regtest_pad::{mine_empty_regtest, pad_empty_from};
+    use crate::pad_empty_from;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::Height;
     let (path, q) = tmp_query();
     let params = ChainParams::regtest();
@@ -548,7 +549,7 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
     raw[8..16].copy_from_slice(&new_logical.to_le_bytes());
     std::fs::write(&conf, &raw).unwrap();
 
-    let q = rbitcoin_query::Query::open_or_create_tiny(&path).unwrap();
+    let q = crate::Query::open_or_create_tiny(&path).unwrap();
     assert_eq!(q.tip_height().map(|h| h.0), Some(3));
     let nxt = mine_empty_regtest(tip, tip_time + 600, 4);
     let r = accept_and_connect_block(&q, &params, Height(4), &nxt, Milestone::NONE);
@@ -570,8 +571,8 @@ fn tip_plus_one_after_trailing_null_heal_is_not_notfound() {
 #[test]
 fn expected_bits_extending_height0_and_no_retarget() {
     use super::expected_bits_extending;
-    use crate::params::ChainParams;
     use bitcoin::CompactTarget;
+    use rbitcoin_consensus::ChainParams;
     use rbitcoin_primitives::Height;
     let (path, q) = tmp_query();
     let params = ChainParams::regtest();
@@ -584,7 +585,10 @@ fn expected_bits_extending_height0_and_no_retarget() {
         0,
     )
     .unwrap();
-    assert_eq!(gbits, crate::params::genesis_block(&params).header.bits);
+    assert_eq!(
+        gbits,
+        rbitcoin_consensus::genesis_block(&params).header.bits
+    );
     // No-pow-retargeting: any height returns prev_bits.
     let prev = CompactTarget::from_consensus(0x207f_ffff);
     let b = expected_bits_extending(&q, &params, Height(2016), prev, 100, 0).unwrap();
@@ -595,11 +599,11 @@ fn expected_bits_extending_height0_and_no_retarget() {
     let loaded = LoadedBatch {
         prepared: Vec::new(),
         wire_blocks: Vec::new(),
-        batch_parents: rbitcoin_query::BatchParents::new(),
+        batch_parents: crate::BatchParents::new(),
         script_preverified: ScriptPreverified::new(),
         archive_plan: None,
         index_want: super::index::IndexWant::default(),
-        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
+        stats: std::sync::Arc::new(crate::ConfirmStats::default()),
     };
     let ok = confirm_scripts_phase(loaded).unwrap();
     assert!(ok.batch.is_empty());
@@ -642,7 +646,7 @@ fn expected_bits_extending_height0_and_no_retarget() {
         },
         txdata: vec![cb],
     };
-    assert!(crate::block::check_bip34_coinbase(&block.txdata[0], 17).is_err());
+    assert!(rbitcoin_consensus::block::check_bip34_coinbase(&block.txdata[0], 17).is_err());
 
     let _ = std::fs::remove_dir_all(&path);
 }
@@ -660,8 +664,8 @@ fn expected_bits_extending_height0_and_no_retarget() {
 #[test]
 fn expected_bits_extending_uses_header_plan_when_period_start_above_tip() {
     use super::expected_bits_extending;
-    use crate::params::ChainParams;
     use bitcoin::CompactTarget;
+    use rbitcoin_consensus::ChainParams;
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_store::HeaderRecord;
     let (path, q) = tmp_query();
@@ -727,12 +731,12 @@ fn expected_bits_extending_uses_header_plan_when_period_start_above_tip() {
 #[test]
 fn script_wave_skips_preverified_txids() {
     use super::{confirm_scripts_phase, LoadedBatch, Prepared, ScriptPreverified};
-    use crate::block::ScriptCheckJob;
     use bitcoin::absolute::LockTime;
     use bitcoin::hashes::Hash;
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_consensus::block::ScriptCheckJob;
     use rbitcoin_primitives::{Fk, Height};
 
     let prevouts = vec![TxOut {
@@ -769,7 +773,7 @@ fn script_wave_skips_preverified_txids() {
         tid,
         prevouts,
         tx,
-        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        rbitcoin_consensus::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     );
     let prepared = Prepared {
         height: Height(1),
@@ -787,24 +791,24 @@ fn script_wave_skips_preverified_txids() {
     let batch = LoadedBatch {
         prepared: vec![prepared],
         wire_blocks: vec![],
-        batch_parents: rbitcoin_query::BatchParents::new(),
+        batch_parents: crate::BatchParents::new(),
         script_preverified: pre,
         archive_plan: None,
         index_want: super::index::IndexWant::default(),
-        stats: std::sync::Arc::new(rbitcoin_query::ConfirmStats::default()),
+        stats: std::sync::Arc::new(crate::ConfirmStats::default()),
     };
     confirm_scripts_phase(batch).expect("preverified skip avoids bad script fail");
 }
 
-fn tiny_query() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
+fn tiny_query() -> (crate::testutil::TempDir, crate::Query) {
     let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
     (path, q)
 }
 
-fn fill_edges_from_packed(plan: &mut rbitcoin_query::ArchiveWritePlan) {
+fn fill_edges_from_packed(plan: &mut crate::ArchiveWritePlan) {
+    use crate::SpendEdge;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::SpendEdge;
     if !plan.edges.is_empty() {
         return;
     }
@@ -854,8 +858,8 @@ fn pin_and_ensure_journey() {
     use super::{
         ensure_spend_abs_layouts, pin_for_wire_batch, post_commit, ParentPinStamp, Prepared,
     };
+    use crate::{ArchiveWritePlan, BatchParents};
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::{ArchiveWritePlan, BatchParents};
     use rbitcoin_store::{InputRecord, OutputRecord};
 
     let (path, q) = tiny_query();
@@ -863,10 +867,7 @@ fn pin_and_ensure_journey() {
     let missing_parent = Fk(999_999);
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            rec_tx(0xAA, 1),
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(rec_tx(0xAA, 1), vec![OutputRecord::unspent(1, vec![0x51])]),
         vec![InputRecord {
             prev_txid: [0xBB; 32],
             parent: rbitcoin_store::InputParent::Prevout {
@@ -914,7 +915,7 @@ fn pin_and_ensure_journey() {
         "unexpected err: {msg}"
     );
 
-    post_commit(&q, &crate::block::AnnotateSlots::default())
+    post_commit(&q, &crate::block_pipeline::AnnotateSlots::default())
         .expect("empty annotate list does not consult BatchParents");
 
     let parent_tx = rec_tx(0x11, 1);
@@ -943,16 +944,13 @@ fn pin_and_ensure_journey() {
     }];
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            rec_tx(0x22, 1),
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(rec_tx(0x22, 1), vec![OutputRecord::unspent(1, vec![0x51])]),
         spend_ins.clone(),
     )];
     plan.planned_fks = vec![Fk(2)];
     plan.external_parents.insert(
         parent_id,
-        rbitcoin_query::ParentIdent::with_loc(parent_tx.txid, range, (spent_off, spent_len), 1),
+        crate::ParentIdent::with_loc(parent_tx.txid, range, (spent_off, spent_len), 1),
     );
     let mut stamp = ParentPinStamp::take_from_plan(&mut plan);
     fill_edges_from_packed(&mut plan);
@@ -968,16 +966,13 @@ fn pin_and_ensure_journey() {
 
     let mut plan2 = ArchiveWritePlan::empty();
     plan2.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            rec_tx(0x22, 1),
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(rec_tx(0x22, 1), vec![OutputRecord::unspent(1, vec![0x51])]),
         spend_ins.clone(),
     )];
     plan2.planned_fks = vec![Fk(2)];
     plan2.external_parents.insert(
         parent_id,
-        rbitcoin_query::ParentIdent::with_body(parent_tx.txid, range),
+        crate::ParentIdent::with_body(parent_tx.txid, range),
     );
     let mut empty_stamp = ParentPinStamp::default();
     fill_edges_from_packed(&mut plan2);
@@ -1052,16 +1047,13 @@ fn pin_and_ensure_journey() {
 
     let mut plan3 = ArchiveWritePlan::empty();
     plan3.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            rec_tx(0x22, 1),
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(rec_tx(0x22, 1), vec![OutputRecord::unspent(1, vec![0x51])]),
         spend_ins,
     )];
     plan3.planned_fks = vec![Fk(2)];
     plan3.external_parents.insert(
         parent_id,
-        rbitcoin_query::ParentIdent {
+        crate::ParentIdent {
             txid: parent_tx.txid,
             body: Some(range),
             spent: Some((spent_off, spent_len)),
@@ -1087,14 +1079,14 @@ fn pin_and_ensure_journey() {
     let mut plan4 = ArchiveWritePlan::empty();
     plan4.packed = vec![
         (
-            rbitcoin_query::CreatePinInner::records(
+            crate::CreatePinInner::records(
                 rec_tx(0x32, 1),
                 vec![OutputRecord::unspent(1, vec![0x51])],
             ),
             vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         ),
         (
-            rbitcoin_query::CreatePinInner::records(
+            crate::CreatePinInner::records(
                 rec_tx(0x33, 1),
                 vec![OutputRecord::unspent(1, vec![0x51])],
             ),
@@ -1162,19 +1154,15 @@ fn pin_and_ensure_journey() {
 #[test]
 fn fill_same_batch_abs_from_append_loc_ram() {
     use super::{ensure_spend_abs_layouts, fill_planned_create_layout_after_commit, Prepared};
+    use crate::BatchParents;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::BatchParents;
     use rbitcoin_store::{InputRecord, OutputRecord};
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x32, 1),
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
-    let child_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x33, 1),
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let parent_pin =
+        crate::CreatePinInner::records(rec_tx(0x32, 1), vec![OutputRecord::unspent(1, vec![0x51])]);
+    let child_pin =
+        crate::CreatePinInner::records(rec_tx(0x33, 1), vec![OutputRecord::unspent(1, vec![0x51])]);
     let parent_ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let child_ins = vec![InputRecord {
         prev_txid: [0x32; 32],
@@ -1243,10 +1231,8 @@ fn fill_same_batch_abs_from_append_loc_ram() {
 
     let mut multi_tx = rec_tx(0x44, 1);
     multi_tx.input_count = 2;
-    let multi_pin = rbitcoin_query::CreatePinInner::records(
-        multi_tx,
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let multi_pin =
+        crate::CreatePinInner::records(multi_tx, vec![OutputRecord::unspent(1, vec![0x51])]);
     let multi_fk = Fk(50);
     let multi_loc = rbitcoin_store::CreateLocPair {
         txout: (10, 8),
@@ -1352,9 +1338,8 @@ fn fill_same_batch_abs_from_append_loc_ram() {
 /// Overlay slot already in Class A: structural must not meta-pread it.
 #[test]
 fn structural_same_batch_overlay_skips_meta_pread() {
-    use crate::block::{structural_validate_spends, RunCreateHeight};
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
+    use crate::block_pipeline::{structural_validate_spends, RunCreateHeight};
+    use crate::{BatchParents, FkMap, OutPointSet};
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -1364,23 +1349,22 @@ fn structural_same_batch_overlay_skips_meta_pread() {
         Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut,
         Witness,
     };
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::{BatchParents, FkMap, OutPointSet};
     use rbitcoin_store::{InputRecord, OutputRecord};
     use std::sync::atomic::Ordering;
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
+    let parent_pin = crate::CreatePinInner::records(
         rec_tx(0x32, 2),
         vec![
             OutputRecord::unspent(7, vec![0x51]),
             OutputRecord::unspent(8, vec![0x52]),
         ],
     );
-    let child_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x33, 1),
-        vec![OutputRecord::unspent(5, vec![0x51])],
-    );
+    let child_pin =
+        crate::CreatePinInner::records(rec_tx(0x33, 1), vec![OutputRecord::unspent(5, vec![0x51])]);
     let parent_ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let child_ins = vec![InputRecord {
         prev_txid: [0x32; 32],
@@ -1474,11 +1458,11 @@ fn structural_same_batch_overlay_skips_meta_pread() {
     map.insert(fks[1], (1, false));
     let run = RunCreateHeight::Map(map);
     let params = ChainParams::regtest();
-    let ctx = crate::block::ValidationContext::at(&params, Height(1), Milestone::NONE);
+    let ctx = rbitcoin_consensus::block::ValidationContext::at(&params, Height(1), Milestone::NONE);
     let mut pending = OutPointSet::default();
-    let mut mtp = rbitcoin_query::U32Map::<u32>::default();
+    let mut mtp = crate::U32Map::<u32>::default();
     mtp.insert(0, 1_300_000_000);
-    let mut scratch = crate::block::StructuralScratch::default();
+    let mut scratch = crate::block_pipeline::StructuralScratch::default();
     let meta0 = q.confirm_stats().spend_meta_n.load(Ordering::Relaxed);
     let ovl0 = q
         .confirm_stats()
@@ -1495,7 +1479,7 @@ fn structural_same_batch_overlay_skips_meta_pread() {
         &bp,
         &mut mtp,
         &run,
-        &crate::block::ClassAWave::new(fks.clone()),
+        &crate::block_pipeline::ClassAWave::new(fks.clone()),
         &mut scratch,
         &abs_jobs,
     )
@@ -1530,9 +1514,8 @@ fn structural_same_batch_overlay_skips_meta_pread() {
 
 #[test]
 fn structural_scratch_second_block_does_not_replay_first_slots() {
-    use crate::block::{structural_validate_spends, RunCreateHeight, StructuralScratch};
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
+    use crate::block_pipeline::{structural_validate_spends, RunCreateHeight, StructuralScratch};
+    use crate::{BatchParents, OutPointSet};
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -1542,12 +1525,13 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
         Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut,
         Witness,
     };
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::{BatchParents, OutPointSet};
     use rbitcoin_store::{InputRecord, OutputRecord};
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
+    let parent_pin = crate::CreatePinInner::records(
         rec_tx(0x41, 2),
         vec![
             OutputRecord::unspent(1, vec![0x51]),
@@ -1624,9 +1608,9 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
     };
     block.header.merkle_root = block.compute_merkle_root().unwrap();
     let params = ChainParams::regtest();
-    let ctx = crate::block::ValidationContext::at(&params, Height(1), Milestone::NONE);
+    let ctx = rbitcoin_consensus::block::ValidationContext::at(&params, Height(1), Milestone::NONE);
     let mut pending = OutPointSet::default();
-    let mut mtp = rbitcoin_query::U32Map::<u32>::default();
+    let mut mtp = crate::U32Map::<u32>::default();
     mtp.insert(0, 1_300_000_000);
     let mut scratch = StructuralScratch::default();
     let run = RunCreateHeight::Spans(Vec::new());
@@ -1650,7 +1634,7 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
             &bp,
             &mut mtp,
             &run,
-            &crate::block::ClassAWave::default(),
+            &crate::block_pipeline::ClassAWave::default(),
             &mut scratch,
             &abs_jobs,
         )
@@ -1675,16 +1659,14 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
 #[test]
 fn post_commit_spend_index_off_leaves_slots_unwritten() {
     use super::post_commit;
-    use crate::block::AnnotateSlots;
+    use crate::block_pipeline::AnnotateSlots;
     use rbitcoin_primitives::Fk;
     use rbitcoin_store::OutputRecord;
     use std::sync::atomic::Ordering;
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x61, 1),
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let parent_pin =
+        crate::CreatePinInner::records(rec_tx(0x61, 1), vec![OutputRecord::unspent(1, vec![0x51])]);
     let (fks, _loc) = q
         .store()
         .put_tx_full_batch_from_pins(
@@ -1722,15 +1704,13 @@ fn post_commit_spend_index_off_leaves_slots_unwritten() {
 #[test]
 fn fill_just_written_survives_until_last_started_write() {
     use super::{ensure_spend_abs_layouts, fill_planned_create_layout_after_commit, Prepared};
+    use crate::BatchParents;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::BatchParents;
     use rbitcoin_store::OutputRecord;
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x32, 1),
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let parent_pin =
+        crate::CreatePinInner::records(rec_tx(0x32, 1), vec![OutputRecord::unspent(1, vec![0x51])]);
 
     let (fks, loc) = q
         .store()
@@ -1796,16 +1776,14 @@ fn fill_just_written_survives_until_last_started_write() {
 #[test]
 fn fill_stamp_spent_hole_from_write_tls() {
     use super::{ensure_spend_abs_layouts, fill_planned_create_layout_after_commit, Prepared};
+    use crate::{stamp_external_parents, BatchParentIds, BatchParents, InFlight};
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::{stamp_external_parents, BatchParentIds, BatchParents, InFlight};
     use rbitcoin_store::OutputRecord;
     use std::sync::atomic::Ordering;
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x32, 1),
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let parent_pin =
+        crate::CreatePinInner::records(rec_tx(0x32, 1), vec![OutputRecord::unspent(1, vec![0x51])]);
 
     let (fks, loc) = q
         .store()
@@ -1875,15 +1853,13 @@ fn fill_stamp_spent_hole_from_write_tls() {
 #[test]
 fn pin_and_ensure_from_pin_loc_without_tls() {
     use super::{ensure_spend_abs_layouts, pin_for_wire_batch, ParentPinStamp, Prepared};
+    use crate::{stamp_external_parents, ArchiveWritePlan, InFlight};
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::{stamp_external_parents, ArchiveWritePlan, InFlight};
     use rbitcoin_store::{InputRecord, OutputRecord};
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x41, 1),
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let parent_pin =
+        crate::CreatePinInner::records(rec_tx(0x41, 1), vec![OutputRecord::unspent(1, vec![0x51])]);
     let (fks, loc) = q
         .store()
         .put_tx_full_batch_from_pins(
@@ -1908,7 +1884,7 @@ fn pin_and_ensure_from_pin_loc_without_tls() {
         q.store(),
         &[parent_pin.tx().txid],
         &inflight,
-        Some(&rbitcoin_query::BatchParentIds::default()),
+        Some(&crate::BatchParentIds::default()),
         q.confirm_stats(),
     )
     .expect("pin loc without disk");
@@ -1928,10 +1904,7 @@ fn pin_and_ensure_from_pin_loc_without_tls() {
     }];
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            rec_tx(0x42, 1),
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(rec_tx(0x42, 1), vec![OutputRecord::unspent(1, vec![0x51])]),
         spend_ins,
     )];
     plan.planned_fks = vec![Fk(2)];
@@ -1964,8 +1937,8 @@ fn pin_and_ensure_from_pin_loc_without_tls() {
 #[test]
 fn pin_creates_only_ibd_skeleton_miss_is_lookup_stage_miss() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::{ArchiveWritePlan, ParentIdent};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, ParentIdent};
     use rbitcoin_store::{InputRecord, OutputRecord};
 
     let (path, q) = tiny_query();
@@ -1982,10 +1955,7 @@ fn pin_creates_only_ibd_skeleton_miss_is_lookup_stage_miss() {
         .unwrap();
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            rec_tx(0x52, 1),
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(rec_tx(0x52, 1), vec![OutputRecord::unspent(1, vec![0x51])]),
         vec![InputRecord {
             prev_txid: parent_tx.txid,
             parent: rbitcoin_store::InputParent::Prevout {
@@ -2015,8 +1985,8 @@ fn pin_creates_only_ibd_skeleton_miss_is_lookup_stage_miss() {
 #[test]
 fn pin_for_wire_incomplete_outs_is_invariant_error() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::ArchiveWritePlan;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
@@ -2045,10 +2015,7 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
     }];
     let mut plan = ArchiveWritePlan {
         packed: vec![(
-            rbitcoin_query::CreatePinInner::records(
-                spend_tx,
-                vec![OutputRecord::unspent(1, vec![0x51])],
-            ),
+            crate::CreatePinInner::records(spend_tx, vec![OutputRecord::unspent(1, vec![0x51])]),
             spend_ins,
         )],
         planned_fks: vec![Fk(2)],
@@ -2075,8 +2042,8 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
         output_start_fk: Fk::NULL,
         output_count: 0,
     };
-    let pin = rbitcoin_query::CreatePinInner::records(parent_tx, Vec::new());
-    let mut inflight = rbitcoin_query::InFlight::new();
+    let pin = crate::CreatePinInner::records(parent_tx, Vec::new());
+    let mut inflight = crate::InFlight::new();
     inflight.note_pins([(Fk(parent_id), &pin)], None);
 
     let mut parent_pin = ParentPinStamp::take_from_plan(&mut plan);
@@ -2096,7 +2063,7 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
 #[test]
 fn parent_pin_stamp_take_from_plan_moves_maps() {
     use super::ParentPinStamp;
-    use rbitcoin_query::{ArchiveWritePlan, ParentIdent, U64Map};
+    use crate::{ArchiveWritePlan, ParentIdent, U64Map};
 
     let mut idents = U64Map::default();
     idents.insert(
@@ -2139,8 +2106,8 @@ fn parent_pin_stamp_take_from_plan_moves_maps() {
 #[test]
 fn pin_takes_stamp_parent_vouts() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::ArchiveWritePlan;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     let (path, q) = tmp_query();
     let parent_tx = TxRecord {
@@ -2167,7 +2134,7 @@ fn pin_takes_stamp_parent_vouts() {
     let range = q.store().txs.body_range(pfk).unwrap();
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
+        crate::CreatePinInner::records(
             TxRecord {
                 txid: [0x22u8; 32],
                 version: 1,
@@ -2194,7 +2161,7 @@ fn pin_takes_stamp_parent_vouts() {
     let spent = q.store().tx_spent_range(pfk).unwrap();
     plan.external_parents.insert(
         parent_id,
-        rbitcoin_query::ParentIdent::with_loc(parent_tx.txid, range, spent, 1),
+        crate::ParentIdent::with_loc(parent_tx.txid, range, spent, 1),
     );
     plan.external_parent_vouts.insert(parent_id, vec![0]);
     let mut stamp = ParentPinStamp::take_from_plan(&mut plan);
@@ -2215,8 +2182,8 @@ fn pin_takes_stamp_parent_vouts() {
 #[test]
 fn pin_for_wire_create_pin_shares_script_bytes() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::{ArchiveWritePlan, CreatePin};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
@@ -2231,10 +2198,8 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
         output_start_fk: Fk::NULL,
         output_count: 1,
     };
-    let pin: CreatePin = rbitcoin_query::CreatePinInner::records(
-        parent_tx.clone(),
-        vec![OutputRecord::unspent(50, script)],
-    );
+    let pin: CreatePin =
+        crate::CreatePinInner::records(parent_tx.clone(), vec![OutputRecord::unspent(50, script)]);
     let expect = pin.out_parts(0).expect("vout 0").1.as_ptr();
     let child_tx = TxRecord {
         txid: [0x42u8; 32],
@@ -2252,10 +2217,7 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
             vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         ),
         (
-            rbitcoin_query::CreatePinInner::records(
-                child_tx,
-                vec![OutputRecord::unspent(1, vec![0x51])],
-            ),
+            crate::CreatePinInner::records(child_tx, vec![OutputRecord::unspent(1, vec![0x51])]),
             vec![InputRecord {
                 prev_txid: parent_tx.txid,
                 parent: rbitcoin_store::InputParent::Prevout {
@@ -2300,9 +2262,9 @@ fn write_encodes_seqsigwit_from_wire() {
         confirm_write_phase, ScriptPreverified,
     };
     use crate::accept_and_connect_block;
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
-    use crate::regtest_pad::mine_empty_regtest;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::Height;
     use std::sync::Arc;
 
@@ -2345,8 +2307,8 @@ fn write_encodes_seqsigwit_from_wire() {
 #[test]
 fn pin_plan_edges_without_packed_ins() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::{ArchiveWritePlan, CreatePin, SpendEdge};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin, SpendEdge};
     use rbitcoin_store::{OutputRecord, TxRecord};
     use std::sync::Arc;
     let (path, q) = tmp_query();
@@ -2361,7 +2323,7 @@ fn pin_plan_edges_without_packed_ins() {
         output_start_fk: Fk::NULL,
         output_count: 1,
     };
-    let pin: CreatePin = rbitcoin_query::CreatePinInner::records(
+    let pin: CreatePin = crate::CreatePinInner::records(
         parent_tx.clone(),
         vec![OutputRecord::unspent(50, vec![0x51])],
     );
@@ -2378,10 +2340,7 @@ fn pin_plan_edges_without_packed_ins() {
     plan.packed = vec![
         (Arc::clone(&pin), vec![]),
         (
-            rbitcoin_query::CreatePinInner::records(
-                child_tx,
-                vec![OutputRecord::unspent(1, vec![0x51])],
-            ),
+            crate::CreatePinInner::records(child_tx, vec![OutputRecord::unspent(1, vec![0x51])]),
             vec![],
         ),
     ];
@@ -2413,13 +2372,13 @@ fn pin_plan_edges_without_packed_ins() {
 #[test]
 fn pin_plan_empty_edges_is_invariant() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::ArchiveWritePlan;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{OutputRecord, TxRecord};
     use std::sync::Arc;
     let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
-    let pin = rbitcoin_query::CreatePinInner::records(
+    let pin = crate::CreatePinInner::records(
         TxRecord {
             txid: [0x11u8; 32],
             version: 1,
@@ -2450,8 +2409,8 @@ fn pin_plan_empty_edges_is_invariant() {
 #[test]
 fn pin_sparse_need_high_vout_only() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::{ArchiveWritePlan, CreatePin};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
@@ -2501,10 +2460,8 @@ fn pin_sparse_need_high_vout_only() {
         script_sig: vec![],
         witness: vec![],
     }];
-    let spend_pin: CreatePin = rbitcoin_query::CreatePinInner::records(
-        spend_tx,
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let spend_pin: CreatePin =
+        crate::CreatePinInner::records(spend_tx, vec![OutputRecord::unspent(1, vec![0x51])]);
     let mut plan = ArchiveWritePlan {
         packed: vec![(Arc::clone(&spend_pin), spend_ins)],
         planned_fks: vec![Fk(2)],
@@ -2513,11 +2470,11 @@ fn pin_sparse_need_high_vout_only() {
         edges: Default::default(),
         batch_creates: vec![],
         external_parents: {
-            let mut m = rbitcoin_query::U64Map::default();
+            let mut m = crate::U64Map::default();
             let spent = q.store().tx_spent_range(pfk).unwrap();
             m.insert(
                 parent_id,
-                rbitcoin_query::ParentIdent::with_loc(parent_tx.txid, range, spent, 4),
+                crate::ParentIdent::with_loc(parent_tx.txid, range, spent, 4),
             );
             m
         },
@@ -2549,8 +2506,8 @@ fn pin_sparse_need_high_vout_only() {
 #[test]
 fn pin_range_fill_does_not_count_as_cache_hit() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::ArchiveWritePlan;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
 
     let (path, q) = tmp_query();
@@ -2605,10 +2562,7 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
         .collect();
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            spend_tx,
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(spend_tx, vec![OutputRecord::unspent(1, vec![0x51])]),
         spend_ins,
     )];
     plan.planned_fks = vec![Fk(100)];
@@ -2616,7 +2570,7 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
         if let Some(id) = fks[i].get() {
             plan.external_parents.insert(
                 id,
-                rbitcoin_query::ParentIdent::with_loc(
+                crate::ParentIdent::with_loc(
                     items[i].0.txid,
                     ranges[i],
                     q.store().tx_spent_range(fks[i]).unwrap(),
@@ -2644,8 +2598,8 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
 #[test]
 fn pin_stamp_outs_is_cache_not_new() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::{ArchiveWritePlan, CreatePin};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{ArchiveWritePlan, CreatePin};
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     use std::sync::Arc;
 
@@ -2664,7 +2618,7 @@ fn pin_stamp_outs_is_cache_not_new() {
     };
     let parent_out = OutputRecord::unspent(50, vec![0x51, 0xaa]);
     let pin: CreatePin =
-        rbitcoin_query::CreatePinInner::records(parent_tx.clone(), vec![parent_out.clone()]);
+        crate::CreatePinInner::records(parent_tx.clone(), vec![parent_out.clone()]);
     let pfk = Fk(7);
 
     let spend_tx = TxRecord {
@@ -2688,16 +2642,13 @@ fn pin_stamp_outs_is_cache_not_new() {
     }];
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            spend_tx,
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(spend_tx, vec![OutputRecord::unspent(1, vec![0x51])]),
         spend_ins,
     )];
     plan.planned_fks = vec![Fk(100)];
     plan.external_parents.insert(
         7,
-        rbitcoin_query::ParentIdent {
+        crate::ParentIdent {
             txid: tid,
             body: Some((99, 1)),
             spent: None,
@@ -2727,8 +2678,8 @@ fn pin_stamp_outs_is_cache_not_new() {
 #[test]
 fn pin_recent_identity_without_outs_still_range_fills() {
     use super::{pin_for_wire_batch, ParentPinStamp};
+    use crate::ArchiveWritePlan;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
 
     let (path, q) = tmp_query();
@@ -2777,22 +2728,14 @@ fn pin_recent_identity_without_outs_still_range_fills() {
     }];
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
-        rbitcoin_query::CreatePinInner::records(
-            spend_tx,
-            vec![OutputRecord::unspent(1, vec![0x51])],
-        ),
+        crate::CreatePinInner::records(spend_tx, vec![OutputRecord::unspent(1, vec![0x51])]),
         spend_ins,
     )];
     plan.planned_fks = vec![Fk(100)];
     if let Some(id) = fks[0].get() {
         plan.external_parents.insert(
             id,
-            rbitcoin_query::ParentIdent::with_loc(
-                tid,
-                range,
-                q.store().tx_spent_range(fks[0]).unwrap(),
-                1,
-            ),
+            crate::ParentIdent::with_loc(tid, range, q.store().tx_spent_range(fks[0]).unwrap(), 1),
         );
     }
 
@@ -2817,8 +2760,6 @@ fn store_start_states_lookup_load_confirm() {
         confirm_scripts_phase, confirm_wire_load_from_plan, confirm_wire_lookup_stamp,
         confirm_write_phase, ScriptPreverified,
     };
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
     use crate::{accept_and_connect_block, prepare_block_for_archive};
     use bitcoin::block::{Header, Version};
     use bitcoin::blockdata::transaction::{
@@ -2828,6 +2769,8 @@ fn store_start_states_lookup_load_confirm() {
     use bitcoin::locktime::absolute::LockTime;
     use bitcoin::CompactTarget;
     use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Sequence, TxMerkleNode, Witness};
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::Height;
     use std::sync::Arc;
 
@@ -2838,7 +2781,7 @@ fn store_start_states_lookup_load_confirm() {
     let maturity = params.coinbase_maturity();
 
     fn coinbase(height: u32) -> Transaction {
-        let mut ss = crate::bip34_height_script(height);
+        let mut ss = rbitcoin_consensus::bip34_height_script(height);
         ss.push(bitcoin::opcodes::all::OP_CHECKSIG.to_u8());
         let script = ScriptBuf::from_bytes(ss);
         Transaction {
@@ -3012,7 +2955,7 @@ fn store_start_states_lookup_load_confirm() {
         (Height(h_need), Arc::new(b_need.clone()), None),
     ];
     match confirm_wire_lookup_stamp(&q, &params, ms, &mixed_arcs, None) {
-        Err(crate::error::ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(m))) => {
+        Err(crate::ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(m))) => {
             assert_eq!(m, "invariant: confirm batch mixed archived");
         }
         Ok(_) => panic!("mixed lookup stamp must fail closed"),
@@ -3020,7 +2963,7 @@ fn store_start_states_lookup_load_confirm() {
     }
     let mixed_run = [(Height(h_have), b_have), (Height(h_need), b_need)];
     match super::confirm_wire_load_phase(&q, &params, ms, &mixed_run, &ScriptPreverified::new()) {
-        Err(crate::error::ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(m))) => {
+        Err(crate::ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(m))) => {
             assert_eq!(m, "invariant: confirm batch mixed archived");
         }
         Ok(_) => panic!("mixed one-shot load must fail closed"),
@@ -3033,16 +2976,17 @@ fn store_start_states_lookup_load_confirm() {
 #[test]
 fn wire_lookup_empty_and_noncontiguous() {
     use super::confirm_wire_lookup_stamp;
-    use crate::error::ConsensusError;
-    use crate::milestone::Milestone;
-    use crate::params::{genesis_block, ChainParams};
+    use crate::ConfirmError;
+    use rbitcoin_consensus::ConsensusError;
+    use rbitcoin_consensus::Milestone;
+    use rbitcoin_consensus::{genesis_block, ChainParams};
     use rbitcoin_primitives::Height;
     use std::sync::Arc;
 
     let (path, q) = tmp_query();
     let params = ChainParams::regtest();
     match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &[], None) {
-        Err(ConsensusError::BadBlock("empty confirm batch")) => {}
+        Err(ConfirmError::Rules(ConsensusError::BadBlock("empty confirm batch"))) => {}
         Ok(_) => panic!("empty lookup must refuse"),
         Err(e) => panic!("empty lookup must refuse, got {e}"),
     }
@@ -3050,7 +2994,7 @@ fn wire_lookup_empty_and_noncontiguous() {
     let a = (Height(0), Arc::new(g.clone()), None);
     let b = (Height(2), Arc::new(g), None);
     match confirm_wire_lookup_stamp(&q, &params, Milestone::NONE, &[a, b], None) {
-        Err(ConsensusError::BadBlock("confirm run not contiguous")) => {}
+        Err(ConfirmError::Rules(ConsensusError::BadBlock("confirm run not contiguous"))) => {}
         Ok(_) => panic!("gap lookup must refuse"),
         Err(e) => panic!("gap lookup must refuse, got {e}"),
     }
@@ -3060,9 +3004,10 @@ fn wire_lookup_empty_and_noncontiguous() {
 /// Direct write skips SH FkMap; Class A idx holds the body range.
 #[test]
 fn direct_write_skips_create_pin_map_idx_without_recent() {
-    use crate::regtest_pad::mine_empty_regtest;
-    use crate::{accept_and_connect_block, ChainParams, Milestone};
+    use crate::accept_and_connect_block;
     use bitcoin::hashes::Hash;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_primitives::Height;
     let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
@@ -3090,12 +3035,13 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
         confirm_wire_load_from_plan, confirm_wire_load_phase, confirm_wire_lookup_stamp,
         ScriptPreverified,
     };
-    use crate::regtest_pad::mine_empty_regtest;
-    use crate::{accept_and_connect_block, ChainParams, Milestone};
+    use crate::accept_and_connect_block;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_primitives::Height;
     use std::sync::Arc;
 
-    fn open_q(_tag: &str) -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
+    fn open_q(_tag: &str) -> (crate::testutil::TempDir, crate::Query) {
         tmp_query()
     }
 
@@ -3185,8 +3131,8 @@ fn one_shot_load_matches_stamp_then_load_from_plan() {
 #[test]
 fn collect_spend_abs_after_fill_is_one_walk() {
     use super::{collect_spend_abs_after_fill, Prepared};
+    use crate::BatchParents;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::BatchParents;
     use rbitcoin_store::OutputRecord;
 
     let mut bp = BatchParents::new();
@@ -3263,8 +3209,7 @@ fn collect_spend_abs_after_fill_is_one_walk() {
 fn structural_run_clears_reused_scratch_between_batches() {
     use super::phases::{structural_run, StructuralReuse};
     use super::{collect_spend_abs_after_fill, Prepared};
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
+    use crate::BatchParents;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -3274,16 +3219,15 @@ fn structural_run_clears_reused_scratch_between_batches() {
         Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut,
         Witness,
     };
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::BatchParents;
     use rbitcoin_store::{InputRecord, OutputRecord};
     use std::sync::Arc;
 
     let (path, q) = tiny_query();
-    let parent_pin = rbitcoin_query::CreatePinInner::records(
-        rec_tx(0x41, 1),
-        vec![OutputRecord::unspent(1, vec![0x51])],
-    );
+    let parent_pin =
+        crate::CreatePinInner::records(rec_tx(0x41, 1), vec![OutputRecord::unspent(1, vec![0x51])]);
     let (fks, loc) = q
         .store()
         .put_tx_full_batch_from_pins(
@@ -3388,7 +3332,7 @@ fn structural_run_clears_reused_scratch_between_batches() {
             &wire,
             &bp,
             &jobs,
-            &crate::block::ClassAWave::default(),
+            &crate::block_pipeline::ClassAWave::default(),
             reuse,
         )
         .expect("reused scratch still connects")
@@ -3454,10 +3398,10 @@ fn datadir_hdd_submits_head_after_annotate() {
         confirm_write_phase, finish_post_commit_hashes, ScriptPreverified,
     };
     use crate::accept_and_connect_block;
-    use crate::milestone::Milestone;
-    use crate::params::ChainParams;
-    use crate::regtest_pad::mine_empty_regtest;
     use bitcoin::hashes::Hash;
+    use rbitcoin_consensus::mine_empty_regtest;
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_consensus::Milestone;
     use rbitcoin_primitives::{Fk, Height};
     use std::sync::Arc;
 

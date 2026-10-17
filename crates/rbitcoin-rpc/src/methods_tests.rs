@@ -60,7 +60,7 @@ fn empty_102_pad() -> &'static Empty102Pad {
         let (ctx, dir) = ctx_empty();
         let params = rbitcoin_consensus::ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        rbitcoin_consensus::accept_and_connect_block(
+        rbitcoin_query::accept_and_connect_block(
             &ctx.query,
             &params,
             Height::GENESIS,
@@ -68,7 +68,7 @@ fn empty_102_pad() -> &'static Empty102Pad {
             rbitcoin_consensus::Milestone::NONE,
         )
         .unwrap();
-        let (_tip, _time, coinbases) = rbitcoin_consensus::pad_empty_from(
+        let (_tip, _time, coinbases) = rbitcoin_query::pad_empty_from(
             &ctx.query,
             &params,
             genesis.block_hash(),
@@ -98,9 +98,8 @@ fn ctx_from_empty_102() -> (RpcContext, TempDir, Vec<Txid>) {
 
 #[test]
 fn empty_102_pad_copy_keeps_the_other_tip() {
-    use rbitcoin_consensus::{
-        accept_and_connect_block, mine_empty_regtest, ChainParams, Milestone,
-    };
+    use rbitcoin_consensus::{mine_empty_regtest, ChainParams, Milestone};
+    use rbitcoin_query::accept_and_connect_block;
 
     let (a, dir_a, cbs_a) = ctx_from_empty_102();
     let (b, dir_b, cbs_b) = ctx_from_empty_102();
@@ -795,8 +794,9 @@ fn mempool_txid_lookups_do_not_list_live() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
 
     let (ctx, dir) = ctx_empty();
     let params = ChainParams::regtest();
@@ -810,7 +810,7 @@ fn mempool_txid_lookups_do_not_list_live() {
     )
     .unwrap();
     const N_SPENDS: u32 = 3;
-    let (_tip, _tip_time, coinbase_txids) = rbitcoin_consensus::pad_empty_from(
+    let (_tip, _tip_time, coinbase_txids) = rbitcoin_query::pad_empty_from(
         &ctx.query,
         &params,
         genesis.block_hash(),
@@ -2529,7 +2529,8 @@ fn generate_selects_chained_mempool_parent_first() {
     use bitcoin::consensus::encode::serialize;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{pad_empty_from, ChainParams};
+    use rbitcoin_consensus::ChainParams;
+    use rbitcoin_query::pad_empty_from;
 
     let (ctx, dir, _hub) = ctx_regtest_hub();
     let params = ChainParams::regtest();
@@ -2646,7 +2647,7 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     let want = crate::blockstats::compute_block_stats(
         1,
         &block,
-        rbitcoin_consensus::median_time_past(hub.query.as_ref(), Height(1))
+        rbitcoin_query::median_time_past(hub.query.as_ref(), Height(1))
             .unwrap_or(block.header.time),
         rbitcoin_consensus::block_subsidy(1, &hub.params),
         |op| {
@@ -2729,7 +2730,7 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     let want = crate::blockstats::compute_block_stats(
         h,
         &block,
-        rbitcoin_consensus::median_time_past(hub.query.as_ref(), Height(h))
+        rbitcoin_query::median_time_past(hub.query.as_ref(), Height(h))
             .unwrap_or(block.header.time),
         rbitcoin_consensus::block_subsidy(h, &hub.params),
         |op| {
@@ -3538,8 +3539,9 @@ fn testmempoolaccept_rbf_does_not_evict_conflict() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::accept_and_connect_block;
 
     let (ctx, dir) = ctx_empty();
     let params = ChainParams::regtest();
@@ -3552,7 +3554,7 @@ fn testmempoolaccept_rbf_does_not_evict_conflict() {
         Milestone::NONE,
     )
     .unwrap();
-    let (_tip, _tip_time, coinbase_txids) = rbitcoin_consensus::pad_empty_from(
+    let (_tip, _tip_time, coinbase_txids) = rbitcoin_query::pad_empty_from(
         &ctx.query,
         &params,
         genesis.block_hash(),

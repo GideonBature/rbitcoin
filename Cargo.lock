@@ -909,9 +909,7 @@ dependencies = [
  "bitcoin",
  "bitcoin_hashes 0.14.101",
  "mutants",
- "rbitcoin-log",
  "rbitcoin-primitives",
- "rbitcoin-query",
  "rbitcoin-store",
  "ruzstd",
  "serde_json",
@@ -1019,6 +1017,9 @@ dependencies = [
 [[package]]
 name = "rbitcoin-primitives"
 version = "0.8.99"
+dependencies = [
+ "bitcoin_hashes 0.14.101",
+]
 
 [[package]]
 name = "rbitcoin-query"
@@ -1027,6 +1028,7 @@ dependencies = [
  "arc-swap",
  "bitcoin",
  "mutants",
+ "rbitcoin-consensus",
  "rbitcoin-log",
  "rbitcoin-primitives",
  "rbitcoin-store",

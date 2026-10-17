@@ -23,7 +23,7 @@ use std::thread;
 
 /// Jobs claimed per steal. Amortizes `next` / `in_wave` / `Arc<Wave>` traffic
 /// without a megachunk on mixed P2WPKH/P2WSH waves.
-pub(crate) const STEAL_CHUNK: usize = 32;
+pub const STEAL_CHUNK: usize = 32;
 
 use crate::error::ConsensusError;
 
@@ -143,7 +143,7 @@ static PUBLISHERS: Mutex<Vec<thread::Thread>> = Mutex::new(Vec::new());
 ///
 /// `None` removes the calling thread. Two stages in one process each
 /// register; a single slot dropped the first stage's wakes.
-pub(crate) fn set_script_publisher(t: Option<thread::Thread>) {
+pub fn set_script_publisher(t: Option<thread::Thread>) {
     let mut g = PUBLISHERS.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(t) = t {
         g.retain(|p| p.id() != t.id());
@@ -172,14 +172,14 @@ static STEAL_CLAIMS: AtomicUsize = AtomicUsize::new(0);
 /// so parallel wave tests do not inflate the counter.
 #[cfg(test)]
 static STEAL_CLAIMS_ON: AtomicBool = AtomicBool::new(false);
-/// Serialize the two 256-job steal tests so they do not share [`STEAL_CLAIMS`].
-#[cfg(test)]
+/// Serialize steal-wave tests so they do not interleave. Lives outside
+/// `cfg(test)` because query tests link this crate without that cfg.
 static STEAL_TEST: Mutex<()> = Mutex::new(());
 
 /// Hold across a test that publishes a steal wave, so pool tests do not
 /// interleave waves.
-#[cfg(test)]
-pub(crate) fn steal_test_gate() -> std::sync::MutexGuard<'static, ()> {
+#[doc(hidden)]
+pub fn steal_test_gate() -> std::sync::MutexGuard<'static, ()> {
     STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner())
 }
 
@@ -205,7 +205,7 @@ fn steal_chunk() -> Option<(Arc<Wave>, Range<usize>)> {
 }
 
 /// True when steal workers can still claim a foreground job.
-pub(crate) fn fg_has_unclaimed() -> bool {
+pub fn fg_has_unclaimed() -> bool {
     waves_snap().load().iter().any(|w| w.has_unclaimed())
 }
 
@@ -213,7 +213,7 @@ pub(crate) fn fg_has_unclaimed() -> bool {
 /// scripts stage thread to finish a wave tail instead of parking.
 ///
 /// A one-job index claim can run on `ibd-confirm` when the workers are busy.
-pub(crate) fn help_steal() -> bool {
+pub fn help_steal() -> bool {
     if on_steal_worker() {
         return false;
     }
@@ -233,14 +233,14 @@ unsafe impl<T: Sync> Send for ApplyCtx<T> {}
 unsafe impl<T: Sync> Sync for ApplyCtx<T> {}
 
 /// Publisher-owned job list + live wave. Safe to move; heap allocation is stable.
-pub(crate) struct OwnedWave<T: Sync> {
+pub struct OwnedWave<T: Sync> {
     _items: Box<[T]>,
     _ctx: Box<ApplyCtx<T>>,
     wave: Arc<Wave>,
 }
 
 impl<T: Sync> OwnedWave<T> {
-    pub(crate) fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.wave.is_complete()
     }
 
@@ -249,7 +249,7 @@ impl<T: Sync> OwnedWave<T> {
         self.wave.has_unclaimed()
     }
 
-    pub(crate) fn finish(self) -> Result<(), ConsensusError> {
+    pub fn finish(self) -> Result<(), ConsensusError> {
         self.wave.wait_done();
         match self
             .wave
@@ -279,7 +279,7 @@ fn unpublish_fg(wave: &Arc<Wave>) {
 
 /// Publish `items` for steal workers without waiting. `None` = already done
 /// (empty or single-item ran inline). Claims [`STEAL_CHUNK`] jobs at a time.
-pub(crate) fn start_for_each_owned<T: Sync>(
+pub fn start_for_each_owned<T: Sync>(
     items: Vec<T>,
     f: fn(&T) -> Result<(), ConsensusError>,
 ) -> Result<Option<OwnedWave<T>>, ConsensusError> {
@@ -288,7 +288,7 @@ pub(crate) fn start_for_each_owned<T: Sync>(
 
 /// Same as [`start_for_each_owned`] with an explicit claim size. `chunk` of 0
 /// is treated as 1. Empty and single-item lists still run inline.
-pub(crate) fn start_for_each_owned_chunk<T: Sync>(
+pub fn start_for_each_owned_chunk<T: Sync>(
     items: Vec<T>,
     f: fn(&T) -> Result<(), ConsensusError>,
     chunk: usize,
@@ -301,7 +301,7 @@ pub(crate) fn start_for_each_owned_chunk<T: Sync>(
 /// [`start_for_each_owned`] runs a single item on the caller. The index wave
 /// must not do that: one filter would block `ibd-confirm` inside `start`.
 /// `chunk` of 0 is treated as 1.
-pub(crate) fn start_for_each_pooled<T: Sync>(
+pub fn start_for_each_pooled<T: Sync>(
     items: Vec<T>,
     f: fn(&T) -> Result<(), ConsensusError>,
     chunk: usize,

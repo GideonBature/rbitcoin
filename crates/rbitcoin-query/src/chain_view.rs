@@ -214,6 +214,14 @@ impl Query {
         &self,
         height: Height,
     ) -> Result<Option<(Fk, HeaderRecord)>, QueryError> {
+        // One-shot armed by tests. The IBD stop flag must not fail later reads.
+        #[cfg(feature = "test-hooks")]
+        if self
+            .header_read_cancel
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Cancelled("header read"));
+        }
         note_header_lookup();
         #[cfg(test)]
         note_header_io_under_index_lock();

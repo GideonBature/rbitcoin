@@ -52,6 +52,12 @@ pub struct PinnedOuts {
     vout: u32,
 }
 
+impl rbitcoin_consensus::block::PinParts for PinOuts {
+    fn parts(&self, vout: u32) -> Option<(u64, &[u8])> {
+        self.get_parts(vout)
+    }
+}
+
 impl SharedPrevoutScript {
     /// Amount and script for a pinned vout. `None` for [`Self::Wire`] (the
     /// block lives on the script job) and when the vout is absent.
@@ -59,6 +65,18 @@ impl SharedPrevoutScript {
         match self {
             Self::Wire { .. } => None,
             Self::Pinned(p) => p.outs.get_parts(p.vout),
+        }
+    }
+
+    /// Same allocation the pin published. The script bytes are not copied.
+    pub fn into_shared_prevout(self) -> rbitcoin_consensus::block::SharedPrevout {
+        use rbitcoin_consensus::block::SharedPrevout;
+        match self {
+            Self::Wire { tx_index, vout } => SharedPrevout::Wire { tx_index, vout },
+            Self::Pinned(p) => SharedPrevout::Pinned {
+                outs: p.outs,
+                vout: p.vout,
+            },
         }
     }
 }

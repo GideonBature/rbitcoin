@@ -670,7 +670,7 @@ mod tests {
             Amount, Block, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut,
             Witness,
         };
-        use rbitcoin_consensus::prepare_block_for_archive;
+        use rbitcoin_query::prepare_block_for_archive;
 
         let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("path-seed-arch");
         hub.ensure_genesis().unwrap();

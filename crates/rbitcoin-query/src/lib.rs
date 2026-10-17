@@ -12,7 +12,6 @@ mod confirm_load;
 mod confirm_parent_cache;
 mod confirm_stats;
 mod connect;
-mod id_map;
 mod in_flight;
 mod reconstruct;
 mod resolved_wire;
@@ -24,22 +23,59 @@ mod sp_tweaks;
 mod spend_sync;
 mod stamp;
 pub mod testutil;
-mod tx_precompute;
 mod wave_prevout;
 mod write_create_loc;
 
+#[cfg(test)]
+mod bip68_store_tests;
+mod block_pipeline;
+mod confirm_error;
+mod confirm_run;
+mod connect_facade;
+mod convert;
+mod header_read;
+#[cfg(test)]
+mod header_store_tests;
+mod index_rows;
+mod index_writebehind;
+mod milestone_gate;
+#[cfg(test)]
+mod overlay_csv_tests;
+mod regtest_pad;
+mod sp_read;
+#[cfg(test)]
+mod sp_store_tests;
+#[cfg(test)]
+mod structure_rule_tests;
+#[cfg(test)]
+mod wire_agree_tests;
+
 pub use combined_stage::{load_creates_once, CombinedCreate};
+pub use confirm_error::ConfirmError;
+pub use connect_facade::*;
+pub use convert::header_to_record;
+pub use header_read::{
+    expected_next_bits, median_time_past, median_time_past_store, validate_header,
+    validate_header_hashed,
+};
+pub use index_writebehind::{
+    build_indexes_released, index_tip_entry, prepare_live_indexes, spawn_index_writebehind,
+    IndexTipEntry, INDEX_STARTUP_GAP_HEIGHTS,
+};
+pub use rbitcoin_consensus::{
+    block_wire_len_from_pres, decode_block_precomputes, pres_for_tip, IdMap, OutPointHasher,
+    OutPointSet, TxPrecompute, TxidHasher, TxidMap, TxidSet,
+};
 pub use reconstruct::{BlockTxStatRows, StampedTxstatBlock};
+pub use regtest_pad::pad_empty_from;
 pub use resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
 pub use soft_densify::{
     bq_assign_stop_bytes, soft_ahead_quarter_full, soft_assign_restricted,
     soft_confirm_window_covered, soft_confirm_window_n, soft_densify_band_hi, BQ_SOFT_FREE_BYTES,
     TIP_HOLE_MIN_AHEAD_BLOCKS,
 };
+pub use sp_read::{tweaks_at_height, tweaks_for_height, tweaks_from_thin_and_body};
 pub use sp_tweaks::{ThinTweakRangeLimits, ThinTweakRow};
-pub use tx_precompute::{
-    block_wire_len_from_pres, decode_block_precomputes, pres_for_tip, TxPrecompute,
-};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header as BlockHeader, Version as BlockVersion};
@@ -226,7 +262,6 @@ pub use catchup::IndexMode;
 pub use chain_view::{header_lookup_count, ChainView, ChainViewKind};
 pub use confirm_load::SpendEdges;
 pub use connect::{spawn_sh_writebehind, ConfirmPrepared};
-pub use id_map::{IdMap, OutPointHasher, OutPointSet, TxidHasher, TxidMap, TxidSet};
 pub use in_flight::InFlight;
 pub use scripthash::{
     BlockTouch, FilteredHistory, HistoryFilter, HistoryOrder, ScriptHashBalance,
@@ -374,6 +409,9 @@ pub struct Query {
     /// Cooperative cancel for in-flight confirm load. Set on IBD SIGINT
     /// teardown so the confirm load thread aborts before process exit.
     confirm_cancel: std::sync::atomic::AtomicBool,
+    /// One header read returns [`StoreError::Cancelled`]. Tests only.
+    #[cfg(feature = "test-hooks")]
+    header_read_cancel: std::sync::atomic::AtomicBool,
     /// Confirmed best-chain `hash → height` (kept for process life; ~60 MiB mainnet).
     ///
     /// Avoids O(tip) header walks on Esplora/P2P `height_of_hash`.
@@ -536,6 +574,8 @@ impl Query {
             sptweaks_origin: AtomicU32::new(sptweaks_origin),
             index_mode_cell: std::sync::atomic::AtomicU8::new(IndexMode::Tip as u8),
             confirm_cancel: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "test-hooks")]
+            header_read_cancel: std::sync::atomic::AtomicBool::new(false),
             height_by_hash: Mutex::new(HeightByHashIndex::default()),
             reconstruct_archived: AtomicU64::new(0),
             max_sh_creates: AtomicU32::new(DEFAULT_MAX_SH_CREATES),
@@ -1238,6 +1278,14 @@ impl Query {
     pub fn confirm_cancelled(&self) -> bool {
         self.confirm_cancel
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The next [`Self::header_at_height`] returns [`StoreError::Cancelled`].
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn fail_next_header_read_cancelled(&self) {
+        self.header_read_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Last height with SH creates applied (after tip). `None` if empty chain.

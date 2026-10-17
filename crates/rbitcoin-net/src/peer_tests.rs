@@ -4711,7 +4711,7 @@ fn headers_poll_expires_a_stale_tx_off_the_tokio_worker() {
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-poll-expire");
     hub.ensure_genesis().unwrap();
     let tip = hub.tip_header().unwrap();
-    let (_tip, _time, cbs) = rbitcoin_consensus::pad_empty_from(
+    let (_tip, _time, cbs) = rbitcoin_query::pad_empty_from(
         &hub.query,
         &ChainParams::regtest(),
         hub.tip_hash().unwrap(),

@@ -1,7 +1,8 @@
 # rbitcoin-consensus
 
-Header, block, and script validation. Depends on primitives, query, and store.
-Peer and RPC script checks use the detached worker. The thread rule is
+Header, block, and script rules from bytes and caller facts. Depends on
+primitives. It does not open a store or write Class A. Peer and RPC script
+checks use the detached worker. The thread rule is
 [`docs/concurrency.md`](../../docs/concurrency.md).
 
 ## Read first
@@ -17,9 +18,9 @@ Open the row that matches the change. Leave the other owners closed.
 ## Where
 
 - Scripts: `src/script/` (`interpreter.rs` is the opcode match)
-- Confirm: `src/confirm_run/`
-- Headers and blocks: `src/header.rs`, `src/block/`
+- Headers and blocks: `src/header.rs`, `src/block/` (`facts.rs` is the spend and assemble decisions)
 - Worker pool: `src/script_pool.rs`
+- Confirm pipeline (lookup, load, pin, write, index): `rbitcoin-query` `src/confirm_run/` and `src/block_pipeline.rs`
 
 ## Verify
 

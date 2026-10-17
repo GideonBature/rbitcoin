@@ -9,8 +9,8 @@ shared libraries through storage and runtime crates to composition and tools;
 | `rbitcoin-primitives` | Shared Bitcoin types and newtypes used across the workspace |
 | `rbitcoin-log` | Leveled stderr logging; live progress of long stages (`progress`) |
 | `rbitcoin-store` | Relational archive and Class A/B/C on-disk tables |
-| `rbitcoin-query` | Archive, confirm, reconstruction, and query APIs over the store |
-| `rbitcoin-consensus` | Header, block, and script validation |
+| `rbitcoin-query` | Archive, confirm pipeline, reconstruction, and query APIs over the store. Loads rows, writes Class A / Class C / spend annotations, and calls `rbitcoin-consensus` for rule decisions |
+| `rbitcoin-consensus` | Header, block, and script rules from bytes and caller facts. Does not open a store |
 | `rbitcoin-mempool` | Live transaction graph and admission policy |
 | `rbitcoin-net` | P2P, IBD, tip follow, and transaction relay |
 | `rbitcoin-rpc` | Core-class JSON-RPC subset |

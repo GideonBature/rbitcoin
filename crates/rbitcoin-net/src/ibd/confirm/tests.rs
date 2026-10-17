@@ -71,7 +71,7 @@ fn spindle_hold_blocks_lookup_and_load_bulk_reads() {
 #[test]
 fn index_startup_gap_matches_one_write_drain() {
     assert_eq!(
-        rbitcoin_consensus::INDEX_STARTUP_GAP_HEIGHTS as usize,
+        rbitcoin_query::INDEX_STARTUP_GAP_HEIGHTS as usize,
         write_drain_max_parts(write_queue_cap()) * CONFIRM_RUN_MAX_BLOCKS
     );
 }
@@ -1527,22 +1527,27 @@ fn plan_epoch_stale_after_clear() {
 
 #[test]
 fn write_session_fault_is_engine_fault() {
-    use rbitcoin_consensus::ConsensusError;
     use rbitcoin_store::StoreError;
 
-    let undrained = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
+    let undrained =
+        rbitcoin_query::ConfirmError::Store(StoreError::Corrupt("invariant: io_uring undrained"));
     assert_eq!(
-        super::ConfirmRejectClass::from_consensus(&undrained),
+        super::ConfirmRejectClass::from_confirm(&undrained),
         super::ConfirmRejectClass::EngineFault
     );
-    let leftover = ConsensusError::Store(StoreError::Corrupt("invariant: io_uring leftover cqe"));
+    let leftover = rbitcoin_query::ConfirmError::Store(StoreError::Corrupt(
+        "invariant: io_uring leftover cqe",
+    ));
     assert_eq!(
-        super::ConfirmRejectClass::from_consensus(&leftover),
+        super::ConfirmRejectClass::from_confirm(&leftover),
         super::ConfirmRejectClass::EngineFault
     );
-    let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
+    let io = rbitcoin_query::ConfirmError::Store(StoreError::io(
+        "/tmp/x",
+        std::io::Error::other("disk"),
+    ));
     assert_eq!(
-        super::ConfirmRejectClass::from_consensus(&io),
+        super::ConfirmRejectClass::from_confirm(&io),
         super::ConfirmRejectClass::EngineFault
     );
 }
@@ -1626,13 +1631,15 @@ fn requeue_on_uring_recover_rearms_lookup_and_offers_the_wave_back() {
 #[test]
 fn lookup_fault_policy_io_halt() {
     use super::{LookupFaultAction, LookupFaultPolicy};
-    use rbitcoin_consensus::ConsensusError;
     use rbitcoin_store::StoreError;
 
     let mut p = LookupFaultPolicy::default();
-    let bp = ConsensusError::Store(StoreError::BudgetFull("io_uring SQ"));
+    let bp = rbitcoin_query::ConfirmError::Store(StoreError::BudgetFull("io_uring SQ"));
     assert_eq!(p.on_err(&bp), LookupFaultAction::Ignore);
-    let io = ConsensusError::Store(StoreError::io("/tmp/x", std::io::Error::other("disk")));
+    let io = rbitcoin_query::ConfirmError::Store(StoreError::io(
+        "/tmp/x",
+        std::io::Error::other("disk"),
+    ));
     for _ in 0..7 {
         assert_eq!(p.on_err(&io), LookupFaultAction::Warn);
     }
@@ -1697,10 +1704,9 @@ fn ibd_confirm_pin_fault() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
-    use rbitcoin_consensus::{
-        mine_empty_regtest, mine_regtest_paying, pad_empty_from, ChainParams,
-    };
+    use rbitcoin_consensus::{mine_empty_regtest, mine_regtest_paying, ChainParams};
     use rbitcoin_primitives::Height;
+    use rbitcoin_query::pad_empty_from;
     use rbitcoin_query::testutil::FixtureChain as _;
     use rbitcoin_query::{ArchiveWritePlan, TxApply};
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};

@@ -14,11 +14,12 @@ use bitcoin::{
     TxOut, Witness,
 };
 use rbitcoin_consensus::{
-    block_subsidy, confirm_scripts_phase, genesis_block, grind_regtest_pow, mine_empty_regtest,
-    mine_regtest_paying, ChainParams, Milestone, REGTEST_BLOCK_SPACING, REGTEST_POW_BITS,
+    block_subsidy, genesis_block, grind_regtest_pow, mine_empty_regtest, mine_regtest_paying,
+    ChainParams, Milestone, REGTEST_BLOCK_SPACING, REGTEST_POW_BITS,
 };
 use rbitcoin_net::{AcceptOutcome, ChainHub, NetError};
 use rbitcoin_primitives::Height;
+use rbitcoin_query::confirm_scripts_phase;
 
 use crate::block_diff::{BlockOracle, BlockStanding, OracleReply};
 

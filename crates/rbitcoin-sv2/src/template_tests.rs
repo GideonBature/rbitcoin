@@ -12,11 +12,11 @@ use bitcoin::{
 };
 use bitcoin::{CompactTarget, Target};
 use rbitcoin_consensus::{
-    bip34_height_script, block_subsidy, confirm_scripts_phase, expected_next_bits,
-    median_time_past, mine_empty_regtest, mine_regtest_paying, witness_commitment_script,
-    ChainParams,
+    bip34_height_script, block_subsidy, mine_empty_regtest, mine_regtest_paying,
+    witness_commitment_script, ChainParams,
 };
 use rbitcoin_primitives::Height;
+use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
 use std::sync::Arc;
 use std::time::Duration;

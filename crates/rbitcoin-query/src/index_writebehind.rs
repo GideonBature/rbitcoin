@@ -16,13 +16,14 @@
 //! a one-height window.
 
 use crate::index_rows::{self, IndexHeightOut, IndexRows};
-use crate::silent_payments::tweak_records_from_window;
-use crate::ConsensusError;
+use crate::sp_read::tweak_records_from_window;
+use crate::ConfirmError;
+use crate::Query;
+use rbitcoin_consensus::ConsensusError;
 use rbitcoin_log::progress;
 #[cfg(test)]
 use rbitcoin_primitives::Fk;
 use rbitcoin_primitives::Height;
-use rbitcoin_query::Query;
 use rbitcoin_store::IndexWindow;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
@@ -143,14 +144,14 @@ pub fn index_tip_entry(query: &Query) -> IndexTipEntry {
 /// Before confirm: seal each enabled index whose gap through the tip fits
 /// [`INDEX_STARTUP_GAP_HEIGHTS`], then set [`Query::index_live`] when every
 /// enabled index is contiguous with the tip.
-pub fn prepare_live_indexes(query: &Query) -> Result<(), ConsensusError> {
+pub fn prepare_live_indexes(query: &Query) -> Result<(), ConfirmError> {
     prepare_live_indexes_limited(query, INDEX_STARTUP_GAP_HEIGHTS)
 }
 
 pub(crate) fn prepare_live_indexes_limited(
     query: &Query,
     max_heights: u32,
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     let tip_h = query.tip_height().map(|h| h.0);
     if let Some(tip) = tip_h {
         let repair_f = repair_from(query.filter_index_next(), tip, max_heights);
@@ -193,7 +194,7 @@ fn seal_through(
     filter_from: Option<u32>,
     tweak_from: Option<u32>,
     tip: u32,
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     let mut start = match (filter_from, tweak_from) {
         (Some(f), Some(t)) => f.min(t),
         (Some(f), None) => f,
@@ -215,7 +216,7 @@ fn seal_through(
         let window = Arc::new(read_window_from(query, start, end, tweak_from)?);
         let rows = assemble_window_from(&window, filter_from, tweak_from)?;
         if index_rows::commit_index_rows(query, rows)?.moved {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+            return Err(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: startup index repair",
             )));
         }
@@ -228,7 +229,7 @@ fn seal_through(
     Ok(())
 }
 
-fn plan_window(query: &Query, start: u32, target: u32) -> Result<u32, ConsensusError> {
+fn plan_window(query: &Query, start: u32, target: u32) -> Result<u32, ConfirmError> {
     let mut end = start;
     let mut txs = 0u64;
     while end < target && end - start + 1 < WINDOW_HEIGHTS {
@@ -249,7 +250,7 @@ fn plan_window(query: &Query, start: u32, target: u32) -> Result<u32, ConsensusE
     Ok(end)
 }
 
-fn read_window(query: &Query, start: u32, end: u32) -> Result<IndexWindow, ConsensusError> {
+fn read_window(query: &Query, start: u32, end: u32) -> Result<IndexWindow, ConfirmError> {
     read_window_from(query, start, end, query.tweak_index_next())
 }
 
@@ -258,7 +259,7 @@ fn read_window_from(
     start: u32,
     end: u32,
     tweaks_from: Option<u32>,
-) -> Result<IndexWindow, ConsensusError> {
+) -> Result<IndexWindow, ConfirmError> {
     let heights = query.index_heights(start, end, tweaks_from)?;
     let mut window = query.read_index_window(&heights)?;
     for block in &mut window.blocks {
@@ -275,12 +276,16 @@ struct IndexHeightJob {
     out: Arc<Mutex<Option<IndexHeightOut>>>,
 }
 
-fn assemble_index_height(job: &IndexHeightJob) -> Result<(), ConsensusError> {
+fn assemble_index_height_pool(job: &IndexHeightJob) -> Result<(), ConsensusError> {
+    assemble_index_height(job).map_err(ConfirmError::into_pool)
+}
+
+fn assemble_index_height(job: &IndexHeightJob) -> Result<(), ConfirmError> {
     let block = &job.window.blocks[job.index];
     let filter = if job.want_filter {
         Some((
             block.height,
-            rbitcoin_query::basic_filter_of(&block.hash, &job.window, job.index)?,
+            crate::basic_filter_of(&block.hash, &job.window, job.index)?,
             block.header_fk,
         ))
     } else {
@@ -301,7 +306,7 @@ fn assemble_index_height(job: &IndexHeightJob) -> Result<(), ConsensusError> {
 
 /// One job per height that still needs a filter or tweaks. The wave joins
 /// before return, so the `Arc` is only shared for that call.
-fn assemble_window(query: &Query, window: &Arc<IndexWindow>) -> Result<IndexRows, ConsensusError> {
+fn assemble_window(query: &Query, window: &Arc<IndexWindow>) -> Result<IndexRows, ConfirmError> {
     assemble_window_from(window, query.filter_index_next(), query.tweak_index_next())
 }
 
@@ -309,7 +314,7 @@ fn assemble_window_from(
     window: &Arc<IndexWindow>,
     filter_from: Option<u32>,
     tweak_from: Option<u32>,
-) -> Result<IndexRows, ConsensusError> {
+) -> Result<IndexRows, ConfirmError> {
     let mut slots = Vec::with_capacity(window.blocks.len());
     let mut jobs = Vec::new();
     for (index, block) in window.blocks.iter().enumerate() {
@@ -328,7 +333,7 @@ fn assemble_window_from(
         }
         slots.push(out);
     }
-    index_rows::finish_wave(jobs, assemble_index_height)?;
+    index_rows::finish_wave(jobs, assemble_index_height_pool)?;
     Ok(index_rows::rows_from_slots(&slots))
 }
 
@@ -420,7 +425,7 @@ fn commit_window(
     query: &Query,
     window: &Arc<IndexWindow>,
     stages: &IndexStageMs,
-) -> Result<CommitTimes, ConsensusError> {
+) -> Result<CommitTimes, ConfirmError> {
     if window.blocks.is_empty() {
         return Ok(CommitTimes {
             ok: true,
@@ -435,7 +440,7 @@ fn commit_window(
     let commit_ns = committed.put_ns;
     stages.add_build(build_ns);
     stages.add_commit(commit_ns);
-    rbitcoin_query::note_confirm(
+    crate::note_confirm(
         &query.confirm_stats().blockfilter_ns,
         build_ns.saturating_add(commit_ns),
     );
@@ -447,7 +452,7 @@ fn commit_window(
 }
 
 /// Seal every released height on this thread (regtest `generate`, tests).
-pub fn build_indexes_released(query: &Query) -> Result<(), ConsensusError> {
+pub fn build_indexes_released(query: &Query) -> Result<(), ConfirmError> {
     let mut live = IndexStages::default();
     live.observe(query, query.index_target(), true, true);
     while let (Some(start), Some(target)) = (next_needed(query), query.index_target()) {
@@ -480,7 +485,7 @@ fn cpu_worker(
     rx: Receiver<ReadyWindow>,
     resync: &AtomicBool,
     stages: &IndexStageMs,
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     for ready in rx {
         if resync.load(Ordering::Acquire) {
             continue;
@@ -533,7 +538,7 @@ fn run_writebehind(
     query: &Query,
     stop: &AtomicBool,
     on_filters_caught_up: impl FnOnce(),
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     // Spawned after catch-up: the current tip was already announced.
     if let Some(tip) = query.tip_height() {
         query.release_index_writebehind(tip);
@@ -575,7 +580,7 @@ fn io_loop(
     tx: &std::sync::mpsc::SyncSender<ReadyWindow>,
     progress_every: Duration,
     on_filters_caught_up: impl FnOnce(),
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     let mut on_filters_caught_up = Some(on_filters_caught_up);
     let mut cursor: Option<u32> = None;
     let mut pass: Option<Pass> = None;
@@ -779,7 +784,7 @@ mod tests {
         prev_fk: &mut Fk,
         prev_hash: &mut Option<[u8; 32]>,
     ) {
-        use rbitcoin_query::testutil::FixtureChain;
+        use crate::testutil::FixtureChain;
         use rbitcoin_store::{InputRecord, OutputRecord};
 
         for height in from..=to {
@@ -856,13 +861,13 @@ mod tests {
     /// the serial window walk.
     #[test]
     fn per_height_jobs_match_serial_window() {
+        use crate::testutil::FixtureChain;
         use bitcoin::hashes::{hash160, Hash};
         use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-        use rbitcoin_query::testutil::FixtureChain;
         use rbitcoin_store::{InputRecord, OutputRecord};
 
-        let _gate = crate::script_pool::steal_test_gate();
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("idx-jobs");
+        let _gate = rbitcoin_consensus::script_pool::steal_test_gate();
+        let (dir, q) = crate::testutil::tiny_query_labeled("idx-jobs");
         q.set_block_filter_index(true).unwrap();
         q.set_sptweaks_enabled(true, Height(0)).unwrap();
 
@@ -938,7 +943,7 @@ mod tests {
             let serial_f = q.basic_filter_from_window(&window, i).unwrap();
             assert_eq!(got.filters[i].1.content, serial_f.content, "filter {i}");
             assert_eq!(got.filters[i].2, block.header_fk);
-            let serial_t = crate::silent_payments::tweak_records_from_window(&window, i).unwrap();
+            let serial_t = crate::sp_read::tweak_records_from_window(&window, i).unwrap();
             assert_eq!(got.tweaks[i].2, serial_t, "tweaks {i}");
         }
         assert!(got.tweaks[0].2.iter().all(|t| t.is_none()), "coinbase");
@@ -982,10 +987,10 @@ mod tests {
 
     #[test]
     fn released_builder_crosses_a_full_window_and_success_does_not_resync() {
-        use rbitcoin_query::testutil::FixtureChain;
+        use crate::testutil::FixtureChain;
         use rbitcoin_store::{InputRecord, OutputRecord};
 
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("idx-full-window");
+        let (dir, q) = crate::testutil::tiny_query_labeled("idx-full-window");
         q.set_block_filter_index(true).unwrap();
         q.set_sptweaks_enabled(true, Height(0)).unwrap();
 
@@ -1090,10 +1095,10 @@ mod tests {
 
     #[test]
     fn filter_catchup_callback_fires_only_after_the_released_tip() {
-        use rbitcoin_query::testutil::FixtureChain;
+        use crate::testutil::FixtureChain;
         use rbitcoin_store::{InputRecord, OutputRecord};
 
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("idx-filter-catchup");
+        let (dir, q) = crate::testutil::tiny_query_labeled("idx-filter-catchup");
         q.set_block_filter_index(true).unwrap();
         let mut prev_fk = Fk::NULL;
         let mut prev_hash = None;
@@ -1239,7 +1244,7 @@ mod tests {
     /// counts from its own start and ends at its own total.
     #[test]
     fn released_builder_reports_each_index_from_its_start() {
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("idx-progress-released");
+        let (dir, q) = crate::testutil::tiny_query_labeled("idx-progress-released");
         q.set_block_filter_index(true).unwrap();
         let tip = WINDOW_HEIGHTS + 1;
         coinbase_chain(&q, tip);
@@ -1269,7 +1274,7 @@ mod tests {
 
     #[test]
     fn startup_repair_reports_only_the_indexes_it_seals() {
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("idx-progress-repair");
+        let (dir, q) = crate::testutil::tiny_query_labeled("idx-progress-repair");
         q.set_block_filter_index(true).unwrap();
         q.set_sptweaks_enabled(true, Height(0)).unwrap();
         let tip = WINDOW_HEIGHTS + 1;
@@ -1297,7 +1302,7 @@ mod tests {
     /// it began.
     #[test]
     fn writebehind_registers_a_stage_for_a_wide_gap() {
-        let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("idx-progress-wb");
+        let (dir, q) = crate::testutil::tiny_query_labeled("idx-progress-wb");
         q.set_block_filter_index(true).unwrap();
         let tip = WINDOW_HEIGHTS + 1;
         coinbase_chain(&q, tip);
@@ -1345,8 +1350,8 @@ mod tests {
         txid: [u8; 32],
         inputs: Vec<rbitcoin_store::InputRecord>,
         outputs: Vec<rbitcoin_store::OutputRecord>,
-    ) -> rbitcoin_query::TxApply {
-        rbitcoin_query::TxApply {
+    ) -> crate::TxApply {
+        crate::TxApply {
             tx: rbitcoin_store::TxRecord {
                 txid,
                 version: 2,

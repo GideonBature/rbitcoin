@@ -2111,6 +2111,7 @@ fn maybe_queue_initial_getheaders(
     if started {
         let h = hub.tip_height().unwrap_or(0);
         rbitcoin_log::info!("{}", crate::chain::initial_getheaders_log(h, session.id));
+        hub.note_initial_getheaders_sent();
         let _ = queue_getheaders(out, hub, Some(session), true, None);
     }
     started
@@ -3660,6 +3661,7 @@ fn on_headers(
     headers: &[bitcoin::block::Header],
 ) -> Result<(), NetError> {
     let n = headers.len();
+    hub.note_headers_reply();
     let _ = session.is_some_and(|s| s.take_awaiting_headers());
     let mut ignored_below_floor = false;
     if n == 0 {

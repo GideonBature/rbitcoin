@@ -2,7 +2,8 @@ use bitcoin::absolute::LockTime;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-use rbitcoin_consensus::{accept_and_connect_block, Milestone};
+use rbitcoin_consensus::{Milestone};
+use rbitcoin_query::{accept_and_connect_block};
 use rbitcoin_query::TxApply;
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
@@ -503,7 +504,7 @@ async fn electrum_sh_join() {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
     const N_SPENDS: u32 = 4;
-    let (tip, _tip_time, coinbase_txids) = rbitcoin_consensus::pad_empty_from(
+    let (tip, _tip_time, coinbase_txids) = rbitcoin_query::pad_empty_from(
         &q,
         &params,
         genesis.block_hash(),

@@ -1,7 +1,7 @@
 //! Process-wide `tip-accept` thread: P2P/RPC connect off tokio workers.
 //!
 //! Jobs are 1-block (or one `accept_branch` run). Confirm still uses
-//! [`rbitcoin_consensus::confirm_wire_run_preverified`] (lookup → load →
+//! [`rbitcoin_query::confirm_wire_run_preverified`] (lookup → load →
 //! `rbtc-scripts-*` steal → write). Not the IBD body-queue pipeline.
 
 use std::future::Future;

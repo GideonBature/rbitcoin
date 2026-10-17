@@ -67,31 +67,6 @@ impl Milestone {
     }
 }
 
-/// Confirm-path gate. Notes `milestone_gate_ns` (`ibd: perf_dbg milestone_us`).
-pub(crate) fn skips_on_query(
-    milestone: Milestone,
-    query: &rbitcoin_query::Query,
-    height: u32,
-    block: &[u8; 32],
-) -> bool {
-    let t = std::time::Instant::now();
-    let skip = milestone.skips_scripts(height, block, |h| query.milestone_header_at(h));
-    rbitcoin_query::note_confirm(
-        &query.confirm_stats().milestone_gate_ns,
-        t.elapsed().as_nanos() as u64,
-    );
-    skip
-}
-
-pub(crate) fn check_scripts(
-    milestone: Milestone,
-    query: &rbitcoin_query::Query,
-    height: u32,
-    block: &[u8; 32],
-) -> bool {
-    !skips_on_query(milestone, query, height, block)
-}
-
 impl Default for Milestone {
     fn default() -> Self {
         Self::NONE

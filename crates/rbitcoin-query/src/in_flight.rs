@@ -15,7 +15,7 @@
 //! [`InFlight::drop_from_height`] on pack height.
 
 use crate::archive::CreatePin;
-use crate::id_map::TxidHasher;
+use crate::TxidHasher;
 use crate::U64Map;
 use rbitcoin_primitives::Fk;
 use std::collections::{BTreeMap, HashMap};

@@ -87,8 +87,16 @@ impl NetError {
         match e {
             rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
             rbitcoin_consensus::ConsensusError::BadPrev => NetError::BadPrev,
-            rbitcoin_consensus::ConsensusError::Store(se) => NetError::store(se),
+            // Pool-adapted store text. Not a block verdict.
+            rbitcoin_consensus::ConsensusError::Internal(m) => NetError::store(m),
             other => NetError::Consensus(other.to_string()),
+        }
+    }
+
+    pub fn from_confirm(e: rbitcoin_query::ConfirmError) -> Self {
+        match e {
+            rbitcoin_query::ConfirmError::Rules(r) => Self::from_consensus(r),
+            rbitcoin_query::ConfirmError::Store(se) => NetError::store(se),
         }
     }
 

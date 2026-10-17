@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Shared types for the rbitcoin node"
 
 [dependencies]
+bitcoin_hashes = { workspace = true }
 
 [lints]
 workspace = true

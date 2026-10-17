@@ -12,14 +12,17 @@ use bitcoin::{
     Work,
 };
 use rbitcoin_consensus::{
-    accept_and_connect_block_preverified, confirm_wire_load_from_plan as consensus_load_from_plan,
-    confirm_wire_load_phase_pipelined, confirm_write_phase, genesis_block, header_to_record,
-    mine_op_true_signet_paying, mine_regtest_paying, validate_header, validate_header_on_parent,
-    ChainParams, Milestone, PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
+    genesis_block, mine_op_true_signet_paying, mine_regtest_paying, validate_header_on_parent,
+    ChainParams, Milestone,
 };
 use rbitcoin_log::{debug, info, warn};
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
+use rbitcoin_query::{
+    accept_and_connect_block_preverified, confirm_wire_load_from_plan as consensus_load_from_plan,
+    confirm_wire_load_phase_pipelined, confirm_write_phase, header_to_record, validate_header,
+    PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
@@ -288,16 +291,23 @@ fn connect_failed_for_header(hash: [u8; 32], e: NetError) -> NetError {
     }
 }
 
-fn header_reject(header: &Header, e: &rbitcoin_consensus::ConsensusError) -> NetError {
-    if let rbitcoin_consensus::ConsensusError::Store(se) = e {
-        return NetError::store(se);
+fn header_reject(header: &Header, e: &rbitcoin_query::ConfirmError) -> NetError {
+    if e.is_cancelled() {
+        return NetError::Cancelled;
     }
-    let reason = rbitcoin_consensus::block_reject_reason(e);
+    let rules = match e {
+        rbitcoin_query::ConfirmError::Store(se) => return NetError::store(se),
+        rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Internal(m)) => {
+            return NetError::store(m);
+        }
+        rbitcoin_query::ConfirmError::Rules(r) => r,
+    };
+    let reason = rbitcoin_consensus::block_reject_reason(rules);
     rbitcoin_log::info!(
         "{}",
         rbitcoin_consensus::block_reject_log_line(header.block_hash(), &reason)
     );
-    NetError::Consensus(e.to_string())
+    NetError::Consensus(rules.to_string())
 }
 
 /// Inputs a connected block spends, excluding the coinbase null prevout.
@@ -378,6 +388,10 @@ pub struct ChainHub {
     chain_work_prefix: RwLock<Vec<Work>>,
     /// Once the relay-inhibited latch clears, stay out.
     finished_ibd: AtomicBool,
+    /// Initial `getheaders` queued by follow sessions since process start.
+    initial_getheaders_sent: AtomicU64,
+    /// `headers` messages applied since process start (including empty).
+    headers_replies: AtomicU64,
     /// A follow-session block inv during IBD. The walk asks its header peer.
     header_inv_challenge: AtomicBool,
     #[cfg(test)]
@@ -493,6 +507,8 @@ impl ChainHub {
             asked_blocks: RwLock::new(HashSet::new()),
             chain_work_prefix: RwLock::new(Vec::new()),
             finished_ibd: AtomicBool::new(false),
+            initial_getheaders_sent: AtomicU64::new(0),
+            headers_replies: AtomicU64::new(0),
             header_inv_challenge: AtomicBool::new(false),
             #[cfg(test)]
             block_at_height_calls: AtomicU64::new(0),
@@ -1154,6 +1170,22 @@ impl ChainHub {
         best
     }
 
+    pub fn note_initial_getheaders_sent(&self) {
+        self.initial_getheaders_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn initial_getheaders_sent(&self) -> u64 {
+        self.initial_getheaders_sent.load(Ordering::Relaxed)
+    }
+
+    pub fn note_headers_reply(&self) {
+        self.headers_replies.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn headers_reply_count(&self) -> u64 {
+        self.headers_replies.load(Ordering::Relaxed)
+    }
+
     fn note_header_tip(&self, header: &Header) {
         let hash = header.block_hash();
         if self.is_connected(&hash) {
@@ -1349,7 +1381,7 @@ impl ChainHub {
             return Err("bad-prevblk".into());
         }
         if let Some(ph) = self.query.height_of_hash(&prev_bytes).ok().flatten() {
-            if let Ok(mtp) = rbitcoin_consensus::median_time_past(self.query.as_ref(), ph) {
+            if let Ok(mtp) = rbitcoin_query::median_time_past(self.query.as_ref(), ph) {
                 if header.time <= mtp {
                     return Err("time-too-old".into());
                 }
@@ -1500,7 +1532,7 @@ impl ChainHub {
             mtp,
             expected,
         )
-        .map_err(|e| header_reject(header, &e))
+        .map_err(|e| header_reject(header, &rbitcoin_query::ConfirmError::from(e)))
     }
 
     fn sync_parent_header(
@@ -1689,7 +1721,7 @@ impl ChainHub {
         &self,
         stamped: PlanStampOutcome,
         pipeline: Option<&WireLoadPipeline>,
-    ) -> Result<rbitcoin_consensus::ConfirmLoadOutcome, NetError> {
+    ) -> Result<rbitcoin_query::ConfirmLoadOutcome, NetError> {
         consensus_load_from_plan(
             &self.query,
             &self.params,
@@ -1698,7 +1730,7 @@ impl ChainHub {
             pipeline,
             &ScriptPreverified::new(),
         )
-        .map_err(NetError::from_consensus)
+        .map_err(NetError::from_confirm)
     }
 
     /// Unified lookup+load from raw wire blocks (no Class-A wire rebuild).
@@ -1713,7 +1745,7 @@ impl ChainHub {
     pub fn confirm_wire_load_phase(
         &self,
         blocks: &[(Height, Block)],
-    ) -> Result<Option<rbitcoin_consensus::ConfirmLoadOutcome>, NetError> {
+    ) -> Result<Option<rbitcoin_query::ConfirmLoadOutcome>, NetError> {
         self.confirm_wire_load_phase_pipelined(blocks, None)
     }
 
@@ -1724,7 +1756,7 @@ impl ChainHub {
         &self,
         blocks: &[(Height, Block)],
         pipeline: Option<&WireLoadPipeline>,
-    ) -> Result<Option<rbitcoin_consensus::ConfirmLoadOutcome>, NetError> {
+    ) -> Result<Option<rbitcoin_query::ConfirmLoadOutcome>, NetError> {
         let Some(contig) = self.confirm_wire_contig(blocks, pipeline) else {
             return Ok(None);
         };
@@ -1736,20 +1768,20 @@ impl ChainHub {
             &ScriptPreverified::new(),
             pipeline,
         )
-        .map_err(NetError::from_consensus)?;
+        .map_err(NetError::from_confirm)?;
         Ok(Some(ok))
     }
 
     /// WRITE stage: structural + Class C + spend annotate (ordered).
     pub fn confirm_write(&self, batch: ScriptOkBatch) -> Result<Vec<AcceptOutcome>, NetError> {
-        let headers = batch.wire_headers().map_err(NetError::from_consensus)?;
+        let headers = batch.wire_headers().map_err(NetError::from_confirm)?;
         let meta: Vec<(u32, BlockHash)> = batch
             .heights_hashes()
             .into_iter()
             .map(|(h, raw)| (h, BlockHash::from_byte_array(raw)))
             .collect();
         confirm_write_phase(&self.query, &self.params, self.milestone, batch)
-            .map_err(NetError::from_consensus)?;
+            .map_err(NetError::from_confirm)?;
         self.note_confirmed_tip(&meta, &headers)?;
         Ok(meta
             .iter()
@@ -1763,11 +1795,9 @@ impl ChainHub {
         headers: &[Header],
     ) -> Result<(), NetError> {
         if headers.len() != need_meta.len() {
-            return Err(NetError::from_consensus(
-                rbitcoin_consensus::ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                    "invariant: wire headers length",
-                )),
-            ));
+            return Err(NetError::store(rbitcoin_store::StoreError::Corrupt(
+                "invariant: wire headers length",
+            )));
         }
         if let Some(mp) = self.mempool() {
             mp.clear_recent_rejects();
@@ -1807,7 +1837,7 @@ impl ChainHub {
     /// Block time is `max(MTP+1, now)`.
     fn generate_block_time(&self, tip_h: u32, tip_time: u32) -> u32 {
         let now = self.clock.now_secs() as u32;
-        let mtp = rbitcoin_consensus::median_time_past(self.query.as_ref(), Height(tip_h))
+        let mtp = rbitcoin_query::median_time_past(self.query.as_ref(), Height(tip_h))
             .unwrap_or(tip_time);
         now.max(mtp.saturating_add(1))
     }
@@ -1951,7 +1981,7 @@ impl ChainHub {
         if let Err(e) = self.query.apply_sh_pending() {
             rbitcoin_log::warn!("generate: SH write-behind drain: {e}");
         }
-        if let Err(e) = rbitcoin_consensus::build_indexes_released(&self.query) {
+        if let Err(e) = rbitcoin_query::build_indexes_released(&self.query) {
             rbitcoin_log::warn!("generate: index write-behind drain: {e}");
         }
         Ok(hashes)
@@ -2516,7 +2546,7 @@ impl ChainHub {
                     &batch,
                 )?;
                 validate_header_on_parent(&self.params, Height(height), &b.header, mtp, expected)
-                    .map_err(|e| header_reject(&b.header, &e))
+                    .map_err(|e| header_reject(&b.header, &rbitcoin_query::ConfirmError::from(e)))
             };
             if let Err(e) = checked {
                 return Err(connect_failed_for_header(b.block_hash().to_byte_array(), e));
@@ -3028,12 +3058,14 @@ impl ChainHub {
                 }
             })
             .map_err(|e| match e {
-                rbitcoin_consensus::ConsensusError::Cancelled => NetError::Cancelled,
-                rbitcoin_consensus::ConsensusError::Store(se) => {
-                    rbitcoin_log::warn!("tip connect {hash} @ {height}: store fault: {se}");
-                    NetError::store(se)
+                e if e.is_cancelled() => NetError::Cancelled,
+                rbitcoin_query::ConfirmError::Rules(
+                    rbitcoin_consensus::ConsensusError::Internal(m),
+                ) => {
+                    rbitcoin_log::warn!("tip connect {hash} @ {height}: pipeline fault: {m}");
+                    NetError::store(m)
                 }
-                e => {
+                rbitcoin_query::ConfirmError::Rules(e) => {
                     let reason = rbitcoin_consensus::block_reject_reason(&e);
                     rbitcoin_log::info!(
                         "{}",
@@ -3044,6 +3076,10 @@ impl ChainHub {
                     } else {
                         NetError::Consensus(reason)
                     }
+                }
+                rbitcoin_query::ConfirmError::Store(se) => {
+                    rbitcoin_log::warn!("tip connect {hash} @ {height}: store fault: {se}");
+                    NetError::store(se)
                 }
             })?;
         self.header_tips.write().unwrap().remove(&hash);
@@ -3326,13 +3362,13 @@ pub fn check_block_proposal_with(
     }
     let height = tip_h.0.saturating_add(1);
     let expected =
-        rbitcoin_consensus::expected_next_bits(query, params, Height(height), block.header.time)
+        rbitcoin_query::expected_next_bits(query, params, Height(height), block.header.time)
             .map(|c| c.to_consensus())
             .unwrap_or(tip_rec.bits);
     if block.header.bits.to_consensus() != expected {
         return Err("bad-diffbits".into());
     }
-    let mtp = rbitcoin_consensus::median_time_past(query, tip_h).unwrap_or(tip_rec.timestamp);
+    let mtp = rbitcoin_query::median_time_past(query, tip_h).unwrap_or(tip_rec.timestamp);
     // Core is `<=` MTP. Proposal uses `<` so a template stamped at the
     // parent's mediantime+1 still validates after that parent is submitted
     // (new MTP often equals that stamp on an incrementing cache).
@@ -3907,8 +3943,9 @@ mod tests {
     use bitcoin::{
         Amount, CompactTarget, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness,
     };
-    use rbitcoin_consensus::{confirm_scripts_phase, ChainParams, Milestone};
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_mempool::UtxoProvider;
+    use rbitcoin_query::confirm_scripts_phase;
 
     fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
         super::tiny_regtest_hub_labeled("chain")
@@ -4289,7 +4326,7 @@ mod tests {
 
     #[test]
     fn wire_load_skips_a_block_below_the_pipeline_floor() {
-        use rbitcoin_consensus::WireLoadPipeline;
+        use rbitcoin_query::WireLoadPipeline;
 
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
@@ -5902,7 +5939,7 @@ mod tests {
     /// Regression: hub used store tip+1 only → Ok(None) "empty outcome" thrash.
     #[test]
     fn wire_prep_ahead_of_store_tip_with_pipeline() {
-        use rbitcoin_consensus::WireLoadPipeline;
+        use rbitcoin_query::WireLoadPipeline;
 
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
@@ -6214,7 +6251,7 @@ mod tests {
             .block_at_height(0)
             .unwrap()
             .expect("genesis after ensure");
-        rbitcoin_consensus::pad_empty_from(
+        rbitcoin_query::pad_empty_from(
             hub.query.as_ref(),
             &hub.params,
             genesis.block_hash(),
@@ -6296,7 +6333,7 @@ mod tests {
             .block_at_height(0)
             .unwrap()
             .expect("genesis after ensure");
-        let (_tip, _time, cbs) = rbitcoin_consensus::pad_empty_from(
+        let (_tip, _time, cbs) = rbitcoin_query::pad_empty_from(
             hub.query.as_ref(),
             &hub.params,
             genesis.block_hash(),
@@ -6746,7 +6783,7 @@ mod tests {
         ));
         assert!(hub.held_body(&stale.block_hash()).is_some());
 
-        rbitcoin_consensus::pad_empty_from(
+        rbitcoin_query::pad_empty_from(
             hub.query.as_ref(),
             &hub.params,
             b1.block_hash(),
@@ -7601,6 +7638,30 @@ mod tests {
             store.txs.sample_reset_body_decodes(),
             0,
             "a row with no fence height is not decoded"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A side block whose parent header read is cancelled is not `BLOCK_FAILED`.
+    #[test]
+    fn cancelled_header_read_on_a_side_block_is_not_cached_invalid() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let b1 = mine(gen, 1_300_050_000, 1);
+        hub.accept_block(b1.clone()).unwrap();
+        let side = mine_distinct(gen, 1_300_050_001, 1, &[b1.block_hash()]);
+        hub.query.fail_next_header_read_cancelled();
+        let err = hub
+            .accept_received_block(side.clone())
+            .expect_err("a cancelled header read is not an accept");
+        assert!(
+            err.is_local_fault(),
+            "cancel must stay a store/engine result, got {err}"
+        );
+        assert!(
+            !hub.is_block_invalid(&side.block_hash()),
+            "a cancelled header read must not be BLOCK_FAILED, err={err}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

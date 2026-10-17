@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Query API over the rbitcoin store"
 
 [dependencies]
+rbitcoin-consensus = { workspace = true }
 rbitcoin-primitives = { workspace = true }
 rbitcoin-store = { workspace = true }
 rbitcoin-log = { workspace = true }
@@ -15,6 +16,9 @@ bitcoin = { workspace = true }
 arc-swap = { workspace = true }
 # Attribute only. cargo-mutants reads it; it does not change compiled code.
 mutants = "0.0.4"
+
+[features]
+test-hooks = []
 
 [dev-dependencies]
 # Height-index tests write a raw confirmed slot. Dependents of this crate

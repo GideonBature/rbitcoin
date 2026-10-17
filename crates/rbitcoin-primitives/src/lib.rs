@@ -7,6 +7,7 @@ mod compact;
 mod hex;
 mod loc_simd;
 mod median_time;
+mod merkle;
 mod script_sigops;
 mod scriptnum;
 
@@ -20,6 +21,9 @@ pub use hex::{
 };
 pub use loc_simd::{deinterleave_pairs_u8x8, inclusive_u8x8_times_8};
 pub use median_time::median_time_past_times;
+pub use merkle::{
+    merkle_branch, merkle_root_from_branch, merkle_root_from_txids, merkle_root_mutated,
+};
 pub use script_sigops::script_sigop_count;
 pub use scriptnum::{
     scriptnum_decode, scriptnum_decode_width, scriptnum_encode, scriptnum_is_minimal,
