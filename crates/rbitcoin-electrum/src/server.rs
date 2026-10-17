@@ -124,10 +124,6 @@ pub struct ElectrumConfig {
     pub max_scripthash_subs: usize,
     /// Max hex length accepted by `blockchain.transaction.broadcast`.
     pub max_broadcast_hex: usize,
-    /// `blockchain.tweaks.subscribe` sends `done` at a wave boundary after
-    /// this wall time so Cake resubscribes. [`Duration::ZERO`] seals after
-    /// wave 0 (tests). Default [`crate::tweaks::SUBSCRIBE_CHUNK`].
-    pub tweaks_chunk: Duration,
     /// Omit served P2TR outs with `value <=` this (sats). `0` serves all.
     /// Default [`crate::tweaks::DEFAULT_TWEAKS_MIN_DUST`].
     pub tweaks_min_dust: u64,
@@ -147,7 +143,6 @@ impl ElectrumConfig {
             limits: ServeLimits::for_public_proxy(),
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
-            tweaks_chunk: crate::tweaks::SUBSCRIBE_CHUNK,
             tweaks_min_dust: crate::tweaks::DEFAULT_TWEAKS_MIN_DUST,
             onion_tcp: Arc::new(OnceLock::new()),
         }
@@ -616,7 +611,6 @@ where
                         &params_v,
                         idle,
                         max_line,
-                        config.tweaks_chunk,
                         config.tweaks_min_dust,
                     )
                     .await?;
@@ -995,7 +989,6 @@ async fn serve_tweaks_subscribe<R, W>(
     params_v: &Value,
     idle: Duration,
     max_line: usize,
-    chunk: Duration,
     min_dust: u64,
 ) -> Result<(), std::io::Error>
 where
@@ -1051,11 +1044,36 @@ where
     write_raw_lines(writer, &wave.rest_notifies).await?;
     let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_serve_limits(req.historical);
-    let more = next <= last;
-    if more && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
+    serve_tweaks_rest(
+        reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0, &mut next,
+    )
+    .await
+}
+
+/// After wave 0: more waves while the chunk is open, then Cake `done`.
+#[allow(clippy::too_many_arguments)]
+async fn serve_tweaks_rest<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    query: &Arc<Query>,
+    chain: &Arc<ChainParams>,
+    peer: &SocketAddr,
+    last: u32,
+    limits: rbitcoin_query::ThinTweakRangeLimits,
+    min_dust: u64,
+    idle: Duration,
+    max_line: usize,
+    t0: Instant,
+    next: &mut u32,
+) -> Result<(), std::io::Error>
+where
+    R: AsyncBufReadExt + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let more = *next <= last;
+    if crate::tweaks::chunk_still_open(t0.elapsed(), more) {
         serve_tweaks_follow_waves(
-            reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, chunk, t0,
-            &mut next,
+            reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0, next,
         )
         .await?;
     }
@@ -1155,7 +1173,6 @@ async fn serve_tweaks_follow_waves<R, W>(
     min_dust: u64,
     idle: Duration,
     max_line: usize,
-    chunk: Duration,
     t0: Instant,
     next: &mut u32,
 ) -> Result<(), std::io::Error>
@@ -1199,11 +1216,12 @@ where
         let n = batch.consumed.max(1);
         *next = batch_start.saturating_add(n);
         let more = *next <= last;
-        if more && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
+        let open = crate::tweaks::chunk_still_open(t0.elapsed(), more);
+        if open {
             handle = spawn_wave(*next);
         }
         write_raw_lines(writer, &batch.lines).await?;
-        if !more || crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
+        if !open {
             break;
         }
         batch_start = *next;

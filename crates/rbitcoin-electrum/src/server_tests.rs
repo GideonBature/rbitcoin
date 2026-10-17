@@ -21,7 +21,6 @@ fn config_helpers_and_param_parsers() {
         rbitcoin_primitives::display_hash_hex(&params.genesis_hash.to_byte_array())
     );
     assert!(cfg.banner.contains("rbitcoin"));
-    assert_eq!(cfg.tweaks_chunk, crate::tweaks::SUBSCRIBE_CHUNK);
     assert_eq!(cfg.tweaks_min_dust, crate::tweaks::DEFAULT_TWEAKS_MIN_DUST);
 
     let sh = electrum_scripthash_hex(&[0x51]);
@@ -1115,7 +1114,7 @@ fn serve_limits_public_proxy_defaults() {
 }
 
 #[tokio::test]
-async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
+async fn tweaks_subscribe_dones_when_the_first_wave_finishes_count() {
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
@@ -1165,8 +1164,7 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
     let params = ChainParams::regtest();
     let q = std::sync::Arc::new(q);
     let (tip_tx, _) = broadcast::channel(4);
-    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
-    cfg.tweaks_chunk = Duration::ZERO;
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
     let handle = run_electrum(cfg, q, params, tip_tx, None)
         .await
         .expect("listen");
@@ -1191,7 +1189,7 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
         stream.write_all(line.as_bytes()).await.unwrap();
     }
 
-    subscribe(&mut stream, "scan", 1, 3).await;
+    subscribe(&mut stream, "scan", 1, 1).await;
     let mut reader = BufReader::new(&mut stream);
 
     let result = read_json(&mut reader).await;
@@ -1204,11 +1202,11 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
     assert_eq!(done["method"], "blockchain.tweaks.subscribe");
     assert_eq!(
         done["params"][0]["message"], "done",
-        "zero chunk must done after wave 0 with heights left, got {done}"
+        "count that fits in wave 0 must done, got {done}"
     );
 
     drop(reader);
-    subscribe(&mut stream, "scan2", 2, 2).await;
+    subscribe(&mut stream, "scan2", 2, 1).await;
     let mut reader = BufReader::new(&mut stream);
     let result2 = read_json(&mut reader).await;
     assert_eq!(result2["id"], "scan2");
@@ -1222,6 +1220,105 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
     assert_eq!(done2["params"][0]["message"], "done");
 
     handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Chunk already due, heights still left: `done` with no further wave, and a
+/// follow loop that was entered writes one wave and stops.
+#[tokio::test]
+async fn elapsed_tweaks_chunk_seals_while_heights_remain() {
+    let (dir, q) = tmp_store();
+    let q = std::sync::Arc::new(q);
+    let chain = std::sync::Arc::new(ChainParams::mainnet());
+    let started = Instant::now()
+        .checked_sub(crate::tweaks::SUBSCRIBE_CHUNK)
+        .expect("monotonic clock is older than one tweaks chunk");
+    let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+    let limits = crate::tweaks::subscribe_serve_limits(false);
+    let idle = Duration::from_secs(1);
+    let max_line = DEFAULT_MAX_LINE_BYTES;
+    let last = 3_000u32;
+
+    let (client, server) = tokio::io::duplex(1024 * 1024);
+    let (server_r, mut server_w) = tokio::io::split(server);
+    let mut server_r = BufReader::new(server_r);
+    let mut next = 0u32;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        serve_tweaks_rest(
+            &mut server_r,
+            &mut server_w,
+            &q,
+            &chain,
+            &peer,
+            last,
+            limits,
+            0,
+            idle,
+            max_line,
+            started,
+            &mut next,
+        ),
+    )
+    .await
+    .expect("wave-0 seal")
+    .unwrap();
+    drop(server_r);
+    drop(server_w);
+    let mut client = BufReader::new(client);
+    let mut line = String::new();
+    client.read_line(&mut line).await.unwrap();
+    let done: Value = serde_json::from_str(&line).expect("done json");
+    assert_eq!(
+        done["params"][0]["message"], "done",
+        "a due chunk writes done without another height wave"
+    );
+    line.clear();
+    assert_eq!(
+        client.read_line(&mut line).await.unwrap(),
+        0,
+        "no height line after done"
+    );
+
+    let (client, server) = tokio::io::duplex(1024 * 1024);
+    let (server_r, mut server_w) = tokio::io::split(server);
+    let mut server_r = BufReader::new(server_r);
+    let mut next = 0u32;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        serve_tweaks_follow_waves(
+            &mut server_r,
+            &mut server_w,
+            &q,
+            &chain,
+            &peer,
+            last,
+            limits,
+            0,
+            idle,
+            max_line,
+            started,
+            &mut next,
+        ),
+    )
+    .await
+    .expect("follow seal")
+    .unwrap();
+    drop(server_r);
+    drop(server_w);
+    let mut client = BufReader::new(client);
+    line.clear();
+    client.read_line(&mut line).await.unwrap();
+    let wave: Value = serde_json::from_str(&line).expect("wave json");
+    let keys = wave["params"][0].as_object().expect("height map").len();
+    assert_eq!(keys, crate::tweaks::EMPTY_WAVE_HEIGHTS as usize);
+    line.clear();
+    assert_eq!(
+        client.read_line(&mut line).await.unwrap(),
+        0,
+        "a due chunk does not write the next wave"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

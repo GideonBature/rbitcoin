@@ -14,5 +14,9 @@ rbitcoin-primitives = { workspace = true }
 rbitcoin-store = { workspace = true }
 bitcoin = { workspace = true }
 
+[features]
+# Net tests pin a full slot table. A production build leaves this off.
+test-hooks = []
+
 [lints]
 workspace = true

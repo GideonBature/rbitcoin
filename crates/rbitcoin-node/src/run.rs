@@ -2087,7 +2087,6 @@ async fn start_sv2_tp(config: &NodeConfig, hub: &Arc<ChainHub>) -> Option<Sv2TpH
         write_timeout: rbitcoin_sv2::WRITE_TIMEOUT,
         fee_delta: config.sv2_tp_fee_delta,
         template_interval: Duration::from_secs(config.sv2_tp_template_interval_secs),
-        constraints_cooldown: rbitcoin_sv2::CONSTRAINTS_COOLDOWN,
     };
     match run_sv2_tp(cfg).await {
         Ok(h) => {

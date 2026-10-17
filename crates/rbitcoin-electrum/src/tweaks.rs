@@ -38,6 +38,11 @@ pub fn seal_subscribe_chunk(elapsed: Duration, budget: Duration, more: bool) -> 
     more && elapsed >= budget
 }
 
+/// Another wave may run: heights remain and the 60s chunk has not elapsed.
+pub(crate) fn chunk_still_open(elapsed: Duration, more: bool) -> bool {
+    more && !seal_subscribe_chunk(elapsed, SUBSCRIBE_CHUNK, more)
+}
+
 /// Parsed `blockchain.tweaks.subscribe` window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TweakReq {
@@ -968,6 +973,15 @@ mod tests {
             "wave boundary at budget with heights left must done"
         );
         assert_eq!(SUBSCRIBE_CHUNK, Duration::from_secs(60));
+        assert!(
+            chunk_still_open(Duration::from_secs(59), true),
+            "under 60s with heights left keeps the stream open"
+        );
+        assert!(
+            !chunk_still_open(SUBSCRIBE_CHUNK, true),
+            "60s with heights left seals the chunk"
+        );
+        assert!(!chunk_still_open(SUBSCRIBE_CHUNK, false));
     }
 
     #[test]

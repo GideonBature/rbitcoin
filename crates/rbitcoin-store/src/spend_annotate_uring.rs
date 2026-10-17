@@ -18,20 +18,19 @@ const META_LEN: usize = OutputRecord::SPENT_SLOT_LEN;
 const MAX_SLOTS: usize = 128;
 
 #[cfg(test)]
-pub(crate) static SPEND_ANNOTATE_READS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-pub(crate) static SPEND_ANNOTATE_WRITES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static SPEND_ANNOTATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SPEND_ANNOTATE_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 pub(crate) fn note_spend_read_for_test() {
     #[cfg(test)]
-    SPEND_ANNOTATE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SPEND_ANNOTATE_READS.with(|n| n.set(n.get() + 1));
 }
 
 pub(crate) fn note_spend_write_for_test() {
     #[cfg(test)]
-    SPEND_ANNOTATE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SPEND_ANNOTATE_WRITES.with(|n| n.set(n.get() + 1));
 }
 type SpentAbsWrite = (u64, Fk, u32, Fk, u32, [u8; META_LEN]);
 
@@ -1156,8 +1155,8 @@ mod tests {
         let a2 = crate::spent_abs(off, 510);
         assert_eq!(a0 / 4096, a1 / 4096);
         assert_ne!(a0 / 4096, a2 / 4096);
-        SPEND_ANNOTATE_READS.store(0, Ordering::Relaxed);
-        SPEND_ANNOTATE_WRITES.store(0, Ordering::Relaxed);
+        SPEND_ANNOTATE_READS.with(|n| n.set(0));
+        SPEND_ANNOTATE_WRITES.with(|n| n.set(0));
         let edges = [
             (a0, fk, 0u32, Fk(10), 1u32),
             (a1, fk, 1u32, Fk(11), 2u32),
@@ -1167,8 +1166,8 @@ mod tests {
             .put_spend_batch_by_abs_meta(&spenders, &edges)
             .unwrap()
             .is_empty());
-        assert_eq!(SPEND_ANNOTATE_READS.load(Ordering::Relaxed), 2);
-        assert_eq!(SPEND_ANNOTATE_WRITES.load(Ordering::Relaxed), 2);
+        assert_eq!(SPEND_ANNOTATE_READS.with(|n| n.get()), 2);
+        assert_eq!(SPEND_ANNOTATE_WRITES.with(|n| n.get()), 2);
         let (off, len) = t.spent_range(fk).unwrap();
         let (m0, f0, v0) = t.get_output_spender_meta_at(off, len, 0).unwrap();
         let (m1, f1, v1) = t.get_output_spender_meta_at(off, len, 1).unwrap();
