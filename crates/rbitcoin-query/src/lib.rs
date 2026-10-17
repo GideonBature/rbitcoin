@@ -409,6 +409,9 @@ pub struct Query {
     /// Cooperative cancel for in-flight confirm load. Set on IBD SIGINT
     /// teardown so the confirm load thread aborts before process exit.
     confirm_cancel: std::sync::atomic::AtomicBool,
+    /// One header read returns [`StoreError::Cancelled`]. Tests only.
+    #[cfg(feature = "test-hooks")]
+    header_read_cancel: std::sync::atomic::AtomicBool,
     /// Confirmed best-chain `hash → height` (kept for process life; ~60 MiB mainnet).
     ///
     /// Avoids O(tip) header walks on Esplora/P2P `height_of_hash`.
@@ -571,6 +574,8 @@ impl Query {
             sptweaks_origin: AtomicU32::new(sptweaks_origin),
             index_mode_cell: std::sync::atomic::AtomicU8::new(IndexMode::Tip as u8),
             confirm_cancel: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "test-hooks")]
+            header_read_cancel: std::sync::atomic::AtomicBool::new(false),
             height_by_hash: Mutex::new(HeightByHashIndex::default()),
             reconstruct_archived: AtomicU64::new(0),
             max_sh_creates: AtomicU32::new(DEFAULT_MAX_SH_CREATES),
@@ -1273,6 +1278,14 @@ impl Query {
     pub fn confirm_cancelled(&self) -> bool {
         self.confirm_cancel
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The next [`Self::header_at_height`] returns [`StoreError::Cancelled`].
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn fail_next_header_read_cancelled(&self) {
+        self.header_read_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Last height with SH creates applied (after tip). `None` if empty chain.

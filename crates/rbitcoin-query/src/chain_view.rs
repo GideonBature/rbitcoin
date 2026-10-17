@@ -214,9 +214,12 @@ impl Query {
         &self,
         height: Height,
     ) -> Result<Option<(Fk, HeaderRecord)>, QueryError> {
-        // IBD SIGINT sets this flag. The read must fail as cancel, not as a
-        // missing header the caller can cache.
-        if self.confirm_cancelled() {
+        // One-shot armed by tests. The IBD stop flag must not fail later reads.
+        #[cfg(feature = "test-hooks")]
+        if self
+            .header_read_cancel
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
             return Err(StoreError::Cancelled("header read"));
         }
         note_header_lookup();

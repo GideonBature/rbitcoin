@@ -27,6 +27,8 @@ sha3 = "0.12"
 # Relay tests pin a full mempool slot table. Dependents of this crate do
 # not turn the feature on.
 rbitcoin-mempool = { workspace = true, features = ["test-hooks"] }
+# Side-block accept arms one cancelled header read. Dependents do not.
+rbitcoin-query = { workspace = true, features = ["test-hooks"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # POLLRDHUP: peer FIN with unread bytes still in the receive buffer.

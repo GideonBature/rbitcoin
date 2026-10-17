@@ -7629,7 +7629,7 @@ mod tests {
         let b1 = mine(gen, 1_300_050_000, 1);
         hub.accept_block(b1.clone()).unwrap();
         let side = mine_distinct(gen, 1_300_050_001, 1, &[b1.block_hash()]);
-        hub.query.request_confirm_cancel();
+        hub.query.fail_next_header_read_cancelled();
         let err = hub
             .accept_received_block(side.clone())
             .expect_err("a cancelled header read is not an accept");
@@ -7641,7 +7641,6 @@ mod tests {
             !hub.is_block_invalid(&side.block_hash()),
             "a cancelled header read must not be BLOCK_FAILED, err={err}"
         );
-        hub.query.clear_confirm_cancel();
         let _ = std::fs::remove_dir_all(dir);
     }
 
