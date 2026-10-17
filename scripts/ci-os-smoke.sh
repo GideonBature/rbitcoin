@@ -16,7 +16,7 @@ STORE_PLATFORM_FILTERS=(
   sorted_run::tests::host_mem
   sorted_run::tests::darwin_vm
   io_backend::tests
-  uring_session::tests::default_kind_follows_os
+  bulk_io::tests::unset_io_env_opens_a_session
   uring_session::tests::pool_
   fuse8_filter::tests::no_false_negatives_and_roundtrip
   segmented_head::tests::insert_roll_seal_lookup_roundtrip
@@ -44,6 +44,8 @@ case "${CI_OS_SMOKE_UNAME:-$(uname -s)}" in
     STORE_PLATFORM_SKIPS+=(concurrent_readers_during_append_and_grow)
     # `mod io_session_iocp` is #[cfg(windows)] — the tests do not exist elsewhere.
     STORE_PLATFORM_FILTERS+=(io_session_iocp)
+    # Linux and Windows only: Darwin opens no session by default.
+    STORE_PLATFORM_FILTERS+=(uring_session::tests::default_kind_follows_os)
     PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::tests)
     ;;
   Darwin*)

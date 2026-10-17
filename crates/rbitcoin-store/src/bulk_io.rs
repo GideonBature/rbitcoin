@@ -23,8 +23,9 @@
 //!
 //! # Non-Linux
 //!
-//! Darwin default is the **pool** completion session (kqueue is not a
-//! regular-file backend). Windows uses IOCP.
+//! Darwin default is libc **pread** (kqueue is not a regular-file backend,
+//! and the pool session's per-read handoff cost more than the reads in IBD);
+//! `RBITCOIN_IO=pool` opens the pool session there. Windows uses IOCP.
 //! Machines stay staged; they do not flatten to one-shot `pread`. See
 //! `docs/io-modality.md` and `docs/concurrency.md`.
 
@@ -66,11 +67,7 @@ pub fn io_uring_enabled() -> bool {
         1 => true,
         2 => false,
         _ => {
-            let want = match parse_io_token() {
-                Some(IoToken::Pread) => false,
-                Some(_) | None => true,
-            };
-            if !want {
+            if !session_wanted(parse_io_token()) {
                 URING_MODE.store(2, Ordering::Relaxed);
                 return false;
             }
@@ -84,6 +81,16 @@ pub fn io_uring_enabled() -> bool {
             }
             ok
         }
+    }
+}
+
+fn session_wanted(token: Option<IoToken>) -> bool {
+    match token {
+        Some(IoToken::Pread) => false,
+        Some(_) => true,
+        // Darwin's only session is the worker pool. Its per-read handoff cost
+        // more than the read in signet IBD (about 20% slower, warm or cold).
+        None => !cfg!(target_os = "macos"),
     }
 }
 
@@ -129,15 +136,11 @@ fn default_session_kind() -> crate::uring_session::SessionKind {
     {
         SessionKind::Uring
     }
-    #[cfg(target_os = "macos")]
-    {
-        SessionKind::Pool
-    }
     #[cfg(windows)]
     {
         SessionKind::Iocp
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         SessionKind::Pool
     }
@@ -600,6 +603,19 @@ fn pwrite_one(op: &mut WriteOp<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unset_io_env_opens_a_session_except_on_darwin() {
+        #[cfg(target_os = "macos")]
+        assert!(!session_wanted(None), "Darwin defaults to libc pread");
+        #[cfg(not(target_os = "macos"))]
+        assert!(session_wanted(None));
+        assert!(
+            session_wanted(Some(IoToken::Pool)),
+            "RBITCOIN_IO=pool still opens the pool session"
+        );
+        assert!(!session_wanted(Some(IoToken::Pread)));
+    }
     use std::io::Write;
 
     fn dummy_handle() -> IoHandle {

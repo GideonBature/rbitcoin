@@ -36,8 +36,10 @@ assert_ok "dry-run lists SH RAM / host_mem probes" \
   grep -q "sorted_run::tests::host_mem" <<<"$out"
 assert_ok "dry-run lists Darwin vm page math" \
   grep -q "sorted_run::tests::darwin_vm" <<<"$out"
-assert_ok "dry-run lists default session kind" \
-  grep -q "uring_session::tests::default_kind_follows_os" <<<"$out"
+assert_ok "dry-run lists the default IO session per OS" \
+  grep -q "bulk_io::tests::unset_io_env_opens_a_session" <<<"$out"
+assert_ok "only Windows lists the default session kind test" \
+  test "$(grep -c 'uring_session::tests::default_kind_follows_os' <<<"$out" || true)" = "0"
 assert_ok "dry-run lists pool session tests" \
   grep -q "uring_session::tests::pool_" <<<"$out"
 
@@ -54,6 +56,8 @@ assert_ok "Windows dry-run still confirms a few blocks" \
   grep -q "chain_view_pin_asof_reorg" <<<"$out"
 assert_ok "Windows dry-run lists IOCP session tests" \
   grep -q "io_session_iocp" <<<"$out"
+assert_ok "Windows dry-run pins the IOCP default session kind" \
+  grep -q "uring_session::tests::default_kind_follows_os" <<<"$out"
 assert_ok "Windows dry-run pins loc SIMD (SSE2) vs scalar" \
   grep -qx "primitives=loc_simd::tests" <<<"$out"
 
