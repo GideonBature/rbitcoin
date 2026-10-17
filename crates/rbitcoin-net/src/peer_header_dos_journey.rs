@@ -929,6 +929,67 @@ async fn sixty_four_byte_body_is_mutated(
     assert_eq!(hub.tip_hash(), Some(tip));
 }
 
+/// An empty body has no merkle root. A header root of all zeros must not
+/// pass that check and must not be stored.
+#[tokio::test]
+async fn empty_body_null_merkle_bans_before_the_header() {
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("empty-mrkl");
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    hub.ensure_genesis().unwrap();
+    let peers = crate::peers::PeerHub::new();
+    let tip = hub.tip_hash().unwrap();
+    let block = bitcoin::Block {
+        header: bitcoin::block::Header {
+            version: bitcoin::block::Version::TWO,
+            prev_blockhash: tip,
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: hub.tip_header().unwrap().time.saturating_add(1),
+            bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        },
+        txdata: Vec::new(),
+    };
+    assert!(
+        !block.check_merkle_root(),
+        "an empty list has no merkle root"
+    );
+    let hash = block.block_hash();
+    let (out_tx, _rx) = mpsc::unbounded_channel();
+    let sender = live_peer(&peers, 18478, 27, true);
+    let mut follow = PeerFollowState::new();
+    follow.requested_blocks.insert(hash);
+    hub.note_asked_block(hash);
+    rbitcoin_log::capture_logs(true);
+    on_block(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(sender.as_ref()),
+        &block,
+    )
+    .await
+    .unwrap();
+    assert!(
+        logs_have("Block mutated: bad-txnmrklroot, hashMerkleRoot mismatch"),
+        "the drop names the missing root"
+    );
+    assert!(
+        sender.stop.load(Ordering::SeqCst),
+        "Core punishes a mutated block"
+    );
+    assert!(
+        !hub.knows_header(&hash),
+        "a mutated body adds no header"
+    );
+    assert!(
+        !hub.already_have_or_asked_block(&hash),
+        "a mutated drop forgets the ask so another peer can serve the real body"
+    );
+    assert!(!follow.requested_blocks.contains(&hash));
+    assert_eq!(hub.tip_hash(), Some(tip));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Core `RemoveBlockRequest` on a merkle-mismatch drop: the body is not the
 /// header's, so another peer must be free to serve the real one.
 async fn merkle_mismatch_forgets_the_ask(
