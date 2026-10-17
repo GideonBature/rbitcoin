@@ -793,8 +793,8 @@ fn rewind_to(st: &mut IbdWorkState, hub: &ChainHub, height: u32, dead: Option<Bl
             None => dead != Some(*h),
         })
         .collect();
-    // `clear_path_above` already dropped path slots above `keep`. The
-    // ordered filter is what still removes a hash that never got a height.
+    // `clear_path_above` already dropped path slots above `keep`. An ordered
+    // hash with no height stays unless it is the abandoned tip.
     drop_queue_above(st, keep, &keep_hashes);
     if dead.is_some() {
         st.header_walk.emptied.clear();

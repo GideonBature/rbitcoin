@@ -770,8 +770,9 @@ mod tests {
         frame(padded(name), payload).decode().payload().clone()
     }
 
-    /// Peer frames for the commands whose decode arm a missed mutant can delete,
-    /// plus the feefilter bounds and a trailing byte that must not be accepted.
+    /// addr, compact filters, reject, and alert stay distinct from an unknown
+    /// command. Feefilter accepts 0 through max money. A trailing byte is not
+    /// verack. Sixty-four invs stay off the heavy path.
     #[test]
     #[allow(clippy::cognitive_complexity)] // one codec, many rare-frame arms
     fn peer_frames_keep_rare_commands_and_feefilter_bounds() {
@@ -863,8 +864,7 @@ mod tests {
             );
         }
 
-        // A trailing byte is not part of verack. The empty-slice guard has to
-        // refuse it; replacing that guard with true would return Verack.
+        // A trailing byte is not verack.
         assert!(matches!(
             decoded("verack", vec![0]),
             NetworkMessage::Unknown { .. }

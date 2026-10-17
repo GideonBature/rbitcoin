@@ -675,8 +675,6 @@ impl ChainHub {
         }
         let near = tip_work - window;
         match self.min_chain_work_floor() {
-            // Equal work is the floor. A comparison here is the same value on
-            // both sides, so the missed `>` / `>=` mutants cannot be told apart.
             Some(min) => std::cmp::max(near, Work::from_be_bytes(min)),
             None => near,
         }
@@ -1616,8 +1614,6 @@ impl ChainHub {
         want: u32,
         in_batch: &HashMap<[u8; 32], HeaderSyncNode>,
     ) -> Option<Header> {
-        // Equality is handled below. Checking `>` first makes `>=` return
-        // nothing for the parent itself.
         if want > parent_height {
             return None;
         }
@@ -3205,8 +3201,6 @@ impl ChainHub {
         };
         let want = tip as usize + 1;
         let mut p = self.chain_work_prefix.write().unwrap();
-        // `truncate` is a no-op when the prefix is already at or below the tip,
-        // so a longer-than-tip cache and an exact one share this line.
         p.truncate(want);
         if p.is_empty() {
             self.fill_chain_work_from_header_body(&mut p, want)?;
@@ -3758,6 +3752,59 @@ fn seed_confirmed_tip(query: &Query) -> HashSet<BlockHash> {
     set
 }
 
+/// Headers in `batch` that are still the store header at that height.
+fn confirmed_hashes_still_there(query: &Query, batch: &[(u32, BlockHash)]) -> Vec<BlockHash> {
+    batch
+        .iter()
+        .filter(|(h, hash)| {
+            query
+                .header_at_height(Height(*h))
+                .ok()
+                .flatten()
+                .is_some_and(|(_, rec)| rec.hash == hash.to_byte_array())
+        })
+        .map(|(_, hash)| *hash)
+        .collect()
+}
+
+fn read_confirmed_chunk(query: &Query, heights: &[u32]) -> Vec<(u32, BlockHash)> {
+    let mut batch = Vec::with_capacity(heights.len());
+    for &h in heights {
+        if let Ok(Some((_, rec))) = query.header_at_height(Height(h)) {
+            batch.push((h, BlockHash::from_byte_array(rec.hash)));
+        }
+    }
+    batch
+}
+
+/// Insert one scanned chunk. A hash read before a disconnect is dropped
+/// when that height now has a different header, or none.
+fn commit_confirmed_chunk(
+    query: &Query,
+    confirmed: &RwLock<HashSet<BlockHash>>,
+    batch: &[(u32, BlockHash)],
+) {
+    // Disconnect removes from this set only while it holds the tip commit.
+    let _commit = query.lock_tip_commit();
+    let live = confirmed_hashes_still_there(query, batch);
+    let mut g = confirmed.write().unwrap();
+    for hash in live {
+        g.insert(hash);
+    }
+}
+
+fn publish_confirmed_heights(query: &Query, confirmed: &RwLock<HashSet<BlockHash>>) {
+    let mut h = 0u32;
+    loop {
+        let batch = read_confirmed_chunk(query, &[h]);
+        if batch.is_empty() {
+            break;
+        }
+        commit_confirmed_chunk(query, confirmed, &batch);
+        h = h.saturating_add(1);
+    }
+}
+
 /// Fill the rest of the confirmed set without blocking P2P start.
 fn spawn_confirmed_seed(query: Arc<Query>, confirmed: Arc<RwLock<HashSet<BlockHash>>>) {
     let Some(tip) = query.tip_height() else {
@@ -3768,18 +3815,7 @@ fn spawn_confirmed_seed(query: Arc<Query>, confirmed: Arc<RwLock<HashSet<BlockHa
     }
     let run = move || {
         let t0 = std::time::Instant::now();
-        let mut hashes = Vec::with_capacity(tip.0 as usize + 1);
-        for h in 0..=tip.0 {
-            if let Ok(Some((_, rec))) = query.header_at_height(Height(h)) {
-                hashes.push(BlockHash::from_byte_array(rec.hash));
-            }
-        }
-        for chunk in hashes.chunks(4096) {
-            let mut g = confirmed.write().unwrap();
-            for hash in chunk {
-                g.insert(*hash);
-            }
-        }
+        publish_confirmed_heights(&query, &confirmed);
         info!(
             "ibd: confirmed-set seed complete tip={} in {:?}",
             tip.0,
@@ -3886,10 +3922,9 @@ mod tests {
         );
     }
 
-    /// One regtest chain that walks the operators the last mutants run left open:
-    /// an empty-store branch, a block the node already has, a held child that
-    /// finishes the accept, rewind bounds, a stale body cache, and an invalid
-    /// child.
+    /// An empty-store branch, a block the node already has, a held child that
+    /// finishes the accept, rewind bounds, a stale body cache, and the body
+    /// count on the tip perf line.
     #[test]
     fn latest_run_chain_surfaces() {
         let (dir, hub) = tmp_hub();
@@ -4898,9 +4933,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Work floor, header-only window, submitheader parents, chaintips rank,
-    /// and a reopened datadir. Each assertion is the side of a comparison the
-    /// other operator gets wrong.
+    /// Work floor, submitheader parents, chaintips rank, and the 288-header
+    /// window past which an unrequested header is too far ahead.
     #[test]
     #[allow(clippy::cognitive_complexity)] // one hub, many chain-edge arms
     fn chain_edges_pin_work_headers_and_reopen() {
@@ -5208,6 +5242,41 @@ mod tests {
         assert!(
             hub.has_block(&mid),
             "reopening a height-3 chain fills the height between genesis and the tip"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn confirmed_seed_does_not_restore_a_disconnected_block() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let mut prev = hub.tip_hash().unwrap();
+        let mut time = hub.tip_header().unwrap().time;
+        for h in 1..=3u32 {
+            time = time.saturating_add(1);
+            let b = mine(prev, time, h);
+            prev = b.block_hash();
+            hub.accept_block(b).unwrap();
+        }
+        let gone = prev;
+        let scanned = read_confirmed_chunk(&hub.query, &[0, 1, 2, 3]);
+        assert!(
+            scanned.iter().any(|(_, hash)| *hash == gone),
+            "the seed read the tip while it was still connected"
+        );
+        hub.rewind_to_height(0).unwrap();
+        assert!(
+            !hub.has_block(&gone),
+            "rewind drops the disconnected tip from the confirmed set"
+        );
+        commit_confirmed_chunk(&hub.query, &hub.confirmed, &scanned);
+        assert!(
+            !hub.has_block(&gone),
+            "a seed chunk scanned before the rewind must not put that block back"
+        );
+        assert!(
+            hub.has_block(&genesis_block(&hub.params).block_hash()),
+            "genesis is still the header at height 0"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
