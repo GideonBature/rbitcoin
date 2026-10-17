@@ -367,6 +367,111 @@ pub fn taproot_leaf_control(leaf: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> 
     Ok((control.serialize(), output))
 }
 
+/// Spend-transaction fields both corpus runners share.
+///
+/// Defaults match Core `script_tests.cpp`: version 1, locktime 0, sequence
+/// `0xffffffff`, one empty output. `version` is the consensus `i32` bit
+/// pattern (`4294967295` and `-1` are the same bits).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpendShape {
+    pub version: i32,
+    pub lock_time: u32,
+    pub sequence: u32,
+    pub n_outputs: usize,
+}
+
+impl Default for SpendShape {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            lock_time: 0,
+            sequence: u32::MAX,
+            n_outputs: 1,
+        }
+    }
+}
+
+/// Optional `"spend"` object on a corpus row. Missing object keeps [`SpendShape::default`].
+pub fn spend_shape_from_json(v: Option<&serde_json::Value>) -> Result<SpendShape, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return Ok(SpendShape::default());
+    };
+    let obj = v.as_object().ok_or("spend must be an object")?;
+    let mut shape = SpendShape::default();
+    if let Some(n) = obj.get("version") {
+        let bits = n.as_i64().ok_or("spend.version")?;
+        shape.version = bits as i32;
+    }
+    if let Some(n) = obj.get("locktime") {
+        shape.lock_time = u32_field(n, "spend.locktime")?;
+    }
+    if let Some(n) = obj.get("sequence") {
+        shape.sequence = u32_field(n, "spend.sequence")?;
+    }
+    if let Some(n) = obj.get("n_outputs") {
+        let u = n.as_u64().ok_or("spend.n_outputs")?;
+        shape.n_outputs = usize::try_from(u).map_err(|_| "spend.n_outputs")?;
+    }
+    Ok(shape)
+}
+
+fn u32_field(n: &serde_json::Value, name: &str) -> Result<u32, String> {
+    let u = n.as_u64().ok_or(name)?;
+    u32::try_from(u).map_err(|_| name.to_string())
+}
+
+/// Core `script_tests.cpp` credit transaction plus the spend under test.
+///
+/// Credit stays version 1, locktime 0, two `OP_0` pushes, sequence max, one
+/// output. `shape` applies to the spend only (script locktime and sequence
+/// read that transaction).
+pub fn credit_and_spend(
+    script_pubkey: bitcoin::ScriptBuf,
+    script_sig: bitcoin::ScriptBuf,
+    witness: bitcoin::Witness,
+    amount: bitcoin::Amount,
+    shape: SpendShape,
+) -> (bitcoin::Transaction, bitcoin::Transaction) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version;
+    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut};
+
+    let credit = Transaction {
+        version: Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x00, 0x00]),
+            sequence: Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: amount,
+            script_pubkey: script_pubkey.clone(),
+        }],
+    };
+    let spend = Transaction {
+        version: Version(shape.version),
+        lock_time: LockTime::from_consensus(shape.lock_time),
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: credit.compute_txid(),
+                vout: 0,
+            },
+            script_sig,
+            sequence: Sequence::from_consensus(shape.sequence),
+            witness,
+        }],
+        output: std::iter::repeat_with(|| TxOut {
+            value: amount,
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        })
+        .take(shape.n_outputs)
+        .collect(),
+    };
+    (credit, spend)
+}
+
 /// One Core `script_tests` witness string (`#SCRIPT#`, `#CONTROLBLOCK#`, or hex).
 pub fn push_core_witness_token(
     stack: &mut Vec<Vec<u8>>,
@@ -408,7 +513,7 @@ pub fn push_core_witness_token(
 
 #[cfg(test)]
 mod tests {
-    use super::decode_hex;
+    use super::{decode_hex, spend_shape_from_json, SpendShape};
 
     #[test]
     fn decode_hex_strips_0x_and_names_odd_length() {
@@ -416,5 +521,21 @@ mod tests {
         assert_eq!(decode_hex("0Xff").unwrap(), vec![0xff]);
         assert_eq!(decode_hex("abc").unwrap_err(), "odd hex length");
         assert_eq!(decode_hex("zz").unwrap_err(), "invalid hex digit");
+    }
+
+    #[test]
+    fn spend_shape_defaults_and_unsigned_version_bits() {
+        assert_eq!(spend_shape_from_json(None).unwrap(), SpendShape::default());
+        let row = serde_json::json!({
+            "version": 4294967295u32,
+            "locktime": 500_000_000,
+            "sequence": 0,
+            "n_outputs": 0
+        });
+        let shape = spend_shape_from_json(Some(&row)).unwrap();
+        assert_eq!(shape.version, -1);
+        assert_eq!(shape.lock_time, 500_000_000);
+        assert_eq!(shape.sequence, 0);
+        assert_eq!(shape.n_outputs, 0);
     }
 }

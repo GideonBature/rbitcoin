@@ -292,3 +292,114 @@ Core `script_tests.json` already has both an accept and a reject for NOP, VERIFY
 | `stack-2rot-5` | 2ROT with 5 items rejects. |
 | `stack-fromalt-ok` | TOALTSTACK then FROMALTSTACK returns the same true item. |
 | `stack-fromalt-empty` | FROMALTSTACK on an empty altstack rejects. |
+
+## Checksig, multisig, find-and-delete, and sighash
+
+An optional `spend` object sets `version`, `locktime`, `sequence`, and `n_outputs` on the spending transaction only. A missing object is version 1, locktime 0, sequence `0xffffffff`, and one output. `version` is the consensus i32 bit pattern.
+
+Unknown hashtype bytes are a STRICTENC check. DERSIG checks the DER encoding and still accepts hashtype `0x04`. LOW_S stays off.
+
+FindAndDelete is observed with an empty signature. Its needle is the single byte `OP_0`. A verifying signature is not placed in `scriptPubKey`, because this credit template would make that signature commit to a txid that already contains it. A `0x00` buried in a push is the off-boundary case. A signature longer than `scriptCode` is the no-op already covered by `sighash-all-legacy`.
+
+CHECKSIGVERIFY of an empty signature is `exec-checksigverify-empty-legacy`, `exec-checksigverify-empty-v0`, and `exec-checksigverify-empty-tapscript`. The new rows are the CHECKSIG continue side.
+
+Tapscript validation weight: one non-empty CHECKSIGADD against a 1-byte pubkey accepts, two exceed the budget, and the same count of empty signatures still accepts.
+
+| Id | Predicate |
+|----|-----------|
+| `hash-sha1-empty` | OP_sha1 of empty matches the known digest. |
+| `hash-sha1-abc` | OP_sha1 of abc matches the known digest. |
+| `hash-sha256-empty` | OP_sha256 of empty matches the known digest. |
+| `hash-sha256-abc` | OP_sha256 of abc matches the known digest. |
+| `hash-ripemd160-empty` | OP_ripemd160 of empty matches the known digest. |
+| `hash-ripemd160-abc` | OP_ripemd160 of abc matches the known digest. |
+| `hash-hash160-empty` | OP_hash160 of empty matches the known digest. |
+| `hash-hash160-abc` | OP_hash160 of abc matches the known digest. |
+| `hash-hash256-empty` | OP_hash256 of empty matches the known digest. |
+| `hash-hash256-abc` | OP_hash256 of abc matches the known digest. |
+| `hash-sha256-abc-mismatch` | SHA256 of abc compared to 32 zero bytes rejects. |
+| `sighash-all-legacy` | Legacy CHECKSIG accepts SIGHASH all with LOW_S off. |
+| `sighash-all-v0` | Witness v0 CHECKSIG accepts SIGHASH all. |
+| `sighash-none-legacy` | Legacy CHECKSIG accepts SIGHASH none with LOW_S off. |
+| `sighash-none-v0` | Witness v0 CHECKSIG accepts SIGHASH none. |
+| `sighash-single-legacy` | Legacy CHECKSIG accepts SIGHASH single with LOW_S off. An in-range SINGLE digest is not uint256 one. |
+| `sighash-single-v0` | Witness v0 CHECKSIG accepts SIGHASH single. |
+| `sighash-all-acp-legacy` | Legacy CHECKSIG accepts SIGHASH all-acp with LOW_S off. |
+| `sighash-all-acp-v0` | Witness v0 CHECKSIG accepts SIGHASH all-acp. |
+| `sighash-none-acp-legacy` | Legacy CHECKSIG accepts SIGHASH none-acp with LOW_S off. |
+| `sighash-none-acp-v0` | Witness v0 CHECKSIG accepts SIGHASH none-acp. |
+| `sighash-single-acp-legacy` | Legacy CHECKSIG accepts SIGHASH single-acp with LOW_S off. An in-range SINGLE digest is not uint256 one. |
+| `sighash-single-acp-v0` | Witness v0 CHECKSIG accepts SIGHASH single-acp. |
+| `sighash-wrongtype-legacy` | A legacy signature signed as ALL and rewritten as NONE rejects. |
+| `sighash-wrongtype-v0` | A witness v0 signature signed as ALL and rewritten as NONE rejects. |
+| `sighash-single-past-legacy` | Legacy SIGHASH_SINGLE with no output hashes uint256 one and the signature of that digest accepts. |
+| `sighash-single-past-v0` | Witness v0 SIGHASH_SINGLE with no output hashes the BIP143 empty-output digest, not uint256 one. |
+| `sighash-type04-dersig-legacy` | DERSIG alone accepts a defined-DER signature whose hashtype byte is 0x04. |
+| `sighash-type04-strictenc-legacy` | STRICTENC rejects hashtype 0x04. LOW_S stays off. |
+| `sighash-type04-dersig-v0` | Witness v0 DERSIG alone accepts hashtype 0x04. |
+| `sighash-type04-strictenc-v0` | Witness v0 STRICTENC rejects hashtype 0x04. |
+| `dersig-off-nondet-legacy` | With DERSIG and LOW_S off, a non-minimal S that the lax parser accepts still verifies. |
+| `dersig-on-nondet-legacy` | DERSIG rejects that non-minimal S. LOW_S stays off. |
+| `dersig-off-nondet-v0` | Witness v0 with DERSIG off accepts the same non-minimal S. |
+| `dersig-on-nondet-v0` | Witness v0 DERSIG rejects the non-minimal S. |
+| `checksig-empty-continues-legacy` | An empty legacy signature is false, not an encoding failure, so CHECKSIG NOT leaves true. |
+| `checksig-empty-continues-v0` | An empty witness v0 signature is false, so CHECKSIG NOT leaves true. |
+| `checksig-badenc-dersig-off-legacy` | With DERSIG off, a non-empty signature the lax parser rejects is false and CHECKSIG NOT leaves true. |
+| `checksig-badenc-dersig-on-legacy` | DERSIG rejects a non-empty non-DER signature before CHECKSIG can push false. |
+| `checksig-badenc-dersig-off-v0` | Witness v0 with DERSIG off treats a non-DER signature as false. |
+| `checksig-badenc-dersig-on-v0` | Witness v0 DERSIG rejects a non-DER signature. |
+| `ecdsa-legacy-sig-on-v0` | The legacy ECDSA signature does not verify under the witness v0 sighash. |
+| `ecdsa-v0-sig-on-legacy` | The witness v0 ECDSA signature does not verify under the legacy sighash. |
+| `fad-empty-keeps-fail-legacy` | An empty signature deletes the aligned OP_0. A signature of the undeleted script then misses, the bad encoding is not tried, and NOT leaves true. |
+| `fad-empty-deleted-match-legacy` | A signature of the script after that OP_0 is removed matches, so DERSIG rejects the bad encoding that the walk then tries. |
+| `fad-v0-keeps-op0-match` | Witness v0 does not FindAndDelete, so the signature of the full script matches and the bad encoding is tried. |
+| `fad-v0-keeps-op0-miss` | Witness v0 keeps the OP_0, so a signature of the shortened script misses and NOT leaves true. |
+| `fad-offboundary-not-removed-legacy` | A 0x00 inside a push is not an empty-signature OP_0. The signature of the full script matches and the bad encoding is tried. |
+| `fad-offboundary-as-if-deleted-legacy` | That buried 0x00 stays, so a signature of the shortened script misses and NOT leaves true. |
+| `codesep-suffix-legacy` | Legacy OP_CODESEPARATOR drops the prefix from scriptCode. A signature of the suffix accepts. |
+| `codesep-prefix-legacy` | A signature of the pre-separator script rejects once OP_CODESEPARATOR truncates scriptCode. |
+| `codesep-suffix-v0` | Witness v0 OP_CODESEPARATOR drops the prefix from scriptCode. |
+| `codesep-prefix-v0` | Witness v0 rejects a signature of the script from before OP_CODESEPARATOR. |
+| `sighash-default-tap` | Tapscript CHECKSIG accepts sighash default. |
+| `sighash-all-tap` | Tapscript CHECKSIG accepts sighash all. |
+| `sighash-none-tap` | Tapscript CHECKSIG accepts sighash none. |
+| `sighash-single-tap` | Tapscript CHECKSIG accepts sighash single. |
+| `sighash-all-acp-tap` | Tapscript CHECKSIG accepts sighash all-acp. |
+| `sighash-none-acp-tap` | Tapscript CHECKSIG accepts sighash none-acp. |
+| `sighash-single-acp-tap` | Tapscript CHECKSIG accepts sighash single-acp. |
+| `sighash-wrongtype-tap` | A tapscript signature signed as ALL and rewritten as NONE fails the check. |
+| `sighash-type00-tap` | A 65-byte tapscript signature with hashtype 0x00 fails. |
+| `sighash-type04-tap` | Tapscript rejects hashtype 0x04. |
+| `sighash-single-past-tap` | Tapscript SIGHASH_SINGLE with no output at that input rejects instead of hashing uint256 one. |
+| `checksig-empty-continues-tap` | An empty tapscript signature is false, so CHECKSIG NOT leaves true. |
+| `checksig-invalid-tap` | A non-empty invalid tapscript signature is a hard failure. |
+| `checksig-empty-pubkey-tap` | Tapscript CHECKSIG with an empty pubkey fails. |
+| `checksig-unknown-pubkey-tap` | A tapscript pubkey that is not 32 bytes succeeds for a non-empty signature (upgrade hook). |
+| `checksigadd-valid-tap` | CHECKSIGADD of a valid signature adds one. |
+| `checksigadd-empty-tap` | CHECKSIGADD of an empty signature pushes n unchanged. |
+| `checksigadd-invalid-tap` | CHECKSIGADD of a non-empty invalid signature fails. |
+| `tap-weight-pass` | Tapscript validation weight still accepts one non-empty signature check. |
+| `tap-weight-fail` | One more non-empty signature check (2) exceeds the tapscript weight budget. |
+| `tap-weight-empty-free` | Empty tapscript signatures do not consume validation weight. |
+| `codesep-pos0-tap` | Tapscript OP_CODESEPARATOR records instruction index 0, and a signature of that position accepts. |
+| `codesep-ignored-tap` | A tapscript signature that omits the executed OP_CODESEPARATOR position fails. |
+| `multisig-m0-n0-legacy` | CHECKMULTISIG with m = 0 and n = 0 accepts. |
+| `multisig-m0-n0-v0` | Witness v0 CHECKMULTISIG with m = 0 and n = 0 accepts. |
+| `multisig-n21-legacy` | CHECKMULTISIG rejects n = 21. |
+| `multisig-n21-v0` | Witness v0 CHECKMULTISIG rejects n = 21. |
+| `multisig-m-gt-n-legacy` | CHECKMULTISIG rejects m > n. |
+| `multisig-m-negative-legacy` | CHECKMULTISIG rejects a negative m. |
+| `multisig-m-negative-v0` | Witness v0 CHECKMULTISIG rejects a negative m. |
+| `multisig-m20-n20-legacy` | CHECKMULTISIG with m = n = 20 accepts. The 20 keys stay inside the opcode budget. |
+| `multisig-m20-n20-v0` | Witness v0 CHECKMULTISIG with m = n = 20 accepts. |
+| `multisig-unused-badenc-legacy` | A bad encoding on a signature CHECKMULTISIG never tries is ignored, and NOT turns the failed match into true. |
+| `multisig-tried-badenc-legacy` | DERSIG rejects a bad encoding on a signature CHECKMULTISIG tries. |
+| `multisig-unused-badenc-v0` | Witness v0 skips encoding checks for a signature the multisig walk does not reach. |
+| `multisig-tried-badenc-v0` | Witness v0 DERSIG rejects a bad encoding on a signature the walk tries. |
+| `nulldummy-off-legacy` | Legacy CHECKMULTISIG accepts a non-empty dummy when NULLDUMMY is off. |
+| `nulldummy-on-legacy` | Legacy CHECKMULTISIG rejects a non-empty dummy when NULLDUMMY is on. |
+| `nulldummy-off-v0` | Witness v0 accepts a non-empty dummy when NULLDUMMY is off. The flag rejects it, not the signature version. |
+| `nulldummy-on-v0` | Witness v0 rejects a non-empty dummy when NULLDUMMY is on. |
+| `nulldummy-cms-tap` | Tapscript CHECKMULTISIG fails before the dummy is interpreted. |
+| `nulldummy-cmsverify-tap` | Tapscript CHECKMULTISIGVERIFY fails before the dummy is interpreted. |
+| `multisig-m-gt-n-v0` | Witness v0 CHECKMULTISIG rejects m > n. |

@@ -7,14 +7,13 @@
 
 #![cfg(test)]
 
-use super::core_script::assemble_script as assemble;
+use super::core_script::{assemble_script as assemble, credit_and_spend, SpendShape};
 use super::interpreter::{self, EvalContext, SigVersion};
 use super::verify_job_all_inputs;
 use crate::block::{JobTx, ScriptCheckJob};
-use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::script::Script;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+use bitcoin::{Amount, ScriptBuf, Transaction, Witness};
 use serde_json::Value;
 
 fn load_json() -> Value {
@@ -166,47 +165,6 @@ fn apply_eval_flags(ctx: &mut EvalContext<'_>, flags: &CoreFlags) {
     }
 }
 
-// ── Credit / spend template (matches Core script_tests.cpp) ─────────────────
-
-fn build_credit(script_pubkey: ScriptBuf, value: Amount) -> Transaction {
-    // CScript() << CScriptNum(0) << CScriptNum(0) → two OP_0 pushes.
-    Transaction {
-        version: bitcoin::transaction::Version::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(vec![0x00, 0x00]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value,
-            script_pubkey,
-        }],
-    }
-}
-
-fn build_spend(credit: &Transaction, script_sig: ScriptBuf, witness: Witness) -> Transaction {
-    let credit_txid = credit.compute_txid();
-    Transaction {
-        version: bitcoin::transaction::Version::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: credit_txid,
-                vout: 0,
-            },
-            script_sig,
-            sequence: Sequence::MAX,
-            witness,
-        }],
-        output: vec![TxOut {
-            value: credit.output[0].value,
-            script_pubkey: ScriptBuf::new(),
-        }],
-    }
-}
-
 /// Core script_tests witness cell: hex items + optional `#SCRIPT#` / `#CONTROLBLOCK#`,
 /// ending with nValue (BTC). Returns optional Taproot output key for `#TAPROOTOUTPUT#`.
 fn parse_witness_and_amount(first: &Value) -> Result<(Witness, Amount, Option<[u8; 32]>), String> {
@@ -298,6 +256,7 @@ fn run_script_row(
     witness: Witness,
     amount: Amount,
     flags: &CoreFlags,
+    shape: SpendShape,
 ) -> Result<(), String> {
     // DISCOURAGE: NOP1/4–10 outside IF regions (see has_discouraged_nop_outside_if).
     if flags.discourage_upgradable_nops
@@ -313,17 +272,14 @@ fn run_script_row(
             .map_err(|_| "SIG_PUSHONLY".to_string())?;
     }
 
-    let spk = ScriptBuf::from_bytes(script_pubkey.to_vec());
-    let credit = build_credit(spk.clone(), amount);
-    let mut spend = build_spend(&credit, ScriptBuf::from_bytes(script_sig.to_vec()), witness);
-    let prev = TxOut {
-        value: amount,
-        script_pubkey: credit.output[0].script_pubkey.clone(),
-    };
-    spend.input[0].previous_output = OutPoint {
-        txid: credit.compute_txid(),
-        vout: 0,
-    };
+    let (credit, spend) = credit_and_spend(
+        ScriptBuf::from_bytes(script_pubkey.to_vec()),
+        ScriptBuf::from_bytes(script_sig.to_vec()),
+        witness,
+        amount,
+        shape,
+    );
+    let prev = credit.output[0].clone();
 
     // Without SCRIPT_VERIFY_WITNESS, Core treats v0/v1 programs as bare scripts.
     // Production always enables witness post-segwit; flag-off is Core-vector only.
@@ -584,7 +540,14 @@ fn run_all_script_rows() -> RowStats {
         };
 
         st.ran += 1;
-        let got = run_script_row(&sig_bytes, &pk_bytes, witness, amount, &flags);
+        let got = run_script_row(
+            &sig_bytes,
+            &pk_bytes,
+            witness,
+            amount,
+            &flags,
+            SpendShape::default(),
+        );
         let ok = outcome_matches(expect_s, &got);
 
         if ok {
@@ -683,7 +646,9 @@ fn script_corpus_rows_match_our_interpreter() {
         let pk = super::core_script::assemble_script_pubkey(pk_s, tap_out)
             .unwrap_or_else(|e| panic!("{id} scriptPubKey: {e}"));
         let flags = parse_flags(flags_s);
-        let got = run_script_row(&sig, &pk, witness, amount, &flags);
+        let shape = super::core_script::spend_shape_from_json(row.get("spend"))
+            .unwrap_or_else(|e| panic!("{id} spend: {e}"));
+        let got = run_script_row(&sig, &pk, witness, amount, &flags, shape);
         assert!(
             outcome_matches(expect, &got),
             "{id}: expect {expect} got {got:?}"

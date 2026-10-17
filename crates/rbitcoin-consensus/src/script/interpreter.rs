@@ -1114,9 +1114,9 @@ fn op_checkmultisig(
         sigs.push(pop(stack)?);
     }
     let dummy = pop(stack)?;
-    // BIP147: required for Witness v0; Base only when SCRIPT_VERIFY_NULLDUMMY.
-    // Independent of CSV (Core treats the flags separately).
-    if !dummy.is_empty() && (ver == PreTapscript::WitnessV0 || ctx.null_dummy) {
+    // BIP147 is SCRIPT_VERIFY_NULLDUMMY. Core does not add a witness-v0
+    // special case. Confirm sets the flag for every segwit block.
+    if !dummy.is_empty() && ctx.null_dummy {
         return Err(ConsensusError::Script("NULLDUMMY".into()));
     }
 
@@ -1584,6 +1584,14 @@ mod success_and_disabled_tests {
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
 
     fn eval(script_bytes: &[u8], sig_version: SigVersion) -> Result<bool, ConsensusError> {
+        eval_with_null_dummy(script_bytes, sig_version, false)
+    }
+
+    fn eval_with_null_dummy(
+        script_bytes: &[u8],
+        sig_version: SigVersion,
+        null_dummy: bool,
+    ) -> Result<bool, ConsensusError> {
         let tx = Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: LockTime::ZERO,
@@ -1600,7 +1608,8 @@ mod success_and_disabled_tests {
         };
         // script_code points into script_bytes via Script::from_bytes
         let script = Script::from_bytes(script_bytes);
-        let ctx = EvalContext::new(&tx, 0, Amount::from_sat(50_000), script, sig_version);
+        let mut ctx = EvalContext::new(&tx, 0, Amount::from_sat(50_000), script, sig_version);
+        ctx.null_dummy = null_dummy;
         let mut stack = Vec::new();
         eval_script(script, &mut stack, &ctx)
     }
@@ -1943,33 +1952,37 @@ mod success_and_disabled_tests {
         }
     }
 
-    /// BIP147: non-empty CHECKMULTISIG dummy fails when NULLDUMMY active.
+    /// BIP147: a non-empty CHECKMULTISIG dummy fails only when the flag is on.
     #[test]
     fn nulldummy_rejects_nonempty_dummy() {
-        // 0-of-0 multisig: n=0, m=0, dummy non-empty → should fail NULLDUMMY.
-        // Stack build (pushed first → deep): dummy=0x01, m=0, n=0 then OP_CHECKMULTISIG
-        // After pops: n, keys, m, sigs, dummy — for 0/0: push dummy, 0, 0, CHECKMULTISIG
-        let script = vec![0x01, 0xff, 0x00, 0x00, 0xae, 0x51]; // dummy, 0, 0, CMS, TRUE won't run
-        let err = eval(&script, SigVersion::WitnessV0).unwrap_err();
+        // 0-of-0 multisig: n=0, m=0, dummy non-empty → NULLDUMMY when the flag is set.
+        let script = vec![0x01, 0xff, 0x00, 0x00, 0xae, 0x51];
+        let err = eval_with_null_dummy(&script, SigVersion::WitnessV0, true).unwrap_err();
         assert!(
             format!("{err}").contains("NULLDUMMY"),
             "expected NULLDUMMY, got {err}"
         );
-        // Empty dummy 0-of-0 succeeds (CMS pushes true), then need true top — CMS pushes 1.
-        let script_ok = vec![0x00, 0x00, 0x00, 0xae]; // empty dummy, m=0, n=0, CMS
-        eval(&script_ok, SigVersion::WitnessV0).expect("0-of-0 empty dummy");
-    }
-
-    /// Witness v0 rejects a non-empty dummy even though `EvalContext::new`
-    /// leaves NULLDUMMY off. Core would accept that. Base with the flag off
-    /// accepts it, which is the version confirm actually runs before segwit.
-    #[test]
-    fn witness_v0_nulldummy_rejects_when_flag_is_off() {
-        let script = vec![0x01, 0xff, 0x00, 0x00, 0xae];
-        let err = eval(&script, SigVersion::WitnessV0).unwrap_err();
+        let err = eval_with_null_dummy(&script, SigVersion::Base, true).unwrap_err();
         assert!(
             format!("{err}").contains("NULLDUMMY"),
-            "witness v0 is stricter than the flag, got {err}"
+            "base flag on, got {err}"
+        );
+        // Empty dummy 0-of-0 succeeds (CMS pushes true).
+        let script_ok = vec![0x00, 0x00, 0x00, 0xae];
+        eval_with_null_dummy(&script_ok, SigVersion::WitnessV0, true).expect("0-of-0 empty dummy");
+    }
+
+    /// Witness v0 follows SCRIPT_VERIFY_NULLDUMMY. Flag off accepts, matching
+    /// Core VerifyScript. Base with the flag off accepts the same dummy.
+    #[test]
+    fn witness_v0_nulldummy_follows_the_flag() {
+        let script = vec![0x01, 0xff, 0x00, 0x00, 0xae];
+        eval_with_null_dummy(&script, SigVersion::WitnessV0, false)
+            .expect("witness v0 flag off accepts");
+        let err = eval_with_null_dummy(&script, SigVersion::WitnessV0, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("NULLDUMMY"),
+            "witness v0 flag on, got {err}"
         );
         eval(&script, SigVersion::Base).expect("base with NULLDUMMY off allows the dummy");
     }

@@ -7,10 +7,10 @@
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::absolute::LockTime;
     use bitcoin::consensus::encode::serialize;
     use bitcoin::script::ScriptBuf;
-    use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    use bitcoin::{Amount, Transaction, Witness};
+    use rbitcoin_consensus::core_script::{credit_and_spend, spend_shape_from_json};
 
     const P2SH: u64 = 1 << 0;
     const STRICTENC: u64 = 1 << 1;
@@ -79,47 +79,6 @@ mod tests {
             }
         }
         flags
-    }
-
-    /// Core `script_tests.cpp` credit transaction: two `OP_0` pushes on a null input.
-    fn credit_and_spend(
-        script_pubkey: ScriptBuf,
-        script_sig: ScriptBuf,
-        witness: Witness,
-        amount: Amount,
-    ) -> (Transaction, Vec<u8>) {
-        let credit = Transaction {
-            version: bitcoin::transaction::Version::ONE,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint::null(),
-                script_sig: ScriptBuf::from_bytes(vec![0x00, 0x00]),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: amount,
-                script_pubkey: script_pubkey.clone(),
-            }],
-        };
-        let spend = Transaction {
-            version: bitcoin::transaction::Version::ONE,
-            lock_time: LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: credit.compute_txid(),
-                    vout: 0,
-                },
-                script_sig,
-                sequence: Sequence::MAX,
-                witness,
-            }],
-            output: vec![TxOut {
-                value: amount,
-                script_pubkey: ScriptBuf::new(),
-            }],
-        };
-        (spend, script_pubkey.to_bytes())
     }
 
     fn core_accepts(spend: &Transaction, spk: &[u8], amount: i64, flags: u64) -> Result<bool, i32> {
@@ -211,12 +170,16 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{id} scriptSig: {e}"));
             let pk = rbitcoin_consensus::core_script::assemble_script_pubkey(pk_s, tap_out)
                 .unwrap_or_else(|e| panic!("{id} scriptPubKey: {e}"));
-            let (spend, spk) = credit_and_spend(
-                ScriptBuf::from_bytes(pk),
+            let shape = spend_shape_from_json(row.get("spend"))
+                .unwrap_or_else(|e| panic!("{id} spend: {e}"));
+            let (_credit, spend) = credit_and_spend(
+                ScriptBuf::from_bytes(pk.clone()),
                 ScriptBuf::from_bytes(sig),
                 witness,
                 amount,
+                shape,
             );
+            let spk = pk;
             let got = core_accepts(
                 &spend,
                 &spk,

@@ -227,6 +227,7 @@ dependencies = [
  "rbitcoin-primitives",
  "rbitcoin-query",
  "rbitcoin-store",
+ "serde_json",
 ]
 
 [[package]]
