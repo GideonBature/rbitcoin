@@ -440,3 +440,33 @@ Tapscript validation weight: one non-empty CHECKSIGADD against a 1-byte pubkey a
 | `cltv-equal-height-v0` | Witness v0 OP_CLTV accepts a matching height. |
 | `csv-version-below-2-v0` | Witness v0 OP_CSV rejects version 1. |
 | `csv-version-ffffffff-v0` | Witness v0 OP_CSV accepts version 0xFFFFFFFF. |
+
+## Spend dispatch and fast paths
+
+BIP16 and Taproot exception hashes change which scripts run. They are block-hash rules, not a `VerifyScript` row. `exception_hashes_change_which_scripts_run` pins both hashes. `corpus_fast_paths_call_typed_verifiers` calls `p2pkh::verify`, `p2wpkh::verify`, and `p2tr::verify` on the same credit and spend as these rows. A one-byte change to the P2PKH template leaves that template. A one-byte change to a P2WPKH program stays a 20-byte v0 program and misses the pubkey hash.
+
+| Id | Predicate |
+|----|-----------|
+| `p2sh-on-executes-true` | P2SH on executes a push-only true redeem. |
+| `p2sh-on-executes-false` | P2SH on executes a push-only false redeem and rejects it. |
+| `p2sh-off-skips-false` | P2SH off checks the scriptPubKey hash only and does not execute the false redeem. |
+| `p2sh-on-not-push-only` | A non-push-only scriptSig does not execute the redeem. P2SH rejects it. |
+| `p2sh-off-not-push-only` | With P2SH off, a non-push-only scriptSig still runs and the hash template can accept. |
+| `wit-v0-20-empty` | An empty witness on a 20-byte v0 program rejects when WITNESS is on. |
+| `wit-v0-21` | A v0 program whose length is not 20 or 32 rejects. |
+| `wit-v0-32-true` | A 32-byte v0 program runs the witness script. OP_1 accepts. |
+| `wit-v1-33-anyone` | A v1 program of a length other than 32 is anyone-can-spend while discourage bits are off. |
+| `wit-v1-33-discourage` | DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM rejects that non-32 v1 program. |
+| `wit-v2-32-anyone` | A witness version above 1 is anyone-can-spend while discourage bits are off. |
+| `wit-v2-32-discourage` | DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM rejects a witness version above 1. |
+| `p2pkh-fast-ok` | Exact P2PKH scriptSig takes the typed verifier and accepts. |
+| `p2pkh-fast-mutated` | Changing one template byte drops P2PKH. The bare script rejects. |
+| `p2pkh-fad-collision` | A signature push equal to the 20-byte pubkey hash is not a verifying signature. Both engines reject it. |
+| `p2wpkh-fast-ok` | Native P2WPKH takes the typed verifier and accepts. |
+| `p2wpkh-fast-mutated` | Changing one program byte makes the pubkey hash miss. P2WPKH rejects. |
+| `p2tr-keypath-ok` | A 32-byte v1 key path takes the typed taproot verifier and accepts. |
+| `p2tr-keypath-mutated` | Changing one output-key byte makes the key path miss. |
+| `tapleaf-unknown-521` | An unknown tapleaf version succeeds without running the leaf, so a 521-byte element is ignored. |
+| `tapleaf-unknown-1001` | An unknown tapleaf version succeeds without running the leaf, so 1001 stack items are ignored. |
+| `tapleaf-known-521` | A known tapscript leaf rejects a 521-byte element. |
+| `tapleaf-known-1001` | A known tapscript leaf rejects 1001 stack items. |
