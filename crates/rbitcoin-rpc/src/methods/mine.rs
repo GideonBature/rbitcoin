@@ -641,18 +641,14 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
                 .unwrap_or(0)
         });
     let curtime = tip_time.saturating_add(1).max(now);
-    let bits = rbitcoin_consensus::expected_next_bits(
-        ctx.query.as_ref(),
-        &params,
-        Height(next_h),
-        curtime,
-    )
-    .map(|c| c.to_consensus())
-    .unwrap_or(tip_bits);
+    let bits =
+        rbitcoin_query::expected_next_bits(ctx.query.as_ref(), &params, Height(next_h), curtime)
+            .map(|c| c.to_consensus())
+            .unwrap_or(tip_bits);
     let mintime = if tip_h == 0 {
         tip_time
     } else {
-        rbitcoin_consensus::median_time_past(ctx.query.as_ref(), Height(tip_h)).unwrap_or(tip_time)
+        rbitcoin_query::median_time_past(ctx.query.as_ref(), Height(tip_h)).unwrap_or(tip_time)
     };
     let selected = mempool_block_txs(ctx);
     let mut fees = 0u64;
@@ -1182,14 +1178,12 @@ fn submit_checkblock_reason(
     params: &rbitcoin_consensus::ChainParams,
     milestone: rbitcoin_consensus::Milestone,
 ) -> Result<Option<String>, rbitcoin_store::StoreError> {
-    use rbitcoin_consensus::ConsensusError;
     let vctx = match spend_height {
         Some(h) => rbitcoin_consensus::ValidationContext::at(params, Height(h), milestone),
         None => rbitcoin_consensus::ValidationContext::archive_structure(params),
     };
     match rbitcoin_consensus::validate_block_structure(block, &vctx) {
         Ok(()) => Ok(None),
-        Err(ConsensusError::Store(e)) => Err(e),
         Err(e) => Ok(Some(rbitcoin_consensus::block_reject_reason(&e))),
     }
 }

@@ -8,10 +8,11 @@
 //! `historicalMode=false` omits confirmed-spent P2TR outs.
 //! Serve-time `--sptweaks-dust` omits P2TR outs with `value <=` the floor.
 
-use rbitcoin_consensus::{tweaks_for_height, ChainParams, TxTweak};
+use rbitcoin_consensus::{ChainParams, TxTweak};
 #[cfg(test)]
 use rbitcoin_primitives::hex_encode;
 use rbitcoin_primitives::Height;
+use rbitcoin_query::tweaks_for_height;
 use rbitcoin_query::{Query, ThinTweakRangeLimits, ThinTweakRow};
 #[cfg(test)]
 use serde_json::Map;

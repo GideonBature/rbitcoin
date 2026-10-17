@@ -26,21 +26,16 @@
 //! in height order once both waves have finished. Steal workers unpark the
 //! publisher when a wave completes.
 
-use crate::block::{
-    assemble_block_prevouts, block_has_witness_from_pres, structural_validate_spends,
-    ScriptCheckJob, ValidationContext,
-};
-use crate::error::ConsensusError;
-use crate::header::{
-    check_header_version_and_future_time, median_time_past_times, pow_hash_meets_target,
-    validate_header_hashed,
-};
-use crate::milestone::Milestone;
-use crate::params::{genesis_block, ChainParams};
+use crate::block_pipeline::{assemble_block_prevouts, structural_validate_spends};
+use crate::header_read::validate_header_hashed;
+use crate::ConfirmError;
+use crate::{FkMap, Query, U32Map, U64Map};
 use bitcoin::hashes::Hash;
 use bitcoin::Block;
+use rbitcoin_consensus::block::{block_has_witness_from_pres, ScriptCheckJob, ValidationContext};
+use rbitcoin_consensus::header::pow_hash_meets_target;
+use rbitcoin_consensus::{genesis_block, ChainParams, ConsensusError, Milestone};
 use rbitcoin_primitives::Height;
-use rbitcoin_query::{FkMap, Query, U32Map, U64Map};
 use rbitcoin_store::{StoreError, WriteIoBackend};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -104,7 +99,7 @@ struct BodyMeta {
     /// at structure/entry (plan or archived load). Assemble must use these only.
     txids: Vec<[u8; 32]>,
     /// Same walk as `txids` (lookup/structure). Script jobs reuse these.
-    pres: std::sync::Arc<[rbitcoin_query::TxPrecompute]>,
+    pres: std::sync::Arc<[crate::TxPrecompute]>,
 }
 
 /// Assemble output for one height (held through scripts → write).
@@ -151,9 +146,9 @@ pub struct WireLoadPipeline<'a> {
     /// Inclusive create-fk start for [`Query::archive_plan_batch_from_wire`].
     pub next_tx_start: u64,
     /// Prior uncommitted packs (load-thread map; stamp/pin borrow).
-    pub in_flight: &'a rbitcoin_query::InFlight,
+    pub in_flight: &'a crate::InFlight,
     /// Lookup-filled parent identity for this load batch (IBD skeleton).
-    pub skeleton: Option<rbitcoin_query::BatchParentIds>,
+    pub skeleton: Option<crate::BatchParentIds>,
     /// External prev_txids from the BQ input walk (IBD skeleton stamp; no second wire collect).
     pub carried_need: Vec<[u8; 32]>,
     /// BQ `header_fk` per block (empty = stamp ensure/put). Length matches `carried_header_hashes`.
@@ -174,14 +169,14 @@ pub struct LoadedBatch {
     /// Shared wire (Arc) so load→scripts→write does not deep-clone full blocks.
     wire_blocks: Vec<Arc<Block>>,
     /// Per-batch pin map: load → assemble → write structural, then drop.
-    batch_parents: rbitcoin_query::BatchParents,
+    batch_parents: crate::BatchParents,
     /// Mempool preverified txids for scripts stage (tip follow); empty on IBD.
     script_preverified: ScriptPreverified,
     /// Planned Class A write from wire lookup/load (committed in write stage).
-    pub archive_plan: Option<rbitcoin_query::ArchiveWritePlan>,
+    pub archive_plan: Option<crate::ArchiveWritePlan>,
     /// Indexes to assemble. Copied from `index_live` at load.
     index_want: index::IndexWant,
-    stats: Arc<rbitcoin_query::ConfirmStats>,
+    stats: Arc<crate::ConfirmStats>,
 }
 
 /// Script-verified batch ready for ordered commit (Class A + structural + C).
@@ -190,8 +185,8 @@ pub struct LoadedBatch {
 pub struct ScriptOkBatch {
     prepared: Vec<Prepared>,
     wire_blocks: Vec<Arc<Block>>,
-    batch_parents: rbitcoin_query::BatchParents,
-    pub archive_plan: Option<rbitcoin_query::ArchiveWritePlan>,
+    batch_parents: crate::BatchParents,
+    pub archive_plan: Option<crate::ArchiveWritePlan>,
     /// Filter bytes and tweak vecs for this batch. Empty when the indexes are off.
     index_seal: index::IndexSeal,
 }
@@ -234,7 +229,7 @@ pub fn confirm_wire_load_phase(
     milestone: Milestone,
     blocks: &[(Height, Block)],
     preverified: &ScriptPreverified,
-) -> Result<ConfirmLoadOutcome, ConsensusError> {
+) -> Result<ConfirmLoadOutcome, ConfirmError> {
     confirm_wire_load_phase_pipelined(query, params, milestone, blocks, preverified, None)
 }
 
@@ -249,7 +244,7 @@ fn wire_blocks_to_arcs(query: &Query, blocks: &[(Height, Block)]) -> Vec<WireBlo
         .collect();
     let ns = t.elapsed().as_nanos() as u64;
     if ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().phase_prep_wire_arc_ns, ns);
+        crate::note_confirm(&query.confirm_stats().phase_prep_wire_arc_ns, ns);
     }
     arcs
 }
@@ -265,15 +260,10 @@ pub fn confirm_wire_load_phase_pipelined(
     blocks: &[(Height, Block)],
     preverified: &ScriptPreverified,
     pipeline: Option<&WireLoadPipeline>,
-) -> Result<ConfirmLoadOutcome, ConsensusError> {
-    if blocks.is_empty() {
-        return Err(ConsensusError::BadBlock("empty confirm batch"));
-    }
-    for w in blocks.windows(2) {
-        if w[1].0 .0 != w[0].0 .0.saturating_add(1) {
-            return Err(ConsensusError::BadBlock("confirm run not contiguous"));
-        }
-    }
+) -> Result<ConfirmLoadOutcome, ConfirmError> {
+    rbitcoin_consensus::block::reject_confirm_batch(
+        &blocks.iter().map(|(h, _)| h.0).collect::<Vec<_>>(),
+    )?;
     let arcs = wire_blocks_to_arcs(query, blocks);
     let stamped = confirm_wire_lookup_stamp(query, params, milestone, &arcs, pipeline)?;
     confirm_wire_load_from_plan(query, params, milestone, stamped, pipeline, preverified)
@@ -285,7 +275,7 @@ pub fn confirm_wire_run(
     params: &ChainParams,
     milestone: Milestone,
     blocks: &[(Height, Block)],
-) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
+) -> Result<Vec<rbitcoin_primitives::Fk>, ConfirmError> {
     let arcs: Vec<WireBlockIn> = blocks
         .iter()
         .map(|(h, b)| (*h, Arc::new(b.clone()), None))
@@ -307,10 +297,8 @@ pub fn confirm_wire_run_preverified(
     milestone: Milestone,
     blocks: &[WireBlockIn],
     preverified: &ScriptPreverified,
-) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
-    if blocks.is_empty() {
-        return Err(ConsensusError::BadBlock("empty confirm batch"));
-    }
+) -> Result<Vec<rbitcoin_primitives::Fk>, ConfirmError> {
+    rbitcoin_consensus::block::reject_empty_confirm_batch(blocks.is_empty())?;
     let stamped = confirm_wire_lookup_stamp(query, params, milestone, blocks, None)?;
     let mat = confirm_wire_load_from_plan(query, params, milestone, stamped, None, preverified)?;
     let ok = confirm_scripts_phase(mat.batch)?;
@@ -372,9 +360,9 @@ impl ScriptOkBatch {
     }
 
     /// Wire headers in the same order as [`Self::heights_hashes`].
-    pub fn wire_headers(&self) -> Result<Vec<bitcoin::block::Header>, ConsensusError> {
+    pub fn wire_headers(&self) -> Result<Vec<bitcoin::block::Header>, ConfirmError> {
         if self.wire_blocks.len() != self.prepared.len() {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+            return Err(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: wire headers length",
             )));
         }

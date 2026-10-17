@@ -8,12 +8,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::Query;
 use bitcoin::bip158::BlockFilter;
 use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_query::Query;
 
-use crate::script_pool::start_for_each_owned_chunk;
-use crate::ConsensusError;
+use crate::ConfirmError;
+use rbitcoin_consensus::script_pool::start_for_each_owned_chunk;
+use rbitcoin_consensus::ConsensusError;
 
 /// Per-tx tweak (`None` = ineligible), block order.
 pub(crate) type HeightTweaks = Vec<Option<[u8; 33]>>;
@@ -41,7 +42,7 @@ pub(crate) struct IndexCommit {
 pub(crate) fn finish_wave<T: Sync>(
     jobs: Vec<T>,
     f: fn(&T) -> Result<(), ConsensusError>,
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     if let Some(wave) = start_for_each_owned_chunk(jobs, f, 1)? {
         wave.finish()?;
     }
@@ -68,7 +69,7 @@ pub(crate) fn rows_from_slots(slots: &[Arc<Mutex<Option<IndexHeightOut>>>]) -> I
 pub(crate) fn commit_index_rows(
     query: &Query,
     rows: IndexRows,
-) -> Result<IndexCommit, ConsensusError> {
+) -> Result<IndexCommit, ConfirmError> {
     let t0 = Instant::now();
     let moved = commit_filters(query, rows.filters)? || commit_tweaks(query, rows.tweaks)?;
     Ok(IndexCommit {
@@ -81,7 +82,7 @@ pub(crate) fn commit_index_rows(
 fn commit_filters(
     query: &Query,
     filters: Vec<(Height, BlockFilter, Fk)>,
-) -> Result<bool, ConsensusError> {
+) -> Result<bool, ConfirmError> {
     let Some(next) = query.filter_index_next() else {
         return Ok(false);
     };
@@ -106,7 +107,7 @@ fn commit_filters(
 fn commit_tweaks(
     query: &Query,
     tweaks: Vec<(Height, Fk, HeightTweaks)>,
-) -> Result<bool, ConsensusError> {
+) -> Result<bool, ConfirmError> {
     let Some(next) = query.tweak_index_next() else {
         return Ok(false);
     };

@@ -5,8 +5,8 @@ use super::status::LoopStats;
 use crate::chain::ChainHub;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use rbitcoin_consensus::WireLoadPipeline;
 use rbitcoin_log::{debug, info, warn};
+use rbitcoin_query::WireLoadPipeline;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -392,12 +392,12 @@ impl ConfirmRejectClass {
 
     pub(crate) fn from_consensus(err: &rbitcoin_consensus::ConsensusError) -> Self {
         use rbitcoin_consensus::ConsensusError;
-        use rbitcoin_store::StoreError;
         match err {
             ConsensusError::Cancelled => Self::Cancelled,
             ConsensusError::BadPrev => Self::SoftWire,
             ConsensusError::BadBlock(r) if crate::chain::reject_is_mutated(r) => Self::SoftWire,
             ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
+            ConsensusError::Internal(m) => Self::from_err_str(m),
             ConsensusError::BadBlock(_)
             | ConsensusError::BadTx(_)
             | ConsensusError::Script(_)
@@ -406,11 +406,18 @@ impl ConfirmRejectClass {
             | ConsensusError::BadVersion(_)
             | ConsensusError::BadHeader(_)
             | ConsensusError::MissingPrevout => Self::ConsensusInvalid,
-            ConsensusError::Store(StoreError::Cancelled(_)) => Self::Cancelled,
-            ConsensusError::Store(e) if e.is_uring_session_fault() => Self::EngineFault,
-            ConsensusError::Store(StoreError::Io { .. }) => Self::EngineFault,
-            ConsensusError::Store(StoreError::Corrupt(m)) => Self::from_err_str(m),
-            ConsensusError::Store(_) => Self::EngineFault,
+        }
+    }
+
+    pub(crate) fn from_confirm(err: &rbitcoin_query::ConfirmError) -> Self {
+        use rbitcoin_query::ConfirmError;
+        use rbitcoin_store::StoreError;
+        match err {
+            ConfirmError::Rules(e) => Self::from_consensus(e),
+            ConfirmError::Store(e) if e.is_uring_session_fault() => Self::EngineFault,
+            ConfirmError::Store(StoreError::Io { .. }) => Self::EngineFault,
+            ConfirmError::Store(StoreError::Corrupt(m)) => Self::from_err_str(m),
+            ConfirmError::Store(_) => Self::EngineFault,
         }
     }
 
@@ -463,10 +470,10 @@ impl ConfirmRejectClass {
 fn finish_connected_write_after_session_fault(
     query: &rbitcoin_query::Query,
     items: &[(u32, [u8; 32])],
-) -> Result<(), rbitcoin_consensus::ConsensusError> {
+) -> Result<(), rbitcoin_query::ConfirmError> {
     query.uring_recover_or_abort("ibd-confirm-write");
     loop {
-        match rbitcoin_consensus::finish_post_commit_hashes(query, items) {
+        match rbitcoin_query::finish_post_commit_hashes(query, items) {
             Ok(()) => return Ok(()),
             Err(e) if e.is_uring_session_fault() => {
                 query.uring_recover_or_abort("ibd-confirm-write");
@@ -749,9 +756,11 @@ impl LookupFaultPolicy {
         self.consecutive = 0;
     }
 
-    pub(crate) fn on_err(&mut self, e: &rbitcoin_consensus::ConsensusError) -> LookupFaultAction {
-        use rbitcoin_consensus::ConsensusError;
-        let backpressure = matches!(e, ConsensusError::Store(se) if se.is_io_backpressure());
+    pub(crate) fn on_err(&mut self, e: &rbitcoin_query::ConfirmError) -> LookupFaultAction {
+        let backpressure = matches!(
+            e,
+            rbitcoin_query::ConfirmError::Store(se) if se.is_io_backpressure()
+        );
         if backpressure {
             return LookupFaultAction::Ignore;
         }
@@ -1637,7 +1646,7 @@ fn check_missing_parent(hub: &ChainHub, feed: &ConfirmFeed, block: &bitcoin::Blo
     }
     // Same HDD gate as lookup and load: this read scans `tx.head`.
     hub.query.store().spindle_wait();
-    let read = rbitcoin_consensus::parent_missing_from_chain(&hub.query, block, stop);
+    let read = rbitcoin_query::parent_missing_from_chain(&hub.query, block, stop);
     if stop() || !ready() || hub.query.take_disconnect(&mut disconnects).is_some() {
         return ParentCheck::OffTip;
     }
@@ -1655,14 +1664,14 @@ fn check_missing_parent(hub: &ChainHub, feed: &ConfirmFeed, block: &bitcoin::Blo
 /// to one block at a time. A lone block's miss takes the class of its
 /// [`ParentCheck`]; an engine fault goes back once, and a repeat halts IBD.
 fn stamp_reject_class(
-    e: &rbitcoin_consensus::ConsensusError,
+    e: &rbitcoin_query::ConfirmError,
     check: Option<ParentCheck>,
 ) -> ConfirmRejectClass {
     match check {
         Some(ParentCheck::Missing(_)) => ConfirmRejectClass::ConsensusInvalid,
         Some(ParentCheck::OffTip) => ConfirmRejectClass::Cascade,
         Some(ParentCheck::Engine) => ConfirmRejectClass::EngineFault,
-        None => ConfirmRejectClass::from_consensus(e),
+        None => ConfirmRejectClass::from_confirm(e),
     }
 }
 
@@ -1692,14 +1701,14 @@ pub(crate) fn stamp_reject_operator_msg(err: &str, stats: &rbitcoin_query::Confi
 /// leftover is returned for the next write iteration (ordered scripts should
 /// never hit that path).
 fn drain_script_ok_write_queue(
-    first: rbitcoin_consensus::ScriptOkBatch,
-    rx: &std::sync::mpsc::Receiver<rbitcoin_consensus::ScriptOkBatch>,
+    first: rbitcoin_query::ScriptOkBatch,
+    rx: &std::sync::mpsc::Receiver<rbitcoin_query::ScriptOkBatch>,
     max_parts: usize,
-    mut on_extra: impl FnMut(&rbitcoin_consensus::ScriptOkBatch),
+    mut on_extra: impl FnMut(&rbitcoin_query::ScriptOkBatch),
 ) -> (
-    rbitcoin_consensus::ScriptOkBatch,
+    rbitcoin_query::ScriptOkBatch,
     usize,
-    Option<rbitcoin_consensus::ScriptOkBatch>,
+    Option<rbitcoin_query::ScriptOkBatch>,
 ) {
     let mut batch = first;
     let mut parts = 1usize;
@@ -1870,10 +1879,10 @@ pub(crate) fn spawn_confirm_engine(
 ) -> (std::thread::JoinHandle<()>, Arc<ConfirmQueueDepths>) {
     let queues = ConfirmQueueDepths::new();
     let caps = confirm_queue_caps();
-    type ScriptsIn = (rbitcoin_consensus::LoadedBatch, u64);
+    type ScriptsIn = (rbitcoin_query::LoadedBatch, u64);
     let (mat_tx, mat_rx) = std::sync::mpsc::sync_channel::<ScriptsIn>(caps.script);
     let (write_tx, write_rx) =
-        std::sync::mpsc::sync_channel::<rbitcoin_consensus::ScriptOkBatch>(caps.write);
+        std::sync::mpsc::sync_channel::<rbitcoin_query::ScriptOkBatch>(caps.write);
     let (load_tx, load_rx) = std::sync::mpsc::sync_channel::<LoadBatch>(caps.load);
     // A write fault that does not re-arm lookup: plan drops reserved fks +
     // last_loaded so re-lookup after Class A partial commit does not drift
@@ -1895,7 +1904,7 @@ pub(crate) fn spawn_confirm_engine(
             info!("ibd: confirm write on dedicated OS thread");
             let stats = hub_wb.query.confirm_stats_arc();
             // Non-contig leftover already note_write_recv'd; write it next iter.
-            let mut leftover: Option<rbitcoin_consensus::ScriptOkBatch> = None;
+            let mut leftover: Option<rbitcoin_query::ScriptOkBatch> = None;
             loop {
                 let t_recv = Instant::now();
                 let first = match leftover.take() {
@@ -1951,7 +1960,7 @@ pub(crate) fn spawn_confirm_engine(
                     .iter()
                     .map(|&(h, raw)| (h, BlockHash::from_byte_array(raw)))
                     .collect();
-                match rbitcoin_consensus::confirm_write_phase_or_return(
+                match rbitcoin_query::confirm_write_phase_or_return(
                     &hub_wb.query,
                     &hub_wb.params,
                     hub_wb.milestone,
@@ -2011,7 +2020,7 @@ pub(crate) fn spawn_confirm_engine(
                         confirm_thr_stats::add_write_work(&stats, t0.elapsed());
                         let mut err = e;
                         let msg = err.to_string();
-                        if matches!(err, rbitcoin_consensus::ConsensusError::Cancelled)
+                        if matches!(err, rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Cancelled))
                             || feed_wb.stopped()
                         {
                             info!("ibd: confirm write aborted: {msg}");
@@ -2124,7 +2133,7 @@ pub(crate) fn spawn_confirm_engine(
                         warn!(
                             "ibd: confirm write reject @ {height} batch_parts={parts}: {err}"
                         );
-                        let class = ConfirmRejectClass::from_consensus(&err);
+                        let class = ConfirmRejectClass::from_confirm(&err);
                         let t_rearm = Instant::now();
                         let wave: Vec<(u32, BlockHash, &bitcoin::Block)> = meta
                             .iter()
@@ -2161,7 +2170,7 @@ pub(crate) fn spawn_confirm_engine(
         .spawn(move || {
             info!("ibd: confirm scripts on dedicated OS thread (publish waves; steal pool verifies)");
             let stats = hub_sc.query.confirm_stats_arc();
-            rbitcoin_consensus::drive_script_waves_with(
+            rbitcoin_query::drive_script_waves_with(
                 &mat_rx,
                 |batch, wait| {
                     confirm_thr_stats::add_script_recv_wait(&stats, wait);
@@ -2208,14 +2217,14 @@ pub(crate) fn spawn_confirm_engine(
                 |e, meta, dropped| {
                     confirm_thr_stats::add_script_work(&stats, Duration::ZERO);
                     let msg = e.to_string();
-                    if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                    if matches!(e, rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Cancelled))
                         || feed_sc.stopped()
                     {
                         info!("ibd: confirm scripts aborted: {msg}");
                         return false;
                     }
                     let session_fault = e.is_uring_session_fault();
-                    let class = ConfirmRejectClass::from_consensus(&e);
+                    let class = ConfirmRejectClass::from_confirm(&e);
                     // A retried, engine-faulted, or session-faulted wave goes
                     // back with the batches dropped behind it; a one-block
                     // verdict drops its block.
@@ -2447,7 +2456,7 @@ pub(crate) fn spawn_confirm_engine(
                     Ok(s) => s,
                     Err(e) => {
                         let msg = e.to_string();
-                        if matches!(e, rbitcoin_consensus::ConsensusError::Cancelled)
+                        if matches!(e, rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::Cancelled))
                             || feed_load.stopped()
                         {
                             drop(mat_tx);
@@ -2458,7 +2467,9 @@ pub(crate) fn spawn_confirm_engine(
                         let session_fault = e.is_uring_session_fault();
                         let parent_check = match (&e, wire_batch.as_slice()) {
                             (
-                                rbitcoin_consensus::ConsensusError::MissingPrevout,
+                                rbitcoin_query::ConfirmError::Rules(
+                                    rbitcoin_consensus::ConsensusError::MissingPrevout,
+                                ),
                                 [(_, _, w)],
                             ) => {
                                 let t_check = Instant::now();
@@ -2778,11 +2789,11 @@ pub(crate) fn spawn_confirm_engine(
                 } else {
                     remaining
                         .saturating_mul(run_max)
-                        .min(rbitcoin_consensus::BQ_RESOLVE_WAVE_MAX_BLOCKS)
+                        .min(rbitcoin_query::BQ_RESOLVE_WAVE_MAX_BLOCKS)
                 };
                 let max_inputs = (remaining as u32)
                     .saturating_mul(confirm_batch_max_inputs())
-                    .min(rbitcoin_consensus::BQ_RESOLVE_WAVE_MAX_INPUTS);
+                    .min(rbitcoin_query::BQ_RESOLVE_WAVE_MAX_INPUTS);
                 let wave_h = hub
                     .query
                     .block_queue_unresolved_heights(path_lo, &skip, max_blocks);
@@ -2882,7 +2893,7 @@ pub(crate) fn spawn_confirm_engine(
                                 // Take before the send: a take that loses to a
                                 // re-arm leaves its rows queued and is not sent.
                                 if !matches!(
-                                    rbitcoin_consensus::take_wave_items_for_load(
+                                    rbitcoin_query::take_wave_items_for_load(
                                         &hub.query,
                                         &batch.items,
                                         taken_gen,
@@ -3057,10 +3068,10 @@ pub(super) fn lookup_bulk_wave(
     heights: &[u32],
     max_blocks: usize,
     max_inputs: u32,
-) -> Result<rbitcoin_consensus::BqResolveWave, rbitcoin_consensus::ConsensusError> {
+) -> Result<rbitcoin_query::BqResolveWave, rbitcoin_query::ConfirmError> {
     query.store().spindle_wait();
     note_confirm_bulk_read();
-    rbitcoin_consensus::confirm_bq_resolve_wave_capped(
+    rbitcoin_query::confirm_bq_resolve_wave_capped(
         query, params, milestone, heights, max_blocks, max_inputs,
     )
 }
@@ -3070,12 +3081,12 @@ pub(super) fn load_bulk_stamp(
     query: &rbitcoin_query::Query,
     params: &rbitcoin_consensus::ChainParams,
     milestone: rbitcoin_consensus::Milestone,
-    blocks: &[rbitcoin_consensus::WireBlockIn],
-    pipeline: Option<&rbitcoin_consensus::WireLoadPipeline>,
-) -> Result<rbitcoin_consensus::PlanStampOutcome, rbitcoin_consensus::ConsensusError> {
+    blocks: &[rbitcoin_query::WireBlockIn],
+    pipeline: Option<&rbitcoin_query::WireLoadPipeline>,
+) -> Result<rbitcoin_query::PlanStampOutcome, rbitcoin_query::ConfirmError> {
     query.store().spindle_wait();
     note_confirm_bulk_read();
-    rbitcoin_consensus::confirm_wire_lookup_stamp(query, params, milestone, blocks, pipeline)
+    rbitcoin_query::confirm_wire_lookup_stamp(query, params, milestone, blocks, pipeline)
 }
 
 #[cfg(test)]

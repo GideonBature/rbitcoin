@@ -1,14 +1,12 @@
-#[cfg(test)]
-use crate::confirm_phase_stats;
 use crate::error::ConsensusError;
 use crate::milestone::Milestone;
 use crate::params::ChainParams;
+use crate::TxidHasher;
 use bitcoin::block::Block;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::script::{Script, ScriptBuf};
-use bitcoin::{Amount, OutPoint, Transaction, TxOut, Witness};
+use bitcoin::{Amount, Transaction, TxOut, Witness};
 use rbitcoin_primitives::Height;
-use rbitcoin_query::{FkMap, Query, TxidHasher, U32Map, U64Map};
 use std::borrow::Borrow;
 use std::hash::BuildHasherDefault;
 use std::ops::{Deref, DerefMut};
@@ -55,7 +53,7 @@ impl<'a> ValidationContext<'a> {
     }
 }
 
-const MAX_BLOCK_STRIPPED_SIZE: usize = 1_000_000;
+pub const MAX_BLOCK_STRIPPED_SIZE: usize = 1_000_000;
 /// Consensus block weight limit. Compact-block tx count is this divided by
 /// [`MIN_TX_WEIGHT`].
 pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
@@ -64,7 +62,7 @@ pub const MIN_TX_WEIGHT: u64 = 10 * 4;
 /// Most transactions a valid block can contain.
 pub const MAX_BLOCK_TX_COUNT: usize = (MAX_BLOCK_WEIGHT / MIN_TX_WEIGHT) as usize;
 
-fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
+pub fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusError> {
     if tx.input.is_empty() {
         return Err(ConsensusError::BadTx("no inputs"));
     }
@@ -74,8 +72,8 @@ fn check_tx_local(tx: &Transaction, base_size: usize) -> Result<(), ConsensusErr
     if base_size > MAX_BLOCK_STRIPPED_SIZE {
         return Err(ConsensusError::BadTx("bad-txns-oversize"));
     }
-    let mut seen: rbitcoin_query::OutPointSet =
-        rbitcoin_query::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default());
+    let mut seen: crate::OutPointSet =
+        crate::OutPointSet::with_capacity_and_hasher(tx.input.len(), Default::default());
     for inp in &tx.input {
         if !tx.is_coinbase() && inp.previous_output.is_null() {
             return Err(ConsensusError::BadTx("bad-txns-prevout-null"));
@@ -167,7 +165,7 @@ pub fn validate_block_structure_with_pres(
     block: &Block,
     ctx: &ValidationContext<'_>,
     pres: Option<Arc<[TxPrecompute]>>,
-    stats: Option<&rbitcoin_query::ConfirmStats>,
+    mut note: Option<&mut dyn FnMut(u64, u64, u64)>,
 ) -> Result<Arc<[TxPrecompute]>, ConsensusError> {
     let n = block.txdata.len();
     let (pres, txid_ns) = if let Some(stashed) = pres {
@@ -201,8 +199,7 @@ pub fn validate_block_structure_with_pres(
         return Err(ConsensusError::BadBlock("bad-cb-length"));
     }
 
-    let mut seen: rbitcoin_query::TxidSet =
-        rbitcoin_query::TxidSet::with_capacity_and_hasher(n, Default::default());
+    let mut seen: crate::TxidSet = crate::TxidSet::with_capacity_and_hasher(n, Default::default());
     for p in pres.iter() {
         if !seen.insert(p.txid) {
             return Err(ConsensusError::BadBlock("duplicate txid"));
@@ -264,8 +261,8 @@ pub fn validate_block_structure_with_pres(
     }
     let walk_ns = t_walk.elapsed().as_nanos() as u64;
 
-    if let Some(stats) = stats {
-        stats.note_struct_parts(txid_ns, 0, walk_ns);
+    if let Some(note) = note.as_mut() {
+        note(txid_ns, 0, walk_ns);
     }
 
     // BIP325 signet solution is not checked here — tip confirm only.
@@ -385,13 +382,13 @@ pub fn legacy_sigop_count(tx: &Transaction) -> u64 {
     n
 }
 
-pub(crate) use rbitcoin_primitives::script_sigop_count;
+pub use rbitcoin_primitives::script_sigop_count;
 
 /// Last push in a script for P2SH/BIP141 sigops.
 ///
 /// Opcode `> OP_16` or a truncated push → no redeem (0 sigops). OP_N / OP_1NEGATE
 /// count as an empty push.
-fn last_script_push(script: &[u8]) -> Option<&[u8]> {
+pub fn last_script_push(script: &[u8]) -> Option<&[u8]> {
     let mut i = 0usize;
     let mut last: &[u8] = &[];
     while i < script.len() {
@@ -447,15 +444,15 @@ fn last_script_push(script: &[u8]) -> Option<&[u8]> {
     Some(last)
 }
 
-fn is_p2sh_script(spk: &[u8]) -> bool {
+pub fn is_p2sh_script(spk: &[u8]) -> bool {
     spk.len() == 23 && spk[0] == 0xa9 && spk[1] == 0x14 && spk[22] == 0x87
 }
 
-fn is_p2wpkh_program(prog: &[u8]) -> bool {
+pub fn is_p2wpkh_program(prog: &[u8]) -> bool {
     prog.len() == 22 && prog[0] == 0x00 && prog[1] == 0x14
 }
 
-fn is_p2wsh_program(prog: &[u8]) -> bool {
+pub fn is_p2wsh_program(prog: &[u8]) -> bool {
     prog.len() == 34 && prog[0] == 0x00 && prog[1] == 0x20
 }
 
@@ -515,7 +512,7 @@ fn witness_sigop_count(tx: &Transaction, prev_spks: &[&[u8]]) -> u64 {
     n
 }
 
-fn prevout_spk_sigops(inp: &bitcoin::TxIn, spk: &[u8], bip16: bool, witness: bool) -> u64 {
+pub fn prevout_spk_sigops(inp: &bitcoin::TxIn, spk: &[u8], bip16: bool, witness: bool) -> u64 {
     const WITNESS_SCALE: u64 = 4;
     let mut n = 0u64;
     if bip16 {
@@ -582,16 +579,13 @@ fn check_witness_commitment_with_wtxids(
 }
 
 /// Merkle root over 32-byte leaves (txid or wtxid tree). Public for tests.
-pub(crate) fn merkle_root_bytes(leaves: &[[u8; 32]]) -> [u8; 32] {
+pub fn merkle_root_bytes(leaves: &[[u8; 32]]) -> [u8; 32] {
     rbitcoin_primitives::merkle_root_from_txids(leaves)
 }
 
 /// BIP34: coinbase scriptSig must start with the block height as a script integer
 /// push: 0 → `OP_0`; 1..=16 → `OP_1`..=`OP_16`; else minimal sign-aware little-endian.
-pub(crate) fn check_bip34_coinbase(
-    coinbase: &Transaction,
-    height: u32,
-) -> Result<(), ConsensusError> {
+pub fn check_bip34_coinbase(coinbase: &Transaction, height: u32) -> Result<(), ConsensusError> {
     let script = &coinbase.input[0].script_sig;
     let bytes = script.as_bytes();
     if bytes.is_empty() {
@@ -661,7 +655,7 @@ const BIP16_EXCEPTION_TESTNET3: [u8; 32] = [
 /// Callers must pass the same prev-block MTP used for BIP113 / header MTP checks
 /// and the once-computed block hash (plan `meta.hash` / structure).
 #[inline]
-pub(crate) fn bip16_active_from_prev_mtp(
+pub fn bip16_active_from_prev_mtp(
     params: &ChainParams,
     height: u32,
     block_hash: &[u8; 32],
@@ -691,7 +685,7 @@ pub(crate) fn bip16_active_from_prev_mtp(
 ///
 /// Deref to [`Transaction`] so script paths keep `job.tx.input` / `&job.tx` ergonomics.
 #[derive(Clone)]
-pub(crate) struct JobTx {
+pub struct JobTx {
     inner: JobTxInner,
 }
 
@@ -703,14 +697,14 @@ enum JobTxInner {
 
 impl JobTx {
     #[inline]
-    pub(crate) fn owned(tx: Transaction) -> Self {
+    pub fn owned(tx: Transaction) -> Self {
         Self {
             inner: JobTxInner::Owned(tx),
         }
     }
 
     #[inline]
-    pub(crate) fn shared(block: Arc<Block>, index: usize) -> Self {
+    pub fn shared(block: Arc<Block>, index: usize) -> Self {
         debug_assert!(index < block.txdata.len());
         Self {
             inner: JobTxInner::Shared { block, index },
@@ -878,23 +872,39 @@ impl ScriptVerifyFlags {
     }
 }
 
+/// Bytes of one pinned prevout. The `Arc` is the pin allocation; `parts`
+/// borrows the script inside it (no second copy).
+pub trait PinParts: Send + Sync {
+    fn parts(&self, vout: u32) -> Option<(u64, &[u8])>;
+}
+
+/// Prevout a confirm job reads without copying script bytes.
+///
+/// `Wire` is `(tx_index, vout)` in the job's wire block. `Pinned` is one vout
+/// of the pin outs `Arc`.
+#[derive(Clone)]
+pub enum SharedPrevout {
+    Wire { tx_index: u32, vout: u32 },
+    Pinned { outs: Arc<dyn PinParts>, vout: u32 },
+}
+
 /// Prevout scripts for one script job.
 ///
 /// Owned jobs (tests, non-wire connect) store [`TxOut`]. Confirm jobs store
-/// [`rbitcoin_query::SharedPrevoutScript`]: same-block bytes stay in the wire
-/// block, historical bytes stay in the pin outs `Arc`.
-#[derive(Clone, Debug)]
-pub(crate) enum JobPrevouts {
+/// [`SharedPrevout`]: same-block bytes stay in the wire block, historical
+/// bytes stay in the pin outs `Arc`.
+#[derive(Clone)]
+pub enum JobPrevouts {
     Owned(Vec<TxOut>),
-    Shared(Vec<rbitcoin_query::SharedPrevoutScript>),
+    Shared(Vec<SharedPrevout>),
 }
 
 impl JobPrevouts {
-    pub(crate) fn owned(v: Vec<TxOut>) -> Self {
+    pub fn owned(v: Vec<TxOut>) -> Self {
         Self::Owned(v)
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Owned(v) => v.len(),
             Self::Shared(v) => v.len(),
@@ -909,10 +919,10 @@ impl JobPrevouts {
 /// re-hashing.
 pub struct ScriptCheckJob {
     /// Wire txid (assemble / [`Self::new`]); used for mempool preverified skip.
-    pub(crate) txid: [u8; 32],
-    pub(crate) prevouts: JobPrevouts,
+    pub txid: [u8; 32],
+    pub prevouts: JobPrevouts,
     /// Owned (tests) or shared wire block + index (confirm path).
-    pub(crate) tx: JobTx,
+    pub tx: JobTx,
     pub(crate) flags: ScriptVerifyFlags,
     /// Lookup/structure `TxPrecompute`. Set on the confirm path; tests lazy-`from_tx`.
     pub(crate) pre: std::sync::OnceLock<JobPre>,
@@ -933,9 +943,9 @@ impl DerefMut for ScriptCheckJob {
 
 /// Confirm jobs borrow the lookup/structure slice; tests own an `Arc`.
 pub(crate) enum JobPre {
-    Owned(std::sync::Arc<rbitcoin_query::TxPrecompute>),
+    Owned(std::sync::Arc<crate::TxPrecompute>),
     Slice {
-        slice: std::sync::Arc<[rbitcoin_query::TxPrecompute]>,
+        slice: std::sync::Arc<[crate::TxPrecompute]>,
         idx: usize,
     },
 }
@@ -951,7 +961,7 @@ impl ScriptCheckJob {
 
     /// Owned-tx path (tests / benches / unit connect): reuse precomputed txid.
     #[inline]
-    pub(crate) fn with_txid(
+    pub fn with_txid(
         txid: [u8; 32],
         prevouts: Vec<TxOut>,
         tx: Transaction,
@@ -962,7 +972,7 @@ impl ScriptCheckJob {
 
     /// Single construction site for activation + production standardness defaults.
     #[inline]
-    pub(crate) fn from_parts(
+    pub fn from_parts(
         txid: [u8; 32],
         prevouts: JobPrevouts,
         tx: JobTx,
@@ -979,20 +989,14 @@ impl ScriptCheckJob {
 
     /// Confirm assemble: `slice[idx]` by refcount only (no `TxPrecompute` clone).
     #[inline]
-    pub(crate) fn with_pre_slice(
-        self,
-        slice: std::sync::Arc<[rbitcoin_query::TxPrecompute]>,
-        idx: usize,
-    ) -> Self {
+    pub fn with_pre_slice(self, slice: std::sync::Arc<[crate::TxPrecompute]>, idx: usize) -> Self {
         let _ = self.pre.set(JobPre::Slice { slice, idx });
         self
     }
 
     fn job_pre(&self) -> &JobPre {
         self.pre.get_or_init(|| {
-            JobPre::Owned(std::sync::Arc::new(rbitcoin_query::TxPrecompute::from_tx(
-                &self.tx,
-            )))
+            JobPre::Owned(std::sync::Arc::new(crate::TxPrecompute::from_tx(&self.tx)))
         })
     }
 
@@ -1000,32 +1004,26 @@ impl ScriptCheckJob {
     ///
     /// Shared wire prevouts read the job's block. Pinned prevouts read the outs
     /// `Arc`. A missing vout is `Corrupt`, not an empty script.
-    pub(crate) fn prevout_parts(&self, i: usize) -> Result<(u64, &[u8]), ConsensusError> {
+    pub fn prevout_parts(&self, i: usize) -> Result<(u64, &[u8]), ConsensusError> {
         match &self.prevouts {
             JobPrevouts::Owned(v) => {
-                let o =
-                    v.get(i)
-                        .ok_or(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                            "invariant: prevout index",
-                        )))?;
+                let o = v
+                    .get(i)
+                    .ok_or(ConsensusError::Internal("invariant: prevout index"))?;
                 Ok((o.value.to_sat(), o.script_pubkey.as_bytes()))
             }
             JobPrevouts::Shared(v) => {
-                let slot =
-                    v.get(i)
-                        .ok_or(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                            "invariant: prevout index",
-                        )))?;
+                let slot = v
+                    .get(i)
+                    .ok_or(ConsensusError::Internal("invariant: prevout index"))?;
                 match slot {
-                    rbitcoin_query::SharedPrevoutScript::Wire { tx_index, vout } => {
+                    SharedPrevout::Wire { tx_index, vout } => {
                         let o = self.wire_output(*tx_index, *vout)?;
                         Ok((o.value.to_sat(), o.script_pubkey.as_bytes()))
                     }
-                    rbitcoin_query::SharedPrevoutScript::Pinned(_) => {
-                        slot.parts().ok_or(ConsensusError::Store(
-                            rbitcoin_store::StoreError::Corrupt("invariant: pinned prevout vout"),
-                        ))
-                    }
+                    SharedPrevout::Pinned { outs, vout } => outs
+                        .parts(*vout)
+                        .ok_or(ConsensusError::Internal("invariant: pinned prevout vout")),
                 }
             }
         }
@@ -1034,13 +1032,11 @@ impl ScriptCheckJob {
     fn wire_output(&self, tx_index: u32, vout: u32) -> Result<&TxOut, ConsensusError> {
         self.tx
             .output_at(tx_index, vout)
-            .ok_or(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "invariant: wire prevout",
-            )))
+            .ok_or(ConsensusError::Internal("invariant: wire prevout"))
     }
 
     #[inline]
-    pub(crate) fn prevout_script(&self, i: usize) -> Result<&[u8], ConsensusError> {
+    pub fn prevout_script(&self, i: usize) -> Result<&[u8], ConsensusError> {
         self.prevout_parts(i).map(|(_, script)| script)
     }
 
@@ -1051,7 +1047,7 @@ impl ScriptCheckJob {
     }
 
     #[inline]
-    pub(crate) fn pre(&self) -> &rbitcoin_query::TxPrecompute {
+    pub fn pre(&self) -> &crate::TxPrecompute {
         match self.job_pre() {
             JobPre::Owned(a) => a.as_ref(),
             JobPre::Slice { slice, idx } => &slice[*idx],
@@ -1060,244 +1056,21 @@ impl ScriptCheckJob {
 }
 
 /// Identity-hashed `txid → V` (assemble index / pack creates).
-pub(crate) type TxidMap<V> = std::collections::HashMap<[u8; 32], V, BuildHasherDefault<TxidHasher>>;
+pub type TxidMap<V> = std::collections::HashMap<[u8; 32], V, BuildHasherDefault<TxidHasher>>;
 
 /// Pack-local create fk by parent txid (not per-vout — fk is per tx).
-pub(crate) type PendingCreates = TxidMap<rbitcoin_primitives::Fk>;
-
-/// Block-local prevout path counts; the confirm pipeline flushes once.
-#[derive(Default)]
-pub(crate) struct AsmPrevoutAcc {
-    in_n: u64,
-    same_n: u64,
-    batch_n: u64,
-    cold_n: u64,
-    cold_null_fk_n: u64,
-    cold_not_pin_n: u64,
-    cold_txid_mismatch_n: u64,
-    cold_vout_miss_n: u64,
-}
-
-impl AsmPrevoutAcc {
-    pub(crate) fn flush(&self, stats: &rbitcoin_query::ConfirmStats) {
-        rbitcoin_query::note_confirm(&stats.asm_in_n, self.in_n);
-        rbitcoin_query::note_confirm(&stats.asm_prev_same_n, self.same_n);
-        rbitcoin_query::note_confirm(&stats.asm_prev_batch_n, self.batch_n);
-        rbitcoin_query::note_confirm(&stats.asm_prev_cold_n, self.cold_n);
-        rbitcoin_query::note_confirm(&stats.asm_prev_cold_null_fk_n, self.cold_null_fk_n);
-        rbitcoin_query::note_confirm(&stats.asm_prev_cold_not_pin_n, self.cold_not_pin_n);
-        rbitcoin_query::note_confirm(
-            &stats.asm_prev_cold_txid_mismatch_n,
-            self.cold_txid_mismatch_n,
-        );
-        rbitcoin_query::note_confirm(&stats.asm_prev_cold_vout_miss_n, self.cold_vout_miss_n);
-    }
-}
-
-pub(crate) struct AssembleMeters {
-    pub prev_ns: u64,
-    pub job_ns: u64,
-    pub acc: AsmPrevoutAcc,
-}
-
-#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
-#[allow(clippy::type_complexity)] // packed row / pin / script-hash tuple is the on-disk shape
-/// Sequential assemble: resolve prevout **content**, build script jobs, collect spends.
-///
-/// Confirm IBD path: no durable spentness / maturity / BIP68 create-height
-/// resolution — those run in [`structural_validate_spends`] after scripts (load
-/// must not walk create height per parent). Absolute nLockTime finality
-/// (BIP113 MTP of prev block) still runs here — it only needs header MTP.
-///
-/// `pending_spent`: pack-local double-spend (early reject before scripts).
-/// `pending_creates`: pack-local `txid → create_fk` (not per-vout).
-/// Same-block outs use `txid_index` (this block, `pj < ti`); meters flush
-/// once per block (no per-input Instant / atomics).
-///
-/// Prevouts resolve from per-batch [`rbitcoin_query::BatchParents`] +
-/// [`rbitcoin_query::SpendEdges`]. Optimistic miss is `invariant:` (no head recover).
-///
-/// Returns `(script_jobs, spends, fees, tx_fees, meters)`. `fees` is the block sum
-/// for the coinbase subsidy check. `tx_fees` is one satoshi fee per tx
-/// (coinbase is 0) for the `txstat` stamp. `meters` is flushed by the caller.
-///
-/// `prev_mtp` / `block_hash` / `bip16_active` must be computed **once** by the
-/// caller (assemble_run header window) — no re-walk of headers and no rehash.
-///
-/// `wire`: when `Some`, script jobs share that Arc (no `Transaction` clone).
-/// When `None` (unit-test connect), jobs own a deep clone of each non-cb tx.
-/// `build_script_jobs` is the caller's milestone decision.
-pub(crate) fn assemble_block_prevouts(
-    block: &Block,
-    ctx: &ValidationContext<'_>,
-    archived_tx_fks: Option<&[rbitcoin_primitives::Fk]>,
-    pending_spent: &mut rbitcoin_query::OutPointSet,
-    pending_creates: &mut PendingCreates,
-    batch_parents: &rbitcoin_query::BatchParents,
-    spend_edges: &rbitcoin_query::SpendEdges,
-    create_txids: &[[u8; 32]],
-    prev_mtp: u32,
-    block_hash: &[u8; 32],
-    bip16_active: bool,
-    wire: Option<&Arc<Block>>,
-    pres: Option<&Arc<[rbitcoin_query::TxPrecompute]>>,
-    build_script_jobs: bool,
-) -> Result<
-    (
-        Vec<ScriptCheckJob>,
-        Vec<(
-            [u8; 32],
-            u32,
-            rbitcoin_primitives::Fk,
-            rbitcoin_primitives::Fk,
-            u32,
-        )>,
-        i64,
-        Vec<u64>,
-        AssembleMeters,
-    ),
-    ConsensusError,
-> {
-    assemble_prevout_guards(block, archived_tx_fks, create_txids)?;
-    // Caller-supplied BIP16 must match hash+prev_mtp (no silent re-resolve).
-    debug_assert_eq!(
-        bip16_active,
-        bip16_active_from_prev_mtp(ctx.params, ctx.height.0, block_hash, prev_mtp)
-    );
-    let flags = ScriptVerifyFlags::consensus_at(ctx, block_hash, bip16_active);
-
-    let n_tx = block.txdata.len();
-    let mut txid_index: TxidMap<usize> =
-        TxidMap::with_capacity_and_hasher(n_tx, Default::default());
-    for (i, id) in create_txids.iter().enumerate() {
-        txid_index.insert(*id, i);
-    }
-    let mut acc = AsmPrevoutAcc::default();
-    let mut clk_job = 0u64;
-    let mut fees = 0i64;
-    let mut tx_fees = vec![0u64; n_tx];
-    let mut script_jobs: Vec<ScriptCheckJob> = if build_script_jobs {
-        Vec::with_capacity(n_tx.saturating_sub(1))
-    } else {
-        Vec::new()
-    };
-    let mut block_sigops_cost = match pres.and_then(|p| p.first()) {
-        Some(p) => p.sigops.saturating_mul(4),
-        None => legacy_sigop_count(&block.txdata[0]).saturating_mul(4),
-    };
-    let mut spends: Vec<(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )> = Vec::with_capacity(n_tx.saturating_mul(2));
-
-    let t_loop = Instant::now();
-
-    let lock_time_cutoff = assemble_lock_time_cutoff(ctx, block, prev_mtp);
-
-    for (ti, tx) in block.txdata.iter().enumerate() {
-        let spend_fk = archived_tx_fks.map(|fks| fks[ti]);
-        let txid = create_txids[ti];
-
-        if !is_final_tx(tx, ctx.height.0, lock_time_cutoff) {
-            return Err(ConsensusError::BadTx("bad-txns-nonfinal"));
-        }
-        if tx.output.is_empty() {
-            return Err(ConsensusError::BadTx("no outputs"));
-        }
-        if ti > 0 {
-            tx_fees[ti] = assemble_non_cb_tx(
-                ctx.params,
-                block,
-                tx,
-                ti,
-                txid,
-                spend_fk,
-                flags,
-                bip16_active,
-                wire,
-                pres,
-                &txid_index,
-                pending_spent,
-                pending_creates,
-                batch_parents,
-                spend_edges,
-                &mut acc,
-                &mut script_jobs,
-                &mut spends,
-                &mut fees,
-                &mut block_sigops_cost,
-                build_script_jobs,
-                &mut clk_job,
-            )?;
-        }
-
-        let create_fk = spend_fk.unwrap_or(rbitcoin_primitives::Fk::NULL);
-        if !create_fk.is_null() {
-            pending_creates.insert(txid, create_fk);
-        }
-    }
-
-    let clk_prev = t_loop.elapsed().as_nanos() as u64;
-    Ok((
-        script_jobs,
-        spends,
-        fees,
-        tx_fees,
-        AssembleMeters {
-            prev_ns: clk_prev,
-            job_ns: clk_job,
-            acc,
-        },
-    ))
-}
-
-fn assemble_prevout_guards(
-    block: &Block,
-    archived_tx_fks: Option<&[rbitcoin_primitives::Fk]>,
-    create_txids: &[[u8; 32]],
-) -> Result<(), ConsensusError> {
-    if let Some(fks) = archived_tx_fks {
-        if fks.len() != block.txdata.len() {
-            return Err(ConsensusError::BadBlock("archived tx fk count mismatch"));
-        }
-    }
-    if create_txids.len() != block.txdata.len() {
-        return Err(ConsensusError::BadBlock(
-            "invariant: create_txids length must match block.txdata (no assemble re-hash)",
-        ));
-    }
-    if block.txdata.is_empty() {
-        return Err(ConsensusError::BadBlock("empty block"));
-    }
-    if !block.txdata[0].is_coinbase() {
-        return Err(ConsensusError::BadBlock("first tx not coinbase"));
-    }
-    Ok(())
-}
-
-fn assemble_lock_time_cutoff(ctx: &ValidationContext<'_>, block: &Block, prev_mtp: u32) -> u32 {
-    // Height 0 has no MTP history, so the cutoff is the block time even
-    // when CSV is active.
-    if ctx.height.0 == 0 || !ctx.params.csv_active_at(ctx.height.0) {
-        block.header.time
-    } else {
-        prev_mtp
-    }
-}
+pub type PendingCreates = TxidMap<rbitcoin_primitives::Fk>;
 
 /// `MAX_BLOCK_SIGOPS_COST` (20_000 legacy sigops × witness scale 4).
 #[inline]
-fn exceeds_sigops_limit(cost: u64) -> bool {
+pub fn exceeds_sigops_limit(cost: u64) -> bool {
     const MAX_BLOCK_SIGOPS_COST: u64 = 80_000;
     cost > MAX_BLOCK_SIGOPS_COST
 }
 
 /// Attach the precompute slice only when `ti` is inside it.
 #[inline]
-fn should_use_pres(ti: usize, len: usize) -> bool {
+pub fn should_use_pres(ti: usize, len: usize) -> bool {
     ti < len
 }
 
@@ -1309,13 +1082,13 @@ fn should_use_pres(ti: usize, len: usize) -> bool {
 /// cannot become negative when `money_range_out_sum` or
 /// `assemble_tx_value_out` casts it.
 #[inline]
-fn exceeds_max_money(sats: u64) -> bool {
+pub fn exceeds_max_money(sats: u64) -> bool {
     sats > Amount::MAX_MONEY.to_sat()
 }
 
 /// Signed satoshis for an `out_sum` that already passed [`exceeds_max_money`].
 #[inline]
-fn money_range_out_sum(out_sum: u64) -> i64 {
+pub fn money_range_out_sum(out_sum: u64) -> i64 {
     debug_assert!(
         !exceeds_max_money(out_sum),
         "out_sum above MAX_MONEY must be rejected in validate_block_structure_with_pres"
@@ -1323,111 +1096,10 @@ fn money_range_out_sum(out_sum: u64) -> i64 {
     out_sum as i64
 }
 
-#[allow(clippy::too_many_arguments)] // one non-coinbase assemble; call site stays unbundled
-fn assemble_non_cb_tx(
-    params: &ChainParams,
-    block: &Block,
+pub fn assemble_tx_value_out(
     tx: &Transaction,
     ti: usize,
-    txid: [u8; 32],
-    spend_fk: Option<rbitcoin_primitives::Fk>,
-    flags: ScriptVerifyFlags,
-    bip16_active: bool,
-    wire: Option<&Arc<Block>>,
-    pres: Option<&Arc<[rbitcoin_query::TxPrecompute]>>,
-    txid_index: &TxidMap<usize>,
-    pending_spent: &mut rbitcoin_query::OutPointSet,
-    pending_creates: &PendingCreates,
-    batch_parents: &rbitcoin_query::BatchParents,
-    spend_edges: &rbitcoin_query::SpendEdges,
-    acc: &mut AsmPrevoutAcc,
-    script_jobs: &mut Vec<ScriptCheckJob>,
-    spends: &mut Vec<(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )>,
-    fees: &mut i64,
-    block_sigops_cost: &mut u64,
-    build_script_jobs: bool,
-    clk_job: &mut u64,
-) -> Result<u64, ConsensusError> {
-    if tx.input.is_empty() {
-        return Err(ConsensusError::BadTx("no inputs"));
-    }
-    let (value_in, prevouts, tx_in_sigops) = assemble_non_cb_inputs(
-        params,
-        block,
-        tx,
-        ti,
-        spend_fk,
-        flags,
-        bip16_active,
-        txid_index,
-        pending_spent,
-        pending_creates,
-        batch_parents,
-        spend_edges,
-        wire,
-        acc,
-        spends,
-        build_script_jobs,
-    )?;
-    let tx_legacy_sigops = match pres.and_then(|p| p.get(ti)) {
-        Some(p) => p.sigops.saturating_mul(4),
-        None => legacy_sigop_count(tx).saturating_mul(4),
-    };
-    *block_sigops_cost = block_sigops_cost
-        .checked_add(tx_legacy_sigops)
-        .and_then(|c| c.checked_add(tx_in_sigops))
-        .ok_or(ConsensusError::BadBlock("bad-blk-sigops"))?;
-    if exceeds_sigops_limit(*block_sigops_cost) {
-        return Err(ConsensusError::BadBlock("bad-blk-sigops"));
-    }
-    let value_out = assemble_tx_value_out(tx, ti, pres)?;
-    if value_out > value_in {
-        return Err(ConsensusError::BadTx("in < out"));
-    }
-    let fee = value_in
-        .checked_sub(value_out)
-        .ok_or(ConsensusError::BadTx("fee overflow"))?;
-    let fee_sat = u64::try_from(fee).map_err(|_| ConsensusError::BadTx("fee overflow"))?;
-    *fees = fees
-        .checked_add(fee)
-        .ok_or(ConsensusError::BadTx("fee overflow"))?;
-    if build_script_jobs {
-        let t_job = Instant::now();
-        let mut job = match (wire, prevouts) {
-            (Some(w), JobPrevouts::Shared(v)) => ScriptCheckJob::from_parts(
-                txid,
-                JobPrevouts::Shared(v),
-                JobTx::shared(Arc::clone(w), ti),
-                flags,
-            ),
-            (None, JobPrevouts::Owned(v)) => ScriptCheckJob::with_txid(txid, v, tx.clone(), flags),
-            _ => {
-                return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                    "invariant: script job prevouts",
-                )));
-            }
-        };
-        if let Some(ps) = pres {
-            if should_use_pres(ti, ps.len()) {
-                job = job.with_pre_slice(Arc::clone(ps), ti);
-            }
-        }
-        script_jobs.push(job);
-        *clk_job = clk_job.saturating_add(t_job.elapsed().as_nanos() as u64);
-    }
-    Ok(fee_sat)
-}
-
-fn assemble_tx_value_out(
-    tx: &Transaction,
-    ti: usize,
-    pres: Option<&Arc<[rbitcoin_query::TxPrecompute]>>,
+    pres: Option<&Arc<[crate::TxPrecompute]>>,
 ) -> Result<i64, ConsensusError> {
     match pres.and_then(|p| p.get(ti)) {
         Some(p) => Ok(money_range_out_sum(p.out_sum)),
@@ -1447,111 +1119,7 @@ fn assemble_tx_value_out(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // one non-coinbase input walk; call site stays unbundled
-fn assemble_non_cb_inputs(
-    params: &ChainParams,
-    block: &Block,
-    tx: &Transaction,
-    ti: usize,
-    spend_fk: Option<rbitcoin_primitives::Fk>,
-    flags: ScriptVerifyFlags,
-    bip16_active: bool,
-    txid_index: &TxidMap<usize>,
-    pending_spent: &mut rbitcoin_query::OutPointSet,
-    pending_creates: &PendingCreates,
-    batch_parents: &rbitcoin_query::BatchParents,
-    spend_edges: &rbitcoin_query::SpendEdges,
-    wire: Option<&Arc<Block>>,
-    acc: &mut AsmPrevoutAcc,
-    spends: &mut Vec<(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )>,
-    build_script_jobs: bool,
-) -> Result<(i64, JobPrevouts, u64), ConsensusError> {
-    let mut value_in = 0i64;
-    let mut prevouts = if build_script_jobs && wire.is_some() {
-        JobPrevouts::Shared(Vec::with_capacity(tx.input.len()))
-    } else {
-        JobPrevouts::owned(Vec::with_capacity(if build_script_jobs {
-            tx.input.len()
-        } else {
-            0
-        }))
-    };
-    let edges = spend_fk.and_then(|fk| fk.get().and_then(|id| spend_edges.get(&id)));
-    let mut tx_in_sigops = 0u64;
-    for (ii, input) in tx.input.iter().enumerate() {
-        let op = input.previous_output;
-        let key = (op.txid.to_byte_array(), op.vout);
-        // The genesis coinbase stays indexed for RPC and Electrum, but it is
-        // not a coin (Core `ConnectBlock` genesis early return).
-        if params.is_genesis_coinbase(&key.0) {
-            return Err(ConsensusError::MissingPrevout);
-        }
-        if !pending_spent.insert(key) {
-            return Err(ConsensusError::BadTx("double spend in block"));
-        }
-        if let Some(&pj) = txid_index.get(&key.0) {
-            if pj >= ti {
-                return Err(ConsensusError::MissingPrevout);
-            }
-            if pj == 0 {
-                return Err(ConsensusError::BadTx("coinbase immature"));
-            }
-        }
-        let prev_fk = edges
-            .as_ref()
-            .and_then(|t| t.get(ii))
-            .and_then(|e| e.create_fk.get().map(|_| e.create_fk))
-            .or_else(|| pending_creates.get(&key.0).copied());
-        let prev_out = resolve_prevout(
-            block,
-            op,
-            input,
-            prev_fk,
-            txid_index,
-            ti,
-            batch_parents,
-            bip16_active,
-            flags.witness_active,
-            build_script_jobs,
-            wire,
-            acc,
-        )?;
-        let create_fk = prev_out.create_fk;
-        tx_in_sigops = tx_in_sigops.saturating_add(prev_out.input_sigops);
-        spends.push((
-            key.0,
-            key.1,
-            spend_fk.unwrap_or(rbitcoin_primitives::Fk::NULL),
-            create_fk,
-            ii as u32,
-        ));
-        value_in = value_in
-            .checked_add(prev_out.txout.value.to_sat() as i64)
-            .ok_or(ConsensusError::BadTx("value in overflow"))?;
-        if build_script_jobs {
-            match &mut prevouts {
-                JobPrevouts::Shared(v) => {
-                    let shared = prev_out.shared.ok_or(ConsensusError::Store(
-                        rbitcoin_store::StoreError::Corrupt(
-                            "invariant: wire confirm prevout shares script bytes",
-                        ),
-                    ))?;
-                    v.push(shared);
-                }
-                JobPrevouts::Owned(v) => v.push(prev_out.txout),
-            }
-        }
-    }
-    Ok((value_in, prevouts, tx_in_sigops))
-}
-
-fn check_coinbase_subsidy(
+pub fn check_coinbase_subsidy(
     block: &Block,
     ctx: &ValidationContext<'_>,
     fees: i64,
@@ -1572,767 +1140,9 @@ fn check_coinbase_subsidy(
     Ok(())
 }
 
-/// Local wall times for one block's structural pass (write path diagnostics).
-///
-/// Measured with `Instant` — **not** deltas of window atomics (those race with
-/// `sample_and_reset` mid-batch and produced false `spent=0` on slow writes).
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct StructuralPhaseNs {
-    pub spent_ns: u64,
-    /// Pin abs collect + bulk on-disk 8-byte spender meta pread.
-    pub spent_abs_ns: u64,
-    /// `is_confirmed_strong_at` on non-null fields (still durable authority).
-    pub spent_strong_ns: u64,
-    /// Cold unspent_create_vouts / null-create probes.
-    pub spent_cold_ns: u64,
-    /// pending_spent order gate (CPU).
-    pub spent_pending_ns: u64,
-    pub create_h_ns: u64,
-    pub bip68_ns: u64,
-}
-
-/// Post-script structural checks: durable spentness, maturity, BIP68, coinbase subsidy.
-///
-/// Runs in height order on the write path (after scripts). `pending_spent` is
-/// write-local across a multi-height run.
-///
-/// **BIP68** create-height lives here (not optimistic load assemble) so confirm
-/// load does not walk create height for every parent. Heights: bulk fence.
-/// Coin MTP only for time-type relative locks on version ≥2 txs (v1 skipped).
-///
-/// Write-path spend annotate slots: abs edge plus the meta structural already read.
-///
-/// Filled during spentness and passed to annotate. No second edge copy.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct AnnotateSlots {
-    pub abs_edges: Vec<(
-        u64,
-        rbitcoin_primitives::Fk,
-        u32,
-        rbitcoin_primitives::Fk,
-        u32,
-    )>,
-    pub known: Vec<(rbitcoin_primitives::Fk, u8, u32)>,
-}
-
-impl AnnotateSlots {
-    pub(crate) fn push(
-        &mut self,
-        edge: (
-            u64,
-            rbitcoin_primitives::Fk,
-            u32,
-            rbitcoin_primitives::Fk,
-            u32,
-        ),
-        known: (rbitcoin_primitives::Fk, u8, u32),
-    ) {
-        self.abs_edges.push(edge);
-        self.known.push(known);
-    }
-}
-
-/// Per-block spentness scratch. Capacity stays across blocks in one write batch.
-/// [`AnnotateSlots`] accumulate for the whole batch.
-pub(crate) struct StructuralScratch {
-    abs_jobs: Vec<StructuralAbsJob>,
-    unique_fks: Vec<rbitcoin_primitives::Fk>,
-    height_by_id: U64Map<u32>,
-    skip_n: std::collections::HashMap<
-        (u64, u32),
-        u32,
-        BuildHasherDefault<rbitcoin_query::OutPointHasher>,
-    >,
-    skip: OverlayMetaSkip,
-    disk_jobs: Vec<StructuralAbsJob>,
-    abs_offs: Vec<u64>,
-    field_fks: Vec<rbitcoin_primitives::Fk>,
-    field_seen: rbitcoin_query::U64Set,
-    field_h_by_id: U64Map<u32>,
-    durable_spent: DurableSpentSet,
-    height_list: Vec<u32>,
-    create_height_by_fk: FkMap<u32>,
-    pub slots: AnnotateSlots,
-}
-
-impl Default for StructuralScratch {
-    fn default() -> Self {
-        Self {
-            abs_jobs: Vec::new(),
-            unique_fks: Vec::new(),
-            height_by_id: U64Map::default(),
-            skip_n: std::collections::HashMap::with_hasher(Default::default()),
-            skip: OverlayMetaSkip::with_hasher(Default::default()),
-            disk_jobs: Vec::new(),
-            abs_offs: Vec::new(),
-            field_fks: Vec::new(),
-            field_seen: rbitcoin_query::U64Set::default(),
-            field_h_by_id: U64Map::default(),
-            durable_spent: DurableSpentSet::with_hasher(Default::default()),
-            height_list: Vec::new(),
-            create_height_by_fk: FkMap::default(),
-            slots: AnnotateSlots::default(),
-        }
-    }
-}
-
-impl StructuralScratch {
-    /// Drop annotate slots from the previous write batch. Per-block buffers
-    /// stay for [`Self::begin_block`]; slots accumulate inside one batch.
-    pub(crate) fn begin_batch(&mut self) {
-        self.slots.abs_edges.clear();
-        self.slots.known.clear();
-    }
-
-    fn begin_block(&mut self) {
-        self.abs_jobs.clear();
-        self.unique_fks.clear();
-        self.height_by_id.clear();
-        self.skip_n.clear();
-        self.skip.clear();
-        self.disk_jobs.clear();
-        self.abs_offs.clear();
-        self.field_fks.clear();
-        self.field_seen.clear();
-        self.field_h_by_id.clear();
-        self.durable_spent.clear();
-        self.height_list.clear();
-        self.create_height_by_fk.clear();
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
-/// **Spentness:** pin denserels → abs + bulk 8-byte meta. Sparse durable-**spent**
-/// set (not unspent). Missing abs / short meta is hard `Err`. **Multi-list** after
-/// reorg annotate is a protocol cold walk (`has_confirmed_strong_spender_create`)
-/// — not a hard fail (tip-follow reorgs leave multi flags by design). Emits
-/// Annotate slots on `scratch` for pure-write annotate.
-pub(crate) fn structural_validate_spends(
-    query: &Query,
-    block: &Block,
-    ctx: &ValidationContext<'_>,
-    archived_tx_fks: Option<&[rbitcoin_primitives::Fk]>,
-    spends: &[(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )],
-    fees: i64,
-    pending_spent: &mut rbitcoin_query::OutPointSet,
-    batch_parents: &rbitcoin_query::BatchParents,
-    mtp_cache: &mut U32Map<u32>,
-    run_create_height: &RunCreateHeight,
-    class_a_wave: &ClassAWave,
-    scratch: &mut StructuralScratch,
-    abs_jobs: &[StructuralAbsJob],
-) -> Result<StructuralPhaseNs, ConsensusError> {
-    use std::time::Instant;
-
-    scratch.begin_block();
-    let maturity = ctx.params.coinbase_maturity();
-    // BIP30's txid batch is inside `spent_ns` (signet runs it on every block).
-    let t_spent = Instant::now();
-    reject_bip30_unspent_overwrite(query, block, ctx)?;
-    let t_abs = Instant::now();
-    structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
-    let tip = query.tip_height().map(|h| h.0);
-    let mut spent_strong_ns = 0u64;
-    let mut multi_list_ns = 0u64;
-    if !scratch.abs_jobs.is_empty() {
-        fill_overlay_skip(spends, class_a_wave, scratch);
-        let loaded = structural_load_durable_spent(query, tip, scratch)?;
-        multi_list_ns = loaded.0;
-        spent_strong_ns = loaded.1;
-    }
-    let spent_abs_ns = (t_abs.elapsed().as_nanos() as u64).saturating_sub(spent_strong_ns);
-    let spent_cold_ns = multi_list_ns;
-    let t_pending = Instant::now();
-    structural_mark_pending(spends, pending_spent, &scratch.durable_spent)?;
-    let spent_pending_ns = t_pending.elapsed().as_nanos() as u64;
-    let spent_ns = t_spent.elapsed().as_nanos() as u64;
-    let t_create = Instant::now();
-    structural_create_heights(
-        query,
-        batch_parents,
-        run_create_height,
-        ctx.height.0,
-        maturity,
-        scratch,
-    )?;
-    let create_h_ns = t_create.elapsed().as_nanos() as u64;
-    let t_bip68 = Instant::now();
-    structural_bip68(
-        query,
-        block,
-        ctx,
-        spends,
-        &scratch.create_height_by_fk,
-        mtp_cache,
-    )?;
-    let bip68_ns = t_bip68.elapsed().as_nanos() as u64;
-    let _ = archived_tx_fks;
-    check_coinbase_subsidy(block, ctx, fees)?;
-    Ok(StructuralPhaseNs {
-        spent_ns,
-        spent_abs_ns,
-        spent_strong_ns,
-        spent_cold_ns,
-        spent_pending_ns,
-        create_h_ns,
-        bip68_ns,
-    })
-}
-
-pub(crate) type StructuralAbsJob = (u64, u32, u64, rbitcoin_primitives::Fk, u32);
-
-/// Creates this write batch's Class A append committed.
-///
-/// Only these spent slots carry the same-batch sole-spender overlay. A run
-/// create archived by an earlier wave has whatever that wave and later
-/// annotates left on disk, so structural reads and annotates it.
-#[derive(Default)]
-pub(crate) struct ClassAWave(Vec<rbitcoin_primitives::Fk>);
-
-impl ClassAWave {
-    pub(crate) fn new(mut fks: Vec<rbitcoin_primitives::Fk>) -> Self {
-        fks.sort_unstable_by_key(|f| f.0);
-        Self(fks)
-    }
-
-    fn contains(&self, fk: rbitcoin_primitives::Fk) -> bool {
-        self.0.binary_search_by_key(&fk.0, |f| f.0).is_ok()
-    }
-}
-
-/// Create heights for one write batch.
-///
-/// Contiguous per-block fk spans are the IBD shape (`first` + count). A gap
-/// or overlap uses the map so a fk between spans does not inherit a height.
-/// Each block's first fk is its coinbase: a span's `first`, or the map's flag.
-pub(crate) enum RunCreateHeight {
-    Spans(Vec<(u64, u64, u32)>),
-    Map(FkMap<(u32, bool)>),
-}
-
-impl RunCreateHeight {
-    pub(crate) fn from_blocks<'a>(
-        blocks: impl IntoIterator<Item = (u32, &'a [rbitcoin_primitives::Fk])>,
-    ) -> Self {
-        let blocks: Vec<(u32, &'a [rbitcoin_primitives::Fk])> = blocks.into_iter().collect();
-        if let Some(spans) = contiguous_create_spans(&blocks) {
-            Self::Spans(spans)
-        } else {
-            let mut map = FkMap::default();
-            for (height, fks) in blocks {
-                for (i, fk) in fks.iter().enumerate() {
-                    map.insert(*fk, (height, i == 0));
-                }
-            }
-            Self::Map(map)
-        }
-    }
-
-    pub(crate) fn get(&self, fk: rbitcoin_primitives::Fk) -> Option<u32> {
-        self.create(fk).map(|(height, _)| height)
-    }
-
-    /// Height of a create in this batch and whether it is its block's coinbase.
-    pub(crate) fn create(&self, fk: rbitcoin_primitives::Fk) -> Option<(u32, bool)> {
-        match self {
-            Self::Map(map) => map.get(&fk).copied(),
-            Self::Spans(spans) => {
-                let id = fk.get()?;
-                let i = spans.partition_point(|span| span.0 <= id);
-                let (first, end, height) = spans.get(i.checked_sub(1)?)?;
-                (*end > id).then_some((*height, *first == id))
-            }
-        }
-    }
-}
-
-/// `Some` when every non-empty block is `[first, first+n)` and spans do not overlap.
-///
-/// A null fk, a gap, or an id that would wrap is `None` so the caller uses the map.
-/// A wrapped end must not cover fks that are not in the block.
-fn contiguous_create_spans(
-    blocks: &[(u32, &[rbitcoin_primitives::Fk])],
-) -> Option<Vec<(u64, u64, u32)>> {
-    let mut spans = Vec::with_capacity(blocks.len());
-    for &(height, fks) in blocks {
-        if fks.is_empty() {
-            continue;
-        }
-        let mut ids = fks.iter().map(|fk| fk.get());
-        let first = ids.next().flatten()?;
-        let mut prev = first;
-        for id in ids {
-            let id = id?;
-            let next = prev.checked_add(1)?;
-            if id != next {
-                return None;
-            }
-            prev = id;
-        }
-        let end = prev.checked_add(1)?;
-        spans.push((first, end, height));
-    }
-    spans.sort_unstable_by_key(|span| span.0);
-    for pair in spans.windows(2) {
-        if pair[0].1 > pair[1].0 {
-            return None;
-        }
-    }
-    Some(spans)
-}
-type DurableSpentSet =
-    std::collections::HashSet<(u64, u32), BuildHasherDefault<rbitcoin_query::OutPointHasher>>;
-type OverlayMetaSkip = std::collections::HashMap<
-    (u64, u32),
-    (rbitcoin_primitives::Fk, u32),
-    BuildHasherDefault<rbitcoin_query::OutPointHasher>,
->;
-
-fn fill_overlay_skip(
-    spends: &[(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )],
-    class_a_wave: &ClassAWave,
-    scratch: &mut StructuralScratch,
-) {
-    for &(_, vout, sfk, cfk, vin) in spends {
-        if !class_a_wave.contains(cfk) {
-            continue;
-        }
-        let Some(id) = cfk.get() else {
-            continue;
-        };
-        let key = (id, vout);
-        *scratch.skip_n.entry(key).or_insert(0) += 1;
-        scratch.skip.entry(key).or_insert((sfk, vin));
-    }
-    let skip_n = &scratch.skip_n;
-    scratch
-        .skip
-        .retain(|k, _| skip_n.get(k).copied() == Some(1));
-}
-
-fn overlay_meta_is_skip(
-    id: u64,
-    vout: u32,
-    sfk: rbitcoin_primitives::Fk,
-    vin: u32,
-    skip: &OverlayMetaSkip,
-) -> bool {
-    skip.get(&(id, vout)) == Some(&(sfk, vin))
-}
-
-fn structural_abs_heights(
-    query: &Query,
-    run_create_height: &RunCreateHeight,
-    scratch: &mut StructuralScratch,
-    abs_jobs: &[StructuralAbsJob],
-) -> Result<(), ConsensusError> {
-    scratch.abs_jobs.extend_from_slice(abs_jobs);
-    scratch.unique_fks.extend(
-        scratch
-            .abs_jobs
-            .iter()
-            .map(|(id, _, _, _, _)| rbitcoin_primitives::Fk(*id)),
-    );
-    scratch.unique_fks.sort_unstable_by_key(|f| f.0);
-    scratch.unique_fks.dedup();
-    let durable_heights = query
-        .store()
-        .tx_height_get_batch(&scratch.unique_fks)
-        .map_err(ConsensusError::from)?;
-    for (fk, h) in scratch.unique_fks.iter().zip(durable_heights) {
-        let Some(id) = fk.get() else {
-            continue;
-        };
-        let Some(h) = h.or_else(|| run_create_height.get(*fk)) else {
-            continue;
-        };
-        scratch.height_by_id.insert(id, h);
-    }
-    Ok(())
-}
-
-fn structural_load_durable_spent(
-    query: &Query,
-    tip: Option<u32>,
-    scratch: &mut StructuralScratch,
-) -> Result<(u64, u64), ConsensusError> {
-    use std::time::Instant;
-    let mut ovl_n = 0u64;
-    for &job in &scratch.abs_jobs {
-        let (id, vout, abs, sfk, vin) = job;
-        if overlay_meta_is_skip(id, vout, sfk, vin, &scratch.skip) {
-            ovl_n = ovl_n.saturating_add(1);
-            continue;
-        }
-        scratch.disk_jobs.push(job);
-        scratch.abs_offs.push(abs);
-    }
-    rbitcoin_query::note_confirm(&query.confirm_stats().spend_overlay_skip_n, ovl_n);
-    if scratch.abs_offs.is_empty() {
-        return Ok((0, 0));
-    }
-    let meta_backend = rbitcoin_store::spend_meta_backend();
-    let t_meta = Instant::now();
-    let metas = query
-        .store()
-        .get_spender_meta_at_abs_batch_backend(&scratch.abs_offs, meta_backend)
-        .map_err(ConsensusError::from)?;
-    let meta_ns = t_meta.elapsed().as_nanos() as u64;
-    rbitcoin_query::note_confirm(&query.confirm_stats().spend_meta_ns, meta_ns);
-    rbitcoin_query::note_confirm(
-        &query.confirm_stats().spend_meta_n,
-        scratch.abs_offs.len() as u64,
-    );
-    let _ = meta_backend;
-    if metas.len() != scratch.disk_jobs.len() {
-        return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-            "invariant: structural meta batch length",
-        )));
-    }
-    let t_strong = Instant::now();
-    for row in &metas {
-        let Some((field, _, _)) = row else {
-            continue;
-        };
-        if field.is_null() {
-            continue;
-        }
-        if let Some(fid) = field.get() {
-            if scratch.field_seen.insert(fid) {
-                scratch.field_fks.push(*field);
-            }
-        }
-    }
-    let field_heights = query
-        .store()
-        .tx_height_get_batch(&scratch.field_fks)
-        .map_err(ConsensusError::from)?;
-    for (fk, h) in scratch.field_fks.iter().zip(field_heights) {
-        if let Some((id, h)) = fk.get().zip(h) {
-            scratch.field_h_by_id.insert(id, h);
-        }
-    }
-    let jobs = std::mem::take(&mut scratch.disk_jobs);
-    let applied = jobs
-        .iter()
-        .copied()
-        .zip(metas)
-        .try_fold(0u64, |acc, (job, meta)| {
-            let (id, vout, abs, sfk, vin) = job;
-            let ns = structural_apply_one_meta(query, meta, id, vout, abs, sfk, vin, tip, scratch)?;
-            Ok::<u64, ConsensusError>(acc.saturating_add(ns))
-        });
-    scratch.disk_jobs = jobs;
-    let multi_list_ns = applied?;
-    let spent_strong_ns = t_strong
-        .elapsed()
-        .as_nanos()
-        .saturating_sub(multi_list_ns as u128) as u64;
-    Ok((multi_list_ns, spent_strong_ns))
-}
-
-#[allow(clippy::too_many_arguments)] // one spent-slot apply; call site stays unbundled
-fn structural_apply_one_meta(
-    query: &Query,
-    meta: Option<(rbitcoin_primitives::Fk, u8, u32)>,
-    id: u64,
-    vout: u32,
-    abs: u64,
-    sfk: rbitcoin_primitives::Fk,
-    vin: u32,
-    tip: Option<u32>,
-    scratch: &mut StructuralScratch,
-) -> Result<u64, ConsensusError> {
-    use std::time::Instant;
-    let Some((field, flags, field_vin)) = meta else {
-        return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-            "invariant: structural spender meta short/OOB (cold forbidden)",
-        )));
-    };
-    scratch.slots.push(
-        (abs, rbitcoin_primitives::Fk(id), vout, sfk, vin),
-        (field, flags, field_vin),
-    );
-    let multi = flags & rbitcoin_store::output_flags::MULTI_SPENDER != 0;
-    if multi {
-        let t_m = Instant::now();
-        let spent = query
-            .store()
-            .has_confirmed_strong_spender_create(rbitcoin_primitives::Fk(id), vout, None)
-            .map_err(ConsensusError::from)?;
-        let ns = t_m.elapsed().as_nanos() as u64;
-        if spent {
-            scratch.durable_spent.insert((id, vout));
-        }
-        return Ok(ns);
-    }
-    if field.is_null() {
-        return Ok(0);
-    }
-    let strong = query
-        .store()
-        .is_confirmed_strong_at(field, tip)
-        .map_err(ConsensusError::from)?;
-    if !strong {
-        return Ok(0);
-    }
-    let create_h = scratch.height_by_id.get(&id).copied();
-    let spend_h = field
-        .get()
-        .and_then(|fid| scratch.field_h_by_id.get(&fid).copied());
-    if let (Some(ch), Some(sh)) = (create_h, spend_h) {
-        if sh < ch {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "invariant: confirmed spender below its create height",
-            )));
-        }
-    }
-    scratch.durable_spent.insert((id, vout));
-    Ok(0)
-}
-
-fn structural_mark_pending(
-    spends: &[(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )],
-    pending_spent: &mut rbitcoin_query::OutPointSet,
-    durable_spent: &DurableSpentSet,
-) -> Result<(), ConsensusError> {
-    for &(prev_txid, vout, _spend_fk, create_fk, _vin) in spends {
-        let key = (prev_txid, vout);
-        let spent = if create_fk.is_null() {
-            false
-        } else if let Some(id) = create_fk.get() {
-            durable_spent.contains(&(id, vout))
-        } else {
-            false
-        };
-        if spent || !pending_spent.insert(key) {
-            return Err(ConsensusError::PrevoutSpent);
-        }
-    }
-    Ok(())
-}
-
-fn structural_create_heights(
-    query: &Query,
-    batch_parents: &rbitcoin_query::BatchParents,
-    run_create_height: &RunCreateHeight,
-    spend_height: u32,
-    maturity: u32,
-    scratch: &mut StructuralScratch,
-) -> Result<(), ConsensusError> {
-    // `confirmed[h]` for a height in this batch is written at Class C, after
-    // structural; the batch index owns coinbase identity there.
-    scratch.height_list.extend(
-        scratch
-            .height_by_id
-            .iter()
-            .filter(|&(&id, &h)| run_create_height.get(rbitcoin_primitives::Fk(id)) != Some(h))
-            .map(|(_, &h)| h),
-    );
-    scratch.height_list.sort_unstable();
-    scratch.height_list.dedup();
-    let coinbase_fk_by_height = query
-        .store()
-        .coinbase_fk_at_heights(&scratch.height_list)
-        .map_err(ConsensusError::from)?;
-    let n_unique = scratch.unique_fks.len();
-    for i in 0..n_unique {
-        let create_fk = scratch.unique_fks[i];
-        let Some(id) = create_fk.get() else {
-            continue;
-        };
-        let Some(&durable_h) = scratch.height_by_id.get(&id) else {
-            return reject_one_create(spend_height, maturity, None, false);
-        };
-        let pin_cb = batch_parents.get_parent_coinbase(create_fk);
-        let is_cb = match (pin_cb, run_create_height.create(create_fk)) {
-            (Some(cb), _) => cb,
-            (None, Some((h, cb))) if h == durable_h => cb,
-            (None, _) => {
-                let cb = coinbase_fk_by_height
-                    .get(&durable_h)
-                    .ok_or(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                        "invariant: no coinbase fk at confirmed create height",
-                    )))?;
-                *cb == create_fk
-            }
-        };
-        // Core connects a run one block at a time: a create from a later
-        // block of this batch is not yet a coin when this block spends it.
-        reject_one_create(spend_height, maturity, Some(durable_h), is_cb)?;
-        scratch.create_height_by_fk.insert(create_fk, durable_h);
-    }
-    Ok(())
-}
-
-fn structural_bip68(
-    query: &Query,
-    block: &Block,
-    ctx: &ValidationContext<'_>,
-    spends: &[(
-        [u8; 32],
-        u32,
-        rbitcoin_primitives::Fk,
-        rbitcoin_primitives::Fk,
-        u32,
-    )],
-    create_height_by_fk: &FkMap<u32>,
-    mtp_cache: &mut U32Map<u32>,
-) -> Result<(), ConsensusError> {
-    if !ctx.params.csv_active_at(ctx.height.0) {
-        return Ok(());
-    }
-    const DISABLE: u32 = 1 << 31;
-    const TYPE_FLAG: u32 = 1 << 22;
-    let prev_mtp = if ctx.height.0 == 0 {
-        0
-    } else {
-        mtp_at(query, Height(ctx.height.0 - 1), mtp_cache)?
-    };
-    let mut si = 0usize;
-    let mut prev_heights: Vec<u32> = Vec::new();
-    let mut coin_mtps: Vec<u32> = Vec::new();
-    for tx in block.txdata.iter().skip(1) {
-        let n_in = tx.input.len();
-        if si + n_in > spends.len() {
-            return Err(ConsensusError::BadBlock(
-                "structural spends/tx input mismatch",
-            ));
-        }
-        let tx_spends = &spends[si..si + n_in];
-        si += n_in;
-        if !bip68_active_for_tx(tx) {
-            continue;
-        }
-        prev_heights.clear();
-        coin_mtps.clear();
-        prev_heights.reserve(n_in);
-        coin_mtps.reserve(n_in);
-        for (inp, &(_ptid, _vout, _sfk, create_fk, _vin)) in tx.input.iter().zip(tx_spends.iter()) {
-            let ch = if create_fk.is_null() {
-                ctx.height.0
-            } else {
-                match create_height_by_fk.get(&create_fk) {
-                    Some(&h) => h,
-                    None => return Err(ConsensusError::BadTx("bad-txns-nonfinal")),
-                }
-            };
-            prev_heights.push(ch);
-            let seq = inp.sequence.to_consensus_u32();
-            let need_mtp = seq & DISABLE == 0 && seq & TYPE_FLAG != 0;
-            // Height 0 is the genesis coin: one median lookup of block 0.
-            // A missing create height is not height 0.
-            let mtp = if !need_mtp {
-                0
-            } else {
-                mtp_at(query, Height(ch.saturating_sub(1)), mtp_cache)?
-            };
-            coin_mtps.push(mtp);
-        }
-        if !sequence_locks_satisfied(tx, &prev_heights, &coin_mtps, ctx.height.0, prev_mtp) {
-            return Err(ConsensusError::BadTx("bad-txns-nonfinal"));
-        }
-    }
-    if si != spends.len() {
-        return Err(ConsensusError::BadBlock(
-            "structural spends/tx input mismatch",
-        ));
-    }
-    Ok(())
-}
-
-/// MTP for write structural. Prefers assemble-carried `prev_mtp` (seeded into
-/// `cache`). Misses go to durable headers only — never `get_header_plan`.
-/// BIP30: a connected instance with any unspent spendable output may not be
-/// overwritten.
-/// Skipped for the two mainnet repeats, and when the header at BIP34 height
-/// is this network's BIP34 hash and the block is below
-/// [`crate::params::BIP34_IMPLIES_BIP30_LIMIT`]. Signet and regtest have no
-/// BIP34 hash, so every block is checked. Just-archived self is unconnected.
-fn reject_bip30_unspent_overwrite(
-    query: &Query,
-    block: &Block,
-    ctx: &ValidationContext<'_>,
-) -> Result<(), ConsensusError> {
-    if ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
-        || bip34_ancestry_skips_bip30(query, ctx)
-    {
-        return Ok(());
-    }
-    let create_txids: Vec<[u8; 32]> = block
-        .txdata
-        .iter()
-        .map(|tx| tx.compute_txid().to_byte_array())
-        .collect();
-    let hits = query
-        .store()
-        .get_fk_by_txid_batch(&create_txids)
-        .map_err(ConsensusError::from)?;
-    for (_txid, row) in hits {
-        let Some((old_fk, _)) = row else {
-            continue;
-        };
-        // Connected instance at *this* height is ourselves (re-validate /
-        // already-confirmed fixture). BIP30 is an earlier unspent sibling.
-        let prior_height = query
-            .store()
-            .tx_height_get(old_fk)
-            .map_err(ConsensusError::from)?;
-        if prior_height == Some(ctx.height.0) {
-            continue;
-        }
-        let (_, outs) = query
-            .store()
-            .get_tx_meta_and_outputs(old_fk)
-            .map_err(ConsensusError::from)?;
-        let mut unspent = false;
-        for (v, out) in (0u32..).zip(&outs) {
-            // Core's AddCoins never stores an unspendable output, so it is
-            // not a coin that the overwrite could clobber.
-            if crate::policy::is_unspendable(&out.script) {
-                continue;
-            }
-            let spent = query
-                .store()
-                .has_confirmed_strong_spender_create(old_fk, v, None)
-                .map_err(ConsensusError::from)?;
-            if !spent {
-                unspent = true;
-                break;
-            }
-        }
-        if unspent {
-            reject_bip30_unspent_prior(
-                ctx.height.0,
-                prior_height.unwrap_or(u32::MAX),
-                true,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// BIP30: an earlier connected instance with an unspent spendable output may
 /// not be overwritten. The same height is this block.
-pub(crate) fn reject_bip30_unspent_prior(
+pub fn reject_bip30_unspent_prior(
     spend_height: u32,
     prior_height: u32,
     unspent_spendable: bool,
@@ -2346,7 +1156,7 @@ pub(crate) fn reject_bip30_unspent_prior(
 /// Create-height facts for one spent output. `None` is not a coin. A later
 /// height in this batch is not yet a coin. A coinbase inside maturity is not
 /// spendable.
-pub(crate) fn reject_one_create(
+pub fn reject_one_create(
     spend_height: u32,
     maturity: u32,
     create_height: Option<u32>,
@@ -2362,32 +1172,6 @@ pub(crate) fn reject_one_create(
         return Err(ConsensusError::BadTx("coinbase immature"));
     }
     Ok(())
-}
-
-fn bip34_ancestry_skips_bip30(query: &Query, ctx: &ValidationContext<'_>) -> bool {
-    let height = ctx.height.0;
-    if ctx.params.bip34_hash.is_none() {
-        return false;
-    }
-    if height <= ctx.params.btc.bip34_height {
-        return false;
-    }
-    let ancestor = query
-        .header_at_height(Height(ctx.params.btc.bip34_height))
-        .ok()
-        .flatten()
-        .map(|(_, rec)| bitcoin::BlockHash::from_byte_array(rec.hash));
-    ctx.params
-        .bip30_skipped_for_bip34_ancestry(height, ancestor)
-}
-
-fn mtp_at(query: &Query, height: Height, cache: &mut U32Map<u32>) -> Result<u32, ConsensusError> {
-    if let Some(&t) = cache.get(&height.0) {
-        return Ok(t);
-    }
-    let t = crate::header::median_time_past_store(query, height)?;
-    cache.insert(height.0, t);
-    Ok(t)
 }
 
 /// Whether this job can skip `verify_job_all_inputs`.
@@ -2416,7 +1200,7 @@ fn job_needs_script_check(job: &ScriptCheckJob) -> bool {
 }
 
 #[inline]
-pub(crate) fn verify_one_script_job(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
+pub fn verify_one_script_job(job: &ScriptCheckJob) -> Result<(), ConsensusError> {
     if job_needs_script_check(job) {
         crate::script::verify_job_all_inputs(job)
     } else {
@@ -2432,17 +1216,6 @@ pub fn block_subsidy(height: u32, params: &ChainParams) -> i64 {
         return 0;
     }
     50_0000_0000i64 >> halvings
-}
-
-struct ResolvedPrevout {
-    txout: TxOut,
-    /// Set when the script bytes stay in a block or pin `Arc`.
-    shared: Option<rbitcoin_query::SharedPrevoutScript>,
-    /// P2SH+witness sigop cost for this input's prevout script (not legacy).
-    input_sigops: u64,
-    /// Class A create fk for this prevout (or `NULL` for same-block). Load pin
-    /// denserels must carry identity matching wire `prev_txid` for this fk.
-    create_fk: rbitcoin_primitives::Fk,
 }
 
 /// BIP65/113 nLockTime threshold: values below are block heights, above are unix times.
@@ -2533,222 +1306,57 @@ pub fn sequence_locks_satisfied(
     true
 }
 
-#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
-fn resolve_prevout(
-    block: &Block,
-    op: OutPoint,
-    inp: &bitcoin::TxIn,
-    prev_fk_hint: Option<rbitcoin_primitives::Fk>,
-    txid_index: &TxidMap<usize>,
-    spend_ti: usize,
-    batch_parents: &rbitcoin_query::BatchParents,
-    bip16: bool,
-    witness: bool,
-    need_script_buf: bool,
-    wire: Option<&Arc<Block>>,
-    acc: &mut AsmPrevoutAcc,
-) -> Result<ResolvedPrevout, ConsensusError> {
-    let prev_txid = op.txid.to_byte_array();
-
-    if let Some(&pj) = txid_index.get(&prev_txid) {
-        if pj < spend_ti {
-            let tx = block.txdata.get(pj).ok_or(ConsensusError::MissingPrevout)?;
-            let v = op.vout as usize;
-            let o = tx.output.get(v).ok_or(ConsensusError::MissingPrevout)?;
-            // Core never puts this script in the coin view. The returned
-            // `txout` is often empty; the wire output holds the real bytes.
-            if crate::policy::is_unspendable(o.script_pubkey.as_bytes()) {
-                return Err(ConsensusError::MissingPrevout);
-            }
-            acc.in_n = acc.in_n.saturating_add(1);
-            acc.same_n = acc.same_n.saturating_add(1);
-            let shared = if need_script_buf {
-                wire.map(|_| rbitcoin_query::SharedPrevoutScript::Wire {
-                    tx_index: pj as u32,
-                    vout: op.vout,
-                })
-            } else {
-                None
-            };
-            return Ok(ResolvedPrevout {
-                txout: if shared.is_some() || !need_script_buf {
-                    TxOut {
-                        value: o.value,
-                        script_pubkey: ScriptBuf::new(),
-                    }
-                } else {
-                    o.clone()
-                },
-                shared,
-                input_sigops: prevout_spk_sigops(inp, o.script_pubkey.as_bytes(), bip16, witness),
-                create_fk: rbitcoin_primitives::Fk::NULL,
-            });
-        }
-    }
-
-    // Batch pin first (no TxRecord clone — A3). Pin identity/vout misses are
-    // hard invariants (load must fill schema-13 identity + denserels).
-    if let Some(prev_fk) = prev_fk_hint {
-        if let Some((pinned, parent_txid)) = batch_parents.share_parent_prevout(prev_fk, op.vout) {
-            if parent_txid != prev_txid {
-                acc.cold_txid_mismatch_n = acc.cold_txid_mismatch_n.saturating_add(1);
-                #[cfg(test)]
-                confirm_phase_stats::tl_note_cold_why_txid_mismatch();
-                return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                    "invariant: pin parent create identity mismatch wire prev_txid",
-                )));
-            }
-            let (value, script) = pinned.parts().ok_or(ConsensusError::Store(
-                rbitcoin_store::StoreError::Corrupt(
-                    "invariant: pin incomplete outs for spent parent vout",
-                ),
-            ))?;
-            // Same rule as the same-block arm. `txout.script_pubkey` below is
-            // empty; `script` is the archived bytes, including when scripts
-            // are not executed.
-            if crate::policy::is_unspendable(script) {
-                return Err(ConsensusError::MissingPrevout);
-            }
-            let input_sigops = prevout_spk_sigops(inp, script, bip16, witness);
-            acc.in_n = acc.in_n.saturating_add(1);
-            acc.batch_n = acc.batch_n.saturating_add(1);
-            #[cfg(test)]
-            confirm_phase_stats::tl_note_batch_hit();
-            return Ok(ResolvedPrevout {
-                txout: TxOut {
-                    value: Amount::from_sat(value),
-                    script_pubkey: ScriptBuf::new(),
-                },
-                shared: need_script_buf.then_some(pinned),
-                input_sigops,
-                create_fk: prev_fk,
-            });
-        } else if batch_parents.contains(prev_fk) {
-            acc.cold_vout_miss_n = acc.cold_vout_miss_n.saturating_add(1);
-            #[cfg(test)]
-            confirm_phase_stats::tl_note_cold_why_vout_miss();
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "invariant: pin incomplete outs for spent parent vout",
-            )));
-        }
-    }
-
-    Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-        "invariant: lookup stage miss (assemble parent create_fk)",
-    )))
-}
-
 fn is_anyone_can_spend(script: &Script) -> bool {
     crate::script::is_anyone_can_spend(script)
 }
 
-pub use rbitcoin_query::TxPrecompute;
+mod facts;
+pub use facts::{
+    add_fee, add_sigops, add_value_in, fee_from_values, fee_sat, header_gap_on_chain,
+    median_or_bad_header, reject_assemble_block_shape, reject_batch_starts_at, reject_bits,
+    reject_carried_header_hash, reject_confirm_batch, reject_csv_create_height,
+    reject_duplicate_input, reject_empty_confirm_batch, reject_genesis_coinbase_spend,
+    reject_non_final, reject_prev_link, reject_prevout_spent, reject_same_block_create,
+    reject_sequence_locks, reject_spend_cursor, reject_tx_without_inputs,
+    reject_tx_without_outputs, reject_txid_count, reject_unresolved_spend,
+    reject_unspendable_prevout, reject_vout_past_n_out, reject_witness_before_segwit,
+    require_linked_parent, require_next_work, require_retarget_first, require_same_block_output,
+    unresolved_parent_create,
+};
+
+pub use crate::TxPrecompute;
 
 #[cfg(test)]
-mod overlay_meta_skip_tests {
-    use super::*;
-    use rbitcoin_primitives::Fk;
-
-    fn spends(rows: &[(u32, Fk, Fk, u32)]) -> Vec<([u8; 32], u32, Fk, Fk, u32)> {
-        rows.iter()
-            .map(|&(vout, sfk, cfk, vin)| ([0u8; 32], vout, sfk, cfk, vin))
-            .collect()
-    }
+mod fact_reject_tests {
+    use super::{reject_bip30_unspent_prior, reject_one_create};
+    use crate::ConsensusError;
 
     #[test]
-    fn overlay_meta_skip_omits_matching_abs() {
-        let wave = ClassAWave::new(vec![Fk(10)]);
-        let mut map = FkMap::default();
-        map.insert(Fk(10), (5, false));
-        let run = RunCreateHeight::Map(map);
-        assert_eq!(run.create(Fk(10)), Some((5, false)));
-        let spends = spends(&[(0, Fk(11), Fk(10), 0)]);
-        let mut scratch = StructuralScratch::default();
-        fill_overlay_skip(&spends, &wave, &mut scratch);
-        assert!(overlay_meta_is_skip(10, 0, Fk(11), 0, &scratch.skip));
-        assert!(!overlay_meta_is_skip(10, 0, Fk(11), 1, &scratch.skip));
-        assert!(!overlay_meta_is_skip(10, 1, Fk(11), 0, &scratch.skip));
-        assert!(!overlay_meta_is_skip(99, 0, Fk(11), 0, &scratch.skip));
-    }
+    fn bip30_and_immature_coinbase_reject_from_facts() {
+        assert!(reject_bip30_unspent_prior(2, 2, true).is_ok());
+        let bip30 = reject_bip30_unspent_prior(5, 1, true).unwrap_err();
+        assert!(
+            matches!(bip30, ConsensusError::BadTx(s) if s.contains("BIP30")),
+            "{bip30:?}"
+        );
+        assert!(reject_bip30_unspent_prior(5, 1, false).is_ok());
 
-    #[test]
-    fn overlay_meta_skip_keeps_conflicting_spender_on_disk_list() {
-        let wave = ClassAWave::new(vec![Fk(10)]);
-        let mut map = FkMap::default();
-        map.insert(Fk(10), (5, false));
-        let run = RunCreateHeight::Map(map);
-        assert_eq!(run.create(Fk(10)), Some((5, false)));
-        let spends = spends(&[(0, Fk(11), Fk(10), 0), (0, Fk(12), Fk(10), 0)]);
-        let mut scratch = StructuralScratch::default();
-        fill_overlay_skip(&spends, &wave, &mut scratch);
-        assert!(!overlay_meta_is_skip(10, 0, Fk(11), 0, &scratch.skip));
-        assert!(!overlay_meta_is_skip(10, 0, Fk(12), 0, &scratch.skip));
-    }
-
-    #[test]
-    fn overlay_meta_skip_historical_create_stays_on_disk() {
-        let wave = ClassAWave::default();
-        let spends = spends(&[(0, Fk(11), Fk(10), 0)]);
-        let mut scratch = StructuralScratch::default();
-        fill_overlay_skip(&spends, &wave, &mut scratch);
-        assert!(!overlay_meta_is_skip(10, 0, Fk(11), 0, &scratch.skip));
-    }
-}
-
-#[cfg(test)]
-mod run_create_height_tests {
-    use super::RunCreateHeight;
-    use rbitcoin_primitives::Fk;
-
-    fn fk(id: u64) -> Fk {
-        Fk(id)
-    }
-
-    #[test]
-    fn run_create_height_span_misses_gaps() {
-        let one = [fk(10), fk(11)];
-        let idx = RunCreateHeight::from_blocks([(7u32, one.as_slice())]);
-        assert!(matches!(idx, RunCreateHeight::Spans(_)));
-        assert_eq!(idx.get(fk(10)), Some(7));
-        assert_eq!(idx.get(fk(11)), Some(7));
-        assert_eq!(idx.get(fk(9)), None);
-        assert_eq!(idx.get(fk(12)), None);
-
-        let low = [fk(10), fk(11)];
-        let high = [fk(20), fk(21)];
-        let idx = RunCreateHeight::from_blocks([(1u32, low.as_slice()), (2, high.as_slice())]);
-        assert_eq!(idx.get(fk(15)), None);
-        assert_eq!(idx.get(fk(10)), Some(1));
-        assert_eq!(idx.get(fk(21)), Some(2));
-
-        let gapped = [fk(1), fk(2), fk(4)];
-        let idx = RunCreateHeight::from_blocks([(3u32, gapped.as_slice())]);
-        assert!(matches!(idx, RunCreateHeight::Map(_)));
-        assert_eq!(idx.get(fk(3)), None);
-        assert_eq!(idx.get(fk(1)), Some(3));
-        assert_eq!(idx.get(fk(2)), Some(3));
-        assert_eq!(idx.get(fk(4)), Some(3));
-    }
-
-    #[test]
-    fn run_create_height_marks_each_block_first_fk_coinbase() {
-        let low = [fk(10), fk(11)];
-        let high = [fk(12), fk(13)];
-        let idx = RunCreateHeight::from_blocks([(1u32, low.as_slice()), (2, high.as_slice())]);
-        assert!(matches!(idx, RunCreateHeight::Spans(_)));
-        assert_eq!(idx.create(fk(10)), Some((1, true)));
-        assert_eq!(idx.create(fk(11)), Some((1, false)));
-        assert_eq!(idx.create(fk(12)), Some((2, true)));
-        assert_eq!(idx.create(fk(13)), Some((2, false)));
-
-        let gapped = [fk(20), fk(22)];
-        let idx = RunCreateHeight::from_blocks([(1u32, low.as_slice()), (2, gapped.as_slice())]);
-        assert!(matches!(idx, RunCreateHeight::Map(_)));
-        assert_eq!(idx.create(fk(10)), Some((1, true)));
-        assert_eq!(idx.create(fk(11)), Some((1, false)));
-        assert_eq!(idx.create(fk(20)), Some((2, true)));
-        assert_eq!(idx.create(fk(22)), Some((2, false)));
-        assert_eq!(idx.create(fk(21)), None);
+        let missing = reject_one_create(10, 100, None, false).unwrap_err();
+        assert!(
+            matches!(missing, ConsensusError::BadTx(s) if s.contains("missingorspent")),
+            "{missing:?}"
+        );
+        let forward = reject_one_create(10, 100, Some(11), false).unwrap_err();
+        assert!(
+            matches!(forward, ConsensusError::MissingPrevout),
+            "{forward:?}"
+        );
+        let immature = reject_one_create(10, 100, Some(1), true).unwrap_err();
+        assert!(
+            matches!(immature, ConsensusError::BadTx(s) if s.contains("immature")),
+            "{immature:?}"
+        );
+        assert!(reject_one_create(101, 100, Some(1), true).is_ok());
     }
 }
 
@@ -2760,5 +1368,3 @@ mod block_866342;
 mod finality_tests;
 #[cfg(test)]
 mod sigop_cost_tests;
-#[cfg(test)]
-mod structure_rule_tests;

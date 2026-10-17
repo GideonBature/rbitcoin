@@ -2,8 +2,9 @@
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::Network;
-use rbitcoin_consensus::{taproot_matches_scan, tweaks_for_height, ChainParams};
+use rbitcoin_consensus::{taproot_matches_scan, ChainParams};
 use rbitcoin_primitives::{hex_decode, Height};
+use rbitcoin_query::tweaks_for_height;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
 

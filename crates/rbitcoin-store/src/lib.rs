@@ -83,11 +83,11 @@ pub use index_build_uring::{read_index_window, IndexBlock, IndexHeight, IndexWin
 pub use input::InputEdge;
 pub use int_map::{FkMap, FkSet, U32Map, U64IdentityHasher, U64Map, U64Set};
 pub use integrity::VERIFY_TIP_BLOCKS;
+pub use io_backend::{ReadIoBackend, WriteIoBackend};
+pub use point_table::PointRecord;
 pub use rbitcoin_primitives::{
     merkle_branch, merkle_root_from_branch, merkle_root_from_txids, merkle_root_mutated,
 };
-pub use io_backend::{ReadIoBackend, WriteIoBackend};
-pub use point_table::PointRecord;
 pub use scripthash::{
     script_hash, sh_heads_insert_capped, ColdProgress, ScriptHashRecord, INCLUDE_HWM_NAME,
     SH_HEADS_CAP,

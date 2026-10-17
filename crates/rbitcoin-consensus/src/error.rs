@@ -1,10 +1,11 @@
 use rbitcoin_primitives::ScriptNumError;
-use rbitcoin_store::StoreError;
 use std::fmt;
 
 #[derive(Debug)]
 pub enum ConsensusError {
-    Store(StoreError),
+    /// Programmer invariant inside a rule helper. Not a block reject and not a
+    /// store fault. The confirm pipeline must not cache it as a failed block.
+    Internal(&'static str),
     BadHeader(&'static str),
     BadBlock(&'static str),
     BadTx(&'static str),
@@ -22,7 +23,7 @@ pub enum ConsensusError {
 impl fmt::Display for ConsensusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConsensusError::Store(e) => write!(f, "store: {e}"),
+            ConsensusError::Internal(s) => write!(f, "{s}"),
             ConsensusError::BadHeader(s) => write!(f, "bad header: {s}"),
             ConsensusError::BadBlock(s) => write!(f, "bad block: {s}"),
             ConsensusError::BadTx(s) => write!(f, "bad transaction: {s}"),
@@ -37,39 +38,11 @@ impl fmt::Display for ConsensusError {
     }
 }
 
-impl std::error::Error for ConsensusError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ConsensusError::Store(e) => Some(e),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for ConsensusError {}
 
 impl From<ScriptNumError> for ConsensusError {
     fn from(e: ScriptNumError) -> Self {
         ConsensusError::Script(e.to_string())
-    }
-}
-
-impl From<StoreError> for ConsensusError {
-    fn from(e: StoreError) -> Self {
-        // Peer / untrusted blocks can hit archive stamp when a parent is simply
-        // missing (invalid block). That is consensus MissingPrevout, not store
-        // corruption — see docs/external_findings/002-store-corrupt-record-on-invalid-block.md.
-        match e {
-            StoreError::Cancelled(_) => ConsensusError::Cancelled,
-            StoreError::Corrupt(m) if m.contains("parent create_fk unresolved") => {
-                ConsensusError::MissingPrevout
-            }
-            other => ConsensusError::Store(other),
-        }
-    }
-}
-
-impl ConsensusError {
-    pub fn is_uring_session_fault(&self) -> bool {
-        matches!(self, ConsensusError::Store(se) if se.is_uring_session_fault())
     }
 }
 
@@ -146,35 +119,6 @@ pub fn block_reject_log_line(hash: impl std::fmt::Display, reason: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn uring_session_fault_covers_leftover_and_submit() {
-        for m in [
-            "invariant: io_uring leftover cqe",
-            "io_uring submit failed",
-            "invariant: io_uring undrained",
-        ] {
-            let e = ConsensusError::Store(StoreError::Corrupt(m));
-            assert!(e.is_uring_session_fault(), "{m}");
-        }
-        assert!(!ConsensusError::Store(StoreError::NotFound).is_uring_session_fault());
-        assert!(!ConsensusError::PrevoutSpent.is_uring_session_fault());
-    }
-
-    #[test]
-    fn archive_unresolved_parent_is_missing_prevout_not_corrupt() {
-        let e = ConsensusError::from(StoreError::Corrupt(
-            "archive: parent create_fk unresolved (contiguous batch required)",
-        ));
-        assert!(matches!(e, ConsensusError::MissingPrevout), "got {e:?}");
-        assert!(!e.to_string().contains("corrupt"));
-    }
-
-    #[test]
-    fn from_store_error() {
-        let e: ConsensusError = StoreError::NotFound.into();
-        assert!(matches!(e, ConsensusError::Store(StoreError::NotFound)));
-    }
 
     #[test]
     fn block_reject_reason_bip113_and_bip112_needles() {

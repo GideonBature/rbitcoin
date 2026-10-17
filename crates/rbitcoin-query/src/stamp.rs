@@ -9,8 +9,8 @@
 //! later-wave stamp reads pin loc. IBD (`skeleton = Some`) never loc-by-fk:
 //! spent is pin loc, skeleton TipOnly loc, or unset for write fill.
 
-use crate::id_map::{IdMap, TxidHasher};
 use crate::{CreatePin, InFlight, QueryError, U64Map};
+use crate::{IdMap, TxidHasher};
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::Store;
 use std::collections::HashMap;

@@ -5,11 +5,10 @@ use std::sync::OnceLock;
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, Txid};
-use rbitcoin_consensus::{
-    accept_and_connect_block, pad_empty_from as consensus_pad, ChainParams, Milestone,
-};
+use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
+use rbitcoin_query::{accept_and_connect_block, pad_empty_from as consensus_pad};
 
 use crate::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 
@@ -158,7 +157,7 @@ fn mine_mature_regtest_with_spend(query: &Query, params: &ChainParams) -> Mature
     }
 }
 
-/// Fast empty pad via [`rbitcoin_consensus::pad_empty_from`].
+/// Fast empty pad via [`rbitcoin_query::pad_empty_from`].
 ///
 /// Mines heights `from_h..=last` on top of `tip` / `tip_time`. Prefer this for
 /// coinbase-maturity padding instead of looping `confirm_wire_run`.

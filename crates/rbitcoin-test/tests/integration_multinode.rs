@@ -66,7 +66,7 @@ fn padded_query_pad() -> &'static PaddedQueryPad {
     use std::sync::OnceLock;
     static PAD: OnceLock<PaddedQueryPad> = OnceLock::new();
     PAD.get_or_init(|| {
-        use rbitcoin_consensus::accept_and_connect_block;
+        use rbitcoin_query::accept_and_connect_block;
         use rbitcoin_test::pad_empty_from;
 
         let keep = TempDir::labeled("padded-query").expect("padded query pad");
@@ -877,7 +877,7 @@ fn mine_on(node: &P2PNode, height: u32) -> BlockHash {
 
 #[test]
 fn padded_query_copy_keeps_the_other_tip_and_filter_hwm() {
-    use rbitcoin_consensus::accept_and_connect_block;
+    use rbitcoin_query::accept_and_connect_block;
 
     let a = TempDir::new().unwrap();
     let b = TempDir::new().unwrap();
@@ -1920,7 +1920,7 @@ async fn tip_follow_after_ibd() {
         peer.query
             .set_sptweaks_enabled(true, Height(ChainParams::regtest().taproot_height()))
             .unwrap();
-        rbitcoin_consensus::prepare_live_indexes(&peer.query).unwrap();
+        rbitcoin_query::prepare_live_indexes(&peer.query).unwrap();
         sync_ibd(&peer, seed.local_addr).await;
         peer.wait_height(5, Duration::from_secs(10))
             .await
@@ -1941,7 +1941,7 @@ async fn tip_follow_after_ibd() {
         let spawn_builder = || {
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (q, at) = (Arc::clone(&pq), Arc::clone(&caught_up_at));
-            let h = rbitcoin_consensus::spawn_index_writebehind(
+            let h = rbitcoin_query::spawn_index_writebehind(
                 Arc::clone(&pq),
                 Arc::clone(&stop),
                 || {},
@@ -2103,7 +2103,7 @@ async fn reorg_to_longer_branch() {
         hub.accept_block(b).unwrap();
     }
     assert_eq!(hub.tip_height(), Some(4));
-    rbitcoin_consensus::build_indexes_released(&hub.query).unwrap();
+    rbitcoin_query::build_indexes_released(&hub.query).unwrap();
     assert_eq!(hub.query.basic_filter_hwm().unwrap(), Some(4));
     let old_3 = hub.query.basic_filter_at(3).unwrap().unwrap().0;
 
@@ -2136,7 +2136,7 @@ async fn reorg_to_longer_branch() {
     assert!(matches!(outcome, AcceptOutcome::Accepted { height: 6 }));
     assert_eq!(hub.tip_height(), Some(6));
     assert_eq!(hub.tip_hash().unwrap(), branch.last().unwrap().block_hash());
-    rbitcoin_consensus::build_indexes_released(&hub.query).unwrap();
+    rbitcoin_query::build_indexes_released(&hub.query).unwrap();
     assert_eq!(hub.query.basic_filter_hwm().unwrap(), Some(6));
     for (h, b) in (3..).zip(&branch) {
         assert_eq!(
@@ -2664,8 +2664,9 @@ fn pin_held_sixteen_vs_seventeen(
 /// longer side branch (tip-mode accept path, not IBD body-queue).
 #[test]
 fn reorg_same_height_then_multi_block_branch() {
-    use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+    use rbitcoin_consensus::{ChainParams, Milestone};
     use rbitcoin_net::{AcceptOutcome, ChainHub};
+    use rbitcoin_query::accept_and_connect_block;
     use rbitcoin_test::pad_empty_from;
 
     let dir = TempDir::new().unwrap();

@@ -1,17 +1,10 @@
 //! structure_rule_tests (peeled from block.rs).
 
-use super::{
-    apply_witness_commitment, bip16_active_from_prev_mtp, bip34_height_script, block_has_witness,
-    block_has_witness_from_pres, block_subsidy, check_tx_local, is_p2sh_script, is_p2wpkh_program,
-    is_p2wsh_program, last_script_push, merkle_root_bytes, script_sigop_count,
-    validate_block_structure, validate_block_structure_with_pres, witness_commitment_script,
-    ScriptCheckJob, ScriptVerifyFlags, TxPrecompute, ValidationContext, BIP16_EXCEPTION_MAINNET,
-    MAX_BLOCK_STRIPPED_SIZE, MAX_BLOCK_TX_COUNT, MAX_BLOCK_WEIGHT, MIN_TX_WEIGHT,
-    TAPROOT_EXCEPTION_MAINNET,
+use crate::block_pipeline::{
+    assemble_block_prevouts, resolve_prevout, structural_validate_spends, AsmPrevoutAcc,
+    ClassAWave, RunCreateHeight, StructuralScratch,
 };
-use crate::error::ConsensusError;
-use crate::milestone::Milestone;
-use crate::params::ChainParams;
+use crate::ConfirmError;
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header, Version};
 use bitcoin::consensus::encode::VarInt;
@@ -22,6 +15,16 @@ use bitcoin::{
     Amount, Block, BlockHash, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxMerkleNode,
     TxOut, Witness,
 };
+use rbitcoin_consensus::block::{
+    apply_witness_commitment, bip16_active_from_prev_mtp, bip34_height_script, block_has_witness,
+    block_has_witness_from_pres, block_subsidy, check_tx_local, is_p2sh_script, is_p2wpkh_program,
+    is_p2wsh_program, last_script_push, merkle_root_bytes, script_sigop_count,
+    validate_block_structure, validate_block_structure_with_pres, witness_commitment_script,
+    PendingCreates, ScriptCheckJob, ScriptVerifyFlags, ValidationContext, BIP16_EXCEPTION_MAINNET,
+    MAX_BLOCK_STRIPPED_SIZE, MAX_BLOCK_TX_COUNT, MAX_BLOCK_WEIGHT, MIN_TX_WEIGHT,
+    TAPROOT_EXCEPTION_MAINNET,
+};
+use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone, TxPrecompute};
 use rbitcoin_primitives::Height;
 
 fn params() -> ChainParams {
@@ -37,11 +40,11 @@ fn ctx_h(height: u32) -> ValidationContext<'static> {
 #[test]
 fn check_block_wire_junk_does_not_panic() {
     for data in [b"".as_slice(), &[0u8; 1], &[0xff; 80], b"not-a-block"] {
-        let _ = super::check_block_wire(data);
+        let _ = rbitcoin_consensus::block::check_block_wire(data);
     }
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let raw = bitcoin::consensus::encode::serialize(&genesis);
-    let _ = super::check_block_wire(&raw);
+    let _ = rbitcoin_consensus::block::check_block_wire(&raw);
 }
 
 fn coinbase(height: u32) -> Transaction {
@@ -112,12 +115,15 @@ fn block_with(txs: Vec<Transaction>) -> Block {
 /// `stamp_sub struct=` split: hash-encode vs extra walks (no algorithm change).
 #[test]
 fn structure_meters_split_txid_wtxid_walk() {
-    let stats = rbitcoin_query::ConfirmStats::default();
+    let stats = crate::ConfirmStats::default();
     let mut spend = non_coinbase_spend(1);
     spend.input[0].witness = Witness::from_slice(&[&[0x01]]);
     let mut b = block_with(vec![coinbase(1), spend]);
     apply_witness_commitment(&mut b);
-    validate_block_structure_with_pres(&b, &ctx_h(1), None, Some(&stats))
+    let mut note = |txid_ns, wtxid_ns, walk_ns| {
+        stats.note_struct_parts(txid_ns, wtxid_ns, walk_ns);
+    };
+    validate_block_structure_with_pres(&b, &ctx_h(1), None, Some(&mut note))
         .expect("witness block structure");
     let s = stats.take_window();
     assert!(
@@ -132,8 +138,8 @@ fn structure_meters_split_txid_wtxid_walk() {
 
 #[test]
 fn structure_with_pres_skips_from_tx() {
-    use rbitcoin_query::TxPrecompute;
-    let stats = rbitcoin_query::ConfirmStats::default();
+    use TxPrecompute;
+    let stats = crate::ConfirmStats::default();
     let mut spend = non_coinbase_spend(1);
     spend.input[0].witness = Witness::from_slice(&[&[0x01]]);
     let mut b = block_with(vec![coinbase(1), spend]);
@@ -144,11 +150,14 @@ fn structure_with_pres_skips_from_tx() {
         .map(TxPrecompute::from_tx)
         .collect::<Vec<_>>()
         .into();
+    let mut note = |txid_ns, wtxid_ns, walk_ns| {
+        stats.note_struct_parts(txid_ns, wtxid_ns, walk_ns);
+    };
     let out = validate_block_structure_with_pres(
         &b,
         &ctx_h(1),
         Some(std::sync::Arc::clone(&pres)),
-        Some(&stats),
+        Some(&mut note),
     )
     .expect("stashed pres must still enforce merkle");
     assert_eq!(out.len(), pres.len());
@@ -168,7 +177,7 @@ fn structure_with_pres_skips_from_tx() {
 /// Confirm assemble must Arc-share lookup/structure pres, not `Arc::new(p.clone())`.
 #[test]
 fn script_jobs_from_same_pres_slice_share_pre() {
-    use rbitcoin_query::TxPrecompute;
+    use TxPrecompute;
     let spend = non_coinbase_spend(1);
     let pres: std::sync::Arc<[TxPrecompute]> =
         std::sync::Arc::from([TxPrecompute::from_tx(&spend)]);
@@ -176,14 +185,14 @@ fn script_jobs_from_same_pres_slice_share_pre() {
         pres[0].txid,
         vec![],
         spend.clone(),
-        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        ScriptVerifyFlags::buried(true, true, true, true, true),
     )
     .with_pre_slice(std::sync::Arc::clone(&pres), 0);
     let job_b = ScriptCheckJob::with_txid(
         pres[0].txid,
         vec![],
         spend,
-        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        ScriptVerifyFlags::buried(true, true, true, true, true),
     )
     .with_pre_slice(std::sync::Arc::clone(&pres), 0);
     assert!(
@@ -194,6 +203,13 @@ fn script_jobs_from_same_pres_slice_share_pre() {
         std::ptr::eq(job_a.pre(), job_b.pre()),
         "two jobs from the same Arc<[TxPrecompute]> share the element"
     );
+}
+
+fn rule_err(err: ConfirmError) -> ConsensusError {
+    match err {
+        ConfirmError::Rules(e) => e,
+        other => panic!("expected a consensus rule reject, got {other}"),
+    }
 }
 
 fn assert_bad_block(err: ConsensusError, needle: &str) {
@@ -345,10 +361,9 @@ fn padded_spend(data_len: usize) -> Transaction {
 /// An unspent connected coinbase with the same txid is BIP30 on regtest (no
 /// 91842/91880 grandfather). Signet activates BIP34 at height 1, and Core's
 /// empty BIP34 hash still enforces BIP30 on every signet block.
-fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
-    use crate::block::{structural_validate_spends, RunCreateHeight};
+fn rejects_unspent_overwrite(q: &crate::Query, first: &Transaction) {
+    use crate::{BatchParents, OutPointSet, U32Map};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, U32Map};
     let dup = block_with(vec![first.clone()]);
     let signet = Box::leak(Box::new(ChainParams::signet()));
     for (ctx, net) in [
@@ -374,8 +389,8 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
             &parents,
             &mut U32Map::default(),
             &heights,
-            &crate::block::ClassAWave::default(),
-            &mut crate::block::StructuralScratch::default(),
+            &ClassAWave::default(),
+            &mut StructuralScratch::default(),
             &abs_jobs,
         )
         .expect_err("an unspent overwrite must trip BIP30");
@@ -389,11 +404,7 @@ fn rejects_unspent_overwrite(q: &rbitcoin_query::Query, first: &Transaction) {
 
 fn plant_unspent_coinbase(
     label: &str,
-) -> (
-    rbitcoin_store::testutil::TempDir,
-    rbitcoin_query::Query,
-    Transaction,
-) {
+) -> (rbitcoin_store::testutil::TempDir, crate::Query, Transaction) {
     let (path, q, first, _fk) = plant_coinbase_with_outputs(label, coinbase(1).output);
     (path, q, first)
 }
@@ -404,13 +415,13 @@ fn plant_coinbase_with_outputs(
     outputs: Vec<TxOut>,
 ) -> (
     rbitcoin_store::testutil::TempDir,
-    rbitcoin_query::Query,
+    crate::Query,
     Transaction,
     rbitcoin_primitives::Fk,
 ) {
     use rbitcoin_primitives::Fk;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled(label);
+    let (path, q) = crate::testutil::tiny_query_labeled(label);
     q.enter_direct_index_mode().unwrap();
     let mut first = coinbase(1);
     first.output = outputs;
@@ -450,7 +461,7 @@ fn plant_coinbase_with_outputs(
     (path, q, first, fk)
 }
 
-fn plant_bip34_ancestor(q: &rbitcoin_query::Query, hash: [u8; 32]) {
+fn plant_bip34_ancestor(q: &crate::Query, hash: [u8; 32]) {
     use rbitcoin_store::HeaderRecord;
     let main = ChainParams::mainnet();
     let hfk = q
@@ -467,12 +478,11 @@ fn plant_bip34_ancestor(q: &rbitcoin_query::Query, hash: [u8; 32]) {
 }
 
 fn bip30_message_at_mainnet_above_bip34(
-    q: &rbitcoin_query::Query,
+    q: &crate::Query,
     block: &Block,
-) -> Result<(), ConsensusError> {
-    use crate::block::{structural_validate_spends, RunCreateHeight};
+) -> Result<(), ConfirmError> {
+    use crate::{BatchParents, OutPointSet, U32Map};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, U32Map};
     let main = Box::leak(Box::new(ChainParams::mainnet()));
     let ctx = ValidationContext::at(main, Height(main.btc.bip34_height + 1), Milestone::NONE);
     let heights = RunCreateHeight::Spans(Vec::new());
@@ -491,8 +501,8 @@ fn bip30_message_at_mainnet_above_bip34(
         &parents,
         &mut U32Map::default(),
         &heights,
-        &crate::block::ClassAWave::default(),
-        &mut crate::block::StructuralScratch::default(),
+        &ClassAWave::default(),
+        &mut StructuralScratch::default(),
         &abs_jobs,
     )
     .map(|_| ())
@@ -500,7 +510,7 @@ fn bip30_message_at_mainnet_above_bip34(
 
 /// Mainnet skips BIP30 only when the header at BIP34 height is the real hash.
 /// A wrong ancestor still rejects an unspent overwrite.
-fn mainnet_ancestor_skip_then_miss(q: &rbitcoin_query::Query, first: &Transaction) {
+fn mainnet_ancestor_skip_then_miss(q: &crate::Query, first: &Transaction) {
     let main = ChainParams::mainnet();
     let real = main.bip34_hash.expect("mainnet BIP34 hash").to_byte_array();
     plant_bip34_ancestor(q, real);
@@ -682,7 +692,10 @@ fn no_coinbase_with_a_64_byte_tx_is_mutated() {
             ),
             "{err:?}"
         );
-        assert_eq!(crate::error::block_reject_reason(&err), "bad-cb-missing");
+        assert_eq!(
+            rbitcoin_consensus::block_reject_reason(&err),
+            "bad-cb-missing"
+        );
     }
     let err = validate_block_structure(&block_with(vec![a, b]), &ctx_h(1)).unwrap_err();
     assert!(
@@ -909,7 +922,7 @@ fn rejects_coinbase_excess_value_fast() {
     let mut cb = coinbase(1);
     cb.output[0].value = Amount::from_sat(50_0000_0000 + 1);
     let block = block_with(vec![cb]);
-    let err = super::check_coinbase_subsidy(&block, &ctx_h(1), 0).unwrap_err();
+    let err = rbitcoin_consensus::block::check_coinbase_subsidy(&block, &ctx_h(1), 0).unwrap_err();
     assert_bad_block(err, "coinbase excess value");
 }
 
@@ -986,25 +999,25 @@ fn last_script_push_rejects_a_non_push_and_a_short_pushdata() {
 
 #[test]
 fn p3_default_milestone_heights() {
-    use crate::params::default_milestone_height;
+    use rbitcoin_consensus::default_milestone_height;
     use rbitcoin_primitives::Network;
     assert_eq!(default_milestone_height(Network::Regtest), 0);
     assert_eq!(default_milestone_height(Network::Mainnet), 840_000);
     assert_eq!(default_milestone_height(Network::Testnet), 2_500_000);
     assert_eq!(default_milestone_height(Network::Signet), 0);
-    let anchor = crate::default_milestone_anchor(Network::Mainnet).unwrap();
+    let anchor = rbitcoin_consensus::default_milestone_anchor(Network::Mainnet).unwrap();
     assert_eq!(
         anchor.hash.to_string(),
-        crate::params::MAINNET_MILESTONE_HASH
+        rbitcoin_consensus::MAINNET_MILESTONE_HASH
     );
     assert_ne!(anchor.min_work_be, [0u8; 32]);
-    let testnet = crate::default_milestone_anchor(Network::Testnet).unwrap();
+    let testnet = rbitcoin_consensus::default_milestone_anchor(Network::Testnet).unwrap();
     assert_eq!(
         testnet.hash.to_string(),
-        crate::params::TESTNET_MILESTONE_HASH
+        rbitcoin_consensus::TESTNET_MILESTONE_HASH
     );
-    assert!(crate::default_milestone_anchor(Network::Signet).is_none());
-    assert!(crate::default_milestone_anchor(Network::Regtest).is_none());
+    assert!(rbitcoin_consensus::default_milestone_anchor(Network::Signet).is_none());
+    assert!(rbitcoin_consensus::default_milestone_anchor(Network::Regtest).is_none());
 }
 
 #[test]
@@ -1208,14 +1221,14 @@ fn bip34_wrong_push_encoding_rejected_after_activation() {
 
 #[test]
 fn assemble_rejects_empty_and_fk_mismatch() {
-    use super::assemble_block_prevouts;
-    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
+    use crate::{BatchParents, OutPointSet, SpendEdges};
+    use assemble_block_prevouts;
     let ctx = ctx_h(1);
     let empty = block_with(vec![]);
     let parents = BatchParents::new();
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
-    let mut creates = super::PendingCreates::default();
+    let mut creates = PendingCreates::default();
     let zero = [0u8; 32];
     let err = assemble_block_prevouts(
         &empty,
@@ -1235,7 +1248,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
     )
     .err()
     .expect("empty");
-    assert_bad_block(err, "empty");
+    assert_bad_block(rule_err(err), "empty");
     // Wrong archived fk count: coinbase alone needs 1 fk; pass empty slice.
     let b = block_with(vec![coinbase(1)]);
     spent.clear();
@@ -1264,7 +1277,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
     )
     .err()
     .expect("fk mismatch");
-    assert_bad_block(err2, "archived tx fk");
+    assert_bad_block(rule_err(err2), "archived tx fk");
     // first tx not coinbase
     let bad = block_with(vec![non_coinbase_spend(1)]);
     spent.clear();
@@ -1293,21 +1306,21 @@ fn assemble_rejects_empty_and_fk_mismatch() {
     )
     .err()
     .expect("not coinbase");
-    assert_bad_block(err3, "coinbase");
+    assert_bad_block(rule_err(err3), "coinbase");
 }
 
 /// Pack creates are `txid → fk` (one insert). Meters flush once (in_n = spends).
 #[test]
 fn assemble_pending_creates_is_txid_map_and_meters_flush() {
-    use super::assemble_block_prevouts;
+    use crate::{BatchParents, OutPointSet, SpendEdges};
+    use assemble_block_prevouts;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-creates");
+    let (path, q) = crate::testutil::tiny_query_labeled("assemble-creates");
     let ctx = ctx_h(1);
     let parents = BatchParents::new();
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
-    let mut creates = super::PendingCreates::default();
+    let mut creates = PendingCreates::default();
     let b = block_with(vec![coinbase(1)]);
     let tids: Vec<[u8; 32]> = b
         .txdata
@@ -1347,9 +1360,9 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
 /// Confirm jobs keep prevout scripts in the wire block or the pin Arc.
 #[test]
 fn script_job_shares_prevout_script() {
-    use super::assemble_block_prevouts;
+    use crate::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
+    use assemble_block_prevouts;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
     use rbitcoin_store::{OutputRecord, TxRecord};
 
     let ctx = ctx_h(1);
@@ -1434,7 +1447,7 @@ fn script_job_shares_prevout_script() {
         }],
     );
     let mut spent = OutPointSet::default();
-    let mut creates = super::PendingCreates::default();
+    let mut creates = PendingCreates::default();
     let (jobs, _, _, _, _) = assemble_block_prevouts(
         &wire,
         &ctx,
@@ -1472,11 +1485,12 @@ fn script_job_shares_prevout_script() {
 /// Optimistic IBD: unstamped parent must not recover via `tx_fk_by_txid_tip`.
 #[test]
 fn optimistic_assemble_unstamped_parent_is_invariant() {
-    use super::assemble_block_prevouts;
-    use crate::{accept_and_connect_block, mine_empty_regtest};
+    use crate::accept_and_connect_block;
+    use crate::{BatchParents, OutPointSet, SpendEdges};
+    use assemble_block_prevouts;
+    use rbitcoin_consensus::mine_empty_regtest;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-unstamped");
+    let (path, q) = crate::testutil::tiny_query_labeled("assemble-unstamped");
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1517,7 +1531,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
     let parents = BatchParents::new();
     let thin = SpendEdges::default();
     let mut spent = OutPointSet::default();
-    let mut creates = super::PendingCreates::default();
+    let mut creates = PendingCreates::default();
     let create_txids: Vec<[u8; 32]> = block
         .txdata
         .iter()
@@ -1556,10 +1570,9 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
 /// coinbase still immature 4 deep.
 #[test]
 fn accept_rejects_connect_spend_rules() {
-    use crate::{
-        accept_and_connect_block, mine_empty_regtest, pad_empty_from, prepare_regtest_candidate,
-    };
-    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("connect-spend-rules");
+    use crate::{accept_and_connect_block, pad_empty_from};
+    use rbitcoin_consensus::{mine_empty_regtest, prepare_regtest_candidate};
+    let (_dir, q) = crate::testutil::tiny_query_labeled("connect-spend-rules");
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1597,7 +1610,7 @@ fn accept_rejects_connect_spend_rules() {
     let err = accept_and_connect_block(&q, &params, Height(1), &same_cb, Milestone::NONE)
         .expect_err("same-block coinbase spend must be immature");
     match err {
-        ConsensusError::BadTx("coinbase immature") => {}
+        ConfirmError::Rules(ConsensusError::BadTx("coinbase immature")) => {}
         other => panic!("expected coinbase immature, got {other}"),
     }
 
@@ -1615,7 +1628,7 @@ fn accept_rejects_connect_spend_rules() {
     let err = accept_and_connect_block(&q, &params, Height(2), &dup, Milestone::NONE)
         .expect_err("same-block double spend");
     assert!(
-        matches!(err, ConsensusError::BadTx(s) if s.contains("double spend")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("double spend")),
         "same-block double spend: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(1)));
@@ -1635,7 +1648,7 @@ fn accept_rejects_connect_spend_rules() {
     let err = accept_and_connect_block(&q, &params, Height(2), &bad_order, Milestone::NONE)
         .expect_err("child-before-parent");
     assert!(
-        matches!(err, ConsensusError::MissingPrevout),
+        matches!(err, ConfirmError::Rules(ConsensusError::MissingPrevout)),
         "child-before-parent: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(1)));
@@ -1646,7 +1659,7 @@ fn accept_rejects_connect_spend_rules() {
     let err = accept_and_connect_block(&q, &params, Height(2), &over, Milestone::NONE)
         .expect_err("in < out");
     assert!(
-        matches!(err, ConsensusError::BadTx(s) if s.contains("in < out")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("in < out")),
         "in < out: {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(1)));
@@ -1659,7 +1672,7 @@ fn accept_rejects_connect_spend_rules() {
     let err = accept_and_connect_block(&q, &params, Height(5), &b5, Milestone::NONE)
         .expect_err("height-1 coinbase still immature 4 deep");
     assert!(
-        matches!(err, ConsensusError::BadTx(s) if s.contains("immature")),
+        matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
         "4-deep immature: {err:?}"
     );
 }
@@ -1668,10 +1681,9 @@ fn accept_rejects_connect_spend_rules() {
 /// missing prevout at any depth, with or without script checks.
 #[test]
 fn genesis_coinbase_is_never_a_coin() {
-    use crate::{
-        accept_and_connect_block, mine_empty_regtest, pad_empty_from, prepare_regtest_candidate,
-    };
-    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("genesis-cb-spend");
+    use crate::{accept_and_connect_block, pad_empty_from};
+    use rbitcoin_consensus::{mine_empty_regtest, prepare_regtest_candidate};
+    let (_dir, q) = crate::testutil::tiny_query_labeled("genesis-cb-spend");
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1703,7 +1715,7 @@ fn genesis_coinbase_is_never_a_coin() {
     let err = accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE)
         .expect_err("genesis coinbase spend at height 1");
     assert!(
-        matches!(err, ConsensusError::MissingPrevout),
+        matches!(err, ConfirmError::Rules(ConsensusError::MissingPrevout)),
         "height 1: {err:?}"
     );
 
@@ -1723,7 +1735,7 @@ fn genesis_coinbase_is_never_a_coin() {
         let err = accept_and_connect_block(&q, &params, Height(h), &block, ms)
             .expect_err("mature genesis coinbase spend");
         assert!(
-            matches!(err, ConsensusError::MissingPrevout),
+            matches!(err, ConfirmError::Rules(ConsensusError::MissingPrevout)),
             "{ms:?}: {err:?}"
         );
         assert_eq!(q.tip_height(), Some(Height(maturity)));
@@ -1845,10 +1857,9 @@ fn anchored_milestone_skips_a_failing_p2pkh_script() {
 /// connects, and the archive keeps the script bytes.
 #[test]
 fn spending_an_unspendable_output_is_missing_prevout() {
-    use crate::{
-        accept_and_connect_block, mine_empty_regtest, pad_empty_from, prepare_regtest_candidate,
-    };
-    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("unspendable-not-a-coin");
+    use crate::{accept_and_connect_block, pad_empty_from};
+    use rbitcoin_consensus::{mine_empty_regtest, prepare_regtest_candidate};
+    let (_dir, q) = crate::testutil::tiny_query_labeled("unspendable-not-a-coin");
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1929,7 +1940,7 @@ fn spending_an_unspendable_output_is_missing_prevout() {
     );
     assert_eq!(q.tip_height(), Some(Height(maturity)));
 
-    let reject = |q: &rbitcoin_query::Query,
+    let reject = |q: &crate::Query,
                   tip: BlockHash,
                   time: u32,
                   height: u32,
@@ -1941,12 +1952,12 @@ fn spending_an_unspendable_output_is_missing_prevout() {
         let err = accept_and_connect_block(q, &params, Height(height), &block, ms)
             .expect_err("unspendable output is not a coin");
         assert!(
-            matches!(err, ConsensusError::MissingPrevout),
+            matches!(err, ConfirmError::Rules(ConsensusError::MissingPrevout)),
             "{ms:?} h={height}: {err:?}"
         );
         assert_eq!(q.tip_height(), Some(Height(height - 1)));
     };
-    let connect = |q: &rbitcoin_query::Query,
+    let connect = |q: &crate::Query,
                    tip: BlockHash,
                    time: u32,
                    height: u32,
@@ -2015,10 +2026,10 @@ fn spending_an_unspendable_output_is_missing_prevout() {
 
 #[test]
 fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
-    use super::assemble_block_prevouts;
+    use crate::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
+    use assemble_block_prevouts;
     use bitcoin::hashes::{sha256, Hash};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
     use rbitcoin_store::{OutputRecord, TxRecord};
     let ws = vec![0xacu8; 80_001];
     let h = sha256::Hash::hash(&ws);
@@ -2079,7 +2090,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
         }],
     );
     let mut spent = OutPointSet::default();
-    let mut creates = super::PendingCreates::default();
+    let mut creates = PendingCreates::default();
     let tids: Vec<[u8; 32]> = b
         .txdata
         .iter()
@@ -2104,17 +2115,17 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     )
     .err()
     .expect("over-budget pin P2WSH must reject");
-    assert_bad_block(err, "bad-blk-sigops");
+    assert_bad_block(rule_err(err), "bad-blk-sigops");
 }
 
 /// Anchored skip uses the header path. A height match with a different hash
 /// still builds script jobs.
-fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
-    use super::assemble_block_prevouts;
-    use crate::milestone::MilestoneAnchor;
+fn signet_low_work_fork_runs_scripts(q: &crate::Query) {
+    use crate::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
+    use assemble_block_prevouts;
     use bitcoin::hashes::Hash;
+    use rbitcoin_consensus::MilestoneAnchor;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
     use rbitcoin_store::{OutputRecord, TxRecord};
     let mut parent_txid = [0u8; 32];
     parent_txid[0] = 0x42;
@@ -2185,9 +2196,9 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
         .map(|t| t.compute_txid().to_byte_array())
         .collect();
     let bh = b.header.block_hash().to_byte_array();
-    let run = |q: &rbitcoin_query::Query| {
+    let run = |q: &crate::Query| {
         let mut spent = OutPointSet::default();
-        let mut creates = super::PendingCreates::default();
+        let mut creates = PendingCreates::default();
         assemble_block_prevouts(
             &b,
             &ctx,
@@ -2202,13 +2213,13 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
             true,
             None,
             None,
-            crate::milestone::check_scripts(ms, q, 1, &bh),
+            crate::milestone_gate::check_scripts(ms, q, 1, &bh),
         )
         .expect("op_true spend assembles")
         .0
     };
     assert_eq!(run(q).len(), 1, "missing anchor path still checks scripts");
-    assert!(crate::milestone::check_scripts(ms, q, 1, &bh));
+    assert!(crate::milestone_gate::check_scripts(ms, q, 1, &bh));
     let mut base = [0u8; 32];
     base[1] = 2;
     let mut one = [0u8; 32];
@@ -2231,14 +2242,14 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
         run(q).is_empty(),
         "header path through the anchor skips scripts"
     );
-    assert!(!crate::milestone::check_scripts(ms, q, 1, &bh));
+    assert!(!crate::milestone_gate::check_scripts(ms, q, 1, &bh));
     q.clear_milestone_path_above(0);
     assert_eq!(run(q).len(), 1, "cleared path checks scripts again");
 }
 
 /// Confirms a height-1 tx that spends `create_fk:0`.
 fn plant_confirmed_spend(
-    q: &rbitcoin_query::Query,
+    q: &crate::Query,
     create_txid: [u8; 32],
     create_fk: rbitcoin_primitives::Fk,
 ) {
@@ -2282,7 +2293,7 @@ fn plant_confirmed_spend(
 
 #[test]
 fn bip30_and_immature_coinbase_reject_from_facts() {
-    use super::{reject_bip30_unspent_prior, reject_one_create};
+    use rbitcoin_consensus::block::{reject_bip30_unspent_prior, reject_one_create};
     assert!(reject_bip30_unspent_prior(2, 2, true).is_ok());
     let bip30 = reject_bip30_unspent_prior(5, 1, true).unwrap_err();
     assert!(
@@ -2314,8 +2325,7 @@ fn bip30_and_immature_coinbase_reject_from_facts() {
 /// overwrite. A spendable unspent output still does.
 #[test]
 fn bip30_ignores_unspendable_outputs() {
-    use crate::block::{structural_validate_spends, RunCreateHeight};
-    use rbitcoin_query::{BatchParents, OutPointSet, U32Map};
+    use crate::{BatchParents, OutPointSet, U32Map};
     let outputs = vec![
         TxOut {
             value: Amount::from_sat(50_0000_0000),
@@ -2332,7 +2342,7 @@ fn bip30_ignores_unspendable_outputs() {
     ];
     let (path, q, first, fk) = plant_coinbase_with_outputs("bip30-unspendable", outputs);
     let dup = block_with(vec![first.clone()]);
-    let check = |q: &rbitcoin_query::Query| {
+    let check = |q: &crate::Query| {
         let mut mtp_cache = U32Map::default();
         mtp_cache.insert(9, 0);
         let parents = BatchParents::new();
@@ -2355,8 +2365,8 @@ fn bip30_ignores_unspendable_outputs() {
             &parents,
             &mut mtp_cache,
             &RunCreateHeight::Spans(Vec::new()),
-            &crate::block::ClassAWave::default(),
-            &mut crate::block::StructuralScratch::default(),
+            &ClassAWave::default(),
+            &mut StructuralScratch::default(),
             &abs_jobs,
         )
         .err()
@@ -2381,9 +2391,9 @@ fn bip30_ignores_unspendable_outputs() {
 /// with and without a script job.
 #[test]
 fn resolve_prevout_rejects_an_unspendable_script() {
-    use super::resolve_prevout;
+    use crate::block_pipeline::resolve_prevout;
+    use crate::BatchParents;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::BatchParents;
     use rbitcoin_store::{OutputRecord, TxRecord};
     let txid = [0x42u8; 32];
     let fk = Fk(7);
@@ -2407,7 +2417,7 @@ fn resolve_prevout_rejects_an_unspendable_script() {
         witness: Witness::new(),
     };
     let block = block_with(vec![coinbase(1)]);
-    let txid_index = super::TxidMap::<usize>::default();
+    let txid_index = rbitcoin_consensus::block::TxidMap::<usize>::default();
     let try_spend = |script: Vec<u8>, need_script_buf: bool| {
         let mut parents = BatchParents::new();
         parents.put_resolved(
@@ -2429,23 +2439,29 @@ fn resolve_prevout_rejects_an_unspendable_script() {
             true,
             need_script_buf,
             None,
-            &mut super::AsmPrevoutAcc::default(),
+            &mut AsmPrevoutAcc::default(),
         )
     };
-    let show = |r: &Result<_, ConsensusError>| match r {
+    let show = |r: &Result<_, ConfirmError>| match r {
         Ok(_) => "resolved as a coin".to_string(),
         Err(e) => format!("{e:?}"),
     };
     for need_script_buf in [false, true] {
         let oversized = try_spend(vec![0x51; 10_001], need_script_buf);
         assert!(
-            matches!(oversized, Err(ConsensusError::MissingPrevout)),
+            matches!(
+                oversized,
+                Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+            ),
             "need_script_buf={need_script_buf} oversized: {}",
             show(&oversized)
         );
         let op_return = try_spend(vec![0x6a, 0x01, 0x42], need_script_buf);
         assert!(
-            matches!(op_return, Err(ConsensusError::MissingPrevout)),
+            matches!(
+                op_return,
+                Err(ConfirmError::Rules(ConsensusError::MissingPrevout))
+            ),
             "need_script_buf={need_script_buf} OP_RETURN: {}",
             show(&op_return)
         );
@@ -2474,13 +2490,13 @@ fn buried_rules_and_a_lying_header_path() {
 /// N1: Optimistic miss is lookup invariant; pin hit / identity / vout still classified.
 #[test]
 fn n1_assemble_cold_why_reasons() {
-    use super::resolve_prevout;
     use crate::accept_and_connect_block;
-    use crate::confirm_phase_stats;
+    use crate::block_pipeline::resolve_prevout;
+    use crate::block_pipeline::test_phase as confirm_phase_stats;
+    use crate::BatchParents;
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::BatchParents;
     use rbitcoin_store::OutputRecord;
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("n1-cold-why");
+    let (path, q) = crate::testutil::tiny_query_labeled("n1-cold-why");
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -2531,13 +2547,13 @@ fn n1_assemble_cold_why_reasons() {
         witness: Witness::new(),
     };
     let empty_block = block_with(vec![coinbase(4)]);
-    let txid_index = super::TxidMap::<usize>::default();
+    let txid_index = rbitcoin_consensus::block::TxidMap::<usize>::default();
 
     // Thread-local N1 counters (process-global atomics race under parallel cargo test).
     let _ = confirm_phase_stats::sample_tl_assemble_cold_why_and_reset();
     let _ = confirm_phase_stats::sample_tl_batch_cold_n_and_reset();
 
-    fn assert_lookup_miss(err: ConsensusError) {
+    fn assert_lookup_miss(err: ConfirmError) {
         let msg = format!("{err}");
         assert!(
             msg.contains("invariant") && msg.contains("lookup stage miss"),
@@ -2560,7 +2576,7 @@ fn n1_assemble_cold_why_reasons() {
             false,
             true,
             None,
-            &mut super::AsmPrevoutAcc::default(),
+            &mut AsmPrevoutAcc::default(),
         )
         .err()
         .expect("null_fk optimistic");
@@ -2582,7 +2598,7 @@ fn n1_assemble_cold_why_reasons() {
             false,
             true,
             None,
-            &mut super::AsmPrevoutAcc::default(),
+            &mut AsmPrevoutAcc::default(),
         )
         .err()
         .expect("not_pin optimistic");
@@ -2614,7 +2630,7 @@ fn n1_assemble_cold_why_reasons() {
             false,
             true,
             None,
-            &mut super::AsmPrevoutAcc::default(),
+            &mut AsmPrevoutAcc::default(),
         )
         .expect("batch hit");
         let why = confirm_phase_stats::sample_tl_assemble_cold_why_and_reset();
@@ -2643,7 +2659,7 @@ fn n1_assemble_cold_why_reasons() {
             false,
             true,
             None,
-            &mut super::AsmPrevoutAcc::default(),
+            &mut AsmPrevoutAcc::default(),
         ) {
             Ok(_) => panic!("mismatch must hard-fail"),
             Err(e) => e,
@@ -2680,7 +2696,7 @@ fn n1_assemble_cold_why_reasons() {
             false,
             true,
             None,
-            &mut super::AsmPrevoutAcc::default(),
+            &mut AsmPrevoutAcc::default(),
         ) {
             Ok(_) => panic!("vout_miss must hard-fail"),
             Err(e) => e,
@@ -2716,7 +2732,7 @@ fn already_archived_schema13_pin_identity_tip_follow() {
     };
 
     use std::sync::Arc;
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("plan-none-pin-id");
+    let (path, q) = crate::testutil::tiny_query_labeled("plan-none-pin-id");
     q.set_spend_index(true);
     let params = ChainParams::regtest();
     let ms = Milestone::NONE;
@@ -2887,7 +2903,7 @@ fn already_archived_schema13_pin_identity_tip_follow() {
     let err = accept_and_connect_block(&q, &params, Height(h_n2 + 1), &b_ds, ms)
         .expect_err("double-spend of C1 must fail");
     assert!(
-        matches!(err, ConsensusError::PrevoutSpent)
+        matches!(err, ConfirmError::Rules(ConsensusError::PrevoutSpent))
             || format!("{err}").contains("spent")
             || format!("{err}").contains("prevout"),
         "got {err}"
@@ -3120,12 +3136,12 @@ fn script_job_shared_tx_is_wire_pointer() {
     let tid = block.txdata[1].compute_txid().to_byte_array();
     let job = ScriptCheckJob::from_parts(
         tid,
-        super::JobPrevouts::owned(vec![TxOut {
+        rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
             value: Amount::from_sat(50_0000_0000),
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }]),
-        super::JobTx::shared(Arc::clone(&block), 1),
-        crate::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        rbitcoin_consensus::block::JobTx::shared(Arc::clone(&block), 1),
+        ScriptVerifyFlags::buried(true, true, true, true, true),
     );
     assert!(std::ptr::eq(
         &*job.tx as *const Transaction,
@@ -3258,7 +3274,7 @@ fn pres_has_witness_matches_block_walk() {
 
 #[test]
 fn exceeds_sigops_limit_matches_the_block_cap() {
-    use super::exceeds_sigops_limit;
+    use rbitcoin_consensus::block::exceeds_sigops_limit;
     assert!(!exceeds_sigops_limit(0));
     assert!(!exceeds_sigops_limit(79_999));
     assert!(!exceeds_sigops_limit(80_000));
@@ -3268,7 +3284,7 @@ fn exceeds_sigops_limit_matches_the_block_cap() {
 
 #[test]
 fn should_use_pres_requires_an_index_inside_the_slice() {
-    use super::should_use_pres;
+    use rbitcoin_consensus::block::should_use_pres;
     assert!(should_use_pres(0, 1));
     assert!(!should_use_pres(1, 1));
     assert!(!should_use_pres(0, 0));
@@ -3278,7 +3294,7 @@ fn should_use_pres_requires_an_index_inside_the_slice() {
 
 #[test]
 fn lock_time_cutoff_uses_block_time_at_height_zero_even_when_csv_is_active() {
-    use super::assemble_lock_time_cutoff;
+    use crate::block_pipeline::assemble_lock_time_cutoff;
     let mut block = block_with(vec![coinbase(0)]);
     block.header.time = 100;
     let mtp = 200;
@@ -3305,7 +3321,7 @@ fn lock_time_cutoff_uses_block_time_at_height_zero_even_when_csv_is_active() {
 
 #[test]
 fn max_money_fits_in_i64_so_the_assemble_cast_is_in_range() {
-    use super::{exceeds_max_money, money_range_out_sum};
+    use rbitcoin_consensus::block::{exceeds_max_money, money_range_out_sum};
     let max_money = Amount::MAX_MONEY.to_sat();
     assert!(!exceeds_max_money(0));
     assert!(!exceeds_max_money(max_money));
@@ -3334,14 +3350,17 @@ fn assemble_without_pres_sums_zero_and_rejects_over_max() {
             }],
         }
     }
-    assert_eq!(super::assemble_tx_value_out(&one(0), 0, None).unwrap(), 0);
+    assert_eq!(
+        rbitcoin_consensus::block::assemble_tx_value_out(&one(0), 0, None).unwrap(),
+        0
+    );
     let max_money = Amount::MAX_MONEY.to_sat();
     assert_eq!(
-        super::assemble_tx_value_out(&one(max_money), 0, None).unwrap(),
+        rbitcoin_consensus::block::assemble_tx_value_out(&one(max_money), 0, None).unwrap(),
         max_money as i64
     );
     assert!(matches!(
-        super::assemble_tx_value_out(&one(max_money + 1), 0, None),
+        rbitcoin_consensus::block::assemble_tx_value_out(&one(max_money + 1), 0, None),
         Err(ConsensusError::BadBlock("bad-txns-vout-toolarge"))
     ));
 }
@@ -3357,7 +3376,7 @@ fn witness_commitment_leaves_a_legacy_block_unchanged() {
 
 #[test]
 fn resolve_prevout_rejects_a_same_index_parent() {
-    use super::{resolve_prevout, AsmPrevoutAcc, TxidMap};
+    use rbitcoin_consensus::block::TxidMap;
     let parent = coinbase(1);
     let txid = parent.compute_txid().to_byte_array();
     let spend = Transaction {
@@ -3387,7 +3406,7 @@ fn resolve_prevout_rejects_a_same_index_parent() {
         None,
         &index,
         1,
-        &rbitcoin_query::BatchParents::new(),
+        &crate::BatchParents::new(),
         true,
         true,
         false,
@@ -3401,9 +3420,9 @@ fn resolve_prevout_rejects_a_same_index_parent() {
 
 #[test]
 fn same_height_confirmed_spender_is_not_below_its_create() {
-    use super::structural_apply_one_meta;
+    use crate::block_pipeline::structural_apply_one_meta;
     use rbitcoin_primitives::Fk;
-    let (_dir, query) = rbitcoin_query::testutil::tiny_query_labeled("spend-same-h");
+    let (_dir, query) = crate::testutil::tiny_query_labeled("spend-same-h");
     let store = query.store();
     store
         .confirmed
@@ -3412,7 +3431,7 @@ fn same_height_confirmed_spender_is_not_below_its_create() {
     store.header_txs.put_range(Fk(1), Fk(1), 1).unwrap();
     store.strong_tx.set_strong(Fk(1), Fk(1)).unwrap();
     store.rebuild_height_fence().unwrap();
-    let mut scratch = super::StructuralScratch::default();
+    let mut scratch = crate::block_pipeline::StructuralScratch::default();
     scratch.height_by_id.insert(9, 0);
     scratch.field_h_by_id.insert(1, 0);
     structural_apply_one_meta(

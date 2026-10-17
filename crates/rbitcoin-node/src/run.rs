@@ -277,7 +277,7 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
         config.store_layout(),
         config.check_blocks_window(),
     )?;
-    rbitcoin_consensus::replay_spend_annotations(&query)
+    rbitcoin_query::replay_spend_annotations(&query)
         .map_err(|e| NodeError::Init(format!("spend annotation replay: {e}")))?;
     Ok(NodeHandle {
         config,
@@ -321,7 +321,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         );
     }
     apply_startup_index_mode(&handle.query, &config, params.taproot_height())?;
-    rbitcoin_consensus::prepare_live_indexes(&handle.query)
+    rbitcoin_query::prepare_live_indexes(&handle.query)
         .map_err(|e| crate::error::NodeError::Init(format!("index startup repair failed: {e}")))?;
     let bind = config.listen.start_p2p_bind(config.network);
 
@@ -724,14 +724,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         tip_follow_ready = gates.tip_follow_ready;
         sh_tip_ready = gates.sh_tip_ready;
         if tip_follow_ready && !shutdown.requested() {
-            let index_entry = rbitcoin_consensus::index_tip_entry(&node.hub.query);
+            let index_entry = rbitcoin_query::index_tip_entry(&node.hub.query);
             if index_entry.advertise_filters {
                 info!("blockfilter: already at tip; advertising NODE_COMPACT_FILTERS");
                 rbitcoin_net::set_compact_filters_service(true);
             }
             if index_entry.spawn {
                 let advertise_later = !index_entry.advertise_filters;
-                index_writebehind = Some(rbitcoin_consensus::spawn_index_writebehind(
+                index_writebehind = Some(rbitcoin_query::spawn_index_writebehind(
                     Arc::clone(&node.hub.query),
                     Arc::clone(&shutdown.flag),
                     {

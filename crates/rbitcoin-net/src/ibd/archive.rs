@@ -442,7 +442,7 @@ mod class_a_rehydrate_tests {
             let b = mine(tip, time + h * 600, h);
             hub.ensure_header(&b.header).unwrap();
             let (rec, txs) =
-                rbitcoin_consensus::prepare_block_for_archive(&hub.query, &hub.params, &b).unwrap();
+                rbitcoin_query::prepare_block_for_archive(&hub.query, &hub.params, &b).unwrap();
             hub.query.commit_class_a_only(&rec, &txs).unwrap();
             hashes.push(b.block_hash());
             tip = b.block_hash();

@@ -63,7 +63,7 @@ fn submit_queued<'a>(
     let drain = super::head_drain::submit_head_insert(query.store(), queued);
     let head_sub_ns = t_head.elapsed().as_nanos() as u64;
     if head_sub_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().write_head_sub_ns, head_sub_ns);
+        crate::note_confirm(&query.confirm_stats().write_head_sub_ns, head_sub_ns);
     }
     drain
 }
@@ -108,7 +108,7 @@ pub(super) fn write_batch_vs_tip(
 fn finish_already_committed_write(
     query: &Query,
     batch: &ScriptOkBatch,
-) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
+) -> Result<Vec<rbitcoin_primitives::Fk>, ConfirmError> {
     let items: Vec<(u32, [u8; 32])> = batch
         .prepared
         .iter()
@@ -122,8 +122,8 @@ fn finish_already_committed_write(
 }
 
 struct ArchivePlanNs {
-    pins: FkMap<rbitcoin_query::CreatePin>,
-    class_a_wave: crate::block::ClassAWave,
+    pins: FkMap<crate::CreatePin>,
+    class_a_wave: crate::block_pipeline::ClassAWave,
     class_a_ns: u64,
     ensure_ns: u64,
     plan_take_ns: u64,
@@ -133,10 +133,10 @@ struct ArchivePlanNs {
 fn apply_archive_plan(
     query: &Query,
     batch: &mut ScriptOkBatch,
-) -> Result<ArchivePlanNs, ConsensusError> {
+) -> Result<ArchivePlanNs, ConfirmError> {
     let mut ns = ArchivePlanNs {
         pins: FkMap::default(),
-        class_a_wave: crate::block::ClassAWave::default(),
+        class_a_wave: crate::block_pipeline::ClassAWave::default(),
         class_a_ns: 0,
         ensure_ns: 0,
         plan_take_ns: 0,
@@ -151,11 +151,11 @@ fn apply_archive_plan(
     let t_take = Instant::now();
     let planned_fks = plan.planned_fks.clone();
     if plan.batch_pin.len() != plan.planned_fks.len() {
-        return Err(ConsensusError::Store(StoreError::Corrupt(
+        return Err(ConfirmError::Store(StoreError::Corrupt(
             "invariant: batch_pin length",
         )));
     }
-    let packed_pins: Vec<rbitcoin_query::CreatePin> = std::mem::take(&mut plan.batch_pin);
+    let packed_pins: Vec<crate::CreatePin> = std::mem::take(&mut plan.batch_pin);
     ns.plan_take_ns = t_take.elapsed().as_nanos() as u64;
     let t_ca = Instant::now();
     let (committed, loc) = {
@@ -163,7 +163,7 @@ fn apply_archive_plan(
         spindle_mark("class-a");
         query
             .archive_commit_plan_defer_head_parents(plan)
-            .map_err(ConsensusError::from)?
+            .map_err(ConfirmError::from)?
     };
     ns.class_a_ns = t_ca.elapsed().as_nanos() as u64;
     if !committed {
@@ -195,7 +195,7 @@ fn apply_archive_plan(
     // The overlay is proven only for rows this commit wrote. A plan trimmed
     // at commit wrote fewer rows than `planned_fks` names.
     if loc.len() == planned_fks.len() {
-        ns.class_a_wave = crate::block::ClassAWave::new(planned_fks);
+        ns.class_a_wave = crate::block_pipeline::ClassAWave::new(planned_fks);
     }
     Ok(ns)
 }
@@ -208,13 +208,13 @@ fn apply_archive_plan(
 /// **Class A never leads tip** (no dual-track archive-ahead / body DONTNEED lead).
 ///
 /// Accrues window timers on [`Query::confirm_stats`] and snapshots the last batch
-/// for slow-write logs via [`rbitcoin_query::ConfirmStats::last_write_phases`].
+/// for slow-write logs via [`crate::ConfirmStats::last_write_phases`].
 pub fn confirm_write_phase(
     query: &Query,
     params: &ChainParams,
     milestone: Milestone,
     batch: ScriptOkBatch,
-) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
+) -> Result<Vec<rbitcoin_primitives::Fk>, ConfirmError> {
     confirm_write_phase_or_return(query, params, milestone, batch).map_err(|(e, _)| e)
 }
 
@@ -226,7 +226,7 @@ pub fn confirm_write_phase_or_return(
     params: &ChainParams,
     milestone: Milestone,
     mut batch: ScriptOkBatch,
-) -> Result<Vec<rbitcoin_primitives::Fk>, (ConsensusError, ScriptOkBatch)> {
+) -> Result<Vec<rbitcoin_primitives::Fk>, (ConfirmError, ScriptOkBatch)> {
     write_phase(query, params, milestone, &mut batch).map_err(|e| (e, batch))
 }
 
@@ -235,12 +235,12 @@ fn write_phase(
     params: &ChainParams,
     milestone: Milestone,
     batch: &mut ScriptOkBatch,
-) -> Result<Vec<rbitcoin_primitives::Fk>, ConsensusError> {
+) -> Result<Vec<rbitcoin_primitives::Fk>, ConfirmError> {
     let tip = query.tip_height().map(|h| h.0);
     match write_batch_vs_tip(tip, batch.prepared.iter().map(|p| p.height.0)) {
         WriteBatchVsTip::AllOld => return finish_already_committed_write(query, batch),
         WriteBatchVsTip::SpansTip => {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
+            return Err(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: write batch spans tip",
             )));
         }
@@ -262,16 +262,16 @@ fn write_phase(
     let abs_jobs = super::collect_spend_abs_after_fill(&batch.batch_parents, &batch.prepared)?;
     ensure_ns = ensure_ns.saturating_add(t_ens.elapsed().as_nanos() as u64);
     if class_a_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().class_a_ns, class_a_ns);
+        crate::note_confirm(&query.confirm_stats().class_a_ns, class_a_ns);
     }
     if ensure_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().ensure_layout_ns, ensure_ns);
+        crate::note_confirm(&query.confirm_stats().ensure_layout_ns, ensure_ns);
     }
     if plan_take_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().write_plan_take_ns, plan_take_ns);
+        crate::note_confirm(&query.confirm_stats().write_plan_take_ns, plan_take_ns);
     }
     if create_map_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().write_create_map_ns, create_map_ns);
+        crate::note_confirm(&query.confirm_stats().write_create_map_ns, create_map_ns);
     }
 
     // Flag off: tx.head insert overlaps structural, Class C, and annotate.
@@ -285,7 +285,7 @@ fn write_phase(
         Some(submit_queued(query, queued.take().unwrap()))
     };
 
-    let overlap = (|| -> Result<_, ConsensusError> {
+    let overlap = (|| -> Result<_, ConfirmError> {
         // Local Instant totals (not atomic deltas) — sample_and_reset races mid-batch.
         let t_struct = Instant::now();
         let (struct_ph, slots) = WRITE_REUSE.with(|reuse| {
@@ -319,7 +319,7 @@ fn write_phase(
             .saturating_sub(cc0);
         let class_c_join_ns = class_c_wall_ns.saturating_sub(class_c_ns);
         if class_c_join_ns > 0 {
-            rbitcoin_query::note_confirm(
+            crate::note_confirm(
                 &query.confirm_stats().write_class_c_join_ns,
                 class_c_join_ns,
             );
@@ -328,8 +328,8 @@ fn write_phase(
         let seal = std::mem::take(&mut batch.index_seal);
         let idx_put_ns = super::index::seal_live_indexes(query, seal)?;
         if idx_put_ns > 0 {
-            rbitcoin_query::note_confirm(&query.confirm_stats().idx_put_ns, idx_put_ns);
-            rbitcoin_query::note_confirm(&query.confirm_stats().blockfilter_ns, idx_put_ns);
+            crate::note_confirm(&query.confirm_stats().idx_put_ns, idx_put_ns);
+            crate::note_confirm(&query.confirm_stats().blockfilter_ns, idx_put_ns);
         }
 
         let spend_ann_ns = {
@@ -365,13 +365,13 @@ fn write_phase(
     let (drain_res, restore) = drain.join_restore();
     let drain_join_ns = t_join.elapsed().as_nanos() as u64;
     if drain_join_ns > 0 {
-        rbitcoin_query::note_confirm(&query.confirm_stats().write_drain_join_ns, drain_join_ns);
+        crate::note_confirm(&query.confirm_stats().write_drain_join_ns, drain_join_ns);
     }
     if drain_res.is_err() {
         query.store().txs.head_note_pending(&restore);
     }
     let (out, n_blocks, structural_ns, struct_ph, class_c_ns, spend_ann_ns) = overlap?;
-    drain_res.map_err(ConsensusError::from)?;
+    drain_res.map_err(ConfirmError::from)?;
     if let Some(fk) = drain_max_fk {
         query.note_head_drain_fk(fk);
     }
@@ -380,10 +380,10 @@ fn write_phase(
     if let Some(h) = batch.prepared.iter().map(|p| p.height.0).max() {
         query.prune_write_create_loc(h);
     }
-    rbitcoin_query::note_confirm(&query.confirm_stats().phase_blocks, n_blocks as u64);
+    crate::note_confirm(&query.confirm_stats().phase_blocks, n_blocks as u64);
     query
         .confirm_stats()
-        .note_last_write(rbitcoin_query::LastWritePhases {
+        .note_last_write(crate::LastWritePhases {
             n_blocks: n_blocks as u32,
             wall_ns: t_wall.elapsed().as_nanos() as u64,
             class_a_ns,
@@ -406,7 +406,7 @@ pub(crate) fn finish_post_commit(
     query: &Query,
     height: u32,
     hash: &[u8; 32],
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     finish_post_commit_hashes(query, &[(height, *hash)])
 }
 
@@ -415,7 +415,7 @@ pub(crate) fn finish_post_commit(
 pub fn finish_post_commit_hashes(
     query: &Query,
     items: &[(u32, [u8; 32])],
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     let queued = query.store().txs.take_pending_queued();
     if queued.is_empty() && !query.spend_index_enabled() {
         return Ok(());
@@ -431,11 +431,11 @@ pub fn finish_post_commit_hashes(
     let annotate_res = {
         let _gate = hold_spindle(query);
         spindle_mark("ann-begin");
-        let res = (|| -> Result<(), ConsensusError> {
+        let res = (|| -> Result<(), ConfirmError> {
             if !query.spend_index_enabled() {
                 return Ok(());
             }
-            let mut slots = crate::block::AnnotateSlots::default();
+            let mut slots = crate::block_pipeline::AnnotateSlots::default();
             for &(height, hash) in items {
                 annotate_slots_from_connected_hash(query, height, &hash, &mut slots)?;
             }
@@ -464,7 +464,7 @@ pub fn finish_post_commit_hashes(
             query.store().txs.head_note_pending(&restore);
         }
         annotate_res?;
-        drain_res.map_err(ConsensusError::from)?;
+        drain_res.map_err(ConfirmError::from)?;
         if let Some(fk) = drain_max_fk {
             query.note_head_drain_fk(fk);
         }
@@ -483,7 +483,7 @@ const REPLAY_STATUS_MS: u64 = 10_000;
 /// above genesis is rewritten before the marker is published at the surviving tip.
 /// Returns how many heights were rewritten. Call this on process open after
 /// tip-window revalidation.
-pub fn replay_spend_annotations(query: &Query) -> Result<u32, ConsensusError> {
+pub fn replay_spend_annotations(query: &Query) -> Result<u32, ConfirmError> {
     let Some(tip) = query.tip_height().map(|h| h.0) else {
         return Ok(0);
     };
@@ -494,17 +494,17 @@ pub fn replay_spend_annotations(query: &Query) -> Result<u32, ConsensusError> {
     let annotated = query
         .store()
         .spend_annotated_through()
-        .map_err(ConsensusError::from)?;
+        .map_err(ConfirmError::from)?;
     if annotated.is_some_and(|h| h > tip) {
         query
             .store()
             .clamp_spend_durable()
-            .map_err(ConsensusError::from)?;
+            .map_err(ConfirmError::from)?;
     }
     let annotated = query
         .store()
         .spend_annotated_through()
-        .map_err(ConsensusError::from)?;
+        .map_err(ConfirmError::from)?;
     let a = match annotated {
         Some(h) => h.min(tip),
         None => {
@@ -518,16 +518,16 @@ pub fn replay_spend_annotations(query: &Query) -> Result<u32, ConsensusError> {
     rewrite_spend_heights(query, a, tip)
 }
 
-fn publish_spend_marker(query: &Query, tip: u32) -> Result<(), ConsensusError> {
+fn publish_spend_marker(query: &Query, tip: u32) -> Result<(), ConfirmError> {
     let sync_ns = query
         .store()
         .sync_spend_durable(tip)
-        .map_err(ConsensusError::from)?;
-    rbitcoin_query::note_confirm(&query.confirm_stats().spend_durable_ns, sync_ns);
+        .map_err(ConfirmError::from)?;
+    crate::note_confirm(&query.confirm_stats().spend_durable_ns, sync_ns);
     Ok(())
 }
 
-fn rewrite_spend_heights(query: &Query, annotated: u32, tip: u32) -> Result<u32, ConsensusError> {
+fn rewrite_spend_heights(query: &Query, annotated: u32, tip: u32) -> Result<u32, ConfirmError> {
     rbitcoin_log::info!("store: replay spend annotations ({annotated}, {tip}]");
     let replayed = annotate_spend_heights(query, annotated + 1, tip)?;
     publish_spend_marker(query, tip)?;
@@ -538,7 +538,7 @@ fn rewrite_spend_heights(query: &Query, annotated: u32, tip: u32) -> Result<u32,
 ///
 /// The next batch's spentness reads those slots, so it must not run until they
 /// are written. A replay that fails returns the error and the batch does not run.
-fn annotate_pending_spends(query: &Query) -> Result<(), ConsensusError> {
+fn annotate_pending_spends(query: &Query) -> Result<(), ConfirmError> {
     let token = query.store().spend_annotate_token();
     let Some(from) = query.store().spend_annotate_pending() else {
         return Ok(());
@@ -549,7 +549,7 @@ fn annotate_pending_spends(query: &Query) -> Result<(), ConsensusError> {
         );
         let t = Instant::now();
         annotate_spend_heights(query, from, tip)?;
-        rbitcoin_query::note_confirm(
+        crate::note_confirm(
             &query.confirm_stats().spend_replay_ns,
             t.elapsed().as_nanos() as u64,
         );
@@ -558,7 +558,7 @@ fn annotate_pending_spends(query: &Query) -> Result<(), ConsensusError> {
     Ok(())
 }
 
-fn annotate_spend_heights(query: &Query, start: u32, tip: u32) -> Result<u32, ConsensusError> {
+fn annotate_spend_heights(query: &Query, start: u32, tip: u32) -> Result<u32, ConfirmError> {
     let heights: Vec<u32> = (start..=tip).collect();
     let replayed = heights.len() as u32;
     let started = std::time::Instant::now();
@@ -569,9 +569,9 @@ fn annotate_spend_heights(query: &Query, start: u32, tip: u32) -> Result<u32, Co
         for &h in chunk {
             let Some((_, rec)) = query
                 .header_at_height(rbitcoin_primitives::Height(h))
-                .map_err(ConsensusError::from)?
+                .map_err(ConfirmError::from)?
             else {
-                return Err(ConsensusError::Store(StoreError::Corrupt(
+                return Err(ConfirmError::Store(StoreError::Corrupt(
                     "invariant: spend replay missing header",
                 )));
             };
@@ -593,23 +593,20 @@ fn annotate_slots_from_connected_hash(
     query: &Query,
     height: u32,
     hash: &[u8; 32],
-    slots: &mut crate::block::AnnotateSlots,
-) -> Result<(), ConsensusError> {
-    match query.height_of_hash(hash).map_err(ConsensusError::from)? {
+    slots: &mut crate::block_pipeline::AnnotateSlots,
+) -> Result<(), ConfirmError> {
+    match query.height_of_hash(hash).map_err(ConfirmError::from)? {
         Some(h) if h.0 == height => {}
         _ => return Ok(()),
     }
-    let Some((hfk, _)) = query
-        .get_header_by_hash(hash)
-        .map_err(ConsensusError::from)?
-    else {
+    let Some((hfk, _)) = query.get_header_by_hash(hash).map_err(ConfirmError::from)? else {
         return Ok(());
     };
     let Some(tx_fks) = query
         .store()
         .header_txs
         .get_list(hfk)
-        .map_err(ConsensusError::from)?
+        .map_err(ConfirmError::from)?
     else {
         return Ok(());
     };
@@ -617,11 +614,11 @@ fn annotate_slots_from_connected_hash(
         let (_meta, ins, _outs) = query
             .store()
             .get_tx_full(spend_fk)
-            .map_err(ConsensusError::from)?;
+            .map_err(ConfirmError::from)?;
         if tx_i == 0 {
             let coinbase = ins.len() == 1 && ins[0].is_coinbase();
             if !coinbase {
-                return Err(ConsensusError::Store(StoreError::Corrupt(
+                return Err(ConfirmError::Store(StoreError::Corrupt(
                     "invariant: coinbase input edge",
                 )));
             }
@@ -629,19 +626,19 @@ fn annotate_slots_from_connected_hash(
         }
         for (inp_i, inp) in ins.into_iter().enumerate() {
             let rbitcoin_store::InputParent::Prevout { create_fk, vout } = inp.parent else {
-                return Err(ConsensusError::Store(StoreError::Corrupt(
+                return Err(ConfirmError::Store(StoreError::Corrupt(
                     "invariant: non-coinbase input edge",
                 )));
             };
             let (off, len) = query
                 .store()
                 .tx_spent_range(create_fk)
-                .map_err(ConsensusError::from)?;
+                .map_err(ConfirmError::from)?;
             let abs = rbitcoin_store::spent_abs(off, vout);
             if abs.saturating_add(rbitcoin_store::OutputRecord::SPENT_SLOT_LEN as u64)
                 > off.saturating_add(len)
             {
-                return Err(ConsensusError::Store(StoreError::Corrupt(
+                return Err(ConfirmError::Store(StoreError::Corrupt(
                     "invariant: finish_post_commit spent slot OOB",
                 )));
             }
@@ -649,7 +646,7 @@ fn annotate_slots_from_connected_hash(
                 .store()
                 .txs
                 .get_output_spender_meta(create_fk, vout)
-                .map_err(ConsensusError::from)?;
+                .map_err(ConfirmError::from)?;
             let flags = if multi {
                 rbitcoin_store::output_flags::MULTI_SPENDER
             } else {
@@ -669,12 +666,12 @@ fn annotate_slots_from_connected_hash(
 /// Write never preads `create.loc`.
 pub(super) fn fill_planned_create_layout_after_commit(
     query: &Query,
-    batch_parents: &mut rbitcoin_query::BatchParents,
+    batch_parents: &mut crate::BatchParents,
     planned_fks: &[rbitcoin_primitives::Fk],
     loc: &[rbitcoin_store::CreateLocPair],
-    packed: &[rbitcoin_query::CreatePin],
+    packed: &[crate::CreatePin],
     prepared: &[Prepared],
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     let mut need: U64Map<Vec<u32>> = U64Map::default();
     for p in prepared {
         for &(_txid, vout, sfk, cfk, _vin) in &p.spends {
@@ -694,7 +691,7 @@ pub(super) fn fill_planned_create_layout_after_commit(
     }
     if !planned_fks.is_empty() {
         if loc.len() != planned_fks.len() || packed.len() != planned_fks.len() {
-            return Err(ConsensusError::Store(StoreError::Corrupt(
+            return Err(ConfirmError::Store(StoreError::Corrupt(
                 "invariant: append loc length",
             )));
         }
@@ -702,7 +699,7 @@ pub(super) fn fill_planned_create_layout_after_commit(
             let Some(id) = fk.get() else { continue };
             let Some(vouts) = need.get(&id) else { continue };
             if pair.n_out != pin.n_out() as u32 {
-                return Err(ConsensusError::Store(StoreError::Corrupt(
+                return Err(ConfirmError::Store(StoreError::Corrupt(
                     "invariant: append loc length",
                 )));
             }

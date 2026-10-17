@@ -3,14 +3,11 @@
 //! Pack/hold uses enqueue-stamped Σ inputs (no `Block` decode). Emit runs one
 //! [`Store::get_fk_by_txid_batch`] (TipOnly) across the selected heights
 //! (soft **64000** inputs / hard **1080** blocks). Hits ride the wave as
-//! [`rbitcoin_query::BatchParentIds`] (fk + body_range + spent_range). Does not
+//! [`crate::BatchParentIds`] (fk + body_range + spent_range). Does not
 //! claim, structure, or stamp. Same-wave creates are omitted from TipOnly need.
 
 use super::*;
-use crate::milestone::Milestone;
-use rbitcoin_query::{
-    BatchParentIds, IdMap, ResolvedWire, TxPrecompute, TxidHasher, U32Map, U64Map,
-};
+use crate::{BatchParentIds, IdMap, ResolvedWire, TxPrecompute, TxidHasher, U32Map, U64Map};
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
@@ -194,7 +191,7 @@ pub fn confirm_bq_resolve_wave_capped(
     heights: &[u32],
     max_blocks: usize,
     max_inputs: u32,
-) -> Result<BqResolveWave, ConsensusError> {
+) -> Result<BqResolveWave, ConfirmError> {
     let t0 = Instant::now();
     let mut stats = BqResolveWaveStats::default();
     let mut done: Vec<u32> = Vec::new();
@@ -291,9 +288,9 @@ pub fn confirm_bq_resolve_wave_capped(
                 continue;
             };
             let t_dec = Instant::now();
-            let decoded = rbitcoin_query::decode_block_precomputes(
+            let decoded = crate::decode_block_precomputes(
                 &payload[..],
-                !crate::milestone::skips_on_query(milestone, query, h, &hash),
+                !crate::milestone_gate::skips_on_query(milestone, query, h, &hash),
             );
             let wall = t_dec.elapsed().as_nanos() as u64;
             let Some((block, pres_vec, pre_ns)) = decoded else {
@@ -362,7 +359,7 @@ pub fn confirm_bq_resolve_wave_capped(
         let rows = query
             .store()
             .get_fk_by_txid_batch(&need)
-            .map_err(ConsensusError::from)?;
+            .map_err(ConfirmError::from)?;
         for (txid, row) in rows {
             if let Some((fk, pair)) = row {
                 layer.insert(txid, (fk, pair.txout));
@@ -393,7 +390,7 @@ pub fn confirm_bq_resolve_wave_capped(
     if !promote.is_empty() {
         query
             .block_queue_promote_wave(promote)
-            .map_err(ConsensusError::from)?;
+            .map_err(ConfirmError::from)?;
     }
     stats.heights = items.len() as u32;
     stats.work_ns = t0.elapsed().as_nanos() as u64;
@@ -422,7 +419,7 @@ pub fn take_wave_items_for_load(
     query: &Query,
     items: &[(u32, [u8; 32], ResolvedWire)],
     gen: u32,
-) -> Result<bool, ConsensusError> {
+) -> Result<bool, ConfirmError> {
     let Some(&(last, _, _)) = items.last() else {
         return Ok(true);
     };
@@ -432,7 +429,7 @@ pub fn take_wave_items_for_load(
     for (h, _, _) in items {
         query
             .block_queue_dequeue_height(*h)
-            .map_err(ConsensusError::from)?;
+            .map_err(ConfirmError::from)?;
     }
     Ok(true)
 }
@@ -441,7 +438,6 @@ pub fn take_wave_items_for_load(
 mod tests {
     use super::*;
     use crate::accept_and_connect_block;
-    use crate::regtest_pad::mine_empty_regtest;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::consensus::encode::serialize;
@@ -451,8 +447,9 @@ mod tests {
         Amount, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Target, Transaction, TxIn,
         TxMerkleNode, TxOut, Txid, Witness,
     };
-    fn tmp_query() -> (rbitcoin_query::testutil::TempDir, Query) {
-        rbitcoin_query::testutil::tiny_query_labeled("bq-resolve")
+    use rbitcoin_consensus::mine_empty_regtest;
+    fn tmp_query() -> (crate::testutil::TempDir, Query) {
+        crate::testutil::tiny_query_labeled("bq-resolve")
     }
 
     fn take_emitted(q: &Query, wave: &BqResolveWave) {
@@ -503,7 +500,7 @@ mod tests {
         let mut ss = if height == 0 {
             vec![0x00]
         } else {
-            crate::bip34_height_script(height)
+            rbitcoin_consensus::bip34_height_script(height)
         };
         while ss.len() < 2 {
             ss.push(0x00);
@@ -1072,7 +1069,7 @@ mod tests {
 
     #[test]
     fn resolve_wave_emits_a_promoted_height() {
-        use rbitcoin_query::{ResolvedWire, TxPrecompute};
+        use crate::{ResolvedWire, TxPrecompute};
         use std::sync::Arc;
 
         let (path, q) = tmp_query();
@@ -1133,7 +1130,7 @@ mod tests {
     /// height is confirmed so stamp does not MissingPrevout (931147 / 933474).
     #[test]
     fn stamp_uses_inflight_until_tip_covers_parent_height() {
-        use rbitcoin_query::InFlight;
+        use crate::InFlight;
         use rbitcoin_store::{OutputRecord, TxRecord};
         let (path, q) = tmp_query();
         let params = ChainParams::regtest();
@@ -1141,7 +1138,7 @@ mod tests {
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
         let parent_txid = [0x22u8; 32];
         let parent_fk = rbitcoin_primitives::Fk(99);
-        let pin = rbitcoin_query::CreatePinInner::records(
+        let pin = crate::CreatePinInner::records(
             TxRecord {
                 txid: parent_txid,
                 version: 1,
@@ -1207,7 +1204,7 @@ mod tests {
     /// would drop the parent (mainnet 945952 leftover_n=3546 hit=2811).
     #[test]
     fn stamp_uses_inflight_when_confirmed_tip_leads_fence() {
-        use rbitcoin_query::InFlight;
+        use crate::InFlight;
         use rbitcoin_store::{OutputRecord, TxRecord};
         let (path, q) = tmp_query();
         let params = ChainParams::regtest();
@@ -1227,7 +1224,7 @@ mod tests {
 
         let parent_txid = [0x33u8; 32];
         let parent_fk = rbitcoin_primitives::Fk(99);
-        let pin = rbitcoin_query::CreatePinInner::records(
+        let pin = crate::CreatePinInner::records(
             TxRecord {
                 txid: parent_txid,
                 version: 1,

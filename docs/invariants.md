@@ -153,8 +153,8 @@ packs at/above the leaving **pack** height **before** the next bind.
 
 ## Related code
 
-- Confirm write annotate / ensure: `rbitcoin-consensus` `confirm_run::{post_commit,collect_spend_abs_after_fill,ensure_spend_abs_layouts,pin_for_wire_batch}`
-- Structural: `rbitcoin-consensus` `block::structural_validate_spends`
+- Confirm write annotate / ensure: `rbitcoin-query` `confirm_run::{post_commit,collect_spend_abs_after_fill,ensure_spend_abs_layouts,pin_for_wire_batch}`
+- Structural: `rbitcoin-query` `block_pipeline::structural_validate_spends` (rule decisions it calls live in `rbitcoin-consensus` `block::facts`)
 - Pin / denserels: `rbitcoin-query` `confirm_load`, `BatchParents`, `pin_for_wire_batch` (cold range / adopt)
 - Abs annotate: `rbitcoin-store` `put_spend_batch_by_abs_meta`
 

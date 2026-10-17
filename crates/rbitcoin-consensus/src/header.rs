@@ -3,8 +3,8 @@ use crate::params::{check_genesis_hash, ChainParams};
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::{CompactTarget, Target};
+pub use rbitcoin_primitives::median_time_past_times;
 use rbitcoin_primitives::Height;
-use rbitcoin_query::Query;
 
 /// Parent header facts for [`check_header`]. Copied so a height above zero can
 /// use the same parent for linkage and for the work calculation.
@@ -78,68 +78,6 @@ pub fn check_header(
 }
 
 /// Validate header linkage, MTP, difficulty bits, and proof-of-work.
-pub fn validate_header(
-    query: &Query,
-    params: &ChainParams,
-    height: Height,
-    header: &Header,
-) -> Result<(), ConsensusError> {
-    validate_header_hashed(
-        query,
-        params,
-        height,
-        header,
-        header.block_hash().to_byte_array(),
-    )
-}
-
-/// [`validate_header`] using a caller-computed header hash (lookup already hashed).
-pub(crate) fn validate_header_hashed(
-    query: &Query,
-    params: &ChainParams,
-    height: Height,
-    header: &Header,
-    hash: [u8; 32],
-) -> Result<(), ConsensusError> {
-    let parent = if height.0 == 0 {
-        None
-    } else {
-        query
-            .header_at_height(Height(height.0 - 1))?
-            .map(|(_fk, prev)| ParentHeader {
-                hash: prev.hash,
-                time: prev.timestamp,
-                bits: CompactTarget::from_consensus(prev.bits),
-            })
-    };
-    let times = if parent.is_some() {
-        mtp_times_ending_at(query, Height(height.0 - 1))?
-    } else {
-        Vec::new()
-    };
-    let period_first = if parent.is_some() {
-        period_first_time(query, params, height.0)?
-    } else {
-        None
-    };
-    check_header(
-        params,
-        height,
-        header,
-        hash,
-        parent,
-        &times,
-        period_first,
-        |h| {
-            header_bits_at(query, Height(h))
-                .ok()
-                .map(CompactTarget::from_consensus)
-        },
-    )
-}
-
-/// Contextual checks when the parent is a known header, not necessarily on the
-/// best chain (`header_at_height` would miss).
 pub fn validate_header_on_parent(
     params: &ChainParams,
     height: Height,
@@ -162,7 +100,7 @@ pub fn validate_header_on_parent(
 }
 
 /// POW vs a **caller-computed** header hash (no second SHA256d).
-pub(crate) fn pow_hash_meets_target(
+pub fn pow_hash_meets_target(
     hash: [u8; 32],
     bits: CompactTarget,
     pow_limit: Target,
@@ -181,7 +119,7 @@ pub(crate) fn pow_hash_meets_target(
 ///
 /// Core `ContextualCheckBlockHeader`. Assemble uses this instead of a second
 /// [`validate_header`] (MTP walk + header rehash).
-pub(crate) fn check_header_version_and_future_time(
+pub fn check_header_version_and_future_time(
     params: &ChainParams,
     height: Height,
     header: &Header,
@@ -208,104 +146,6 @@ pub(crate) fn check_header_version_and_future_time(
 /// chain, then load-stage header plans (same hybrid as [`crate::confirm_run`]
 /// header MTP). Heights still above tip with no plan are retryable load
 /// incomplete — not permanent `BadPrev` (that silently split batches to n=1).
-pub fn median_time_past(query: &Query, height: Height) -> Result<u32, ConsensusError> {
-    let times = mtp_times_ending_at(query, height)?;
-    median_time_past_times(&times).map_err(|_| ConsensusError::BadHeader("empty median time"))
-}
-
-/// Timestamps ending at `height` for [`median_time_past`]. A missing plan above
-/// the confirmed tip stays a retryable load fault. A gap at or below the tip
-/// is [`ConsensusError::BadPrev`].
-fn mtp_times_ending_at(query: &Query, height: Height) -> Result<Vec<u32>, ConsensusError> {
-    if let Some((n, buf)) = query.store().mtp_times_at(height) {
-        return Ok(buf[..n as usize].to_vec());
-    }
-    let mut times = Vec::with_capacity(11);
-    let start = height.0.saturating_sub(10);
-    let tip = query.tip_height().map(|h| h.0).unwrap_or(0);
-    for h in start..=height.0 {
-        if let Some((_fk, rec)) = query.header_at_height(Height(h))? {
-            times.push(rec.timestamp);
-            continue;
-        }
-        if let Some(plan) = query.confirm_parent_cache().get_header_plan(h) {
-            times.push(plan.header_rec.timestamp);
-            continue;
-        }
-        if h > tip {
-            return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-                "confirm: load incomplete (parent header plan missing above tip)",
-            )));
-        }
-        return Err(ConsensusError::BadPrev);
-    }
-    Ok(times)
-}
-
-/// MTP from the confirmed chain only (write structural). Tip-ahead heights
-/// must be carried on [`crate::confirm_run`] `Prepared::prev_mtp`.
-pub fn median_time_past_store(query: &Query, height: Height) -> Result<u32, ConsensusError> {
-    if let Some((n, buf)) = query.store().mtp_times_at(height) {
-        return median_time_past_times(&buf[..n as usize])
-            .map_err(|_| ConsensusError::BadHeader("empty median time"));
-    }
-    let mut times = Vec::with_capacity(11);
-    let start = height.0.saturating_sub(10);
-    for h in start..=height.0 {
-        if let Some((_fk, rec)) = query.header_at_height(Height(h))? {
-            times.push(rec.timestamp);
-            continue;
-        }
-        return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
-            "confirm: write MTP missing confirmed header (carry prev_mtp)",
-        )));
-    }
-    median_time_past_times(&times).map_err(|_| ConsensusError::BadHeader("empty median time"))
-}
-
-pub use rbitcoin_primitives::median_time_past_times;
-
-/// Expected `nBits` for a new header at `height`.
-///
-/// `header_time` is the candidate block's timestamp (Core `pblock->GetBlockTime()`).
-pub fn expected_next_bits(
-    query: &Query,
-    params: &ChainParams,
-    height: Height,
-    header_time: u32,
-) -> Result<CompactTarget, ConsensusError> {
-    if height.0 == 0 {
-        let g = crate::params::genesis_block(params);
-        return Ok(g.header.bits);
-    }
-
-    let prev_height = Height(height.0 - 1);
-    let (_fk, prev_rec) = query
-        .header_at_height(prev_height)?
-        .ok_or(ConsensusError::BadPrev)?;
-    let prev_bits = CompactTarget::from_consensus(prev_rec.bits);
-    let period_first = period_first_time(query, params, height.0)?;
-    next_work_bits(
-        params,
-        height.0,
-        prev_bits,
-        prev_rec.timestamp,
-        header_time,
-        period_first,
-        |h| {
-            header_bits_at(query, Height(h))
-                .ok()
-                .map(CompactTarget::from_consensus)
-        },
-    )
-    .ok_or(ConsensusError::BadPrev)
-}
-
-/// Difficulty for the header at `height`, from the parent and the period start.
-///
-/// `period_first_time` is the timestamp of the header at `height - interval`
-/// when `height` is a retarget boundary. `bits_at` supplies earlier `nBits`
-/// for the testnet min-difficulty walk. `None` means an ancestor is missing.
 pub fn next_work_bits(
     params: &ChainParams,
     height: u32,
@@ -339,20 +179,6 @@ pub fn next_work_bits(
         timespan,
         &params.btc,
     ))
-}
-
-fn period_first_time(
-    query: &Query,
-    params: &ChainParams,
-    height: u32,
-) -> Result<Option<u32>, ConsensusError> {
-    let interval = params.difficulty_adjustment_interval();
-    if interval == 0 || !height.is_multiple_of(interval) || params.no_pow_retargeting() {
-        return Ok(None);
-    }
-    Ok(query
-        .header_at_height(Height(height - interval))?
-        .map(|(_fk, first_rec)| first_rec.timestamp))
 }
 
 fn min_diff_bits(
@@ -400,25 +226,10 @@ pub fn difficulty_from_bits(bits: u32) -> f64 {
     ddiff
 }
 
-fn header_bits_at(query: &Query, height: Height) -> Result<u32, ConsensusError> {
-    if let Some((_fk, rec)) = query.header_at_height(height)? {
-        return Ok(rec.bits);
-    }
-    if let Some(plan) = query.confirm_parent_cache().get_header_plan(height.0) {
-        return Ok(plan.header_rec.bits);
-    }
-    Err(ConsensusError::BadPrev)
-}
-
 #[cfg(test)]
 mod median_time_past_tests {
     use super::*;
     use bitcoin::block::Version;
-    use rbitcoin_primitives::{Fk, Height};
-    use rbitcoin_query::testutil::FixtureChain;
-    use rbitcoin_query::{Query, TxApply};
-    use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn max_target_bits_are_difficulty_one() {
@@ -513,228 +324,6 @@ mod median_time_past_tests {
         assert_eq!(median_time_past_times(&[10]).unwrap(), 10);
         // Even length: Core takes sorted[len/2] (upper middle).
         assert_eq!(median_time_past_times(&[1, 2, 3, 4]).unwrap(), 3);
-    }
-
-    fn temp_q() -> (std::path::PathBuf, Query) {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-hdr-mtp-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(dir.join("store")).unwrap();
-        (dir, q)
-    }
-
-    /// Write-gate-safe synthetic coinbase: non-null `prev_fk` must commit `parent_hash`.
-    fn coinbase(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRecord, TxApply) {
-        let version = 1;
-        let timestamp = 1_000 + h * 10;
-        let bits = 0x207fffff;
-        let nonce = h;
-        let mut merkle = [0u8; 32];
-        merkle[0..4].copy_from_slice(&h.to_le_bytes());
-        merkle[4] = 0xcd;
-        let hash = match parent_hash {
-            None => merkle,
-            Some(ph) => {
-                rbitcoin_store::block_header_hash(version, &ph, &merkle, timestamp, bits, nonce)
-            }
-        };
-        let header = HeaderRecord {
-            prev_fk: prev,
-            version,
-            timestamp,
-            bits,
-            nonce,
-            merkle_root: merkle,
-            hash,
-            size: 0,
-            weight: 0,
-        };
-        let mut txid = [0u8; 32];
-        txid[0..4].copy_from_slice(&h.to_le_bytes());
-        txid[31] = 0xcb;
-        let ta = TxApply {
-            tx: TxRecord {
-                txid,
-                version: 1,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
-            inputs: vec![InputRecord {
-                prev_txid: [0u8; 32],
-                parent: rbitcoin_store::InputParent::Coinbase,
-                sequence: u32::MAX,
-                script_sig: vec![h as u8],
-                witness: vec![],
-            }],
-            outputs: vec![OutputRecord::unspent(50, vec![0x51])],
-        };
-        (header, ta)
-    }
-
-    #[test]
-    fn mtp_from_confirmed_chain_and_missing_above_tip() {
-        let (dir, q) = temp_q();
-        let mut prev = Fk::NULL;
-        let mut parent_hash: Option<[u8; 32]> = None;
-        for h in 0..3u32 {
-            let (hdr, ta) = coinbase(h, prev, parent_hash);
-            parent_hash = Some(hdr.hash);
-            prev = q.connect_block(Height(h), &hdr, &[ta]).unwrap();
-        }
-        let mtp = median_time_past(&q, Height(2)).unwrap();
-        // times: 1000, 1010, 1020 → middle 1010
-        assert_eq!(mtp, 1010);
-        let (n, buf) = q
-            .store()
-            .mtp_times_at(Height(2))
-            .expect("ring covers confirmed tip");
-        assert_eq!(n, 3);
-        assert_eq!(median_time_past_times(&buf[..3]).unwrap(), 1010);
-
-        // Height above tip with no plan → incomplete load error (not BadPrev).
-        let err = median_time_past(&q, Height(5)).unwrap_err();
-        assert!(
-            format!("{err}").contains("load incomplete"),
-            "above tip must be the retryable load error, got {err:?}"
-        );
-
-        let (empty_dir, empty) = temp_q();
-        let err = median_time_past(&empty, Height(0)).unwrap_err();
-        assert!(
-            matches!(err, ConsensusError::BadPrev),
-            "a missing header at the tip is BadPrev, got {err:?}"
-        );
-        let _ = std::fs::remove_dir_all(&empty_dir);
-
-        // expected_next_bits: height 0 + regtest no-retarget.
-        let params = ChainParams::regtest();
-        let gbits = expected_next_bits(&q, &params, Height(0), 0).unwrap();
-        assert_eq!(gbits, crate::params::genesis_block(&params).header.bits);
-        let b1 = expected_next_bits(&q, &params, Height(1), 0).unwrap();
-        let (_fk, rec0) = q.header_at_height(Height(0)).unwrap().unwrap();
-        assert_eq!(b1.to_consensus(), rec0.bits);
-
-        // Bad prev header height.
-        assert!(expected_next_bits(&q, &params, Height(99), 0).is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn sequential_tip_mtp_matches_ring_and_survives_pop() {
-        let (dir, q) = temp_q();
-        let mut prev = Fk::NULL;
-        let mut parent_hash: Option<[u8; 32]> = None;
-        let mut times = Vec::new();
-        for h in 0..12u32 {
-            let (hdr, ta) = coinbase(h, prev, parent_hash);
-            times.push(hdr.timestamp);
-            parent_hash = Some(hdr.hash);
-            prev = q.connect_block(Height(h), &hdr, &[ta]).unwrap();
-        }
-        let want11 = median_time_past_times(&times[1..]).unwrap();
-        assert_eq!(median_time_past_store(&q, Height(11)).unwrap(), want11);
-        assert_eq!(median_time_past(&q, Height(11)).unwrap(), want11);
-        let (n, buf) = q.store().mtp_times_at(Height(11)).expect("ring at tip");
-        assert_eq!(n, 11);
-        assert_eq!(median_time_past_times(&buf[..11]).unwrap(), want11);
-        assert!(
-            q.store().mtp_times_at(Height(5)).is_none(),
-            "historical MTP is not the tip ring"
-        );
-        assert_eq!(
-            median_time_past_store(&q, Height(5)).unwrap(),
-            median_time_past_times(&times[0..=5]).unwrap()
-        );
-
-        q.disconnect_tip().unwrap();
-        let want10 = median_time_past_times(&times[0..=10]).unwrap();
-        assert_eq!(median_time_past_store(&q, Height(10)).unwrap(), want10);
-        let (n, buf) = q
-            .store()
-            .mtp_times_at(Height(10))
-            .expect("ring rebuilt after pop");
-        assert_eq!(median_time_past_times(&buf[..n as usize]).unwrap(), want10);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn validate_header_genesis_and_bad_prev() {
-        let (dir, q) = temp_q();
-        let params = ChainParams::regtest();
-        let g = crate::params::genesis_block(&params);
-        // Wrong genesis hash at height 0.
-        let mut bad = g.header;
-        bad.nonce ^= 1;
-        let err = validate_header(&q, &params, Height(0), &bad).unwrap_err();
-        assert!(matches!(err, ConsensusError::BadHeader(_)), "{err:?}");
-
-        // Synthetic tip for prev linkage (child hash commits to parent).
-        let (h0, ta0) = coinbase(0, Fk::NULL, None);
-        let prev = q.connect_block(Height(0), &h0, &[ta0]).unwrap();
-        let (h1, ta1) = coinbase(1, prev, Some(h0.hash));
-        q.connect_block(Height(1), &h1, &[ta1]).unwrap();
-
-        // Header with wrong prev hash at height 1.
-        let mut hdr = g.header;
-        hdr.prev_blockhash = bitcoin::BlockHash::from_byte_array([0xee; 32]);
-        hdr.time = 2_000;
-        hdr.bits = bitcoin::CompactTarget::from_consensus(0x207fffff);
-        let err = validate_header(&q, &params, Height(1), &hdr).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ConsensusError::BadPrev
-                    | ConsensusError::BadHeader(_)
-                    | ConsensusError::BadVersion(_)
-            ),
-            "{err:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn testnet_min_difficulty_after_20_minute_gap() {
-        let (dir, q) = temp_q();
-        let params = ChainParams::testnet();
-        assert!(params.allow_min_difficulty_blocks());
-        let (h0, ta0) = coinbase(0, Fk::NULL, None);
-        let prev_fk = q.connect_block(Height(0), &h0, &[ta0]).unwrap();
-        let limit = params.pow_limit.to_compact_lossy();
-        assert_ne!(CompactTarget::from_consensus(h0.bits), limit);
-
-        let spacing = params.btc.pow_target_spacing as u32;
-        let gap =
-            expected_next_bits(&q, &params, Height(1), h0.timestamp + 2 * spacing + 1).unwrap();
-        assert_eq!(gap, limit);
-        let eq_boundary =
-            expected_next_bits(&q, &params, Height(1), h0.timestamp + 2 * spacing).unwrap();
-        assert_eq!(eq_boundary.to_consensus(), h0.bits);
-
-        let (mut h1, ta1) = coinbase(1, prev_fk, Some(h0.hash));
-        h1.timestamp = h0.timestamp + 2 * spacing + 1;
-        h1.bits = limit.to_consensus();
-        h1.hash = rbitcoin_store::block_header_hash(
-            h1.version,
-            &h0.hash,
-            &h1.merkle_root,
-            h1.timestamp,
-            h1.bits,
-            h1.nonce,
-        );
-        q.connect_block(Height(1), &h1, &[ta1]).unwrap();
-        let walked = expected_next_bits(&q, &params, Height(2), h1.timestamp + 100).unwrap();
-        assert_eq!(walked.to_consensus(), h0.bits);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

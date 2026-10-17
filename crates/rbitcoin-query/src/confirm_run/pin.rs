@@ -2,19 +2,19 @@
 
 use super::*;
 
-type CreatePin = rbitcoin_query::CreatePin;
+type CreatePin = crate::CreatePin;
 
 struct PlanSpend<'a> {
-    spend_edges: std::borrow::Cow<'a, rbitcoin_query::SpendEdges>,
+    spend_edges: std::borrow::Cow<'a, crate::SpendEdges>,
     parent_vouts: U64Map<Vec<u32>>,
     vouts_from_stamp: bool,
     batch_pin_by_id: U64Map<&'a CreatePin>,
 }
 
 fn spend_edges_from_plan<'a>(
-    plan: &'a rbitcoin_query::ArchiveWritePlan,
+    plan: &'a crate::ArchiveWritePlan,
     parent_pin: &mut ParentPinStamp,
-) -> Result<PlanSpend<'a>, ConsensusError> {
+) -> Result<PlanSpend<'a>, ConfirmError> {
     let mut batch_pin_by_id: U64Map<&CreatePin> = U64Map::default();
     // Reachable plans store the same pin Arc in `packed` and `batch_pin`.
     // Indexing `packed` is that pin either way.
@@ -24,7 +24,7 @@ fn spend_edges_from_plan<'a>(
         }
     }
     if plan.edges.is_empty() && !plan.planned_fks.is_empty() {
-        return Err(ConsensusError::Store(StoreError::Corrupt(
+        return Err(ConfirmError::Store(StoreError::Corrupt(
             "invariant: plan spend edges empty",
         )));
     }
@@ -59,8 +59,8 @@ fn spend_edges_from_stamp(
     parent_pin: &ParentPinStamp,
     metas: &[BodyMeta],
     wire_blocks: &[Arc<Block>],
-) -> (rbitcoin_query::SpendEdges, U64Map<Vec<u32>>) {
-    let mut spend_edges = rbitcoin_query::SpendEdges::default();
+) -> (crate::SpendEdges, U64Map<Vec<u32>>) {
+    let mut spend_edges = crate::SpendEdges::default();
     let mut parent_vouts: U64Map<Vec<u32>> = U64Map::default();
     for (m, block) in metas.iter().zip(wire_blocks.iter()) {
         for (ti, tx) in block.txdata.iter().enumerate() {
@@ -71,7 +71,7 @@ fn spend_edges_from_stamp(
             for (vin, inp) in tx.input.iter().enumerate() {
                 let vin = vin as u32;
                 if inp.previous_output.is_null() {
-                    edges.push(rbitcoin_query::SpendEdge {
+                    edges.push(crate::SpendEdge {
                         prev_txid: [0u8; 32],
                         vout: u32::MAX,
                         spend_fk: rbitcoin_primitives::Fk(sfk),
@@ -83,7 +83,7 @@ fn spend_edges_from_stamp(
                 let prev_txid = inp.previous_output.txid.to_byte_array();
                 let vout = inp.previous_output.vout;
                 if let Some(&pid) = parent_pin.resolved.get(&prev_txid) {
-                    edges.push(rbitcoin_query::SpendEdge {
+                    edges.push(crate::SpendEdge {
                         prev_txid,
                         vout,
                         spend_fk: rbitcoin_primitives::Fk(sfk),
@@ -93,7 +93,7 @@ fn spend_edges_from_stamp(
                     parent_vouts.entry(pid).or_default().push(vout);
                     continue;
                 }
-                edges.push(rbitcoin_query::SpendEdge {
+                edges.push(crate::SpendEdge {
                     prev_txid,
                     vout,
                     spend_fk: rbitcoin_primitives::Fk(sfk),
@@ -111,8 +111,8 @@ fn fill_pins(
     parent_vouts: &U64Map<Vec<u32>>,
     batch_pin_by_id: &U64Map<&CreatePin>,
     parent_pin: &ParentPinStamp,
-    in_flight: Option<&rbitcoin_query::InFlight>,
-    stats: &rbitcoin_query::ConfirmStats,
+    in_flight: Option<&crate::InFlight>,
+    stats: &crate::ConfirmStats,
 ) -> U64Map<CreatePin> {
     let mut plan_by_id: U64Map<CreatePin> = U64Map::default();
     if let Some(ifo) = in_flight {
@@ -148,7 +148,7 @@ fn fill_pins(
         plan_by_id.insert(*id, pin);
     }
     let recent_outs_ns = t_recent.elapsed().as_nanos() as u64;
-    rbitcoin_query::note_confirm(&stats.pin_recent_outs_ns, recent_outs_ns);
+    crate::note_confirm(&stats.pin_recent_outs_ns, recent_outs_ns);
     plan_by_id
 }
 
@@ -166,7 +166,7 @@ fn apply_plan_pins(
     parent_vouts: &U64Map<Vec<u32>>,
     plan_by_id: &U64Map<CreatePin>,
     parent_pin: &ParentPinStamp,
-    batch_parents: &mut rbitcoin_query::BatchParents,
+    batch_parents: &mut crate::BatchParents,
     still_need: &mut U64Map<Vec<u32>>,
 ) -> u64 {
     let mut n_plan_pin = 0u64;
@@ -217,13 +217,13 @@ fn reject_vout_past_n_out(
     parent_vouts: &U64Map<Vec<u32>>,
     parent_pin: &ParentPinStamp,
     plan_by_id: &U64Map<CreatePin>,
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     for (id, need) in parent_vouts {
         let Some(&max_vout) = need.iter().max() else {
             continue;
         };
         let wire_n_out = || match plan_by_id.get(id).map(|p| &***p) {
-            Some(rbitcoin_query::CreatePinInner::Wire {
+            Some(crate::CreatePinInner::Wire {
                 block, tx_index, ..
             }) => block
                 .txdata
@@ -232,9 +232,7 @@ fn reject_vout_past_n_out(
             _ => None,
         };
         let n_out = parent_pin.n_out(*id).map(u64::from).or_else(wire_n_out);
-        if n_out.is_some_and(|n| u64::from(max_vout) >= n) {
-            return Err(ConsensusError::MissingPrevout);
-        }
+        rbitcoin_consensus::block::reject_vout_past_n_out(max_vout, n_out)?;
     }
     Ok(())
 }
@@ -244,8 +242,8 @@ fn denserels_by_stamped_range(
     query: &Query,
     parent_pin: &ParentPinStamp,
     still_need: &mut U64Map<Vec<u32>>,
-    batch_parents: &mut rbitcoin_query::BatchParents,
-) -> Result<(u64, u64), ConsensusError> {
+    batch_parents: &mut crate::BatchParents,
+) -> Result<(u64, u64), ConfirmError> {
     let mut range_jobs: Vec<(rbitcoin_primitives::Fk, (u64, u64), [u8; 32], u32, Vec<u32>)> =
         Vec::new();
     let pending = std::mem::take(still_need);
@@ -260,7 +258,7 @@ fn denserels_by_stamped_range(
         };
         let tid = parent_pin.create_txid(id);
         let Some(tid) = tid else {
-            return Err(ConsensusError::Store(StoreError::Corrupt(
+            return Err(ConfirmError::Store(StoreError::Corrupt(
                 "invariant: lookup stage miss (load parent create identity not stamped)",
             )));
         };
@@ -273,31 +271,31 @@ fn denserels_by_stamped_range(
     let (decoded, body_ns, dec_ns, extend_n, body_sqe_n, guess_full_n) = query
         .store()
         .get_outs_by_range_batch(&range_jobs)
-        .map_err(ConsensusError::from)?;
+        .map_err(ConfirmError::from)?;
     let rng_ns = body_ns.saturating_add(dec_ns);
     // Zero adds are a no-op inside `note_confirm`.
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_io_ns, rng_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_ns, rng_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_body_ns, body_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_decode_ns, dec_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_n, n_range);
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_extend_n, extend_n);
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_body_sqe_n, body_sqe_n);
-    rbitcoin_query::note_confirm(&query.confirm_stats().cold_range_guess_full_n, guess_full_n);
-    rbitcoin_query::note_confirm(&query.confirm_stats().body_tx_reads, n_range);
-    rbitcoin_query::note_confirm(&query.confirm_stats().pin_new, n_range);
+    crate::note_confirm(&query.confirm_stats().cold_io_ns, rng_ns);
+    crate::note_confirm(&query.confirm_stats().cold_range_ns, rng_ns);
+    crate::note_confirm(&query.confirm_stats().cold_range_body_ns, body_ns);
+    crate::note_confirm(&query.confirm_stats().cold_range_decode_ns, dec_ns);
+    crate::note_confirm(&query.confirm_stats().cold_range_n, n_range);
+    crate::note_confirm(&query.confirm_stats().cold_range_extend_n, extend_n);
+    crate::note_confirm(&query.confirm_stats().cold_range_body_sqe_n, body_sqe_n);
+    crate::note_confirm(&query.confirm_stats().cold_range_guess_full_n, guess_full_n);
+    crate::note_confirm(&query.confirm_stats().body_tx_reads, n_range);
+    crate::note_confirm(&query.confirm_stats().pin_new, n_range);
     let t_range_fill = Instant::now();
     for ((fk, range, _tid, _n_out, need), row) in range_jobs.into_iter().zip(decoded) {
         let Some(id) = fk.get() else {
             continue;
         };
         let Some((mut tx, live, sparse)) = row else {
-            return Err(ConsensusError::Store(StoreError::Corrupt(
+            return Err(ConfirmError::Store(StoreError::Corrupt(
                 "invariant: load denserels by range returned none for stamped parent",
             )));
         };
         if live.len() != need.len() {
-            return Err(ConsensusError::Store(StoreError::Corrupt(
+            return Err(ConfirmError::Store(StoreError::Corrupt(
                 "invariant: load denserels by range incomplete outs for need_vouts",
             )));
         }
@@ -305,7 +303,7 @@ fn denserels_by_stamped_range(
             tx.txid =
                 parent_pin
                     .create_txid(id)
-                    .ok_or(ConsensusError::Store(StoreError::Corrupt(
+                    .ok_or(ConfirmError::Store(StoreError::Corrupt(
                         "invariant: lookup stage miss (load parent create identity not stamped)",
                     )))?;
         }
@@ -318,7 +316,7 @@ fn denserels_by_stamped_range(
     }
     let range_fill_ns = t_range_fill.elapsed().as_nanos() as u64;
     // `note_confirm` ignores a zero add, so a `> 0` gate is the same call.
-    rbitcoin_query::note_confirm(&query.confirm_stats().pin_range_fill_ns, range_fill_ns);
+    crate::note_confirm(&query.confirm_stats().pin_range_fill_ns, range_fill_ns);
     Ok((n_range, rng_ns))
 }
 
@@ -330,18 +328,12 @@ fn denserels_by_stamped_range(
 /// `spent_range` onto pins. Write [`collect_spend_abs_after_fill`] is abs-or-Corrupt.
 pub(super) fn pin_for_wire_batch<'a>(
     query: &Query,
-    plan: Option<&'a rbitcoin_query::ArchiveWritePlan>,
+    plan: Option<&'a crate::ArchiveWritePlan>,
     parent_pin: &mut ParentPinStamp,
     metas: &[BodyMeta],
     wire_blocks: &[Arc<Block>],
-    in_flight: Option<&rbitcoin_query::InFlight>,
-) -> Result<
-    (
-        rbitcoin_query::BatchParents,
-        std::borrow::Cow<'a, rbitcoin_query::SpendEdges>,
-    ),
-    ConsensusError,
-> {
+    in_flight: Option<&crate::InFlight>,
+) -> Result<(crate::BatchParents, std::borrow::Cow<'a, crate::SpendEdges>), ConfirmError> {
     let t_pin = Instant::now();
     let t_thin = Instant::now();
 
@@ -379,9 +371,9 @@ pub(super) fn pin_for_wire_batch<'a>(
     );
     reject_vout_past_n_out(&parent_vouts, parent_pin, &plan_by_id)?;
 
-    let mut batch_parents = rbitcoin_query::BatchParents::with_capacity(parent_vouts.len());
+    let mut batch_parents = crate::BatchParents::with_capacity(parent_vouts.len());
     let thin_ns = t_thin.elapsed().as_nanos() as u64;
-    rbitcoin_query::note_confirm(&query.confirm_stats().thin_ns, thin_ns);
+    crate::note_confirm(&query.confirm_stats().thin_ns, thin_ns);
     let mut still_need: U64Map<Vec<u32>> = U64Map::default();
 
     let t_plan = Instant::now();
@@ -404,7 +396,7 @@ pub(super) fn pin_for_wire_batch<'a>(
     }
 
     if !still_need.is_empty() {
-        return Err(ConsensusError::Store(StoreError::Corrupt(
+        return Err(ConfirmError::Store(StoreError::Corrupt(
             "invariant: lookup stage miss (load parent without body_range denserels)",
         )));
     }
@@ -427,12 +419,12 @@ pub(super) fn pin_for_wire_batch<'a>(
     let contract_ns = t_contract.elapsed().as_nanos() as u64;
 
     let n_unique = parent_vouts.len() as u64;
-    rbitcoin_query::note_confirm(&query.confirm_stats().parent_unique, n_unique);
-    rbitcoin_query::note_confirm(&query.confirm_stats().utxo_parents, n_unique);
-    rbitcoin_query::note_confirm(&query.confirm_stats().pin_plan, n_plan_pin);
-    rbitcoin_query::note_confirm(&query.confirm_stats().pin_cache_body, n_plan_pin);
-    rbitcoin_query::note_confirm(&query.confirm_stats().plan_pin_ns, plan_pin_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().pin_contract_ns, contract_ns);
+    crate::note_confirm(&query.confirm_stats().parent_unique, n_unique);
+    crate::note_confirm(&query.confirm_stats().utxo_parents, n_unique);
+    crate::note_confirm(&query.confirm_stats().pin_plan, n_plan_pin);
+    crate::note_confirm(&query.confirm_stats().pin_cache_body, n_plan_pin);
+    crate::note_confirm(&query.confirm_stats().plan_pin_ns, plan_pin_ns);
+    crate::note_confirm(&query.confirm_stats().pin_contract_ns, contract_ns);
     query.confirm_stats().note_last_pin(
         plan_pin_ns,
         cold_range_batch_ns,
@@ -441,11 +433,11 @@ pub(super) fn pin_for_wire_batch<'a>(
         n_range_new,
     );
     let pin_ns = t_pin.elapsed().as_nanos() as u64;
-    rbitcoin_query::note_confirm(&query.confirm_stats().parent_pin_ns, pin_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().pin_body_ns, pin_ns);
-    rbitcoin_query::note_confirm(&query.confirm_stats().load_win_ns, pin_ns);
+    crate::note_confirm(&query.confirm_stats().parent_pin_ns, pin_ns);
+    crate::note_confirm(&query.confirm_stats().pin_body_ns, pin_ns);
+    crate::note_confirm(&query.confirm_stats().load_win_ns, pin_ns);
     let n_blks = metas.len() as u64;
-    rbitcoin_query::note_confirm(&query.confirm_stats().load_blocks, n_blks);
+    crate::note_confirm(&query.confirm_stats().load_blocks, n_blks);
 
     Ok((batch_parents, spend_edges))
 }
@@ -456,9 +448,9 @@ pub(super) fn pin_for_wire_batch<'a>(
 /// before `tx.head` insert and passes the jobs to structural, which does not
 /// look them up again. Null create fk is skipped; duplicate abs is one job.
 pub(super) fn collect_spend_abs_after_fill(
-    batch_parents: &rbitcoin_query::BatchParents,
+    batch_parents: &crate::BatchParents,
     prepared: &[Prepared],
-) -> Result<Vec<Vec<crate::block::StructuralAbsJob>>, ConsensusError> {
+) -> Result<Vec<Vec<crate::block_pipeline::StructuralAbsJob>>, ConfirmError> {
     let mut out = Vec::with_capacity(prepared.len());
     for p in prepared {
         let jobs = batch_parents
@@ -468,7 +460,7 @@ pub(super) fn collect_spend_abs_after_fill(
                     .map(|&(_txid, vout, sfk, cfk, vin)| (cfk, vout, sfk, vin)),
             )
             .map_err(|_| {
-                ConsensusError::Store(StoreError::Corrupt(
+                ConfirmError::Store(StoreError::Corrupt(
                     "invariant: ensure denserels/abs incomplete for spend edge",
                 ))
             })?;
@@ -487,16 +479,16 @@ pub(super) fn collect_spend_abs_after_fill(
 /// [`collect_spend_abs_after_fill`] is the write-phase post-condition.
 #[cfg(test)]
 pub(super) fn ensure_spend_abs_layouts(
-    batch_parents: &rbitcoin_query::BatchParents,
+    batch_parents: &crate::BatchParents,
     prepared: &[Prepared],
-) -> Result<(), ConsensusError> {
+) -> Result<(), ConfirmError> {
     for p in prepared {
         for &(_txid, vout, sfk, cfk, _vin) in &p.spends {
             if sfk.is_null() || cfk.is_null() {
                 continue;
             }
             if batch_parents.get_spender_abs(cfk, vout).is_none() {
-                return Err(ConsensusError::Store(StoreError::Corrupt(
+                return Err(ConfirmError::Store(StoreError::Corrupt(
                     "invariant: ensure denserels/abs incomplete for spend edge",
                 )));
             }
@@ -508,12 +500,12 @@ pub(super) fn ensure_spend_abs_layouts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{CreatePin, ParentIdent, U64Map};
     use rbitcoin_primitives::Fk;
-    use rbitcoin_query::{CreatePin, ParentIdent, U64Map};
     use rbitcoin_store::{OutputRecord, TxRecord};
 
     fn pin_with(txid: [u8; 32], inputs: u32) -> CreatePin {
-        rbitcoin_query::CreatePinInner::records(
+        crate::CreatePinInner::records(
             TxRecord {
                 txid,
                 version: 1,
@@ -531,7 +523,7 @@ mod tests {
     fn plan_pin_coinbase_flag_follows_input_count() {
         let one = pin_with([0x31; 32], 1);
         let two = pin_with([0x32; 32], 2);
-        let mut parents = rbitcoin_query::BatchParents::new();
+        let mut parents = crate::BatchParents::new();
         parents.insert_owned(
             Fk(1),
             one.tx().clone(),
@@ -566,7 +558,7 @@ mod tests {
             "a one-input pin still publishes a body range"
         );
 
-        let mut fresh = rbitcoin_query::BatchParents::new();
+        let mut fresh = crate::BatchParents::new();
         let mut by_two: U64Map<CreatePin> = U64Map::default();
         by_two.insert(2, two);
         let mut need: U64Map<Vec<u32>> = U64Map::default();
@@ -585,7 +577,7 @@ mod tests {
         empty_need.insert(3, Vec::new());
         let mut by_empty: U64Map<CreatePin> = U64Map::default();
         by_empty.insert(3, pin_with([0x33; 32], 1));
-        let mut dest = rbitcoin_query::BatchParents::new();
+        let mut dest = crate::BatchParents::new();
         let mut still = U64Map::default();
         apply_plan_pins(
             &empty_need,

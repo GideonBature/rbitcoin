@@ -201,7 +201,7 @@ pub(crate) struct EvalContext<'a> {
     /// Legacy midstate. Created on first use (WitnessV0 uses `pre`, tapscript `tapscript`).
     cache: RefCell<Option<SighashCache<&'a Transaction>>>,
     /// Structure/lookup midstates (WitnessV0 BIP143).
-    pre: Cow<'a, rbitcoin_query::TxPrecompute>,
+    pre: Cow<'a, crate::TxPrecompute>,
     /// BIP342 remaining validation weight (`50 + witness serialized size`).
     validation_weight_left: Cell<i64>,
     /// Tapscript only: per-input sighash facts from the script-path spend.
@@ -250,7 +250,7 @@ impl<'a> EvalContext<'a> {
             bip65_active,
             bip112_active,
             bip66_active,
-            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(tx)),
+            Cow::Owned(crate::TxPrecompute::from_tx(tx)),
         )
     }
 
@@ -264,7 +264,7 @@ impl<'a> EvalContext<'a> {
         bip65_active: bool,
         bip112_active: bool,
         bip66_active: bool,
-        pre: Cow<'a, rbitcoin_query::TxPrecompute>,
+        pre: Cow<'a, crate::TxPrecompute>,
     ) -> Self {
         Self {
             tx,

@@ -1,0 +1,343 @@
+//! Connect façade. Query loads and writes; consensus decides the block.
+
+use crate::ConfirmError;
+use bitcoin::hashes::Hash;
+use bitcoin::Block;
+use rbitcoin_consensus::block::{validate_block_structure_hashed, ValidationContext};
+use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone};
+use rbitcoin_primitives::{Fk, Height};
+use rbitcoin_store::HeaderRecord;
+use std::sync::Arc;
+
+use crate::confirm_run;
+use crate::convert::{block_to_apply, block_to_apply_with_txids_prev, header_to_record};
+use crate::{Query, TxApply, TxPrecompute, WirePlanNeed};
+
+/// Confirm a contiguous tip-extension run of wire blocks (sync all stages).
+///
+/// See [`confirm_wire_run`]: lookup → load → scripts → write. IBD uses the split
+/// phases for pipeline overlap.
+pub use crate::confirm_run::{
+    confirm_bq_resolve_wave_capped, confirm_scripts_phase, confirm_wire_load_from_plan,
+    confirm_wire_load_phase, confirm_wire_load_phase_pipelined, confirm_wire_lookup_stamp,
+    confirm_wire_run, confirm_wire_run_preverified, confirm_write_phase,
+    confirm_write_phase_or_return, drive_script_waves_with, finish_post_commit_hashes,
+    parent_missing_from_chain, replay_spend_annotations, take_wave_items_for_load, BqResolveWave,
+    ConfirmLoadOutcome, ConfirmScriptOutcome, LoadedBatch, PlanStampOutcome, ScriptOkBatch,
+    ScriptPreverified, WireBlockIn, WireLoadPipeline, BQ_RESOLVE_WAVE_MAX_BLOCKS,
+    BQ_RESOLVE_WAVE_MAX_INPUTS,
+};
+
+/// Wake the IBD scripts publisher (`ibd-confirm`) after `scriptq` send or close.
+pub use rbitcoin_consensus::unpark_script_publisher;
+
+/// Accept + archive + confirm in one step (genesis / tip extension / tests).
+///
+/// **Same path as IBD confirm:** structure + header checks, then Class A
+/// archive, then [`confirm_wire_run`] (lookup → load pin denserels → scripts →
+/// structural → Class C → abs spend annotate). No separate
+/// `put_spend_batch_by_create`.
+///
+/// Idempotent when `height` is already confirmed for this block hash.
+/// Full script verify (no mempool skip) — use
+/// [`accept_and_connect_block_preverified`] on tip follow with a live mempool.
+pub fn accept_and_connect_block(
+    query: &Query,
+    params: &ChainParams,
+    height: Height,
+    block: &Block,
+    milestone: Milestone,
+) -> Result<rbitcoin_primitives::Fk, ConfirmError> {
+    accept_and_connect_block_preverified(
+        query,
+        params,
+        height,
+        Arc::new(block.clone()),
+        milestone,
+        &ScriptPreverified::new(),
+        None,
+    )
+}
+
+/// Like [`accept_and_connect_block`], skipping script verify for `preverified`
+/// txids (tip follow: live mempool after accept). Reorg disconnect stays outside.
+pub fn accept_and_connect_block_preverified(
+    query: &Query,
+    params: &ChainParams,
+    height: Height,
+    block: Arc<Block>,
+    milestone: Milestone,
+    preverified: &ScriptPreverified,
+    pres: Option<Arc<[TxPrecompute]>>,
+) -> Result<rbitcoin_primitives::Fk, ConfirmError> {
+    let hash = block.block_hash().to_byte_array();
+    if let Some(h) = query.height_of_hash(&hash).map_err(ConfirmError::from)? {
+        if h == height {
+            if let Some((fk, _)) = query
+                .get_header_by_hash(&hash)
+                .map_err(ConfirmError::from)?
+            {
+                confirm_run::finish_post_commit(query, height.0, &hash)?;
+                return Ok(fk);
+            }
+        }
+    }
+
+    // Unified height-ordered path: wire → lookup → load (pin+assemble) → scripts →
+    // write (Class A + structural + Class C + annotate). No archive-then-reload.
+    let fks = confirm_wire_run_preverified(
+        query,
+        params,
+        milestone,
+        &[(height, block, pres)],
+        preverified,
+    )?;
+    if let Some(fk) = fks.into_iter().next() {
+        return Ok(fk);
+    }
+    // Write skipped heights ≤ tip (idempotent race). A body we just ran
+    // through lookup/load must have a header — missing is an invariant, not
+    // a soft NotFound (inflated confirmed[] used to hit this on tip+1).
+    query
+        .get_header_by_hash(&hash)
+        .map_err(ConfirmError::from)?
+        .map(|(fk, _)| fk)
+        .ok_or(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
+            "invariant: confirm write skipped but header missing",
+        )))
+}
+
+fn class_a_header_and_txids(
+    query: &Query,
+    params: &ChainParams,
+    block: &Block,
+) -> Result<(HeaderRecord, Vec<[u8; 32]>), ConfirmError> {
+    let ctx = ValidationContext::archive_structure(params);
+    let txids = validate_block_structure_hashed(block, &ctx)?;
+    let hash = block.header.block_hash().to_byte_array();
+    rbitcoin_consensus::header::pow_hash_meets_target(hash, block.header.bits, params.pow_limit)?;
+    let prev = block.header.prev_blockhash;
+    let prev_fk = if prev.to_byte_array() == [0u8; 32] {
+        Fk::NULL
+    } else {
+        rbitcoin_consensus::block::require_linked_parent(
+            query
+                .get_header_by_hash(prev.as_byte_array())
+                .map_err(ConfirmError::from)?
+                .map(|(fk, _)| fk),
+        )?
+    };
+    Ok((header_to_record(prev_fk, &block.header, hash), txids))
+}
+
+/// Class A only (no tip / Class C). Crash and `plan=None` tests.
+///
+/// Not a production IBD API — confirm write uses `archive_plan_batch_from_wire`
+/// + commit (wire `seqsigwit` is encoded from the block and plan edges).
+pub fn commit_class_a_block(
+    query: &Query,
+    params: &ChainParams,
+    height: Height,
+    block: &Block,
+    milestone: Milestone,
+) -> Result<(), ConfirmError> {
+    let _ = (height, milestone);
+    let (header, txids) = class_a_header_and_txids(query, params, block)?;
+    let fk = query.ensure_header(&header).map_err(ConfirmError::from)?;
+    let arc = Arc::new(block.clone());
+    query
+        .archive_class_a_from_wire(&[(fk, &arc, txids.as_slice())])
+        .map_err(ConfirmError::from)?;
+    Ok(())
+}
+
+/// Class A for a contiguous run in one plan (same-batch parent stamp).
+///
+/// Use this instead of N×[`commit_class_a_block`] when later blocks spend
+/// earlier unconfirmed creates.
+pub fn commit_class_a_run(
+    query: &Query,
+    params: &ChainParams,
+    blocks: &[(Height, Block)],
+    milestone: Milestone,
+) -> Result<(), ConfirmError> {
+    let _ = milestone;
+    let mut owned = Vec::with_capacity(blocks.len());
+    for (_, block) in blocks {
+        let (header, txids) = class_a_header_and_txids(query, params, block)?;
+        let fk = query.ensure_header(&header).map_err(ConfirmError::from)?;
+        owned.push((fk, Arc::new(block.clone()), txids));
+    }
+    let refs: Vec<WirePlanNeed<'_>> = owned
+        .iter()
+        .map(|(fk, b, ids)| (*fk, b, ids.as_slice()))
+        .collect();
+    query
+        .archive_class_a_from_wire(&refs)
+        .map_err(ConfirmError::from)?;
+    Ok(())
+}
+
+/// CPU-side prep for Class A archive.
+pub fn prepare_block_for_archive(
+    query: &Query,
+    params: &ChainParams,
+    block: &Block,
+) -> Result<(HeaderRecord, Vec<TxApply>), ConfirmError> {
+    let hash = block.block_hash().to_byte_array();
+    if query.is_block_archived(&hash).map_err(ConfirmError::from)? {
+        // Standalone archive helper (not confirm pipeline): one hash pass here.
+        return block_to_apply(query, &block.header, &block.txdata);
+    }
+    prepare_block_for_archive_new(query, params, block)
+}
+
+fn prepare_block_for_archive_new(
+    query: &Query,
+    params: &ChainParams,
+    block: &Block,
+) -> Result<(HeaderRecord, Vec<TxApply>), ConfirmError> {
+    let (header, txids) = class_a_header_and_txids(query, params, block)?;
+    let (_, txs) =
+        block_to_apply_with_txids_prev(header.prev_fk, &block.header, &block.txdata, &txids)?;
+    Ok((header, txs))
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::Query;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::Version;
+    use bitcoin::hashes::Hash;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, Sequence, Target, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_consensus::block::ScriptCheckJob;
+    use rbitcoin_consensus::{genesis_block, mine_empty_regtest, ChainParams, Milestone};
+    use rbitcoin_primitives::Height;
+    use std::path::PathBuf;
+    fn temp_store() -> (PathBuf, Query) {
+        let path = std::env::temp_dir().join(format!(
+            "rbitcoin-consensus-cov-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let q = Query::open_or_create_tiny(&path).expect("open store");
+        (path, q)
+    }
+
+    #[test]
+    fn verify_tx_scripts_detached_acs_job() {
+        let tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([1; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let prevouts = vec![TxOut {
+            value: Amount::from_sat(10),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }];
+        rbitcoin_consensus::verify_tx_scripts_detached(prevouts.clone(), tx.clone()).unwrap();
+        let job = ScriptCheckJob::new(
+            prevouts,
+            tx,
+            rbitcoin_consensus::block::ScriptVerifyFlags::buried(true, true, true, true, true),
+        );
+        rbitcoin_consensus::block::verify_one_script_job(&job).unwrap();
+    }
+
+    #[test]
+    fn verify_tx_scripts_detached_forks_op_true_and_op_return() {
+        let spend = |spk: Vec<u8>| {
+            let tx = Transaction {
+                version: TxVersion::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: bitcoin::Txid::from_byte_array([1; 32]),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(1),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                }],
+            };
+            let prevouts = vec![TxOut {
+                value: Amount::from_sat(10),
+                script_pubkey: ScriptBuf::from_bytes(spk),
+            }];
+            rbitcoin_consensus::verify_tx_scripts_detached_forks(
+                prevouts, tx, true, true, true, true, true,
+            )
+        };
+        spend(vec![0x51]).unwrap();
+        assert!(spend(vec![0x6a]).is_err());
+    }
+
+    #[test]
+    fn regtest_connect_archive_and_confirm_path() {
+        let (path, q) = temp_store();
+        let params = ChainParams::regtest();
+        let ms = Milestone::height(1_000_000);
+        let genesis = genesis_block(&params);
+        let gen_fk = accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
+
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        // prepare helpers stay (CPU-side); confirm is sole Class A.
+        let (_hr, _txs) = prepare_block_for_archive(&q, &params, &b1).unwrap();
+        accept_and_connect_block(&q, &params, Height(1), &b1, ms).unwrap();
+        // already-have prepare after connect keeps the parent fk
+        let (hr, _) = prepare_block_for_archive(&q, &params, &b1).unwrap();
+        assert_eq!(hr.prev_fk, gen_fk);
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn assemble_second_block_rejects_stale_nversion() {
+        let (path, q) = temp_store();
+        let params = ChainParams::regtest();
+        let ms = Milestone::height(1_000_000);
+        let genesis = genesis_block(&params);
+        accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, ms).unwrap();
+
+        let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+        let mut b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
+        b2.header.version = Version::from_consensus(1);
+        let target = Target::from_compact(b2.header.bits);
+        for nonce in 0..u32::MAX {
+            b2.header.nonce = nonce;
+            if b2.header.validate_pow(target).is_ok() {
+                break;
+            }
+        }
+        let err =
+            confirm_wire_run(&q, &params, ms, &[(Height(1), b1), (Height(2), b2)]).unwrap_err();
+        assert!(
+            matches!(err, ConfirmError::Rules(ConsensusError::BadVersion(1))),
+            "{err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}

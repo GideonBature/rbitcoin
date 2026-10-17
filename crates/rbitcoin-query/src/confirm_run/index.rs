@@ -11,15 +11,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use crate::{ConfirmError, ParentPinView, Query};
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, ScriptBuf, Transaction, TxOut};
 use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_query::{ParentPinView, Query};
-use rbitcoin_store::StoreError;
 
 use crate::index_rows::{self, IndexRows};
-use crate::silent_payments::{is_p2tr, tweak_from_tx};
-use crate::ConsensusError;
+use rbitcoin_consensus::silent_payments::{is_p2tr, tweak_from_tx};
+use rbitcoin_consensus::ConsensusError;
 
 use super::{LoadedBatch, Prepared};
 
@@ -93,7 +92,7 @@ pub(super) fn index_want(query: &Query) -> IndexWant {
     }
 }
 
-pub(super) fn prepare_index_jobs(batch: &LoadedBatch) -> Result<IndexJobs, ConsensusError> {
+pub(super) fn prepare_index_jobs(batch: &LoadedBatch) -> Result<IndexJobs, ConfirmError> {
     let want = &batch.index_want;
     if !want.filters && want.tweak_origin.is_none() {
         return Ok(IndexJobs {
@@ -181,7 +180,7 @@ pub(super) fn prepare_index_jobs(batch: &LoadedBatch) -> Result<IndexJobs, Conse
 }
 
 pub(super) fn apply_index_job(job: &IndexJob) -> Result<(), ConsensusError> {
-    match job {
+    let result = match job {
         IndexJob::Filter(work) => {
             let _ = work.started.set(Instant::now());
             apply_filter(work)
@@ -190,10 +189,11 @@ pub(super) fn apply_index_job(job: &IndexJob) -> Result<(), ConsensusError> {
             let _ = work.started.set(Instant::now());
             apply_tweak_range(work, txs)
         }
-    }
+    };
+    result.map_err(ConfirmError::into_pool)
 }
 
-fn apply_tweak_range(work: &BlockWork, txs: &[usize]) -> Result<(), ConsensusError> {
+fn apply_tweak_range(work: &BlockWork, txs: &[usize]) -> Result<(), ConfirmError> {
     for &ti in txs {
         let tx = &work.block.txdata[ti];
         let prevouts = prevouts_cached(work, ti)?;
@@ -205,7 +205,7 @@ fn apply_tweak_range(work: &BlockWork, txs: &[usize]) -> Result<(), ConsensusErr
     Ok(())
 }
 
-fn apply_filter(work: &BlockWork) -> Result<(), ConsensusError> {
+fn apply_filter(work: &BlockWork) -> Result<(), ConfirmError> {
     let mut prevouts = Vec::with_capacity(work.block.txdata.len());
     for ti in 0..work.block.txdata.len() {
         prevouts.push(prevouts_cached(work, ti)?.clone());
@@ -220,7 +220,7 @@ fn apply_filter(work: &BlockWork) -> Result<(), ConsensusError> {
     Ok(())
 }
 
-pub(super) fn rows_from_heights(slots: &[HeightSlots]) -> Result<IndexRows, ConsensusError> {
+pub(super) fn rows_from_heights(slots: &[HeightSlots]) -> Result<IndexRows, ConfirmError> {
     let mut rows = IndexRows::default();
     for height in slots {
         if let Some(slot) = &height.filter {
@@ -250,7 +250,7 @@ fn tx_has_taproot_out(tx: &Transaction) -> bool {
         .any(|out| is_p2tr(out.script_pubkey.as_bytes()))
 }
 
-fn group_spends(prep: &Prepared, n_tx: usize) -> Result<Vec<Vec<SpendRef>>, ConsensusError> {
+fn group_spends(prep: &Prepared, n_tx: usize) -> Result<Vec<Vec<SpendRef>>, ConfirmError> {
     let mut index_of: HashMap<Fk, usize> = HashMap::with_capacity(prep.tx_fks.len());
     for (i, fk) in prep.tx_fks.iter().copied().enumerate() {
         if i >= n_tx {
@@ -283,7 +283,7 @@ fn basic_filter_from_wire(
     hash: &[u8; 32],
     block: &Block,
     prevouts: &[Vec<TxOut>],
-) -> Result<bitcoin::bip158::BlockFilter, ConsensusError> {
+) -> Result<bitcoin::bip158::BlockFilter, ConfirmError> {
     let outputs = block
         .txdata
         .iter()
@@ -292,10 +292,10 @@ fn basic_filter_from_wire(
         .iter()
         .flatten()
         .map(|prev| prev.script_pubkey.as_bytes());
-    rbitcoin_query::basic_filter_from_scripts(hash, outputs, spent).map_err(ConsensusError::from)
+    crate::basic_filter_from_scripts(hash, outputs, spent).map_err(ConfirmError::from)
 }
 
-fn prevouts_cached(work: &BlockWork, ti: usize) -> Result<&Vec<TxOut>, ConsensusError> {
+fn prevouts_cached(work: &BlockWork, ti: usize) -> Result<&Vec<TxOut>, ConfirmError> {
     if let Some(got) = work.prevouts[ti].get() {
         return Ok(got);
     }
@@ -310,7 +310,7 @@ fn prevouts_for_tx(
     work: &BlockWork,
     ti: usize,
     tx: &Transaction,
-) -> Result<Vec<TxOut>, ConsensusError> {
+) -> Result<Vec<TxOut>, ConfirmError> {
     if tx.is_coinbase() {
         return Ok(Vec::new());
     }
@@ -325,7 +325,7 @@ fn prevouts_for_tx(
     Ok(out)
 }
 
-fn resolve_prevout(work: &BlockWork, spend: &SpendRef) -> Result<TxOut, ConsensusError> {
+fn resolve_prevout(work: &BlockWork, spend: &SpendRef) -> Result<TxOut, ConfirmError> {
     if spend.create_fk.is_null() {
         let same_block = work.same_block.get_or_init(|| {
             let mut map = HashMap::with_capacity(work.block.txdata.len());
@@ -356,7 +356,7 @@ fn resolve_prevout(work: &BlockWork, spend: &SpendRef) -> Result<TxOut, Consensu
 
 /// After `confirmed[h]` is set: commit this batch. A watermark that is not
 /// the first row is corrupt. An empty seal (live append off) is a no-op.
-pub(super) fn seal_live_indexes(query: &Query, seal: IndexSeal) -> Result<u64, ConsensusError> {
+pub(super) fn seal_live_indexes(query: &Query, seal: IndexSeal) -> Result<u64, ConfirmError> {
     if seal.filters.is_empty() && seal.tweaks.is_empty() {
         return Ok(0);
     }
@@ -367,25 +367,25 @@ pub(super) fn seal_live_indexes(query: &Query, seal: IndexSeal) -> Result<u64, C
     Ok(commit.put_ns)
 }
 
-fn corrupt(msg: &'static str) -> ConsensusError {
-    ConsensusError::Store(StoreError::Corrupt(msg))
+fn corrupt(msg: &'static str) -> ConfirmError {
+    ConfirmError::Rules(ConsensusError::Internal(msg))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::tiny_query_labeled;
+    use crate::Query;
     use bitcoin::absolute::LockTime;
     use bitcoin::hashes::{hash160, Hash};
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut, Witness};
-    use rbitcoin_query::testutil::tiny_query_labeled;
-    use rbitcoin_query::Query;
 
-    use crate::silent_payments::tweak_records_from_window;
-    use crate::{
-        accept_and_connect_block, confirm_wire_run, genesis_block, mine_empty_regtest,
-        mine_regtest_paying, ChainParams, Milestone,
+    use crate::sp_read::tweak_records_from_window;
+    use crate::{accept_and_connect_block, confirm_wire_run};
+    use rbitcoin_consensus::{
+        genesis_block, mine_empty_regtest, mine_regtest_paying, ChainParams, Milestone,
     };
 
     fn keys() -> (Vec<u8>, bitcoin::ScriptBuf, bitcoin::ScriptBuf) {
@@ -436,7 +436,7 @@ mod tests {
     /// P2TR once that coinbase is mature, and the blocks between them.
     #[test]
     fn live_batch_matches_window_and_reaches_tip() {
-        let _gate = crate::script_pool::steal_test_gate();
+        let _gate = rbitcoin_consensus::script_pool::steal_test_gate();
         let (_dir, q) = tiny_query_labeled("idx-live");
         enable(&q);
         go_live(&q);
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn far_watermark_does_not_advance() {
-        let _gate = crate::script_pool::steal_test_gate();
+        let _gate = rbitcoin_consensus::script_pool::steal_test_gate();
         let (_dir, q) = tiny_query_labeled("idx-gap");
         let params = ChainParams::regtest();
         let ms = Milestone::height(u32::MAX);
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn startup_seals_a_short_gap_then_the_batch_appends() {
-        let _gate = crate::script_pool::steal_test_gate();
+        let _gate = rbitcoin_consensus::script_pool::steal_test_gate();
         let (_dir, q) = tiny_query_labeled("idx-repair");
         let params = ChainParams::regtest();
         let ms = Milestone::height(u32::MAX);
@@ -560,7 +560,7 @@ mod tests {
     /// A limit that fits only the tweak hole does not turn live append on.
     #[test]
     fn startup_repairs_each_fitting_index() {
-        let _gate = crate::script_pool::steal_test_gate();
+        let _gate = rbitcoin_consensus::script_pool::steal_test_gate();
         let (_dir, q) = tiny_query_labeled("idx-split");
         let params = ChainParams::regtest();
         let ms = Milestone::height(u32::MAX);
@@ -759,14 +759,14 @@ mod tests {
         LoadedBatch {
             prepared: vec![p0, p1],
             wire_blocks: vec![Arc::new(b0), Arc::new(b1)],
-            batch_parents: rbitcoin_query::BatchParents::new(),
+            batch_parents: crate::BatchParents::new(),
             script_preverified: super::super::ScriptPreverified::new(),
             archive_plan: None,
             index_want: IndexWant {
                 filters: true,
                 tweak_origin: Some(0),
             },
-            stats: Arc::new(rbitcoin_query::ConfirmStats::default()),
+            stats: Arc::new(crate::ConfirmStats::default()),
         }
     }
 

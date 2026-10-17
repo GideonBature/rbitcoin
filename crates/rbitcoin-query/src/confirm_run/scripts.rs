@@ -2,8 +2,8 @@
 
 use super::index::{self, IndexJob};
 use super::*;
-use crate::block::{verify_one_script_job, ScriptCheckJob};
-use crate::script_pool::{
+use rbitcoin_consensus::block::{verify_one_script_job, ScriptCheckJob};
+use rbitcoin_consensus::script_pool::{
     fg_has_unclaimed, help_steal, set_script_publisher, start_for_each_owned,
     start_for_each_pooled, OwnedWave,
 };
@@ -20,7 +20,7 @@ const SCRIPT_WAVES_MAX: usize = 4;
 fn take_script_jobs(
     prepared: &mut [Prepared],
     preverified: &ScriptPreverified,
-    stats: &rbitcoin_query::ConfirmStats,
+    stats: &crate::ConfirmStats,
 ) -> Vec<ScriptCheckJob> {
     let mut jobs = Vec::new();
     let mut n_skip = 0u64;
@@ -40,9 +40,9 @@ fn take_script_jobs(
         p.jobs.shrink_to_fit();
     }
     if n_skip > 0 {
-        rbitcoin_query::note_confirm(&stats.script_skip_mempool, n_skip);
+        crate::note_confirm(&stats.script_skip_mempool, n_skip);
     }
-    rbitcoin_query::note_confirm(&stats.script_jobs, jobs.len() as u64);
+    crate::note_confirm(&stats.script_jobs, jobs.len() as u64);
     jobs
 }
 
@@ -53,10 +53,10 @@ fn outcome_from(
     seal: super::index::IndexSeal,
     idx_asm_ns: u64,
 ) -> ConfirmScriptOutcome {
-    rbitcoin_query::note_confirm(&batch.stats.script_ns, work_ns);
+    crate::note_confirm(&batch.stats.script_ns, work_ns);
     if idx_asm_ns > 0 {
-        rbitcoin_query::note_confirm(&batch.stats.idx_asm_ns, idx_asm_ns);
-        rbitcoin_query::note_confirm(&batch.stats.blockfilter_ns, idx_asm_ns);
+        crate::note_confirm(&batch.stats.idx_asm_ns, idx_asm_ns);
+        crate::note_confirm(&batch.stats.blockfilter_ns, idx_asm_ns);
     }
     ConfirmScriptOutcome {
         batch: ScriptOkBatch {
@@ -94,7 +94,7 @@ impl Inflight {
     fn start(
         mut batch: LoadedBatch,
         mat_ns: u64,
-    ) -> Result<Self, (ConsensusError, ScriptsBatchMeta)> {
+    ) -> Result<Self, (ConfirmError, ScriptsBatchMeta)> {
         let t0 = Instant::now();
         let meta = ScriptsBatchMeta::from_batch(&batch, mat_ns);
         let scripts =
@@ -106,11 +106,11 @@ impl Inflight {
         let index_started = index_jobs.started;
         let script_wave = match start_for_each_owned(scripts, apply_script) {
             Ok(w) => w,
-            Err(e) => return Err((e, meta)),
+            Err(e) => return Err((ConfirmError::from(e), meta)),
         };
         let index_wave = match start_for_each_pooled(index_jobs.jobs, index::apply_index_job, 1) {
             Ok(w) => w,
-            Err(e) => return Err((e, meta)),
+            Err(e) => return Err((ConfirmError::from(e), meta)),
         };
         let inf = Self {
             batch,
@@ -158,7 +158,7 @@ impl Inflight {
         scripts_done && index_done
     }
 
-    fn finish(mut self) -> Result<(ConfirmScriptOutcome, ScriptsBatchMeta), ConsensusError> {
+    fn finish(mut self) -> Result<(ConfirmScriptOutcome, ScriptsBatchMeta), ConfirmError> {
         let script_res = match self.script_wave.take() {
             Some(w) => w.finish(),
             None => Ok(()),
@@ -189,7 +189,7 @@ impl Inflight {
     }
 }
 
-pub fn confirm_scripts_phase(batch: LoadedBatch) -> Result<ConfirmScriptOutcome, ConsensusError> {
+pub fn confirm_scripts_phase(batch: LoadedBatch) -> Result<ConfirmScriptOutcome, ConfirmError> {
     match Inflight::start(batch, 0) {
         Ok(inf) => inf.finish().map(|(o, _)| o),
         Err((e, _)) => Err(e),
@@ -206,7 +206,7 @@ pub fn drive_script_waves_with(
     mat_rx: &std::sync::mpsc::Receiver<(LoadedBatch, u64)>,
     mut on_take: impl FnMut(&LoadedBatch, Duration),
     mut on_ok: impl FnMut(ConfirmScriptOutcome, ScriptsBatchMeta) -> bool,
-    mut on_err: impl FnMut(ConsensusError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
+    mut on_err: impl FnMut(ConfirmError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
     mut should_stop: impl FnMut() -> bool,
 ) {
     struct ClearPublisher;
@@ -263,7 +263,7 @@ fn drop_inflight_tail(inflight: &mut VecDeque<Inflight>) -> Vec<ScriptsBatchMeta
 fn drive_drain_complete(
     inflight: &mut VecDeque<Inflight>,
     on_ok: &mut impl FnMut(ConfirmScriptOutcome, ScriptsBatchMeta) -> bool,
-    on_err: &mut impl FnMut(ConsensusError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
+    on_err: &mut impl FnMut(ConfirmError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
 ) -> bool {
     while inflight.front().is_some_and(Inflight::is_complete) {
         let front = inflight.pop_front().expect("front");
@@ -289,7 +289,7 @@ fn drive_try_start(
     inflight: &mut VecDeque<Inflight>,
     mat_rx: &std::sync::mpsc::Receiver<(LoadedBatch, u64)>,
     on_take: &mut impl FnMut(&LoadedBatch, Duration),
-    on_err: &mut impl FnMut(ConsensusError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
+    on_err: &mut impl FnMut(ConfirmError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
 ) -> DriveStart {
     if fg_has_unclaimed() || inflight.len() >= SCRIPT_WAVES_MAX {
         return DriveStart::Idle;
@@ -327,7 +327,7 @@ fn drive_blocking_start(
     inflight: &mut VecDeque<Inflight>,
     mat_rx: &std::sync::mpsc::Receiver<(LoadedBatch, u64)>,
     on_take: &mut impl FnMut(&LoadedBatch, Duration),
-    on_err: &mut impl FnMut(ConsensusError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
+    on_err: &mut impl FnMut(ConfirmError, ScriptsBatchMeta, &[ScriptsBatchMeta]) -> bool,
 ) -> DriveStart {
     let t_recv = Instant::now();
     match mat_rx.recv() {

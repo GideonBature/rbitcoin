@@ -1,9 +1,10 @@
-use crate::error::ConsensusError;
+use crate::ConfirmError;
+use crate::{Query, TxApply};
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::Transaction;
+use rbitcoin_consensus::ConsensusError;
 use rbitcoin_primitives::Fk;
-use rbitcoin_query::{Query, TxApply};
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
 /// Header row from wire fields. `hash` is the caller-computed `header.block_hash()`.
@@ -25,7 +26,7 @@ pub fn block_to_apply(
     query: &Query,
     header: &Header,
     txs: &[Transaction],
-) -> Result<(HeaderRecord, Vec<TxApply>), ConsensusError> {
+) -> Result<(HeaderRecord, Vec<TxApply>), ConfirmError> {
     let txids: Vec<[u8; 32]> = txs
         .iter()
         .map(|t| t.compute_txid().to_byte_array())
@@ -42,17 +43,16 @@ pub fn block_to_apply_with_txids(
     header: &Header,
     txs: &[Transaction],
     txids: &[[u8; 32]],
-) -> Result<(HeaderRecord, Vec<TxApply>), ConsensusError> {
-    if txs.len() != txids.len() {
-        return Err(ConsensusError::BadBlock("txid count mismatch"));
-    }
+) -> Result<(HeaderRecord, Vec<TxApply>), ConfirmError> {
+    rbitcoin_consensus::block::reject_txid_count(txs.len(), txids.len())?;
     let prev_fk = if header.prev_blockhash.to_byte_array() == [0u8; 32] {
         Fk::NULL
     } else {
-        query
-            .get_header_by_hash(header.prev_blockhash.as_byte_array())?
-            .map(|(fk, _)| fk)
-            .ok_or(ConsensusError::BadPrev)?
+        rbitcoin_consensus::block::require_linked_parent(
+            query
+                .get_header_by_hash(header.prev_blockhash.as_byte_array())?
+                .map(|(fk, _)| fk),
+        )?
     };
     block_to_apply_with_txids_prev(prev_fk, header, txs, txids)
 }
@@ -64,10 +64,8 @@ pub fn block_to_apply_with_txids_prev(
     header: &Header,
     txs: &[Transaction],
     txids: &[[u8; 32]],
-) -> Result<(HeaderRecord, Vec<TxApply>), ConsensusError> {
-    if txs.len() != txids.len() {
-        return Err(ConsensusError::BadBlock("txid count mismatch"));
-    }
+) -> Result<(HeaderRecord, Vec<TxApply>), ConfirmError> {
+    rbitcoin_consensus::block::reject_txid_count(txs.len(), txids.len())?;
     let hash = header.block_hash().to_byte_array();
     let header_rec = header_to_record(prev_fk, header, hash);
     let mut out = Vec::with_capacity(txs.len());
@@ -77,7 +75,7 @@ pub fn block_to_apply_with_txids_prev(
     Ok((header_rec, out))
 }
 
-fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConsensusError> {
+fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConfirmError> {
     let inputs: Vec<InputRecord> = tx
         .input
         .iter()
@@ -173,14 +171,14 @@ mod tests {
         assert_eq!(apply.tx.txid, want);
         assert_eq!(apply.inputs.len(), 1);
         assert_eq!(apply.outputs[0].value, 50_0000_0000);
-        let edges = [rbitcoin_query::SpendEdge {
+        let edges = [crate::SpendEdge {
             prev_txid: [0u8; 32],
             vout: u32::MAX,
             spend_fk: Fk(9),
             create_fk: Fk::NULL,
             vin: 0,
         }];
-        let ins = rbitcoin_query::input_records_from_wire(&tx, Fk(9), &edges).unwrap();
+        let ins = crate::input_records_from_wire(&tx, Fk(9), &edges).unwrap();
         assert_eq!(ins, apply.inputs);
     }
 
@@ -215,11 +213,11 @@ mod tests {
         // Mismatch paths.
         assert!(matches!(
             block_to_apply_with_txids_prev(Fk::NULL, &header, std::slice::from_ref(&tx), &[]),
-            Err(ConsensusError::BadBlock(_))
+            Err(ConfirmError::Rules(ConsensusError::BadBlock(_)))
         ));
         assert!(matches!(
             block_to_apply_with_txids_prev(Fk::NULL, &header, &[], &[[0u8; 32]]),
-            Err(ConsensusError::BadBlock(_))
+            Err(ConfirmError::Rules(ConsensusError::BadBlock(_)))
         ));
         let (rec, apps) =
             block_to_apply_with_txids_prev(Fk::NULL, &header, &[tx], &[txid]).unwrap();
@@ -268,19 +266,18 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             }],
         };
-        let edge = |prev_txid: [u8; 32], vout: u32| rbitcoin_query::SpendEdge {
+        let edge = |prev_txid: [u8; 32], vout: u32| crate::SpendEdge {
             prev_txid,
             vout,
             spend_fk: Fk(9),
             create_fk: Fk(5),
             vin: 0,
         };
-        let ok =
-            rbitcoin_query::input_records_from_wire(&tx, Fk(9), &[edge([1u8; 32], 3)]).unwrap();
+        let ok = crate::input_records_from_wire(&tx, Fk(9), &[edge([1u8; 32], 3)]).unwrap();
         assert_eq!(ok[0].prev_txid, [1u8; 32]);
         assert_eq!(ok[0].prev_index(), 3);
         for bad in [edge([2u8; 32], 3), edge([1u8; 32], 4)] {
-            let err = rbitcoin_query::input_records_from_wire(&tx, Fk(9), &[bad])
+            let err = crate::input_records_from_wire(&tx, Fk(9), &[bad])
                 .expect_err("mismatched edge must not encode");
             assert!(
                 format!("{err}").contains("edge/wire prevout"),

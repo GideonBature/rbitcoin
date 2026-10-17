@@ -310,11 +310,8 @@ impl UtxoProvider for QueryUtxoProvider<'_> {
             if let Some(m) = self.meter_create_mtp {
                 m.fetch_add(1, Ordering::Relaxed);
             }
-            rbitcoin_consensus::median_time_past(
-                self.query,
-                Height(create_height.saturating_sub(1)),
-            )
-            .unwrap_or(0)
+            rbitcoin_query::median_time_past(self.query, Height(create_height.saturating_sub(1)))
+                .unwrap_or(0)
         };
         ChainPrevout::Unspent(Coin {
             txout: TxOut {
@@ -1767,7 +1764,7 @@ impl MempoolHub {
 
     /// Confirmed tip snapshot for mempool structural checks (height + BIP113 MTP).
     fn chain_tip_ctx(&self) -> ChainTipCtx {
-        use rbitcoin_consensus::median_time_past;
+        use rbitcoin_query::median_time_past;
         let height = self.query.tip_height().map(|h| h.0).unwrap_or(0);
         let fk = self.query.tip_header_fk().ok().flatten();
         if let Some(fk) = fk {
@@ -5325,9 +5322,10 @@ mod tests {
     /// prevout unavailable. `Ok(false)` on height 0 is not a non-coinbase coin.
     #[test]
     fn coinbase_table_error_makes_the_prevout_unavailable() {
-        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_consensus::{ChainParams, Milestone};
         use rbitcoin_mempool::{ChainPrevout, UtxoProvider};
         use rbitcoin_primitives::Height;
+        use rbitcoin_query::accept_and_connect_block;
 
         let dir = tmp();
         let q = Query::open_or_create_tiny(&dir).unwrap();
@@ -5369,8 +5367,9 @@ mod tests {
         let (store, owned_q, owned_cbs) = copy_maturity_pad(3);
         let q = &owned_q;
         let cbs = owned_cbs.as_slice();
-        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_consensus::{ChainParams, Milestone};
         use rbitcoin_primitives::Height;
+        use rbitcoin_query::accept_and_connect_block;
         use rbitcoin_store::script_hash;
 
         let params = ChainParams::regtest();
@@ -6062,10 +6061,9 @@ mod tests {
     /// drops it. The graph filter is what decides, including a tx that is gone.
     #[test]
     fn purge_confirmed_drops_relay_maps() {
-        use rbitcoin_consensus::{
-            accept_and_connect_block, mine_regtest_paying, ChainParams, Milestone,
-        };
+        use rbitcoin_consensus::{mine_regtest_paying, ChainParams, Milestone};
         use rbitcoin_primitives::Height;
+        use rbitcoin_query::accept_and_connect_block;
 
         let (store, q, cbs) = copy_maturity_pad(3);
         let params = ChainParams::regtest();
@@ -6828,15 +6826,16 @@ mod tests {
     }
 
     fn build_maturity_pad(n: u32) -> MaturityPad {
-        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_consensus::{ChainParams, Milestone};
         use rbitcoin_primitives::Height;
+        use rbitcoin_query::accept_and_connect_block;
         let dir = tmp();
         let q = Query::open_or_create_tiny(&dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
         let last = n + params.coinbase_maturity();
-        let (_tip, _t, cbs) = rbitcoin_consensus::pad_empty_from(
+        let (_tip, _t, cbs) = rbitcoin_query::pad_empty_from(
             &q,
             &params,
             genesis.block_hash(),
@@ -7824,14 +7823,15 @@ mod tests {
 
     #[test]
     fn fee_history_preload_reuses_heights_it_already_holds() {
-        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_consensus::{ChainParams, Milestone};
+        use rbitcoin_query::accept_and_connect_block;
 
         let store_dir = tmp();
         let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
-        rbitcoin_consensus::pad_empty_from(
+        rbitcoin_query::pad_empty_from(
             &q,
             &params,
             genesis.block_hash(),
@@ -7879,14 +7879,15 @@ mod tests {
 
     #[test]
     fn fee_history_file_survives_a_restart_and_drops_heights_off_the_chain() {
-        use rbitcoin_consensus::{accept_and_connect_block, ChainParams, Milestone};
+        use rbitcoin_consensus::{ChainParams, Milestone};
+        use rbitcoin_query::accept_and_connect_block;
 
         let store_dir = tmp();
         let q = Query::open_or_create_tiny(&store_dir).unwrap();
         let params = ChainParams::regtest();
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
-        let (tip, tip_time, _) = rbitcoin_consensus::pad_empty_from(
+        let (tip, tip_time, _) = rbitcoin_query::pad_empty_from(
             &q,
             &params,
             genesis.block_hash(),
@@ -7904,7 +7905,7 @@ mod tests {
         assert_eq!(first.total_targets, 11);
         assert_eq!(first.ready_targets, 0);
         // a connect after the preload goes to the journal
-        rbitcoin_consensus::pad_empty_from(&q, &params, tip, tip_time, 6, 6, 0);
+        rbitcoin_query::pad_empty_from(&q, &params, tip, tip_time, 6, 6, 0);
         hub.note_block_fee_history(Height(6));
         let journaled = fee_history_file::load(&mp_dir).unwrap().unwrap();
         assert_eq!(

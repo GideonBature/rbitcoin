@@ -4,12 +4,13 @@
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, BlockHash, CompactTarget};
-use rbitcoin_consensus::{
-    accept_and_connect_block, confirm_wire_run, expected_next_bits, genesis_block,
-    median_time_past, validate_header, ChainParams, ConsensusError, Milestone,
-};
+use rbitcoin_consensus::{genesis_block, ChainParams, ConsensusError, Milestone};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
+use rbitcoin_query::{
+    accept_and_connect_block, confirm_wire_run, expected_next_bits, median_time_past,
+    validate_header,
+};
 use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 use rbitcoin_test::{pad_empty_from, TestDatadir};
 
