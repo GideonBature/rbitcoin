@@ -107,7 +107,6 @@ The Test column is the witness. Do not copy it into [`TESTING.md`](../TESTING.md
 | H1 | Genesis hash matches params | `BadHeader("genesis hash mismatch")` | `header_and_spending_boundaries` |
 | H2 | `prev` links to height−1 | `BadPrev` | `header_and_spending_boundaries` |
 | H3 | `time > median_time_past` | `timestamp <= median-time-past` | `header_and_spending_boundaries` (`time==mtp` / `mtp+1`) |
-| H4 | Checkpoint hash at height | `checkpoint mismatch` | `header_and_spending_boundaries` (match at height 1; mismatch) |
 | H5 | `bits == expected_next_bits` | `incorrect proof of work bits` | `header_and_spending_boundaries` (regtest: must equal prev) |
 | H6 | Target ≤ `pow_limit` | `target above pow limit` | `header_and_spending_boundaries` (`validate_header` with mainnet `pow_limit`) |
 | H7 | PoW valid for claimed bits | `InvalidPow` | `h7_rejects_header_hash_above_target` + smoke via `mine_regtest_block` accept |

@@ -2461,13 +2461,6 @@ fn batch_context_ok(
             return false;
         }
         height = height.saturating_add(1);
-        if hub
-            .params
-            .checkpoint_at(rbitcoin_primitives::Height(height))
-            .is_some_and(|want| want != hash)
-        {
-            return false;
-        }
         let mtp = if times.len() < 11 {
             0
         } else {
