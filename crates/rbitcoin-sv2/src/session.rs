@@ -45,12 +45,6 @@ const TDP_VERSION: u16 = 2;
 /// `Arc`s: a template costs a pointer per tx until its txs leave the pool.
 const MAX_RETAINED: usize = 64;
 
-/// CPU trade: a `CoinbaseOutputConstraints` within this long of the last
-/// build waits out the rest of it, so a client cycling budgets costs at most
-/// one mempool-locked build per interval; a changed budget can lag by up to
-/// this long. Tip events are not delayed.
-const CONSTRAINTS_COOLDOWN: Duration = Duration::from_secs(1);
-
 /// Budgets that replace a still-queued one before it is built. A real client
 /// changes its budget minutes apart; past this many inside one cooldown the
 /// session is closed so the slot goes back to a real client.
@@ -137,6 +131,7 @@ pub(crate) async fn serve(
     setup_timeout: Duration,
     write_timeout: Duration,
     fee_push: FeePush,
+    constraints_cooldown: Duration,
     stats: Arc<Sv2TpStats>,
 ) -> io::Result<()> {
     let deadline = Instant::now() + setup_timeout;
@@ -169,6 +164,7 @@ pub(crate) async fn serve(
         chain,
         stale_grace,
         fee_push,
+        constraints_cooldown,
         stats,
         constraints: None,
         templates: Templates::default(),
@@ -196,13 +192,15 @@ struct Session {
     chain: Arc<ChainHub>,
     stale_grace: Duration,
     fee_push: FeePush,
+    /// [`crate::CONSTRAINTS_COOLDOWN`] on a node. Tests pass a shorter wait.
+    constraints_cooldown: Duration,
     stats: Arc<Sv2TpStats>,
     /// Last `CoinbaseOutputConstraints`: `(max_additional_size, sigops)`.
     constraints: Option<(u32, u16)>,
     templates: Templates,
     /// When `publish` last sent a template.
     built_at: Option<Instant>,
-    /// Constraints-triggered rebuild deferred by `CONSTRAINTS_COOLDOWN`.
+    /// Constraints-triggered rebuild deferred by `constraints_cooldown`.
     rebuild_at: Option<Instant>,
     /// Budgets that replaced a queued rebuild's since the last build.
     superseded: u32,
@@ -288,7 +286,7 @@ impl Session {
                 if same || self.holding {
                     return Ok(true);
                 }
-                match self.built_at.map(|t| t + CONSTRAINTS_COOLDOWN) {
+                match self.built_at.map(|t| t + self.constraints_cooldown) {
                     Some(at) if at > Instant::now() => {
                         if self.rebuild_at.replace(at).is_some() {
                             self.superseded += 1;

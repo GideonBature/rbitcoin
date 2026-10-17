@@ -43,6 +43,13 @@ pub const FEE_DELTA: u64 = 1000;
 /// `-templateinterval`).
 pub const TEMPLATE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Default [`Sv2TpConfig::constraints_cooldown`]. A changed coinbase budget
+/// within this long of the last build waits out the rest of it, so a client
+/// cycling budgets costs at most one mempool-locked build per interval. A
+/// changed budget can lag by up to this long. Tip events are not delayed.
+/// A live node passes this. Tests that wait on a later budget pass a shorter one.
+pub const CONSTRAINTS_COOLDOWN: Duration = Duration::from_secs(1);
+
 /// Lower bound on [`Sv2TpConfig::template_interval`]. CPU trade: each check
 /// after a mempool change is one build under the mempool read lock, so a
 /// session costs at most ten per second.
@@ -80,6 +87,9 @@ pub struct Sv2TpConfig {
     /// Minimum time from a session's last push to a fee push; the mempool
     /// is checked once per interval.
     pub template_interval: Duration,
+    /// How long a changed `CoinbaseOutputConstraints` waits after the
+    /// previous template. [`CONSTRAINTS_COOLDOWN`] is what a node passes.
+    pub constraints_cooldown: Duration,
 }
 
 /// Template work across this listener's sessions, for `tip: perf` and
@@ -171,6 +181,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
         delta: config.fee_delta,
         interval: config.template_interval,
     };
+    let constraints_cooldown = config.constraints_cooldown;
     let chain = config.chain;
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
@@ -225,6 +236,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                     setup_timeout,
                     write_timeout,
                     fee_push,
+                    constraints_cooldown,
                     stats,
                 )
                 .await

@@ -1,6 +1,9 @@
 use crate::test_chain::{padded_chain_with, shared_regtest, TestChain};
 use crate::testutil::TpClient;
-use crate::{run_sv2_tp, Sv2TpConfig, FEE_DELTA, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT};
+use crate::{
+    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN, FEE_DELTA, SETUP_TIMEOUT, TEMPLATE_INTERVAL,
+    WRITE_TIMEOUT,
+};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{
@@ -186,6 +189,7 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: Duration::from_millis(20),
     })
     .await
     .expect("listen");
@@ -218,6 +222,51 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
     tp.shutdown().await;
 }
 
+/// A later budget is published on `constraints_cooldown`, not on the
+/// production 1s. The heavy output is counted out under `u16::MAX`.
+#[tokio::test(flavor = "multi_thread")]
+async fn short_constraints_cooldown_publishes_the_next_budget() {
+    let tc = shared_regtest(1);
+    mock_live_tip(&tc);
+    let heavy = spend(
+        tc.coinbases[0],
+        20_000,
+        ScriptBuf::from_bytes(vec![OP_CHECKSIG; 4_000]),
+    );
+    tc.mempool.accept_tx(&heavy).expect("mempool accept");
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: Duration::from_millis(20),
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    expect_template(&mut c, &tc, &[&heavy], true).await;
+
+    c.coinbase_output_constraints(0, u16::MAX).await.unwrap();
+    let f = tokio::time::timeout(Duration::from_millis(500), c.recv())
+        .await
+        .expect("second budget inside 500ms")
+        .expect("message");
+    check_template(&mut c, &tc, f, &[], false).await;
+
+    tp.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn template_resent_constraints_do_not_rebuild() {
     let tc = shared_regtest(1);
@@ -239,6 +288,7 @@ async fn template_resent_constraints_do_not_rebuild() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: Duration::from_millis(20),
     })
     .await
     .expect("listen");
@@ -271,6 +321,8 @@ async fn template_constraint_rebuilds_are_rate_limited() {
         ScriptBuf::from_bytes(vec![OP_CHECKSIG; 4_000]),
     );
     tc.mempool.accept_tx(&heavy).expect("mempool accept");
+    // Long enough that the three budgets below land in one window. 20ms
+    // lets the last send schedule a second rebuild.
     let tp = run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         chain: Arc::clone(&tc.chain),
@@ -281,6 +333,7 @@ async fn template_constraint_rebuilds_are_rate_limited() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: Duration::from_millis(200),
     })
     .await
     .expect("listen");
@@ -299,7 +352,7 @@ async fn template_constraint_rebuilds_are_rate_limited() {
     }
     let id = expect_template(&mut c, &tc, &[&heavy], false).await;
     assert!(id > first, "template_id must increase");
-    let extra = tokio::time::timeout(Duration::from_millis(500), c.recv()).await;
+    let extra = tokio::time::timeout(Duration::from_millis(150), c.recv()).await;
     assert!(extra.is_err(), "one rebuild per cooldown");
 
     tp.shutdown().await;
@@ -318,6 +371,7 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN,
     })
     .await
     .expect("listen");
@@ -372,6 +426,7 @@ async fn constraints_while_ibd_keep_the_last_budget() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN,
     })
     .await
     .expect("listen");
@@ -441,6 +496,7 @@ async fn first_template_every(tc: &TestChain, template_interval: Duration) -> Fi
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN,
     })
     .await
     .expect("listen");
@@ -677,6 +733,7 @@ async fn constraints_flood_closes_the_session() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN,
     })
     .await
     .expect("listen");
@@ -729,6 +786,7 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN,
     })
     .await
     .expect("listen");
@@ -811,8 +869,7 @@ async fn same_prev_hash_template_keeps_the_sent_bits() {
 /// template's plus the delta is pushed once the interval has passed, with no
 /// `SetNewPrevHash`. The delta is against the last sent template, so gains
 /// below it add up. A budget change queued by the constraints cooldown
-/// builds once: the fee check leaves it to the deferred rebuild. Wall is
-/// about 3 s, most of it the fixed 1 s cooldown and the silence after it.
+/// builds once: the fee check leaves it to the deferred rebuild.
 #[tokio::test(flavor = "multi_thread")]
 async fn fee_push_after_the_interval_past_the_delta() {
     let tc = shared_regtest(3);
@@ -828,6 +885,7 @@ async fn fee_push_after_the_interval_past_the_delta() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: 1_000,
         template_interval: interval,
+        constraints_cooldown: Duration::from_millis(20),
     })
     .await
     .expect("listen");
@@ -874,7 +932,7 @@ async fn fee_push_after_the_interval_past_the_delta() {
     let next = check_template(&mut c, &tc, pushed, &[&a, &b, &d], false).await;
     assert!(next > id, "template_id must increase");
 
-    // Inside the cooldown of that push: the new budget waits out the second.
+    // Inside the cooldown of that push: the new budget waits it out.
     // A fee check in between must not send it early and again at the end.
     let e = Transaction {
         input: vec![TxIn {
@@ -903,7 +961,7 @@ async fn fee_push_after_the_interval_past_the_delta() {
         t.coinbase_tx_value_remaining,
         block_subsidy(next_h, &tc.chain.params) as u64 + 3_000
     );
-    let extra = tokio::time::timeout(Duration::from_secs(1), c.recv()).await;
+    let extra = tokio::time::timeout(Duration::from_millis(200), c.recv()).await;
     assert!(extra.is_err(), "one template for the deferred budget");
 
     tp.shutdown().await;
@@ -1018,6 +1076,7 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN,
     })
     .await
     .expect("listen");
