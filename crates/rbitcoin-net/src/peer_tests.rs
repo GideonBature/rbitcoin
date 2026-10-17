@@ -3018,9 +3018,9 @@ async fn rate_limited_block_request_disconnects_without_waiting_for_another_mess
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rate_limit_disconnect_releases_the_session_block_asks() {
-    let mut t = paused_serve("rate-asks", 1, &["/rbitcoin:test(rate-asks)/"]).await;
+/// A follow session that has asked for one block body it will never get.
+async fn serve_with_open_ask(label: &str) -> (PausedServe, BlockHash) {
+    let mut t = paused_serve(label, 1, &["/rbitcoin:test(open-ask)/"]).await;
     let tip = t.node.hub.tip_header().unwrap();
     let mut child = bitcoin::block::Header {
         version: bitcoin::block::Version::from_consensus(4),
@@ -3048,6 +3048,13 @@ async fn rate_limit_disconnect_releases_the_session_block_asks() {
     .await;
     assert!(asked.is_ok(), "the header announce must ask for its body");
     assert!(t.node.hub.already_have_or_asked_block(&hash));
+    (t, hash)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limit_disconnect_releases_the_session_block_asks() {
+    let (mut t, hash) = serve_with_open_ask("rate-asks").await;
+    let (raw, _) = &mut t.clients[0];
     let ping = crate::v2::encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
     for _ in 0..=crate::peer_dos::DEFAULT_MAX_MSGS_PER_SEC {
         if raw.write_contents(&ping).await.is_err() {
@@ -3066,6 +3073,26 @@ async fn rate_limit_disconnect_releases_the_session_block_asks() {
     assert!(
         !still_asked,
         "a disconnect must release the session's body asks for other peers"
+    );
+}
+
+/// `disconnectnode`, inbound eviction, and stale-tip replacement abort the
+/// session task instead of letting it return.
+#[tokio::test]
+async fn aborted_follow_session_releases_its_block_asks() {
+    let (mut t, hash) = serve_with_open_ask("abort-asks").await;
+    assert!(t.node.peers.disconnect_id(t.clients[0].1.id));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while t.node.hub.already_have_or_asked_block(&hash) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let still_asked = t.node.hub.already_have_or_asked_block(&hash);
+    t.clients[0].0.close();
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        !still_asked,
+        "an aborted session must release its body asks for other peers"
     );
 }
 

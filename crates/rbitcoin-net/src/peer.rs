@@ -1684,7 +1684,11 @@ pub async fn peer_session_with(
         rbitcoin_log::warn!("p2p: {peer_s} initial getheaders queue failed: {e}");
     }
 
-    let mut follow = PeerFollowState::new();
+    let mut owned_follow = SessionFollow {
+        hub: hub.clone(),
+        state: PeerFollowState::new(),
+    };
+    let follow = &mut owned_follow.state;
     if let Some(s) = meta.session.as_ref() {
         follow.wtxid_relay = s.wtxid_relay();
     }
@@ -1827,7 +1831,7 @@ pub async fn peer_session_with(
                         frame,
                         hub.as_ref(),
                         &out_tx,
-                        &mut follow,
+                        follow,
                         session.as_deref(),
                     )
                     .await?;
@@ -1868,7 +1872,7 @@ pub async fn peer_session_with(
                     } else if on_tip_event(
                         hub.as_ref(),
                         &out_tx,
-                        &mut follow,
+                        follow,
                         session.as_deref(),
                         tip,
                     )
@@ -1888,7 +1892,7 @@ pub async fn peer_session_with(
                         if on_tip_event(
                             hub.as_ref(),
                             &out_tx,
-                            &mut follow,
+                            follow,
                             session.as_deref(),
                             tip,
                         )
@@ -1912,7 +1916,7 @@ pub async fn peer_session_with(
                     on_tx_announce(
                         hub.as_ref(),
                         &out_tx,
-                        &follow,
+                        follow,
                         session.as_deref(),
                         ann,
                     )?;
@@ -1928,7 +1932,7 @@ pub async fn peer_session_with(
                     on_inv_flush(
                         hub.as_ref(),
                         &out_tx,
-                        &follow,
+                        follow,
                         session.as_deref(),
                         flush,
                     );
@@ -1938,7 +1942,7 @@ pub async fn peer_session_with(
                     on_heartbeat(
                         hub.as_ref(),
                         &out_tx,
-                        &mut follow,
+                        follow,
                         session.as_deref(),
                         &mut requested_since,
                         &mut tx_announce_rx,
@@ -1965,14 +1969,14 @@ pub async fn peer_session_with(
                         return Ok(());
                     }
                     if !follow.getdata_tail.is_empty() {
-                        serve_getdata_tail(hub.as_ref(), &out_tx, &mut follow, session.as_deref())
+                        serve_getdata_tail(hub.as_ref(), &out_tx, follow, session.as_deref())
                             .await?;
                     }
                     if !follow.getblocktxn_tail.is_empty() {
                         serve_getblocktxn_tail(
                             hub.as_ref(),
                             &out_tx,
-                            &mut follow,
+                            follow,
                             session.as_deref(),
                         )
                         .await?;
@@ -1983,11 +1987,6 @@ pub async fn peer_session_with(
     }
     .await;
 
-    // `asked_blocks` is hub-wide: an ask this session never answered would
-    // keep every other peer from fetching that body.
-    for h in follow.requested_blocks.drain() {
-        hub.forget_asked_block(&h);
-    }
     drop(out_tx);
     // If select! already joined the writer, do not await again (would pend).
     if writer_task.is_finished() {
@@ -2602,6 +2601,23 @@ struct PeerFollowState {
     /// One parked `getblocktxn`. The session reads no frame while this is
     /// non-empty, so a peer that never reads cannot stack reconstructs.
     getblocktxn_tail: VecDeque<BlockTransactionsRequest>,
+}
+
+/// A live session's follow state. Dropping it, including when
+/// `PeerHub::disconnect_id` aborts the session task, releases the body asks
+/// the peer never answered: `asked_blocks` is hub-wide, so a held ask would
+/// keep every other peer from fetching that body.
+struct SessionFollow {
+    hub: Arc<ChainHub>,
+    state: PeerFollowState,
+}
+
+impl Drop for SessionFollow {
+    fn drop(&mut self) {
+        for h in self.state.requested_blocks.drain() {
+            self.hub.forget_asked_block(&h);
+        }
+    }
 }
 
 impl PeerFollowState {
