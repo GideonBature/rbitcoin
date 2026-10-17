@@ -2181,12 +2181,7 @@ fn note_lane(st: &mut IbdWorkState, peer: usize) {
 }
 
 fn punish_header_peer(st: &mut IbdWorkState, peer: usize) {
-    super::dial::disconnect_peer(
-        &mut st.slots,
-        &mut st.addr_cooldown,
-        &mut st.addr_strikes,
-        peer,
-    );
+    super::dial::disconnect_peer(st, peer);
 }
 
 /// Ask for the next header when it is not already stored. The locator is the
@@ -4995,21 +4990,22 @@ mod tests {
         let gen = hub.tip_hash().unwrap();
         let h1 = mine(gen, 1);
         let h2 = mine(h1.block_hash(), 2);
-        hub.milestone = rbitcoin_consensus::Milestone {
-            height: 840_000,
-            anchor: Some(rbitcoin_consensus::MilestoneAnchor {
-                hash: BlockHash::from_byte_array([0xab; 32]),
-                min_work_be: [0xff; 32],
-            }),
-        };
+        floor_unreachable(&mut hub);
+        let owed = BlockHash::from_byte_array([0x5a; 32]);
         let (path_peer, _rx0) = slot(0);
-        let (side_peer, _rx1) = slot(1);
+        let (mut side_peer, _rx1) = slot(1);
         let path_addr = path_peer.addr;
         let side_addr = side_peer.addr;
+        side_peer.track_insert(owed);
         let mut st = IbdWorkState::new(vec![path_peer, side_peer], Some(gen), Some(0));
+        super::super::assign::inflight_add_peer(&mut st.inflight, owed, 1);
         apply(&mut st, &hub, 0, vec![h1, h2]);
         assert!(st.slots.iter().any(|s| s.id == 0 && s.alive));
         assert!(!st.addr_cooldown.contains_key(&path_addr));
+        assert!(
+            st.inflight.contains_key(&owed),
+            "the side peer still owes the block while it is connected"
+        );
 
         let mut prev = gen;
         let mut side = Vec::with_capacity(4_001);
@@ -5025,6 +5021,10 @@ mod tests {
         );
         assert!(st.addr_cooldown.contains_key(&side_addr));
         assert!(st.slots.iter().any(|s| s.id == 0 && s.alive));
+        assert!(
+            !st.inflight.contains_key(&owed),
+            "the disconnected peer's block getdata is free to ask another peer"
+        );
     }
 
     fn push_dummy(st: &mut IbdWorkState, n: u32) {

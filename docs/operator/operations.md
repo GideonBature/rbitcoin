@@ -360,7 +360,9 @@ a new getdata spends queued before that write, does not count. A later
 getdata write starts a new 30s even when older hashes are still outstanding.
 WARN
 `ibd: peer[…] relative-slow` is a quarter-median outlier (cluster gate keeps a
-uniformly slow pack). Slow or constrained uplinks: [Slow / constrained uplink
+uniformly slow pack). Every IBD disconnect (stall, relative-slow, a second
+missed header ask, off-path headers, an undecodable or mutated block) hands
+that peer's block getdata back to densify when it drops the peer. Slow or constrained uplinks: [Slow / constrained uplink
 (IBD)](#slow--constrained-uplink-ibd).
 
 **Create pins:** pipeline-local only (`batch_pin` / `BatchParents`). No process pin FIFO. Header plans via ConfirmParentCache. Just-confirmed **identity + full create outs** stay on in-flight until a later lookup wave snapshots drain+fence past the pack height and load finishes that wave's last in-flight read. Not a coins cache.
