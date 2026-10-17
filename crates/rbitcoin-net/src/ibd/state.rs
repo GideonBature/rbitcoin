@@ -198,6 +198,12 @@ pub(crate) struct IbdWorkState {
     pub(crate) header_cmd: Option<HeaderCmdTx>,
     /// Heights below this are already claim-ready. Rewind starts here.
     pub(crate) densify_ready_through: u32,
+    /// Confirmed-chain `getheaders` tail for one published tip.
+    ///
+    /// `(height, hash, hashes)`. Absent until the first catch-up ask. The next
+    /// ask reuses `hashes` while both the height and the hash still match
+    /// `published_tip`. The work-path prefix is not stored here.
+    pub(crate) confirmed_locator_tail: Option<(Option<u32>, Option<[u8; 32]>, Vec<BlockHash>)>,
 }
 
 pub(crate) enum HeaderCmd {
@@ -289,6 +295,7 @@ impl IbdWorkState {
             confirm_feed: None,
             header_cmd: None,
             densify_ready_through: 0,
+            confirmed_locator_tail: None,
         }
     }
 

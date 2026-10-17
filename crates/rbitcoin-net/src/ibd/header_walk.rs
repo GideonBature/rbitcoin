@@ -2368,11 +2368,37 @@ fn ask_header_peer(
     peer: usize,
     tips: &[BlockHash],
 ) -> Result<bool, crate::error::NetError> {
-    if !super::dial::request_headers_from(&st.slots, peer, hub, &mut st.header_req_seq, tips)? {
+    let tail = confirmed_chain_tail(st, hub)?;
+    let locator = super::dial::ibd_header_locator(hub, tips, &tail);
+    if !super::dial::request_headers_from(&st.slots, peer, &mut st.header_req_seq, locator)? {
         return Ok(false);
     }
     note_lane(st, peer);
     Ok(true)
+}
+
+/// Confirmed-chain hashes for `getheaders`, reused until the published tip changes.
+///
+/// The work-path prefix is built on every ask. This is only the tail
+/// `query.locator_hashes` used to re-read on each send.
+fn confirmed_chain_tail(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+) -> Result<Vec<BlockHash>, crate::error::NetError> {
+    let published = hub.query.published_tip();
+    let height = published.map(|tip| tip.height);
+    let hash = published.map(|tip| tip.hash);
+    if let Some((cached_h, cached_hash, tail)) = &st.confirmed_locator_tail {
+        if *cached_h == height && *cached_hash == hash {
+            return Ok(tail.clone());
+        }
+    }
+    let tail = hub
+        .query
+        .locator_hashes()
+        .map_err(|e| crate::error::NetError::Consensus(e.to_string()))?;
+    st.confirmed_locator_tail = Some((height, hash, tail.clone()));
+    Ok(tail)
 }
 
 fn parent_header(st: &IbdWorkState, hub: &ChainHub, hash: BlockHash) -> Option<Header> {
@@ -3668,6 +3694,80 @@ mod tests {
         while st.ordered.len() > keep {
             let dropped = st.ordered.pop_front().unwrap();
             st.ordered_set.remove(&dropped);
+        }
+    }
+
+    /// Two asks at one confirmed tip share one store walk of that chain.
+    ///
+    /// The ordered queue holds a hash ahead of the confirmed tip, so the
+    /// locator starts there. A later tip rebuilds the tail.
+    #[test]
+    fn second_getheaders_reuses_confirmed_locator_tail() {
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("locator-tail");
+        let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+        hub.generate_to_script(30, script.clone(), vec![]).unwrap();
+        let tip = hub.tip_hash().unwrap();
+        let tip_h = hub.tip_height().unwrap();
+        let genesis = hub.params.genesis_hash;
+        let ancestor = hub
+            .query
+            .locator_hashes()
+            .unwrap()
+            .into_iter()
+            .find(|hash| *hash != tip && *hash != genesis)
+            .expect("the confirmed chain locator has an ancestor between tip and genesis");
+        let (peer, mut rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(tip), Some(tip_h));
+        let ahead = BlockHash::from_byte_array([0xab; 32]);
+        st.ordered.push_back(ahead);
+        st.ordered_set.insert(ahead);
+        st.hash_height.insert(ahead, tip_h.saturating_add(100));
+        assert!(st.ordered.len() < ORDERED_HEADERS_SOFT_CAP);
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let first = take_locator(&mut rx);
+        assert_eq!(
+            first.first().copied(),
+            Some(ahead),
+            "a queue with room asks from the stored path tip"
+        );
+        assert!(
+            first.contains(&ancestor),
+            "the confirmed ancestor stays in the locator"
+        );
+        assert!(first.contains(&tip));
+        assert_ne!(take_header_ask(&mut st, 0), HeaderAsk::Unsolicited);
+        let before = rbitcoin_query::header_lookup_count();
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let second = take_locator(&mut rx);
+        assert_eq!(
+            rbitcoin_query::header_lookup_count().saturating_sub(before),
+            0,
+            "a second ask at the same confirmed tip does not walk the header store"
+        );
+        assert_eq!(second, first);
+        hub.generate_to_script(1, script, vec![]).unwrap();
+        let new_tip = hub.tip_hash().unwrap();
+        assert_ne!(new_tip, tip);
+        assert_ne!(take_header_ask(&mut st, 0), HeaderAsk::Unsolicited);
+        let before = rbitcoin_query::header_lookup_count();
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let third = take_locator(&mut rx);
+        assert!(
+            rbitcoin_query::header_lookup_count() > before,
+            "a changed confirmed tip rebuilds the tail"
+        );
+        assert_eq!(third.first().copied(), Some(ahead));
+        assert!(
+            third.contains(&new_tip),
+            "the rebuilt tail names the new confirmed tip"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn take_locator(rx: &mut mpsc::UnboundedReceiver<PeerCmd>) -> Vec<BlockHash> {
+        match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => locator,
+            _ => panic!("expected one getheaders"),
         }
     }
 
