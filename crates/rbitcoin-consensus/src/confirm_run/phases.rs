@@ -164,8 +164,9 @@ pub(super) fn assemble_run(
             crate::block::bip16_active_from_prev_mtp(params, height.0, &block_hash, prev_mtp);
 
         let t_connect = Instant::now();
-        let (script_jobs, spends, fees, block_fees) = assemble_block_prevouts(
-            query,
+        let build_script_jobs =
+            !crate::milestone::skips_on_query(milestone, query, height.0, &block_hash);
+        let (script_jobs, spends, fees, block_fees, meters) = assemble_block_prevouts(
             block.as_ref(),
             &ctx,
             Some(&meta.tx_fks),
@@ -179,7 +180,11 @@ pub(super) fn assemble_run(
             bip16_active,
             Some(block),
             Some(&meta.pres),
+            build_script_jobs,
         )?;
+        meters.acc.flush(query.confirm_stats());
+        rbitcoin_query::note_confirm(&query.confirm_stats().asm_prevout_ns, meters.prev_ns);
+        rbitcoin_query::note_confirm(&query.confirm_stats().asm_job_ns, meters.job_ns);
         if meta.pres.len() != block.txdata.len() {
             return Err(ConsensusError::Store(rbitcoin_store::StoreError::Corrupt(
                 "invariant: txstat size pres",

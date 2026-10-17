@@ -1065,9 +1065,9 @@ pub(crate) type TxidMap<V> = std::collections::HashMap<[u8; 32], V, BuildHasherD
 /// Pack-local create fk by parent txid (not per-vout — fk is per tx).
 pub(crate) type PendingCreates = TxidMap<rbitcoin_primitives::Fk>;
 
-/// Block-local prevout path counts; flush to [`Query::confirm_stats`] once.
+/// Block-local prevout path counts; the confirm pipeline flushes once.
 #[derive(Default)]
-struct AsmPrevoutAcc {
+pub(crate) struct AsmPrevoutAcc {
     in_n: u64,
     same_n: u64,
     batch_n: u64,
@@ -1079,7 +1079,7 @@ struct AsmPrevoutAcc {
 }
 
 impl AsmPrevoutAcc {
-    fn flush(&self, stats: &rbitcoin_query::ConfirmStats) {
+    pub(crate) fn flush(&self, stats: &rbitcoin_query::ConfirmStats) {
         rbitcoin_query::note_confirm(&stats.asm_in_n, self.in_n);
         rbitcoin_query::note_confirm(&stats.asm_prev_same_n, self.same_n);
         rbitcoin_query::note_confirm(&stats.asm_prev_batch_n, self.batch_n);
@@ -1092,6 +1092,12 @@ impl AsmPrevoutAcc {
         );
         rbitcoin_query::note_confirm(&stats.asm_prev_cold_vout_miss_n, self.cold_vout_miss_n);
     }
+}
+
+pub(crate) struct AssembleMeters {
+    pub prev_ns: u64,
+    pub job_ns: u64,
+    pub acc: AsmPrevoutAcc,
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
@@ -1111,17 +1117,17 @@ impl AsmPrevoutAcc {
 /// Prevouts resolve from per-batch [`rbitcoin_query::BatchParents`] +
 /// [`rbitcoin_query::SpendEdges`]. Optimistic miss is `invariant:` (no head recover).
 ///
-/// Returns `(script_jobs, spends, fees, tx_fees)`. `fees` is the block sum
+/// Returns `(script_jobs, spends, fees, tx_fees, meters)`. `fees` is the block sum
 /// for the coinbase subsidy check. `tx_fees` is one satoshi fee per tx
-/// (coinbase is 0) for the `txstat` stamp.
+/// (coinbase is 0) for the `txstat` stamp. `meters` is flushed by the caller.
 ///
 /// `prev_mtp` / `block_hash` / `bip16_active` must be computed **once** by the
 /// caller (assemble_run header window) — no re-walk of headers and no rehash.
 ///
 /// `wire`: when `Some`, script jobs share that Arc (no `Transaction` clone).
 /// When `None` (unit-test connect), jobs own a deep clone of each non-cb tx.
+/// `build_script_jobs` is the caller's milestone decision.
 pub(crate) fn assemble_block_prevouts(
-    query: &Query,
     block: &Block,
     ctx: &ValidationContext<'_>,
     archived_tx_fks: Option<&[rbitcoin_primitives::Fk]>,
@@ -1135,6 +1141,7 @@ pub(crate) fn assemble_block_prevouts(
     bip16_active: bool,
     wire: Option<&Arc<Block>>,
     pres: Option<&Arc<[rbitcoin_query::TxPrecompute]>>,
+    build_script_jobs: bool,
 ) -> Result<
     (
         Vec<ScriptCheckJob>,
@@ -1147,6 +1154,7 @@ pub(crate) fn assemble_block_prevouts(
         )>,
         i64,
         Vec<u64>,
+        AssembleMeters,
     ),
     ConsensusError,
 > {
@@ -1168,8 +1176,6 @@ pub(crate) fn assemble_block_prevouts(
     let mut clk_job = 0u64;
     let mut fees = 0i64;
     let mut tx_fees = vec![0u64; n_tx];
-    let build_script_jobs =
-        !crate::milestone::skips_on_query(ctx.milestone, query, ctx.height.0, block_hash);
     let mut script_jobs: Vec<ScriptCheckJob> = if build_script_jobs {
         Vec::with_capacity(n_tx.saturating_sub(1))
     } else {
@@ -1235,10 +1241,17 @@ pub(crate) fn assemble_block_prevouts(
     }
 
     let clk_prev = t_loop.elapsed().as_nanos() as u64;
-    acc.flush(query.confirm_stats());
-    rbitcoin_query::note_confirm(&query.confirm_stats().asm_prevout_ns, clk_prev);
-    rbitcoin_query::note_confirm(&query.confirm_stats().asm_job_ns, clk_job);
-    Ok((script_jobs, spends, fees, tx_fees))
+    Ok((
+        script_jobs,
+        spends,
+        fees,
+        tx_fees,
+        AssembleMeters {
+            prev_ns: clk_prev,
+            job_ns: clk_job,
+            acc,
+        },
+    ))
 }
 
 fn assemble_prevout_guards(
@@ -2147,13 +2160,8 @@ fn structural_create_heights(
             continue;
         };
         let Some(&durable_h) = scratch.height_by_id.get(&id) else {
-            return Err(ConsensusError::BadTx("bad-txns-inputs-missingorspent"));
+            return reject_one_create(spend_height, maturity, None, false);
         };
-        // Core connects a run one block at a time: a create from a later
-        // block of this batch is not yet a coin when this block spends it.
-        if durable_h > spend_height {
-            return Err(ConsensusError::MissingPrevout);
-        }
         let pin_cb = batch_parents.get_parent_coinbase(create_fk);
         let is_cb = match (pin_cb, run_create_height.create(create_fk)) {
             (Some(cb), _) => cb,
@@ -2167,9 +2175,9 @@ fn structural_create_heights(
                 *cb == create_fk
             }
         };
-        if is_cb && spend_height < durable_h.saturating_add(maturity) {
-            return Err(ConsensusError::BadTx("coinbase immature"));
-        }
+        // Core connects a run one block at a time: a create from a later
+        // block of this batch is not yet a coin when this block spends it.
+        reject_one_create(spend_height, maturity, Some(durable_h), is_cb)?;
         scratch.create_height_by_fk.insert(create_fk, durable_h);
     }
     Ok(())
@@ -2284,12 +2292,11 @@ fn reject_bip30_unspent_overwrite(
         };
         // Connected instance at *this* height is ourselves (re-validate /
         // already-confirmed fixture). BIP30 is an earlier unspent sibling.
-        if query
+        let prior_height = query
             .store()
             .tx_height_get(old_fk)
-            .map_err(ConsensusError::from)?
-            == Some(ctx.height.0)
-        {
+            .map_err(ConsensusError::from)?;
+        if prior_height == Some(ctx.height.0) {
             continue;
         }
         let (_, outs) = query
@@ -2313,8 +2320,46 @@ fn reject_bip30_unspent_overwrite(
             }
         }
         if unspent {
-            return Err(ConsensusError::BadTx("bad-txns-BIP30"));
+            reject_bip30_unspent_prior(
+                ctx.height.0,
+                prior_height.unwrap_or(u32::MAX),
+                true,
+            )?;
         }
+    }
+    Ok(())
+}
+
+/// BIP30: an earlier connected instance with an unspent spendable output may
+/// not be overwritten. The same height is this block.
+pub(crate) fn reject_bip30_unspent_prior(
+    spend_height: u32,
+    prior_height: u32,
+    unspent_spendable: bool,
+) -> Result<(), ConsensusError> {
+    if prior_height != spend_height && unspent_spendable {
+        return Err(ConsensusError::BadTx("bad-txns-BIP30"));
+    }
+    Ok(())
+}
+
+/// Create-height facts for one spent output. `None` is not a coin. A later
+/// height in this batch is not yet a coin. A coinbase inside maturity is not
+/// spendable.
+pub(crate) fn reject_one_create(
+    spend_height: u32,
+    maturity: u32,
+    create_height: Option<u32>,
+    is_coinbase: bool,
+) -> Result<(), ConsensusError> {
+    let Some(create_height) = create_height else {
+        return Err(ConsensusError::BadTx("bad-txns-inputs-missingorspent"));
+    };
+    if create_height > spend_height {
+        return Err(ConsensusError::MissingPrevout);
+    }
+    if is_coinbase && spend_height < create_height.saturating_add(maturity) {
+        return Err(ConsensusError::BadTx("coinbase immature"));
     }
     Ok(())
 }

@@ -1210,7 +1210,6 @@ fn bip34_wrong_push_encoding_rejected_after_activation() {
 fn assemble_rejects_empty_and_fk_mismatch() {
     use super::assemble_block_prevouts;
     use rbitcoin_query::{BatchParents, OutPointSet, SpendEdges};
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble");
     let ctx = ctx_h(1);
     let empty = block_with(vec![]);
     let parents = BatchParents::new();
@@ -1219,7 +1218,6 @@ fn assemble_rejects_empty_and_fk_mismatch() {
     let mut creates = super::PendingCreates::default();
     let zero = [0u8; 32];
     let err = assemble_block_prevouts(
-        &q,
         &empty,
         &ctx,
         None,
@@ -1233,6 +1231,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         false,
         None,
         None,
+        true,
     )
     .err()
     .expect("empty");
@@ -1248,7 +1247,6 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         .collect();
     let bh = b.header.block_hash().to_byte_array();
     let err2 = assemble_block_prevouts(
-        &q,
         &b,
         &ctx,
         Some(&[]),
@@ -1262,6 +1260,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         false,
         None,
         None,
+        true,
     )
     .err()
     .expect("fk mismatch");
@@ -1277,7 +1276,6 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         .collect();
     let bh3 = bad.header.block_hash().to_byte_array();
     let err3 = assemble_block_prevouts(
-        &q,
         &bad,
         &ctx,
         None,
@@ -1291,11 +1289,11 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         false,
         None,
         None,
+        true,
     )
     .err()
     .expect("not coinbase");
     assert_bad_block(err3, "coinbase");
-    let _ = std::fs::remove_dir_all(&path);
 }
 
 /// Pack creates are `txid → fk` (one insert). Meters flush once (in_n = spends).
@@ -1319,8 +1317,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
     let bh = b.header.block_hash().to_byte_array();
     let bip16 = bip16_active_from_prev_mtp(ctx.params, ctx.height.0, &bh, 0);
     let _ = q.confirm_stats().take_window();
-    assemble_block_prevouts(
-        &q,
+    let (_, _, _, _, meters) = assemble_block_prevouts(
         &b,
         &ctx,
         Some(&[Fk(1)]),
@@ -1334,8 +1331,10 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
         bip16,
         None,
         None,
+        true,
     )
     .expect("coinbase-only assemble");
+    meters.acc.flush(q.confirm_stats());
     assert_eq!(creates.len(), 1, "one create fk per tx, not per vout");
     assert_eq!(creates.get(&tids[0]), Some(&Fk(1)));
     let w = q.confirm_stats().take_window();
@@ -1353,7 +1352,6 @@ fn script_job_shares_prevout_script() {
     use rbitcoin_query::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
     use rbitcoin_store::{OutputRecord, TxRecord};
 
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("share-prevout-script");
     let ctx = ctx_h(1);
     let parent_txid = [0x42u8; 32];
     let hist_script = vec![0x51, 0x11, 0x22];
@@ -1437,8 +1435,7 @@ fn script_job_shares_prevout_script() {
     );
     let mut spent = OutPointSet::default();
     let mut creates = super::PendingCreates::default();
-    let (jobs, _, _, _) = assemble_block_prevouts(
-        &q,
+    let (jobs, _, _, _, _) = assemble_block_prevouts(
         &wire,
         &ctx,
         Some(&[Fk(1), Fk(2), Fk(3)]),
@@ -1452,6 +1449,7 @@ fn script_job_shares_prevout_script() {
         bip16,
         Some(&wire),
         None,
+        true,
     )
     .expect("assemble shared prevouts");
     assert_eq!(jobs.len(), 2);
@@ -1469,7 +1467,6 @@ fn script_job_shares_prevout_script() {
         wire.txdata[1].output[0].script_pubkey.as_bytes().as_ptr(),
         "same-block prevout script is the wire output"
     );
-    let _ = std::fs::remove_dir_all(&path);
 }
 
 /// Optimistic IBD: unstamped parent must not recover via `tx_fk_by_txid_tip`.
@@ -1529,7 +1526,6 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
     let bh = block.header.block_hash().to_byte_array();
     let spend_fks = [Fk(3), Fk(4)];
     let err = assemble_block_prevouts(
-        &q,
         &block,
         &ctx,
         Some(&spend_fks),
@@ -1543,6 +1539,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
         bip16_active_from_prev_mtp(ctx.params, ctx.height.0, &bh, b1.header.time),
         None,
         None,
+        true,
     )
     .err()
     .expect("unstamped parent must not head-recover");
@@ -2023,7 +2020,6 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     use rbitcoin_primitives::Fk;
     use rbitcoin_query::{BatchParents, OutPointSet, SpendEdge, SpendEdges};
     use rbitcoin_store::{OutputRecord, TxRecord};
-    let (path, q) = rbitcoin_query::testutil::tiny_query_labeled("assemble-ms-sigops");
     let ws = vec![0xacu8; 80_001];
     let h = sha256::Hash::hash(&ws);
     let mut spk = vec![0x00, 0x20];
@@ -2091,7 +2087,6 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
         .collect();
     let bh = b.header.block_hash().to_byte_array();
     let err = assemble_block_prevouts(
-        &q,
         &b,
         &ctx,
         Some(&[Fk::NULL, spend_fk]),
@@ -2105,11 +2100,11 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
         true,
         None,
         None,
+        true,
     )
     .err()
     .expect("over-budget pin P2WSH must reject");
     assert_bad_block(err, "bad-blk-sigops");
-    let _ = std::fs::remove_dir_all(&path);
 }
 
 /// Anchored skip uses the header path. A height match with a different hash
@@ -2194,7 +2189,6 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
         let mut spent = OutPointSet::default();
         let mut creates = super::PendingCreates::default();
         assemble_block_prevouts(
-            q,
             &b,
             &ctx,
             Some(&[Fk::NULL, spend_fk]),
@@ -2208,6 +2202,7 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
             true,
             None,
             None,
+            crate::milestone::check_scripts(ms, q, 1, &bh),
         )
         .expect("op_true spend assembles")
         .0
@@ -2283,6 +2278,35 @@ fn plant_confirmed_spend(
     q.store()
         .put_spend_create(create_fk, 0, spender, 0)
         .unwrap();
+}
+
+#[test]
+fn bip30_and_immature_coinbase_reject_from_facts() {
+    use super::{reject_bip30_unspent_prior, reject_one_create};
+    assert!(reject_bip30_unspent_prior(2, 2, true).is_ok());
+    let bip30 = reject_bip30_unspent_prior(5, 1, true).unwrap_err();
+    assert!(
+        matches!(bip30, ConsensusError::BadTx(s) if s.contains("BIP30")),
+        "{bip30:?}"
+    );
+    assert!(reject_bip30_unspent_prior(5, 1, false).is_ok());
+
+    let missing = reject_one_create(10, 100, None, false).unwrap_err();
+    assert!(
+        matches!(missing, ConsensusError::BadTx(s) if s.contains("missingorspent")),
+        "{missing:?}"
+    );
+    let forward = reject_one_create(10, 100, Some(11), false).unwrap_err();
+    assert!(
+        matches!(forward, ConsensusError::MissingPrevout),
+        "{forward:?}"
+    );
+    let immature = reject_one_create(10, 100, Some(1), true).unwrap_err();
+    assert!(
+        matches!(immature, ConsensusError::BadTx(s) if s.contains("immature")),
+        "{immature:?}"
+    );
+    assert!(reject_one_create(101, 100, Some(1), true).is_ok());
 }
 
 /// Core never adds `IsUnspendable` outputs (leading `OP_RETURN`, or a script
