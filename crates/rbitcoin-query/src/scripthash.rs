@@ -857,8 +857,8 @@ impl Query {
     }
 
     /// Height-ascending page. Expand one create at a time. Spend slots flush
-    /// when the next slot leaves the open peek group, then the page-full stop
-    /// runs. The remainder flushes once.
+    /// when the next create has no spend slots, or those slots leave the open
+    /// peek group, then the page-full stop runs. The remainder flushes once.
     fn join_page_waves(
         &self,
         scripthash: &[u8; 32],
@@ -884,7 +884,11 @@ impl Query {
             class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
             let offs = self.spend_abs_offs(&created)?;
             let slots: Vec<u64> = offs.iter().copied().flatten().collect();
-            if !run.accepts_all(&slots) && !pending.is_empty() {
+            // An empty slot list does not extend a peek group (`accepts_all`
+            // of nothing is true). Closing here is what lets the page stop
+            // run when the spend index is off or the create has no range.
+            let group_closed = slots.is_empty() || !run.accepts_all(&slots);
+            if group_closed && !pending.is_empty() {
                 let t_s = std::time::Instant::now();
                 out.extend(self.join_known_offs(&pending, &pending_offs, need, view)?);
                 spends_us = spends_us.saturating_add(t_s.elapsed().as_micros());

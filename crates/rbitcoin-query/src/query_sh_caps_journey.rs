@@ -416,8 +416,9 @@ fn pay_txid(n: u32) -> [u8; 32] {
 }
 
 /// More creates than one txout wave, split by a spent-body hole wider than
-/// the pin merge. Each unpaged join reads spend slots once. A height-ascending
-/// page flushes when that hole closes the group, then stops.
+/// the pin merge. An unpaged join still returns the full totals. A
+/// height-ascending page flushes when that hole closes the group, and also
+/// when the next create has no spend slots, then stops.
 #[test]
 fn unpaged_join_reads_spend_slots_once() {
     const N: u32 = 4097;
@@ -485,5 +486,11 @@ fn unpaged_join_reads_spend_slots_once() {
     let before = q.store().spend_meta_batches();
     assert_eq!(q.scripthash_listunspent(&sh).unwrap().len(), N as usize);
     assert_eq!(q.store().spend_meta_batches() - before, 1);
+
+    q.set_spend_index(false);
+    let quiet = q.scripthash_history_filtered(&sh, &asc(2)).unwrap().rows;
+    assert_eq!(quiet.len(), 2);
+    assert_eq!(quiet[0].txid, pay_txid(0));
+    assert_eq!(quiet[1].txid, pay_txid(1));
     let _ = std::fs::remove_dir_all(&dir);
 }
