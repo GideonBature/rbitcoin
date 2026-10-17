@@ -18,7 +18,7 @@
 //! checkpoints is the previous checkpoint plus those stored headers. That
 //! replay runs only when a competing headers batch forks there.
 
-use super::state::IbdWorkState;
+use super::state::{ConfirmedLocatorTail, IbdWorkState};
 use super::ORDERED_HEADERS_SOFT_CAP;
 use crate::chain::ChainHub;
 use bitcoin::block::Header;
@@ -2388,16 +2388,20 @@ fn confirmed_chain_tail(
     let published = hub.query.published_tip();
     let height = published.map(|tip| tip.height);
     let hash = published.map(|tip| tip.hash);
-    if let Some((cached_h, cached_hash, tail)) = &st.confirmed_locator_tail {
-        if *cached_h == height && *cached_hash == hash {
-            return Ok(tail.clone());
+    if let Some(cached) = &st.confirmed_locator_tail {
+        if cached.height == height && cached.hash == hash {
+            return Ok(cached.hashes.clone());
         }
     }
     let tail = hub
         .query
         .locator_hashes()
         .map_err(|e| crate::error::NetError::Consensus(e.to_string()))?;
-    st.confirmed_locator_tail = Some((height, hash, tail.clone()));
+    st.confirmed_locator_tail = Some(ConfirmedLocatorTail {
+        height,
+        hash,
+        hashes: tail.clone(),
+    });
     Ok(tail)
 }
 

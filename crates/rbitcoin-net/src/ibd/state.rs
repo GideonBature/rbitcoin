@@ -125,6 +125,17 @@ impl InflightReq {
     }
 }
 
+/// Confirmed-chain `getheaders` tail for one published tip.
+///
+/// Absent until the first catch-up ask. The next ask reuses `hashes` while
+/// both `height` and `hash` still match `published_tip`. The work-path
+/// prefix is not stored here.
+pub(crate) struct ConfirmedLocatorTail {
+    pub(crate) height: Option<u32>,
+    pub(crate) hash: Option<[u8; 32]>,
+    pub(crate) hashes: Vec<BlockHash>,
+}
+
 /// Core mutable state for the IBD event loop.
 pub(crate) struct IbdWorkState {
     pub slots: Vec<PeerSlot>,
@@ -199,11 +210,7 @@ pub(crate) struct IbdWorkState {
     /// Heights below this are already claim-ready. Rewind starts here.
     pub(crate) densify_ready_through: u32,
     /// Confirmed-chain `getheaders` tail for one published tip.
-    ///
-    /// `(height, hash, hashes)`. Absent until the first catch-up ask. The next
-    /// ask reuses `hashes` while both the height and the hash still match
-    /// `published_tip`. The work-path prefix is not stored here.
-    pub(crate) confirmed_locator_tail: Option<(Option<u32>, Option<[u8; 32]>, Vec<BlockHash>)>,
+    pub(crate) confirmed_locator_tail: Option<ConfirmedLocatorTail>,
 }
 
 pub(crate) enum HeaderCmd {
