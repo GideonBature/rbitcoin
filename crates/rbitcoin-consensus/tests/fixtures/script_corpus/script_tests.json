@@ -9125,5 +9125,50 @@
       "P2SH,WITNESS,TAPROOT",
       "ERR"
     ]
+  },
+  {
+    "id": "stack-underflow-drop",
+    "row": [
+      "",
+      "DROP",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "stack-2rot-6",
+    "row": [
+      "",
+      "1 2 3 4 5 6 2ROT",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "stack-2rot-5",
+    "row": [
+      "",
+      "1 2 3 4 5 2ROT",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "stack-fromalt-ok",
+    "row": [
+      "",
+      "1 TOALTSTACK FROMALTSTACK",
+      "NONE",
+      "OK"
+    ]
+  },
+  {
+    "id": "stack-fromalt-empty",
+    "row": [
+      "",
+      "FROMALTSTACK",
+      "NONE",
+      "ERR"
+    ]
   }
 ]

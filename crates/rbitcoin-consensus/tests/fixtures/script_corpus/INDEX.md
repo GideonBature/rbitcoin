@@ -282,3 +282,13 @@ through `VerifyScript`. Legacy rows are bare scripts with no flags.
 | `exec-checksigverify-empty-legacy` | CHECKSIGVERIFY of an empty signature rejects when the branch runs. |
 | `exec-checksigverify-empty-v0` | CHECKSIGVERIFY of an empty signature rejects when the branch runs. |
 | `exec-checksigverify-empty-tapscript` | CHECKSIGVERIFY of an empty signature rejects when the branch runs. |
+
+Core `script_tests.json` already has both an accept and a reject for NOP, VERIFY, TOALTSTACK, FROMALTSTACK, 2DROP, 2DUP, 3DUP, 2OVER, 2ROT, 2SWAP, IFDUP, DEPTH, DROP, DUP, NIP, OVER, PICK, ROLL, ROT, SWAP, TUCK, and SIZE. Those success arms are not duplicated here. The rows below are the boundary pairs this corpus names itself.
+
+| Id | Predicate |
+|----|-----------|
+| `stack-underflow-drop` | One empty-stack underflow through the shared pop: DROP with nothing on the stack rejects. |
+| `stack-2rot-6` | 2ROT with 6 items accepts. The top item is the original second value and is true. |
+| `stack-2rot-5` | 2ROT with 5 items rejects. |
+| `stack-fromalt-ok` | TOALTSTACK then FROMALTSTACK returns the same true item. |
+| `stack-fromalt-empty` | FROMALTSTACK on an empty altstack rejects. |
