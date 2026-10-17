@@ -7,8 +7,18 @@ Two jobs:
    because Bitcoin Core consensus requires something else.
 2. **Upstream queue.** The same facts, grouped by who would be hurt, so a
    later session can open rust-bitcoin issues or PRs without re-auditing.
-   Three false-reject bugs are filed: RB-004, RB-015, and RB-019. The rest
-   of the queue has not been filed. The comparison is crate **0.32.102**
+   Filed: RB-004
+   ([rust-secp256k1#1010](https://git.rust-bitcoin.org/rust-bitcoin/rust-secp256k1/issues/1010)),
+   RB-014
+   ([rust-bitcoin#7057](https://github.com/rust-bitcoin/rust-bitcoin/issues/7057)),
+   RB-015
+   ([rust-bitcoin#7020](https://github.com/rust-bitcoin/rust-bitcoin/issues/7020)),
+   and RB-019
+   ([rust-bitcoin#7019](https://github.com/rust-bitcoin/rust-bitcoin/issues/7019)).
+   Checked `master` on 2026-10-17: RB-001, RB-002, RB-003, RB-020, and
+   RB-021 are fixed there and still present in 0.32.102. Do not file them.
+   RB-016 and RB-017 were reviewed the same day and left unfiled.
+   The comparison for everything else is crate **0.32.102**
    as locked in this workspace, not rust-bitcoin `master` and not the open
    issue list. Re-check both before posting.
 
@@ -43,9 +53,9 @@ Core, **fix the engine** before commit.
 
 | ID | Area | Symptom / risk | Our mitigation | Code pointer | Status | Notes |
 |----|------|----------------|----------------|--------------|--------|-------|
-| RB-001 | `transaction::Version` | Core `nVersion` is **unsigned**; rust-bitcoin `Version(i32)`. Signed `< 2` skips BIP68 at wire `0xFFFFFFFF` (`i32` −1). | `(tx.version.0 as u32) >= 2` via `bip68_active_for_tx`; CSV same cast | `crates/rbitcoin-consensus/src/block/mod.rs` (`bip68_active_for_tx`); `script/interpreter.rs` CSV | mitigated | Finding [003](./external_findings/003-bip68-version-signedness-consensus-split.md); unit `bip68_enforced_when_version_high_bit_set` |
-| RB-002 | ECDSA sighash type | `EcdsaSighashType::from_consensus(0)` maps **0 → ALL(1)**; mainnet has hashtype **0**. | Parse raw type as `u32`; hash with raw byte; do not round-trip through `from_consensus` | `script/mod.rs` `crypto::parse_der_sig`; `crypto::bip143_signature_hash` writes `raw_ty` | mitigated | Mainnet e.g. block 110300 era. Their own docs say the mapping does not round-trip |
-| RB-003 | P2WPKH / P2WSH sighash helper | `p2wpkh_signature_hash` / `segwit_v0_encode_signing_data_to` hash `EcdsaSighashType::to_u32()`, so non-standard **0x65** (and raw 0) change the digest | Consensus path uses raw hashtype | `script/tests_verify.rs` `mainnet_508011_nested_p2wpkh_raw_sighash_0x65`; `crypto::bip143_*` | mitigated | Mainnet block 508011 nested P2SH-P2WPKH. `legacy_signature_hash` already takes a raw `u32` |
+| RB-001 | `transaction::Version` | Core `nVersion` is **unsigned**; rust-bitcoin `Version(i32)`. Signed `< 2` skips BIP68 at wire `0xFFFFFFFF` (`i32` −1). | `(tx.version.0 as u32) >= 2` via `bip68_active_for_tx`; CSV same cast | `crates/rbitcoin-consensus/src/block/mod.rs` (`bip68_active_for_tx`); `script/interpreter.rs` CSV | mitigated | Finding [003](./external_findings/003-bip68-version-signedness-consensus-split.md); unit `bip68_enforced_when_version_high_bit_set`. Fixed on `master` by [#4039](https://github.com/rust-bitcoin/rust-bitcoin/issues/4039) (`Version(u32)` / `to_u32`). Not filed. 0.32.102 is still `i32` |
+| RB-002 | ECDSA sighash type | `EcdsaSighashType::from_consensus(0)` maps **0 → ALL(1)**; mainnet has hashtype **0**. | Parse raw type as `u32`; hash with raw byte; do not round-trip through `from_consensus` | `script/mod.rs` `crypto::parse_der_sig`; `crypto::bip143_signature_hash` writes `raw_ty` | mitigated | Mainnet e.g. block 110300 era. Fixed on `master`: `from_consensus` round-trips, including 0. Not filed. 0.32.102 still collapses |
+| RB-003 | P2WPKH / P2WSH sighash helper | `p2wpkh_signature_hash` / `segwit_v0_encode_signing_data_to` hash `EcdsaSighashType::to_u32()`, so non-standard **0x65** (and raw 0) change the digest | Consensus path uses raw hashtype | `script/tests_verify.rs` `mainnet_508011_nested_p2wpkh_raw_sighash_0x65`; `crypto::bip143_*` | mitigated | Mainnet block 508011 nested P2SH-P2WPKH. Fixed on `master` once RB-002 round-trips: the helpers hash that `to_u32()`. Not filed. 0.32.102 still rewrites the type |
 | RB-004 | DER parse (libsecp) | `from_der` can return **Ok with wrong (R,S)** on some pre-BIP66 encodings; Core uses **lax** then optional strict check | Always `from_der_lax`; when BIP66, strict encoding check **before** lax parse | `script/mod.rs` `crypto::parse_der_sig`, `is_valid_signature_encoding` | mitigated | e.g. mainnet block 140493-style encodings. Filed [rust-secp256k1#1010](https://git.rust-bitcoin.org/rust-bitcoin/rust-secp256k1/issues/1010) |
 | RB-005 | Soft-fork heights | `Params::REGTEST` still has historical Core heights (BIP34 = 100_000_000, BIP65 = 1351, BIP66 = 1251). `Params` has no CSV, segwit, or taproot height | Own `ChainParams`: overwrite the three regtest fields; store the buried heights `Params` lacks | `params.rs` | mitigated | Finding [021](./external_findings/021-regtest-activation-heights.md). Current Core regtest is BIP34/65/66/CSV = 1, segwit = 0 |
 | RB-006 | PoW formula | Compact target / retarget multiply-and-clamp lives in rust-bitcoin and matches Core | `CompactTarget::from_next_work_required` via `next_work_bits`. We do not reimplement that math | `header.rs`; [consensus-tests H7](./consensus-tests.md) | delegated | The *scheduler* around the formula is RB-018, not this row |
@@ -56,14 +66,14 @@ Core, **fix the engine** before commit.
 | RB-011 | Segwit flag 0 | Marker plus flag `0x00` is Core's 10-byte empty transaction (no inputs, no outputs). `Transaction::consensus_decode` returns `UnsupportedSegwitFlag(0)` | `decode_flag_zero_tx` accepts those 10 bytes, then consensus rejects the tx | `query/tx_precompute.rs` `decode_flag_zero_tx`; `store/block_wire.rs` | mitigated | The tx is invalid. The block must still decode so connect can reject it the way Core does |
 | RB-012 | Merkle mutation | `merkle_tree::calculate_root` duplicates an odd tail and returns only the root. Core also returns the CVE-2012-2459 mutation bit | `merkle_root_mutated` sets the bit when a level pairs two equal hashes, before odd-padding | `store/integrity.rs`; consensus `merkle_root_bytes` | mitigated | `PartialMerkleTree` is the BIP37 merkleblock, not an Electrum sibling list. That branch is `merkle_branch` |
 | RB-013 | BIP34 height parser | `Block::bip34_block_height` accepts only a minimal `PushBytes` and requires `version >= 2`. Core encodes height 0 as `OP_0` and heights 1..=16 as `OP_1`..=`OP_16` | `bip34_height_script` builds that byte string; connect checks the coinbase scriptSig prefix | `block/mod.rs` `check_bip34_coinbase` | mitigated | Mainnet BIP34 starts at height 227931 (a 3-byte push), so this shows up on regtest, signet, and any chain that activates below height 17 |
-| RB-014 | Script integers | `read_scriptint` / `read_scriptint_non_minimal` reject a slice longer than 4 bytes. CLTV and CSV use a 5-byte `CScriptNum` | `scriptnum_decode_width(v, max_len, require_minimal)` | `rbitcoin-primitives/src/scriptnum.rs` | mitigated | Finding [004](./external_findings/004-csv-nop-and-scriptnum-width.md). The 4-byte readers are the right arithmetic helper |
+| RB-014 | Script integers | `read_scriptint` / `read_scriptint_non_minimal` reject a slice longer than 4 bytes. CLTV and CSV use a 5-byte `CScriptNum` | `scriptnum_decode_width(v, max_len, require_minimal)` | `rbitcoin-primitives/src/scriptnum.rs` | mitigated | Finding [004](./external_findings/004-csv-nop-and-scriptnum-width.md). The 4-byte readers are the right arithmetic helper. Filed [rust-bitcoin#7057](https://github.com/rust-bitcoin/rust-bitcoin/issues/7057). `master` `read_cltv_scriptint` already reads a minimal 5-byte number; the open issue is the non-minimal 5-byte operand |
 | RB-015 | Sigop cost | `Transaction::total_sigop_cost` always adds P2SH and witness sigops. Its P2SH path counts a redeem script even when the scriptSig contains an opcode above `OP_16`. Core counts that input as 0, and gates the two classes on the script flags | `tx_sigop_cost` / `last_script_push` | `block/mod.rs`; `primitives/script_sigops.rs` | mitigated | Consensus-tests S11, S12. Filed [rust-bitcoin#7020](https://github.com/rust-bitcoin/rust-bitcoin/issues/7020) |
-| RB-016 | Absolute lock in a block | `LockTime::is_satisfied_by` is `n <= height` / `n <= time`. That matches CLTV against `tx.nLockTime`. Core `IsFinalTx` is strict `<` against the block height or the cutoff time | `is_final_tx` | `block/mod.rs` | mitigated | Do not ask upstream to change `<=`. Ask for an `IsFinalTx` helper if anything |
-| RB-017 | BIP68 sequence locks | `relative::LockTime::is_satisfied_by` is one input, `<=`, with no disable bit and no median-time past | `sequence_locks_satisfied` (Core `EvaluateSequenceLocks`) plus the unsigned version gate from RB-001 | `block/mod.rs` | mitigated | |
+| RB-016 | Absolute lock in a block | `LockTime::is_satisfied_by` is `n <= height` / `n <= time`. That matches CLTV against `tx.nLockTime`. Core `IsFinalTx` is strict `<` against the block height or the cutoff time | `is_final_tx` | `block/mod.rs` | mitigated | Do not ask upstream to change `<=`. Reviewed 2026-10-17. Not filed |
+| RB-017 | BIP68 sequence locks | `relative::LockTime::is_satisfied_by` is one input, `<=`, with no disable bit and no median-time past | `sequence_locks_satisfied` (Core `EvaluateSequenceLocks`) plus the unsigned version gate from RB-001 | `block/mod.rs` | mitigated | Reviewed 2026-10-17. Not filed. `master` has the per-input helper; it has no block-connect function |
 | RB-018 | Difficulty scheduler | `from_next_work_required` is the 2016-block multiply-and-clamp only. It does not apply "retarget only on the boundary" or the testnet walk back across min-difficulty blocks | `next_work_bits` / `min_diff_bits` call the crate formula on a boundary and walk `bits_at` otherwise | `header.rs` | mitigated | Test `testnet_min_difficulty_after_20_minute_gap` |
 | RB-019 | Taproot key-spend helper | `taproot_key_spend_signature_hash` hardcodes `annex = None`. A key-path spend with an annex is consensus-valid; that helper hashes the wrong message. `taproot_script_spend_signature_hash` also drops the annex and pins the codeseparator at `0xFFFFFFFF`. `TapSighashType::from_consensus_u8(0x00)` is `Default`, so a 65-byte signature ending in `0x00` must be rejected before the parser | Key path and script path call in-tree `tap_signature_hash` (annex included; `leaf` absent on key path). They do not call the two wrappers. An explicit `0x00` type byte is rejected. The `0x00 → Default` mapping itself is correct | `script/p2tr.rs` `verify_key_path`, `verify_script_path`; tapscript `checksig_schnorr` | mitigated | Finding [008](./external_findings/008-p2tr-keypath-sighash-zero.md). Mainnet annex key-path example: block 896078. Filed [rust-bitcoin#7019](https://github.com/rust-bitcoin/rust-bitcoin/issues/7019) |
-| RB-020 | Witness decode allocation | `Witness::consensus_decode` allows a stack count up to `MAX_VEC_SIZE` (4_000_000), then allocates `count * 4 + 128` bytes before reading any element length. A short `tx`, `block`, `cmpctblock`, or `blocktxn` whose count is 4_000_000 zeros about 16 MB and then fails | Allocation-free pre-walk in `try_decode`. A count that cannot fit in the remaining bytes (an element is at least one byte) is `MessageTooLarge`, which the peer loop scores. Relay `tx`, `block`, `cmpctblock`, and `blocktxn` then walk inputs, outputs, and witnesses a second time inside `consensus_decode`. IBD block frames skip the pre-walk | `net/src/codec.rs` `walk_witness` | mitigated | `short_tx_witness_count_is_message_too_large` and the `block`, `cmpctblock`, and `blocktxn` siblings. A real witness payload still decodes |
-| RB-021 | `merkleblock` bit vector | `PartialMerkleTree::consensus_decode` reads a flag-byte compact-size capped at 4_000_000, then allocates `vec![false; n * 8]` before reading those bytes. At the cap that is 32 MB of bools. This node never asks for or handles a merkle block | The command is `Unknown` before `consensus_decode`. An unrecognized command stays `Unknown` | `net/src/codec.rs` `decode_cmd_payload` | mitigated | `short_merkleblock_is_unknown_without_decoding`. Esplora still builds a `MerkleBlock` itself for `/tx/:txid/merkleblock-proof` |
+| RB-020 | Witness decode allocation | `Witness::consensus_decode` allows a stack count up to `MAX_VEC_SIZE` (4_000_000), then allocates `count * 4 + 128` bytes before reading any element length. A short `tx`, `block`, `cmpctblock`, or `blocktxn` whose count is 4_000_000 zeros about 16 MB and then fails | Allocation-free pre-walk in `try_decode`. A count that cannot fit in the remaining bytes (an element is at least one byte) is `MessageTooLarge`, which the peer loop scores. Relay `tx`, `block`, `cmpctblock`, and `blocktxn` then walk inputs, outputs, and witnesses a second time inside `consensus_decode`. IBD block frames skip the pre-walk | `net/src/codec.rs` `walk_witness` | mitigated | `short_tx_witness_count_is_message_too_large` and the `block`, `cmpctblock`, and `blocktxn` siblings. A real witness payload still decodes. Fixed on `master` (`WitnessDecoder` grows from bytes received). Not filed. 0.32.102 still allocates up front |
+| RB-021 | `merkleblock` bit vector | `PartialMerkleTree::consensus_decode` reads a flag-byte compact-size capped at 4_000_000, then allocates `vec![false; n * 8]` before reading those bytes. At the cap that is 32 MB of bools. This node never asks for or handles a merkle block | The command is `Unknown` before `consensus_decode`. An unrecognized command stays `Unknown` | `net/src/codec.rs` `decode_cmd_payload` | mitigated | `short_merkleblock_is_unknown_without_decoding`. Esplora still builds a `MerkleBlock` itself for `/tx/:txid/merkleblock-proof`. Fixed on `master` (`ByteVecDecoder` reserves as bytes arrive; the bit vector is built from bytes read). Not filed. 0.32.102 still allocates first |
 
 ## Upstream queue
 
@@ -89,7 +99,9 @@ regtest harnesses included.
   `legacy_signature_hash` has, and hash those four bytes. Do not change
   `from_consensus` without a migration; callers rely on the lossy mapping
   for standardness. **Title:** "Segwit sighash helpers cannot verify a
-  non-standard hashtype."
+  non-standard hashtype." **Fixed on `master` (2026-10-17). Do not file.**
+  `from_consensus(n).to_u32()` is `n`, and the segwit helpers hash that
+  value. 0.32.102 still maps a non-standard type to `All` before hashing.
 
 - **RB-004. `Signature::from_der` is not a consensus parse.**
   On some pre-BIP66 encodings (high-bit S without a `0x00` pad; mainnet
@@ -157,6 +169,10 @@ regtest harnesses included.
   **Ask:** if `count` is greater than the bytes still available, return
   before allocating. Each element is at least one byte. **Title:**
   "`Witness::consensus_decode` allocates before checking the payload."
+  **Fixed on `master` (2026-10-17). Do not file.** `WitnessDecoder`
+  grows from the bytes that arrive and reserves the index table only
+  after every element is read. 0.32.102 still allocates `count * 4 + 128`
+  up front.
 
 - **RB-021. Partial merkle tree allocates eight bools per flag byte.**
   `PartialMerkleTree::consensus_decode` reads a compact-size byte count
@@ -165,7 +181,10 @@ regtest harnesses included.
   BIP37 still pay it if they decode a `merkleblock`.
   **Ask:** size the bit vector from bytes actually read, or cap `n` by
   the remaining length. **Title:** "`PartialMerkleTree` allocates a bit
-  per flag before reading it."
+  per flag before reading it." **Fixed on `master` (2026-10-17). Do not
+  file.** Flag bytes go through `ByteVecDecoder`, which reserves as those
+  bytes arrive, and the bit vector is built from the bytes read.
+  0.32.102 still builds `vec![false; n * 8]` first.
 
 ### Consensus gaps that hit a full node and not a wallet
 
@@ -181,6 +200,9 @@ untrusted blocks the way Core does will, if it uses the obvious helper.
   sentence that BIP68 and CSV use the unsigned compare. Do not change the
   field to `u32`; negative versions exist on the wire.
   **Title:** "Version is i32; BIP68 needs an unsigned compare."
+  **Fixed on `master` (2026-10-17). Do not file.** [#4039](https://github.com/rust-bitcoin/rust-bitcoin/issues/4039)
+  stored `Version` as `u32` with `to_u32()`. Wire `0xFFFFFFFF` is a large
+  version, so BIP68 still applies. 0.32.102 is still `Version(pub i32)`.
 
 - **RB-011. Flag 0 does not decode.**
   Core `UnserializeTransaction` treats marker `0x00` plus flag `0x00` as a
@@ -212,7 +234,16 @@ untrusted blocks the way Core does will, if it uses the obvious helper.
   opcodes rejects spends Core accepts.
   **Ask:** `read_scriptnum(bytes, max_len, require_minimal)` beside the
   existing 4-byte functions. Do not raise the cap on `read_scriptint`.
-  **Title:** "Script integers have no 5-byte CLTV/CSV reader."
+  **Title:** "Five-byte script numbers can only be read when they are
+  minimal CLTV values." **Filed:**
+  [rust-bitcoin#7057](https://github.com/rust-bitcoin/rust-bitcoin/issues/7057)
+  (2026-10-17). `master` already has `read_cltv_scriptint` for a minimal
+  5-byte number, including the CSV disable flag `2147483648`
+  (`00 00 00 80 00`). The open issue is the non-minimal operand Core
+  accepts with `MINIMALDATA` off: five zero bytes, `tx_valid.json`
+  ("5 byte non-minimally-encoded arguments are valid"). Both public
+  readers on 0.32.102 return `NumericOverflow` for that operand and for
+  the minimal disable-flag operand.
 
 - **RB-015. `total_sigop_cost` is not `GetSigOpCost`.**
   The public method always includes P2SH (scaled) and witness sigops.
@@ -242,6 +273,8 @@ untrusted blocks the way Core does will, if it uses the obvious helper.
   **Ask:** add `Transaction::is_final_at(block_height, cutoff_time)` with
   the strict `<`. Leave `is_satisfied_by` alone.
   **Title:** "Add IsFinalTx; do not change LockTime::is_satisfied_by."
+  **Not filed (2026-10-17).** Still absent on `master`. Separate from
+  closed [#6373](https://github.com/rust-bitcoin/rust-bitcoin/issues/6373).
 
 - **RB-017. No `EvaluateSequenceLocks`.**
   `relative::LockTime` cannot express the disable bit, the type bit, the
@@ -251,6 +284,10 @@ untrusted blocks the way Core does will, if it uses the obvious helper.
   **Ask:** a free function that takes the transaction, the previous
   heights, the previous median times, the block height, and the previous
   block's median time. **Title:** "Add EvaluateSequenceLocks."
+  **Not filed (2026-10-17).** `master` can decode one sequence and answer
+  the per-input "next block" question. It still has no block-connect
+  function. The version half of this row is RB-001, already fixed on
+  `master`.
 
 - **RB-005 (absent fields) + RB-018. Deployment heights and the retarget
   scheduler.** `Params` stores BIP16 time and BIP34/65/66 heights. It does
