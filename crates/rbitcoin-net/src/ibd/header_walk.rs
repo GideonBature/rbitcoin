@@ -2377,10 +2377,10 @@ fn ask_header_peer(
     Ok(true)
 }
 
-/// Confirmed-chain hashes for `getheaders`, reused until the published tip changes.
+/// Confirmed-chain tail for `getheaders`.
 ///
-/// The work-path prefix is built on every ask. This is only the tail
-/// `query.locator_hashes` used to re-read on each send.
+/// Rebuilt when `published_tip` height or hash changes. The work-path prefix
+/// is not part of this vec.
 fn confirmed_chain_tail(
     st: &mut IbdWorkState,
     hub: &ChainHub,
