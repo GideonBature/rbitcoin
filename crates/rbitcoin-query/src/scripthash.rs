@@ -5,7 +5,7 @@
 //! Spentness/heights from spends + Class C.
 
 use super::*;
-use rbitcoin_store::{output_flags, script_hash, spent_abs, IdxBodyMode};
+use rbitcoin_store::{output_flags, script_hash, spent_abs, IdxBodyMode, SpendSlotRun};
 use std::sync::Arc;
 
 /// Class A expand / spend-join wave. Bounds decoded `txout` pages in RAM.
@@ -632,32 +632,21 @@ impl Query {
         if paging {
             self.order_fks_for_page(&mut fks, page.expect("paging"))?;
         }
-        let wave_n = if paging { 1 } else { SH_JOIN_WAVE };
-        let mut out = Vec::new();
-        let mut class_a_us = 0u128;
-        let mut spends_us = 0u128;
-        let mut offset = 0usize;
-        let mut stop_at: Option<usize> = None;
-        for wave in fks.chunks(wave_n) {
-            let t_a = std::time::Instant::now();
-            let creates = self.expand_create_fks_wave(scripthash, wave, need)?;
-            class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
+        let (out, class_a_us, spends_us) = if paging {
+            self.join_page_waves(scripthash, &fks, need, view, page.expect("paging"))?
+        } else {
+            let mut creates = Vec::new();
+            let mut class_a_us = 0u128;
+            for wave in fks.chunks(SH_JOIN_WAVE) {
+                let t_a = std::time::Instant::now();
+                creates.extend(self.expand_create_fks_wave(scripthash, wave, need)?);
+                class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
+            }
             let t_s = std::time::Instant::now();
-            out.extend(self.join_spends_wave(&creates, need, view)?);
-            spends_us = spends_us.saturating_add(t_s.elapsed().as_micros());
-            offset = offset.saturating_add(wave.len());
-            if !paging {
-                continue;
-            }
-            let filter = page.expect("paging");
-            if stop_at.is_none() && Self::history_page_full(&out, filter) {
-                let keep = self.history_tail_keep(&out, filter, &fks[offset..])?;
-                stop_at = Some(offset.saturating_add(keep));
-            }
-            if stop_at.is_some_and(|end| offset >= end) {
-                break;
-            }
-        }
+            let joined = self.join_spends_wave(&creates, need, view)?;
+            let spends_us = t_s.elapsed().as_micros();
+            (joined, class_a_us, spends_us)
+        };
         let total_us = pages_us
             .saturating_add(class_a_us)
             .saturating_add(spends_us);
@@ -867,26 +856,68 @@ impl Query {
         })
     }
 
-    fn join_spends_wave(
+    /// Height-ascending page. Expand one create at a time. Spend slots flush
+    /// when the next slot leaves the open peek group, then the page-full stop
+    /// runs. The remainder flushes once.
+    fn join_page_waves(
         &self,
-        creates: &[ScriptHashOutpoint],
+        scripthash: &[u8; 32],
+        fks: &[Fk],
         need: ShJoinNeed,
         view: &ChainView,
-    ) -> Result<Vec<ShJoinedOut>, QueryError> {
-        if creates.is_empty() {
-            return Ok(Vec::new());
+        filter: &HistoryFilter,
+    ) -> Result<(Vec<ShJoinedOut>, u128, u128), QueryError> {
+        let mut out = Vec::new();
+        let mut pending = Vec::new();
+        let mut pending_offs = Vec::new();
+        let mut run = SpendSlotRun::new();
+        let mut class_a_us = 0u128;
+        let mut spends_us = 0u128;
+        let mut i = 0usize;
+        let mut stop_at: Option<usize> = None;
+        while i < fks.len() {
+            if stop_at.is_some_and(|end| i >= end) {
+                break;
+            }
+            let t_a = std::time::Instant::now();
+            let created = self.expand_create_fks_wave(scripthash, &fks[i..i + 1], need)?;
+            class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
+            let offs = self.spend_abs_offs(&created)?;
+            let slots: Vec<u64> = offs.iter().copied().flatten().collect();
+            if !run.accepts_all(&slots) && !pending.is_empty() {
+                let t_s = std::time::Instant::now();
+                out.extend(self.join_known_offs(&pending, &pending_offs, need, view)?);
+                spends_us = spends_us.saturating_add(t_s.elapsed().as_micros());
+                pending.clear();
+                pending_offs.clear();
+                run.clear();
+                if stop_at.is_none() && Self::history_page_full(&out, filter) {
+                    let keep = self.history_tail_keep(&out, filter, &fks[i..])?;
+                    stop_at = Some(i.saturating_add(keep));
+                }
+                if stop_at.is_some_and(|end| i >= end) {
+                    break;
+                }
+            }
+            run.push_all(&slots);
+            pending.extend(created);
+            pending_offs.extend(offs);
+            i += 1;
         }
-        if !self.spend_index_enabled() {
-            return Ok(creates
-                .iter()
-                .cloned()
-                .map(|out| ShJoinedOut {
-                    out,
-                    spent: false,
-                    spender_fks: Vec::new(),
-                    spenders: Vec::new(),
-                })
-                .collect());
+        if !pending.is_empty() {
+            let t_s = std::time::Instant::now();
+            out.extend(self.join_known_offs(&pending, &pending_offs, need, view)?);
+            spends_us = spends_us.saturating_add(t_s.elapsed().as_micros());
+        }
+        Ok((out, class_a_us, spends_us))
+    }
+
+    fn spend_abs_offs(
+        &self,
+        creates: &[ScriptHashOutpoint],
+    ) -> Result<Vec<Option<u64>>, QueryError> {
+        if creates.is_empty() || !self.spend_index_enabled() {
+            return Ok(vec![None; creates.len()]);
         }
         let mut uniq = Vec::new();
         let mut seen = HashSet::new();
@@ -902,14 +933,62 @@ impl Query {
                 range_by_fk.insert(*fk, range);
             }
         }
+        Ok(creates
+            .iter()
+            .map(|c| {
+                range_by_fk
+                    .get(&c.create_tx_fk)
+                    .map(|(off, _)| spent_abs(*off, c.vout))
+            })
+            .collect())
+    }
+
+    fn join_spends_wave(
+        &self,
+        creates: &[ScriptHashOutpoint],
+        need: ShJoinNeed,
+        view: &ChainView,
+    ) -> Result<Vec<ShJoinedOut>, QueryError> {
+        let offs = self.spend_abs_offs(creates)?;
+        self.join_known_offs(creates, &offs, need, view)
+    }
+
+    fn join_known_offs(
+        &self,
+        creates: &[ScriptHashOutpoint],
+        offs: &[Option<u64>],
+        need: ShJoinNeed,
+        view: &ChainView,
+    ) -> Result<Vec<ShJoinedOut>, QueryError> {
+        if creates.is_empty() {
+            return Ok(Vec::new());
+        }
+        if offs.len() != creates.len() {
+            return Err(StoreError::Corrupt(
+                "invariant: SH spend offset batch length",
+            ));
+        }
+        if !self.spend_index_enabled() {
+            return Ok(creates
+                .iter()
+                .cloned()
+                .map(|out| ShJoinedOut {
+                    out,
+                    spent: false,
+                    spender_fks: Vec::new(),
+                    spenders: Vec::new(),
+                })
+                .collect());
+        }
         let mut abs_offs = Vec::with_capacity(creates.len());
-        let mut abs_at = vec![None; creates.len()];
-        for (i, c) in creates.iter().enumerate() {
-            let Some((off, _)) = range_by_fk.get(&c.create_tx_fk) else {
-                continue;
-            };
-            abs_at[i] = Some(abs_offs.len());
-            abs_offs.push(spent_abs(*off, c.vout));
+        let mut abs_at = Vec::with_capacity(creates.len());
+        for off in offs {
+            if let Some(off) = off {
+                abs_at.push(Some(abs_offs.len()));
+                abs_offs.push(*off);
+            } else {
+                abs_at.push(None);
+            }
         }
         let metas = self.store.get_spender_meta_at_abs_batch(&abs_offs)?;
         let per_out = self.join_spends_wave_fks(creates, &abs_at, &metas, view)?;

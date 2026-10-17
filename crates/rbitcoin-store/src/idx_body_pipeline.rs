@@ -154,6 +154,182 @@ pub(crate) fn plan_spend_slot_peeks(offs: &[u64]) -> Vec<SpendSlotPeek> {
         .collect()
 }
 
+fn window_pages(off: u64, len: u64) -> (u64, u64) {
+    let lo = off / BODY_OS_PAGE;
+    let hi = if len == 0 {
+        lo
+    } else {
+        off.saturating_add(len).saturating_sub(1) / BODY_OS_PAGE
+    };
+    (lo, hi)
+}
+
+/// One open `group_body_peeks` run. The caps live in [`group_body_peeks`]'s caller.
+#[derive(Clone, Copy, Debug)]
+struct PeekGroup {
+    glo: u64,
+    ghi: u64,
+    min_off: u64,
+    max_end: u64,
+}
+
+impl PeekGroup {
+    fn start(off: u64, len: u64) -> Self {
+        let (glo, ghi) = window_pages(off, len);
+        Self {
+            glo,
+            ghi,
+            min_off: off,
+            max_end: off.saturating_add(len),
+        }
+    }
+
+    /// `off` is the next window in file order, the same walk as [`group_body_peeks`].
+    fn extends(&self, off: u64, len: u64) -> bool {
+        let (plo, phi) = window_pages(off, len);
+        let new_hi = self.ghi.max(phi);
+        let new_end = self.max_end.max(off.saturating_add(len));
+        let page_off = (self.min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
+        let span = new_end.saturating_sub(page_off);
+        let hole = off.saturating_sub(self.max_end);
+        let page_merge = plo <= self.ghi && new_hi.saturating_sub(self.glo) < BODY_GROUP_MAX_PAGES;
+        let gap_merge = hole <= BODY_GROUP_MAX_HOLE && span <= BODY_GROUP_MAX_SPAN;
+        page_merge || gap_merge
+    }
+
+    fn absorb(&mut self, off: u64, len: u64) {
+        let (_plo, phi) = window_pages(off, len);
+        self.ghi = self.ghi.max(phi);
+        self.max_end = self.max_end.max(off.saturating_add(len));
+    }
+
+    fn page_span(&self) -> (u64, u64) {
+        let page_off = (self.min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
+        (page_off, self.max_end.saturating_sub(page_off))
+    }
+}
+
+/// Slots that still form one [`group_body_peeks`] group.
+///
+/// Callers flush a spend batch when the next slot no longer joins this run.
+/// Unsorted slots use the same grouper.
+#[derive(Clone, Debug)]
+pub struct SpendSlotRun {
+    offs: Vec<u64>,
+    group: Option<PeekGroup>,
+    spilled: bool,
+}
+
+impl Default for SpendSlotRun {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpendSlotRun {
+    pub fn new() -> Self {
+        Self {
+            offs: Vec::new(),
+            group: None,
+            spilled: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.offs.clear();
+        self.group = None;
+        self.spilled = false;
+    }
+
+    /// Every `extra` slot still merges with the slots already pushed.
+    pub fn accepts_all(&self, extra: &[u64]) -> bool {
+        if extra.is_empty() {
+            return true;
+        }
+        if self.spilled {
+            return false;
+        }
+        let slot = crate::tx_table::OutputRecord::SPENT_SLOT_LEN as u64;
+        if self.sorted_append(extra) {
+            let mut group = self.group;
+            for &off in extra {
+                match group {
+                    None => group = Some(PeekGroup::start(off, slot)),
+                    Some(mut open) => {
+                        if !open.extends(off, slot) {
+                            return false;
+                        }
+                        open.absorb(off, slot);
+                        group = Some(open);
+                    }
+                }
+            }
+            return true;
+        }
+        let mut all = Vec::with_capacity(self.offs.len().saturating_add(extra.len()));
+        all.extend_from_slice(&self.offs);
+        all.extend_from_slice(extra);
+        single_sorted_group(&all).is_some()
+    }
+
+    pub fn push_all(&mut self, extra: &[u64]) {
+        for &off in extra {
+            self.push(off);
+        }
+    }
+
+    fn sorted_append(&self, extra: &[u64]) -> bool {
+        if let Some(&last) = self.offs.last() {
+            if extra[0] < last {
+                return false;
+            }
+        }
+        extra.windows(2).all(|pair| pair[1] >= pair[0])
+    }
+
+    fn push(&mut self, off: u64) {
+        let slot = crate::tx_table::OutputRecord::SPENT_SLOT_LEN as u64;
+        if self.spilled {
+            self.offs.push(off);
+            return;
+        }
+        let Some(group) = self.group else {
+            self.group = Some(PeekGroup::start(off, slot));
+            self.offs.push(off);
+            return;
+        };
+        if self.offs.last().is_some_and(|&last| off >= last) && group.extends(off, slot) {
+            self.group.as_mut().expect("open group").absorb(off, slot);
+            self.offs.push(off);
+            return;
+        }
+        self.offs.push(off);
+        if let Some(group) = single_sorted_group(&self.offs) {
+            self.group = Some(group);
+        } else {
+            self.spilled = true;
+            self.group = None;
+        }
+    }
+}
+
+fn single_sorted_group(offs: &[u64]) -> Option<PeekGroup> {
+    if offs.is_empty() {
+        return None;
+    }
+    let slot = crate::tx_table::OutputRecord::SPENT_SLOT_LEN as u64;
+    let mut order = offs.to_vec();
+    order.sort_unstable();
+    let mut group = PeekGroup::start(order[0], slot);
+    for &off in order.iter().skip(1) {
+        if !group.extends(off, slot) {
+            return None;
+        }
+        group.absorb(off, slot);
+    }
+    Some(group)
+}
+
 /// Offset-sorted `[off, off+len)` windows → `(page_off, span_len, window indices)`.
 ///
 /// Jobs that share an OS page, straddle two pages, or leave a hole of at most
@@ -166,51 +342,20 @@ fn group_body_peeks(windows: &[(u64, u64)]) -> Vec<(u64, u64, Vec<usize>)> {
     if windows.is_empty() {
         return groups;
     }
-    let pages = |off: u64, len: u64| -> (u64, u64) {
-        let lo = off / BODY_OS_PAGE;
-        let hi = if len == 0 {
-            lo
-        } else {
-            off.saturating_add(len).saturating_sub(1) / BODY_OS_PAGE
-        };
-        (lo, hi)
-    };
     let mut start = 0usize;
-    let (mut glo, mut ghi) = pages(windows[0].0, windows[0].1);
-    let mut min_off = windows[0].0;
-    let mut max_end = windows[0].0.saturating_add(windows[0].1);
+    let mut group = PeekGroup::start(windows[0].0, windows[0].1);
     for (i, &(off, len)) in windows.iter().enumerate().skip(1) {
-        let (plo, phi) = pages(off, len);
-        let new_hi = ghi.max(phi);
-        let new_end = max_end.max(off.saturating_add(len));
-        let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
-        let span = new_end.saturating_sub(page_off);
-        let hole = off.saturating_sub(max_end);
-        let page_merge = plo <= ghi && new_hi.saturating_sub(glo) < BODY_GROUP_MAX_PAGES;
-        let gap_merge = hole <= BODY_GROUP_MAX_HOLE && span <= BODY_GROUP_MAX_SPAN;
-        if page_merge || gap_merge {
-            ghi = new_hi;
-            max_end = new_end;
+        if group.extends(off, len) {
+            group.absorb(off, len);
             continue;
         }
-        let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
-        groups.push((
-            page_off,
-            max_end.saturating_sub(page_off),
-            (start..i).collect(),
-        ));
+        let (page_off, span) = group.page_span();
+        groups.push((page_off, span, (start..i).collect()));
         start = i;
-        glo = plo;
-        ghi = phi;
-        min_off = off;
-        max_end = off.saturating_add(len);
+        group = PeekGroup::start(off, len);
     }
-    let page_off = (min_off / BODY_OS_PAGE) * BODY_OS_PAGE;
-    groups.push((
-        page_off,
-        max_end.saturating_sub(page_off),
-        (start..windows.len()).collect(),
-    ));
+    let (page_off, span) = group.page_span();
+    groups.push((page_off, span, (start..windows.len()).collect()));
     groups
 }
 
@@ -544,6 +689,42 @@ mod tests {
         let same = plan_spend_slot_peeks(&[page + 100, page + 10]);
         assert_eq!(same.len(), 1, "same page, caller order is not file order");
         assert_eq!(same[0].members, vec![1, 0]);
+    }
+
+    #[test]
+    fn spend_slot_run_closes_when_the_grouper_splits() {
+        let page = BODY_OS_PAGE;
+        let slot = crate::tx_table::OutputRecord::SPENT_SLOT_LEN as u64;
+        let near = [page, page + slot + 8 * 1024];
+        let mut run = SpendSlotRun::new();
+        assert!(run.accepts_all(&near), "8 KiB hole");
+        run.push_all(&near);
+        let far = near[1] + slot + 64 * 1024 + 1;
+        assert!(!run.accepts_all(&[far]), "hole just over 64 KiB");
+        let mut wide = Vec::new();
+        wide.extend_from_slice(&near);
+        wide.push(far);
+        assert_eq!(plan_spend_slot_peeks(&wide).len(), 2);
+
+        let mut stepped = Vec::new();
+        let mut at = 0u64;
+        while at + slot <= 256 * 1024 {
+            stepped.push(at);
+            at += 32 * 1024;
+        }
+        let mut run = SpendSlotRun::new();
+        assert!(run.accepts_all(&stepped), "steps inside the span cap");
+        run.push_all(&stepped);
+        assert!(
+            !run.accepts_all(&[at]),
+            "the next step past 256 KiB closes the run"
+        );
+
+        let reversed = SpendSlotRun::new();
+        assert!(
+            reversed.accepts_all(&[page + 100, page + 10]),
+            "same page, caller order is not file order"
+        );
     }
 
     fn stamp_txout(t: &TxTable, jobs: &mut [IdxBodyJob]) {

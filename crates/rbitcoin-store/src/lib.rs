@@ -78,7 +78,7 @@ pub use head_resolve_stats::{leftover_probe_diag_ready, leftover_probe_diag_reco
 pub use header_table::{block_header_hash, HeaderRecord};
 pub use height_fence::HeightFence;
 pub(crate) use idx_body_pipeline::run_idx_body_pipeline;
-pub use idx_body_pipeline::{BodyMode as IdxBodyMode, IdxBodyJob};
+pub use idx_body_pipeline::{BodyMode as IdxBodyMode, IdxBodyJob, SpendSlotRun};
 pub use index_build_uring::{read_index_window, IndexBlock, IndexHeight, IndexWindow};
 pub use input::InputEdge;
 pub use int_map::{FkMap, FkSet, U32Map, U64IdentityHasher, U64Map, U64Set};

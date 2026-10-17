@@ -350,3 +350,105 @@ fn newest_page_is_tip_events_not_creates_between() {
     assert_newest_page_leaves_slot_empty(&q, &sh);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn script_pay(n: u32, script: u8) -> TxApply {
+    let mut txid = [0u8; 32];
+    txid[0..4].copy_from_slice(&n.to_le_bytes());
+    txid[31] = script;
+    TxApply {
+        tx: TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord {
+            prev_txid: [0u8; 32],
+            parent: rbitcoin_store::InputParent::Coinbase,
+            sequence: u32::MAX,
+            script_sig: vec![],
+            witness: vec![],
+        }],
+        outputs: vec![OutputRecord::unspent(1, vec![script])],
+    }
+}
+
+fn pay_txid(n: u32) -> [u8; 32] {
+    script_pay(n, 0x51).tx.txid
+}
+
+/// More creates than one txout wave, split by a spent-body hole wider than
+/// the pin merge. Each unpaged join reads spend slots once. A height-ascending
+/// page flushes when that hole closes the group, then stops.
+#[test]
+fn unpaged_join_reads_spend_slots_once() {
+    const N: u32 = 4097;
+    let (dir, q) = temp_query("sh-spend-once");
+    let sh = script_hash(&[0x51]);
+    let (header, mut cb) = coinbase_block(0, Fk::NULL, None);
+    cb.outputs[0] = OutputRecord::unspent(1, vec![0x00]);
+    let mut gap = script_pay(N, 0x00);
+    gap.tx.output_count = 8193;
+    gap.outputs = vec![OutputRecord::unspent(1, vec![0x00]); 8193];
+    let block0 = vec![cb, script_pay(0, 0x51), script_pay(1, 0x51), gap];
+    let tip = q.connect_block(Height(0), &header, &block0).unwrap();
+    let (header1, mut cb1) = coinbase_block(1, tip, Some(header.hash));
+    cb1.outputs[0] = OutputRecord::unspent(1, vec![0x00]);
+    let mut block1 = Vec::with_capacity((N - 2) as usize + 1);
+    block1.push(cb1);
+    for n in 2..N {
+        block1.push(script_pay(n, 0x51));
+    }
+    q.connect_block(Height(1), &header1, &block1).unwrap();
+
+    let asc = |limit| crate::scripthash::HistoryFilter {
+        limit: Some(limit),
+        order: crate::scripthash::HistoryOrder::HeightAsc,
+        ..crate::scripthash::HistoryFilter::open()
+    };
+    let before = q.store().spend_meta_batches();
+    let page = q.scripthash_history_filtered(&sh, &asc(2)).unwrap().rows;
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].txid, pay_txid(0));
+    assert_eq!(page[1].txid, pay_txid(1));
+    assert_eq!(
+        q.store().spend_meta_batches() - before,
+        1,
+        "two same-block creates share one spend read"
+    );
+
+    let before = q.store().spend_meta_batches();
+    let wider = q.scripthash_history_filtered(&sh, &asc(3)).unwrap().rows;
+    assert_eq!(wider.len(), 3);
+    assert_eq!(wider[2].height, 1);
+    assert_eq!(wider[2].txid, pay_txid(256));
+    assert_eq!(
+        q.store().spend_meta_batches() - before,
+        2,
+        "the next block sits past the merge hole and is its own spend read"
+    );
+
+    let before = q.store().spend_meta_batches();
+    let stats = q.scripthash_chain_stats(&sh).unwrap();
+    assert_eq!(stats.funded_txo_count, N);
+    assert_eq!(stats.funded_txo_sum, i64::from(N));
+    assert_eq!(stats.spent_txo_count, 0);
+    assert_eq!(stats.spent_txo_sum, 0);
+    assert_eq!(stats.tx_count, N);
+    assert_eq!(
+        q.store().spend_meta_batches() - before,
+        1,
+        "an unpaged join reads every spend slot in one batch"
+    );
+    let before = q.store().spend_meta_batches();
+    let bal = q.scripthash_balance(&sh).unwrap();
+    assert_eq!(bal.confirmed, i64::from(N));
+    assert_eq!(q.store().spend_meta_batches() - before, 1);
+    let before = q.store().spend_meta_batches();
+    assert_eq!(q.scripthash_listunspent(&sh).unwrap().len(), N as usize);
+    assert_eq!(q.store().spend_meta_batches() - before, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
