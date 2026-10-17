@@ -1,0 +1,1 @@
+Fix IBD peer recovery after empty attempts to add connections. Only failed rounds with no live peers consume the recovery budget, and an already-started replacement connection is allowed to finish. Exhausted recovery still stops without entering tip mode.

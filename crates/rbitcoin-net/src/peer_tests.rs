@@ -2990,6 +2990,34 @@ async fn write_peer_msg(raw: &mut V2PlainSession, msg: NetworkMessage) {
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limited_block_request_disconnects_without_waiting_for_another_message() {
+    let mut t = paused_serve("rate-request", 1, &["/rbitcoin:test(rate-request)/"]).await;
+    let (raw, _) = &mut t.clients[0];
+    // The handshake is outside the rate window; send no follow-session replies.
+    for _ in 0..crate::peer_dos::DEFAULT_MAX_MSGS_PER_SEC {
+        write_peer_msg(raw, NetworkMessage::Ping(7)).await;
+    }
+    write_peer_msg(raw, getdata_msg(&t.hashes)).await;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match next_peer_msg(raw).await {
+                Err(_) => return true,
+                Ok(NetworkMessage::Block(_)) => return false,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    raw.close();
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        matches!(closed, Ok(true)),
+        "an over-budget block request must close the session, not disappear: {closed:?}"
+    );
+}
+
 /// Unknown BIP324 short id on a live follow session counts as `*other*`
 /// and the peer stays up (Core `test_msgtype`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

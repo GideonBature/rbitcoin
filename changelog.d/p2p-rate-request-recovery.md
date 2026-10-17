@@ -1,0 +1,1 @@
+Disconnect a peer when its application message exceeds the rate budget, so a dropped block request can be retried immediately instead of waiting for the quiet-peer timeout. Rate budgets and address-discouragement thresholds are unchanged.

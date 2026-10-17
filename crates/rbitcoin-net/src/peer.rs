@@ -1788,7 +1788,8 @@ pub async fn peer_session_with(
                         if follow.ban_score >= BAN_SCORE_THRESHOLD {
                             return Err(threshold_disconnect(session.as_deref()));
                         }
-                        continue;
+                        // EOF lets the peer retry a request we cannot accept.
+                        return Err(NetError::Protocol("peer rate limit"));
                     }
                     // Ping/pong: cheap 8-byte path — never leave the I/O task for decode.
                     if frame.is_ping() {

@@ -178,12 +178,11 @@ pub fn all_peers_dead_action(
     st: &IbdWorkState,
     tip_h: u32,
     redial_in_flight: bool,
-    dark_redial_empty: u32,
 ) -> AllPeersDead {
     if ibd_caught_up(st, tip_h) {
         return AllPeersDead::CatchupComplete;
     }
-    if !redial_in_flight || dark_redial_empty >= MAX_DARK_EMPTY_REDIALS {
+    if !redial_in_flight {
         return AllPeersDead::GiveUpMidCatchup;
     }
     AllPeersDead::WaitRedial
@@ -192,6 +191,21 @@ pub fn all_peers_dead_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_replacement_peer_is_not_abandoned_after_empty_topups() {
+        let mut st = IbdWorkState::new(Vec::new(), None, Some(21_792));
+        st.max_peer_height = 326_676;
+        assert_eq!(
+            all_peers_dead_action(&st, 21_792, true),
+            AllPeersDead::WaitRedial,
+            "a started replacement connection must finish before declaring the network exhausted"
+        );
+        assert_eq!(
+            all_peers_dead_action(&st, 21_792, false),
+            AllPeersDead::GiveUpMidCatchup
+        );
+    }
 
     /// all_peers_dead + catchup_complete edge matrix (mid-chain / caught-up / tip-0).
     #[allow(clippy::cognitive_complexity)] // one fixture, many exit arms
@@ -202,11 +216,11 @@ mod tests {
         mid.max_peer_height = 958_820;
         mid.max_ready_height = 161_000;
         assert_eq!(
-            all_peers_dead_action(&mid, 161_249, false, 0),
+            all_peers_dead_action(&mid, 161_249, false),
             AllPeersDead::GiveUpMidCatchup
         );
         assert_eq!(
-            all_peers_dead_action(&mid, 161_249, true, 0),
+            all_peers_dead_action(&mid, 161_249, true),
             AllPeersDead::WaitRedial
         );
 
@@ -216,7 +230,7 @@ mod tests {
         done.max_ready_height = 100;
         done.headers_done = true;
         assert_eq!(
-            all_peers_dead_action(&done, 100, false, 0),
+            all_peers_dead_action(&done, 100, false),
             AllPeersDead::CatchupComplete
         );
 
@@ -239,13 +253,7 @@ mod tests {
         assert!(!ibd_caught_up(&zero, 0));
         assert!(!ibd_caught_up(&zero, 0));
         assert_eq!(
-            all_peers_dead_action(&zero, 0, false, 0),
-            AllPeersDead::GiveUpMidCatchup
-        );
-
-        // Dark redial budget exhausted while redial still marked in-flight.
-        assert_eq!(
-            all_peers_dead_action(&mid, 161_249, true, MAX_DARK_EMPTY_REDIALS),
+            all_peers_dead_action(&zero, 0, false),
             AllPeersDead::GiveUpMidCatchup
         );
 
@@ -487,7 +495,7 @@ mod tests {
         zero.max_ready_height = 0;
         assert!(!ibd_caught_up(&zero, 0));
         assert_eq!(
-            all_peers_dead_action(&zero, 0, false, 0),
+            all_peers_dead_action(&zero, 0, false),
             AllPeersDead::GiveUpMidCatchup
         );
 
@@ -497,7 +505,7 @@ mod tests {
         done.max_ready_height = 100;
         done.headers_done = true;
         assert_eq!(
-            all_peers_dead_action(&done, 100, false, 0),
+            all_peers_dead_action(&done, 100, false),
             AllPeersDead::CatchupComplete
         );
 

@@ -58,7 +58,7 @@ use events::{apply_confirm_events, apply_peer_event, disconnect_all_peers, updat
 pub(crate) use events::{apply_confirm_reject, apply_headers_event};
 use exit::{
     all_peers_dead_action, best_chain_remainder, empty_path_header_fan, header_lag_behind_peers,
-    ibd_caught_up, path_drained, should_unlatch_headers_done, AllPeersDead,
+    ibd_caught_up, path_drained, should_unlatch_headers_done, AllPeersDead, MAX_DARK_EMPTY_REDIALS,
 };
 #[cfg(test)]
 pub(crate) use header_walk::{
@@ -796,7 +796,11 @@ pub async fn ibd_cancellable(
                             enqueue_header_cmd(st, HeaderCmd::Ask);
                         }
                     } else {
-                        dark_redial_empty = dark_redial_empty.saturating_add(1);
+                        dark_redial_empty = if st.slots.iter().any(|s| s.alive) {
+                            0
+                        } else {
+                            dark_redial_empty.saturating_add(1)
+                        };
                         warn!("ibd: redial returned 0 peers (empty_rounds={dark_redial_empty})");
                     }
                 }
@@ -818,6 +822,7 @@ pub async fn ibd_cancellable(
             };
             if redial_handle.is_none()
                 && alive_n < target
+                && (alive_n > 0 || dark_redial_empty < MAX_DARK_EMPTY_REDIALS)
                 && !peer_sess.book().is_empty()
                 && last_redial.elapsed() >= redial_interval
             {
@@ -980,7 +985,7 @@ pub async fn ibd_cancellable(
             // All peers dead — never treat mid-chain peer death as catch-up complete.
             if st.slots.iter().all(|s| !s.alive) {
                 let tip_h = hub.tip_height().unwrap_or(0);
-                match all_peers_dead_action(st, tip_h, redial_handle.is_some(), dark_redial_empty) {
+                match all_peers_dead_action(st, tip_h, redial_handle.is_some()) {
                     AllPeersDead::CatchupComplete => {
                         info!(
                         "ibd: catch-up complete (no live peers) tip={tip_h} max_peer_height={} max_ready={} — exiting IBD",
