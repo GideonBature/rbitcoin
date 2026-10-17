@@ -3688,7 +3688,12 @@ mod tests {
         assert!(st.ordered_set.contains(&second.block_hash()));
         assert!(rx0.try_recv().is_err());
         assert!(rx1.try_recv().is_err());
+        confirmed_tail_follows_the_published_tip(&hub);
+    }
 
+    /// Same hub as the seeded walk. Two asks share one confirmed tail. A
+    /// same-height hash, then a taller tip, each rebuild it.
+    fn confirmed_tail_follows_the_published_tip(hub: &ChainHub) {
         let script = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
         hub.generate_to_script(2, script.clone(), vec![]).unwrap();
         let tip = hub.tip_hash().unwrap();
@@ -3708,7 +3713,7 @@ mod tests {
         st.ordered_set.insert(ahead);
         st.hash_height.insert(ahead, tip_h.saturating_add(100));
         assert!(st.ordered.len() < ORDERED_HEADERS_SOFT_CAP);
-        assert!(send_getheaders(&mut st, &hub).unwrap());
+        assert!(send_getheaders(&mut st, hub).unwrap());
         let first = take_locator(&mut rx);
         assert_eq!(
             first.first().copied(),
@@ -3720,16 +3725,37 @@ mod tests {
             "the confirmed ancestor stays in the locator"
         );
         assert!(first.contains(&tip));
-        assert_ne!(take_header_ask(&mut st, 0), HeaderAsk::Unsolicited);
+        same_tip_reuses_the_tail(&mut st, hub, &mut rx, &first);
+        let same_h_tip = same_height_rebuilds_the_tail(&mut st, hub, &mut rx, tip, tip_h, ahead);
+        taller_tip_rebuilds_the_tail(&mut st, hub, &mut rx, &script, same_h_tip, ahead);
+    }
+
+    fn same_tip_reuses_the_tail(
+        st: &mut IbdWorkState,
+        hub: &ChainHub,
+        rx: &mut mpsc::UnboundedReceiver<PeerCmd>,
+        first: &[BlockHash],
+    ) {
+        assert_ne!(take_header_ask(st, 0), HeaderAsk::Unsolicited);
         let before = rbitcoin_query::header_lookup_count();
-        assert!(send_getheaders(&mut st, &hub).unwrap());
-        let second_ask = take_locator(&mut rx);
+        assert!(send_getheaders(st, hub).unwrap());
+        let second_ask = take_locator(rx);
         assert_eq!(
             rbitcoin_query::header_lookup_count().saturating_sub(before),
             0,
             "a second ask at the same confirmed tip does not walk the header store"
         );
         assert_eq!(second_ask, first);
+    }
+
+    fn same_height_rebuilds_the_tail(
+        st: &mut IbdWorkState,
+        hub: &ChainHub,
+        rx: &mut mpsc::UnboundedReceiver<PeerCmd>,
+        tip: BlockHash,
+        tip_h: u32,
+        ahead: BlockHash,
+    ) -> BlockHash {
         hub.invalidate_block(tip).unwrap();
         assert_eq!(hub.tip_height(), Some(tip_h - 1));
         let alt_script = bitcoin::ScriptBuf::from_bytes(vec![0x52]);
@@ -3740,10 +3766,10 @@ mod tests {
         assert_eq!(published.height, tip_h);
         assert_eq!(published.hash, same_h_tip.to_byte_array());
         assert_ne!(same_h_tip, tip);
-        assert_ne!(take_header_ask(&mut st, 0), HeaderAsk::Unsolicited);
+        assert_ne!(take_header_ask(st, 0), HeaderAsk::Unsolicited);
         let before = rbitcoin_query::header_lookup_count();
-        assert!(send_getheaders(&mut st, &hub).unwrap());
-        let reorged = take_locator(&mut rx);
+        assert!(send_getheaders(st, hub).unwrap());
+        let reorged = take_locator(rx);
         assert!(
             rbitcoin_query::header_lookup_count() > before,
             "a same-height tip hash rebuilds the tail"
@@ -3764,13 +3790,24 @@ mod tests {
             !tail.hashes.contains(&tip),
             "the replaced tip hash leaves the confirmed tail"
         );
-        hub.generate_to_script(1, script, vec![]).unwrap();
+        same_h_tip
+    }
+
+    fn taller_tip_rebuilds_the_tail(
+        st: &mut IbdWorkState,
+        hub: &ChainHub,
+        rx: &mut mpsc::UnboundedReceiver<PeerCmd>,
+        script: &bitcoin::ScriptBuf,
+        same_h_tip: BlockHash,
+        ahead: BlockHash,
+    ) {
+        hub.generate_to_script(1, script.clone(), vec![]).unwrap();
         let new_tip = hub.tip_hash().unwrap();
         assert_ne!(new_tip, same_h_tip);
-        assert_ne!(take_header_ask(&mut st, 0), HeaderAsk::Unsolicited);
+        assert_ne!(take_header_ask(st, 0), HeaderAsk::Unsolicited);
         let before = rbitcoin_query::header_lookup_count();
-        assert!(send_getheaders(&mut st, &hub).unwrap());
-        let taller = take_locator(&mut rx);
+        assert!(send_getheaders(st, hub).unwrap());
+        let taller = take_locator(rx);
         assert!(
             rbitcoin_query::header_lookup_count() > before,
             "a changed confirmed tip rebuilds the tail"
