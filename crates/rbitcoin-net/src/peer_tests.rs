@@ -4050,6 +4050,61 @@ fn threshold_exit_refuses_the_address_without_punish_disconnect() {
 }
 
 #[test]
+fn second_rate_limit_disconnect_from_an_address_discourages_it() {
+    let peers = crate::peers::PeerHub::new();
+    let now = 1_700_000_200u64;
+    peers.set_mock_now(now);
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        sender: bitcoin::p2p::address::Address::new(
+            &std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            bitcoin::p2p::ServiceFlags::NONE,
+        ),
+        nonce: 5,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let flood = |addr: std::net::SocketAddr| {
+        let peer = peers.register(addr, addr, &ver, true, crate::peers::PeerConnType::Inbound);
+        rate_limit_disconnect(Some(peer.as_ref()))
+    };
+
+    let first = std::net::SocketAddr::from(([7, 7, 7, 7], 8333));
+    assert!(matches!(
+        flood(first),
+        crate::error::NetError::Protocol("peer rate limit")
+    ));
+    assert!(
+        !peers.inbound_discouraged(first),
+        "one rate-limit disconnect does not refuse the address"
+    );
+    assert!(matches!(
+        flood(std::net::SocketAddr::from(([7, 7, 7, 7], 9999))),
+        crate::error::NetError::Protocol("peer misbehavior threshold")
+    ));
+    assert!(
+        peers.inbound_discouraged(first),
+        "a second rate-limit disconnect from that address refuses it"
+    );
+
+    let slow = std::net::SocketAddr::from(([7, 7, 7, 8], 8333));
+    let _ = flood(slow);
+    peers.set_mock_now(now + crate::peers::PeerHub::RATE_STRIKE_SECS);
+    let _ = flood(slow);
+    assert!(
+        !peers.inbound_discouraged(slow),
+        "a strike older than the window does not count"
+    );
+}
+
+#[test]
 fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
     let peers = crate::peers::PeerHub::new();
     let now = 1_800_000_000u64;

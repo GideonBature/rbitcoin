@@ -174,6 +174,20 @@ fn threshold_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
     NetError::Protocol("peer misbehavior threshold")
 }
 
+/// The first rate-limit exit from an address leaves a strike. A second one
+/// within [`crate::peers::PeerHub::RATE_STRIKE_SECS`] is a threshold exit, as
+/// two overflows in one session were.
+fn rate_limit_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
+    let repeat = session.is_some_and(|s| {
+        s.peer_hub()
+            .is_some_and(|hub| hub.note_rate_strike(s.addr.ip()))
+    });
+    if repeat {
+        return threshold_disconnect(session);
+    }
+    NetError::Protocol("peer rate limit")
+}
+
 /// Core `MaybeDiscourageAndDisconnect`: misbehavior never disconnects or
 /// discourages a noban peer or a manual one (`--connect`, `addnode`).
 fn misbehavior_exempt(s: &crate::peers::LivePeer) -> bool {
@@ -1789,7 +1803,7 @@ pub async fn peer_session_with(
                             return Err(threshold_disconnect(session.as_deref()));
                         }
                         // EOF lets the peer retry a request we cannot accept.
-                        return Err(NetError::Protocol("peer rate limit"));
+                        return Err(rate_limit_disconnect(session.as_deref()));
                     }
                     // Ping/pong: cheap 8-byte path — never leave the I/O task for decode.
                     if frame.is_ping() {
