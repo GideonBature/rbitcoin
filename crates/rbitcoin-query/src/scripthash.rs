@@ -5,11 +5,35 @@
 //! Spentness/heights from spends + Class C.
 
 use super::*;
-use rbitcoin_store::{output_flags, script_hash, spent_abs, IdxBodyMode};
+use rbitcoin_store::{output_flags, script_hash, spent_abs, IdxBodyMode, SpendSlotRun};
 use std::sync::Arc;
 
 /// Class A expand / spend-join wave. Bounds decoded `txout` pages in RAM.
 const SH_JOIN_WAVE: usize = 4096;
+/// Strong creates read from the posting tail while the page bound is open.
+const NEWEST_TAIL_CHUNK: usize = 256;
+
+struct NewestPageScan {
+    high: u32,
+    strict: bool,
+}
+
+struct SpendHit {
+    spender: Fk,
+    height: u32,
+    parent: Fk,
+    vout: u32,
+}
+
+/// Strong creates that can still land on a newest-first page.
+///
+/// `bound` is the height of the limit-th counted create. `None` means the
+/// posting list is shorter than the limit, so `creates` is the whole set
+/// and the caller reads those spend slots instead of scanning blocks.
+struct NewestWindow {
+    bound: Option<u32>,
+    creates: Vec<(u32, Fk)>,
+}
 
 /// Expanded Electrum create outpoint (Class A + height joins).
 ///
@@ -524,18 +548,18 @@ impl Query {
         history_items_from_joined(joined, filter).rows.len() >= limit
     }
 
-    /// How many leading `rest` creates can still change a full page.
+    /// How many leading `rest` creates can still change a height-ascending page.
     ///
-    /// One height read and one spent-range read for the whole tail. The join
-    /// loop calls this once, so a full page does not re-read that tail per wave.
+    /// The join loop calls this once, so a full page does not re-read the tail
+    /// per wave.
     fn history_tail_keep(
         &self,
         joined: &[ShJoinedOut],
         filter: &HistoryFilter,
         rest: &[Fk],
     ) -> Result<usize, QueryError> {
-        if rest.is_empty() {
-            return Ok(0);
+        if rest.is_empty() || filter.order != HistoryOrder::HeightAsc {
+            return Ok(rest.len());
         }
         let page = history_items_from_joined(joined, filter).rows;
         let edge = page.last().map(|i| i.height).unwrap_or(0);
@@ -545,33 +569,10 @@ impl Query {
                 "invariant: SH create height batch length",
             ));
         }
-        match filter.order {
-            HistoryOrder::HeightAsc => Ok(heights
-                .iter()
-                .take_while(|h| i64::from(h.unwrap_or(0)) <= edge)
-                .count()),
-            HistoryOrder::NewestFirst => {
-                let ranges = self.store.tx_spent_range_batch(rest)?;
-                if ranges.len() != rest.len() {
-                    return Err(StoreError::Corrupt(
-                        "invariant: SH spent-range batch length",
-                    ));
-                }
-                let reach = self.store.spent_ranges_reach(&ranges, edge)?;
-                if reach.len() != rest.len() {
-                    return Err(StoreError::Corrupt(
-                        "invariant: SH spent-range batch length",
-                    ));
-                }
-                let mut keep = 0usize;
-                for (i, (h, hot)) in heights.iter().zip(reach).enumerate() {
-                    if i64::from(h.unwrap_or(0)) >= edge || hot {
-                        keep = i.saturating_add(1);
-                    }
-                }
-                Ok(keep)
-            }
-        }
+        Ok(heights
+            .iter()
+            .take_while(|h| i64::from(h.unwrap_or(0)) <= edge)
+            .count())
     }
 
     /// Confirmed-strong create outpoints plus confirmed spenders (create_fk join).
@@ -641,32 +642,24 @@ impl Query {
         if paging {
             self.order_fks_for_page(&mut fks, page.expect("paging"))?;
         }
-        let wave_n = if paging { 1 } else { SH_JOIN_WAVE };
-        let mut out = Vec::new();
-        let mut class_a_us = 0u128;
-        let mut spends_us = 0u128;
-        let mut offset = 0usize;
-        let mut stop_at: Option<usize> = None;
-        for wave in fks.chunks(wave_n) {
-            let t_a = std::time::Instant::now();
-            let creates = self.expand_create_fks_wave(scripthash, wave, need)?;
-            class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
+        let (out, class_a_us, spends_us) = if paging {
+            self.join_page_waves(scripthash, &fks, need, view, page.expect("paging"))?
+        } else {
+            let mut creates = Vec::new();
+            let mut class_a_us = 0u128;
+            for wave in fks.chunks(SH_JOIN_WAVE) {
+                let t_a = std::time::Instant::now();
+                creates.extend(self.expand_create_fks_wave(scripthash, wave, need)?);
+                class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
+            }
             let t_s = std::time::Instant::now();
-            out.extend(self.join_spends_wave(&creates, need, view)?);
-            spends_us = spends_us.saturating_add(t_s.elapsed().as_micros());
-            offset = offset.saturating_add(wave.len());
-            if !paging {
-                continue;
-            }
-            let filter = page.expect("paging");
-            if stop_at.is_none() && Self::history_page_full(&out, filter) {
-                let keep = self.history_tail_keep(&out, filter, &fks[offset..])?;
-                stop_at = Some(offset.saturating_add(keep));
-            }
-            if stop_at.is_some_and(|end| offset >= end) {
-                break;
-            }
-        }
+            // The whole unpaged join is this one spend-slot batch. A
+            // height-ascending page flushes one peek group at a time in
+            // `join_page_waves`.
+            let joined = self.join_spends_wave(&creates, need, view)?;
+            let spends_us = t_s.elapsed().as_micros();
+            (joined, class_a_us, spends_us)
+        };
         let total_us = pages_us
             .saturating_add(class_a_us)
             .saturating_add(spends_us);
@@ -684,9 +677,9 @@ impl Query {
         Ok(out)
     }
 
-    /// A height window never wants the whole join. A page limit skips it only
-    /// when the unpaged join would hit `--max-sh-creates`, so an under-cap
-    /// page still fills the last-1 slot.
+    /// A height window never wants the whole join. A limited newest-first page
+    /// never fills it, at every cap. A height-ascending page skips it only
+    /// when the unpaged join would hit `--max-sh-creates`.
     fn page_without_full_slot(
         &self,
         scripthash: &[u8; 32],
@@ -705,6 +698,9 @@ impl Query {
         }
         if filter.limit.is_none() {
             return Ok(false);
+        }
+        if filter.order == HistoryOrder::NewestFirst {
+            return Ok(true);
         }
         let cap = self.max_sh_creates();
         Ok(cap > 0 && self.scripthash_create_count(scripthash)? > cap)
@@ -873,26 +869,72 @@ impl Query {
         })
     }
 
-    fn join_spends_wave(
+    /// Height-ascending page. Expand one create at a time. Spend slots flush
+    /// when the next create has no spend slots, or those slots leave the open
+    /// peek group, then the page-full stop runs. The remainder flushes once.
+    fn join_page_waves(
         &self,
-        creates: &[ScriptHashOutpoint],
+        scripthash: &[u8; 32],
+        fks: &[Fk],
         need: ShJoinNeed,
         view: &ChainView,
-    ) -> Result<Vec<ShJoinedOut>, QueryError> {
-        if creates.is_empty() {
-            return Ok(Vec::new());
+        filter: &HistoryFilter,
+    ) -> Result<(Vec<ShJoinedOut>, u128, u128), QueryError> {
+        let mut out = Vec::new();
+        let mut pending = Vec::new();
+        let mut pending_offs = Vec::new();
+        let mut run = SpendSlotRun::new();
+        let mut class_a_us = 0u128;
+        let mut spends_us = 0u128;
+        let mut i = 0usize;
+        let mut stop_at: Option<usize> = None;
+        while i < fks.len() {
+            if stop_at.is_some_and(|end| i >= end) {
+                break;
+            }
+            let t_a = std::time::Instant::now();
+            let created = self.expand_create_fks_wave(scripthash, &fks[i..i + 1], need)?;
+            class_a_us = class_a_us.saturating_add(t_a.elapsed().as_micros());
+            let offs = self.spend_abs_offs(&created)?;
+            let slots: Vec<u64> = offs.iter().copied().flatten().collect();
+            // An empty slot list does not extend a peek group (`accepts_all`
+            // of nothing is true). Closing here is what lets the page stop
+            // run when the spend index is off or the create has no range.
+            let group_closed = slots.is_empty() || !run.accepts_all(&slots);
+            if group_closed && !pending.is_empty() {
+                let t_s = std::time::Instant::now();
+                out.extend(self.join_known_offs(&pending, &pending_offs, need, view)?);
+                spends_us = spends_us.saturating_add(t_s.elapsed().as_micros());
+                pending.clear();
+                pending_offs.clear();
+                run.clear();
+                if stop_at.is_none() && Self::history_page_full(&out, filter) {
+                    let keep = self.history_tail_keep(&out, filter, &fks[i..])?;
+                    stop_at = Some(i.saturating_add(keep));
+                }
+                if stop_at.is_some_and(|end| i >= end) {
+                    break;
+                }
+            }
+            run.push_all(&slots);
+            pending.extend(created);
+            pending_offs.extend(offs);
+            i += 1;
         }
-        if !self.spend_index_enabled() {
-            return Ok(creates
-                .iter()
-                .cloned()
-                .map(|out| ShJoinedOut {
-                    out,
-                    spent: false,
-                    spender_fks: Vec::new(),
-                    spenders: Vec::new(),
-                })
-                .collect());
+        if !pending.is_empty() {
+            let t_s = std::time::Instant::now();
+            out.extend(self.join_known_offs(&pending, &pending_offs, need, view)?);
+            spends_us = spends_us.saturating_add(t_s.elapsed().as_micros());
+        }
+        Ok((out, class_a_us, spends_us))
+    }
+
+    fn spend_abs_offs(
+        &self,
+        creates: &[ScriptHashOutpoint],
+    ) -> Result<Vec<Option<u64>>, QueryError> {
+        if creates.is_empty() || !self.spend_index_enabled() {
+            return Ok(vec![None; creates.len()]);
         }
         let mut uniq = Vec::new();
         let mut seen = HashSet::new();
@@ -908,14 +950,66 @@ impl Query {
                 range_by_fk.insert(*fk, range);
             }
         }
+        Ok(creates
+            .iter()
+            .map(|c| {
+                range_by_fk
+                    .get(&c.create_tx_fk)
+                    .map(|(off, _)| spent_abs(*off, c.vout))
+            })
+            .collect())
+    }
+
+    /// One call reads every spend slot of `creates` as a single `spent.body`
+    /// batch. The unpaged join passes the whole create list. A
+    /// height-ascending page does not: it flushes one closed peek group
+    /// through [`Self::join_known_offs`].
+    fn join_spends_wave(
+        &self,
+        creates: &[ScriptHashOutpoint],
+        need: ShJoinNeed,
+        view: &ChainView,
+    ) -> Result<Vec<ShJoinedOut>, QueryError> {
+        let offs = self.spend_abs_offs(creates)?;
+        self.join_known_offs(creates, &offs, need, view)
+    }
+
+    fn join_known_offs(
+        &self,
+        creates: &[ScriptHashOutpoint],
+        offs: &[Option<u64>],
+        need: ShJoinNeed,
+        view: &ChainView,
+    ) -> Result<Vec<ShJoinedOut>, QueryError> {
+        if creates.is_empty() {
+            return Ok(Vec::new());
+        }
+        if offs.len() != creates.len() {
+            return Err(StoreError::Corrupt(
+                "invariant: SH spend offset batch length",
+            ));
+        }
+        if !self.spend_index_enabled() {
+            return Ok(creates
+                .iter()
+                .cloned()
+                .map(|out| ShJoinedOut {
+                    out,
+                    spent: false,
+                    spender_fks: Vec::new(),
+                    spenders: Vec::new(),
+                })
+                .collect());
+        }
         let mut abs_offs = Vec::with_capacity(creates.len());
-        let mut abs_at = vec![None; creates.len()];
-        for (i, c) in creates.iter().enumerate() {
-            let Some((off, _)) = range_by_fk.get(&c.create_tx_fk) else {
-                continue;
-            };
-            abs_at[i] = Some(abs_offs.len());
-            abs_offs.push(spent_abs(*off, c.vout));
+        let mut abs_at = Vec::with_capacity(creates.len());
+        for off in offs {
+            if let Some(off) = off {
+                abs_at.push(Some(abs_offs.len()));
+                abs_offs.push(*off);
+            } else {
+                abs_at.push(None);
+            }
         }
         let metas = self.store.get_spender_meta_at_abs_batch(&abs_offs)?;
         let per_out = self.join_spends_wave_fks(creates, &abs_at, &metas, view)?;
@@ -1021,13 +1115,364 @@ impl Query {
             .rows)
     }
 
+    fn newest_limited_page(&self, filter: &HistoryFilter) -> bool {
+        filter.limit.is_some() && filter.order == HistoryOrder::NewestFirst
+    }
+
+    fn newest_page_scan(
+        &self,
+        filter: &HistoryFilter,
+        view: &ChainView,
+    ) -> Result<Option<NewestPageScan>, QueryError> {
+        let mut high = view.height.0;
+        if let Some(to) = filter.to_height {
+            if to <= 0 {
+                return Ok(None);
+            }
+            let cap = u32::try_from(to.saturating_sub(1)).unwrap_or(u32::MAX);
+            high = high.min(cap);
+        }
+        let Some(txid) = filter.after_txid else {
+            return Ok(Some(NewestPageScan {
+                high,
+                strict: false,
+            }));
+        };
+        let Some((fk, h)) = self.store.get_fk_by_txid_tip_height(&txid)? else {
+            return Ok(None);
+        };
+        if h > view.height.0 || !self.confirmed_strong_in(fk, view)? {
+            return Ok(None);
+        }
+        if let Some(to) = filter.to_height {
+            if i64::from(h) >= to {
+                return Ok(None);
+            }
+        }
+        Ok(Some(NewestPageScan {
+            high: h,
+            strict: true,
+        }))
+    }
+
+    fn strong_sh_creates(
+        &self,
+        scripthash: &[u8; 32],
+        view: &ChainView,
+    ) -> Result<Vec<Fk>, QueryError> {
+        let mut fks = Vec::new();
+        for fk in self.store.scripthash.create_fks(scripthash)? {
+            if self.confirmed_strong_in(fk, view)? {
+                fks.push(fk);
+            }
+        }
+        for fk in self.pending_sh_create_fks(scripthash) {
+            if !self.confirmed_strong_in(fk, view)? {
+                continue;
+            }
+            if let Err(at) = fks.binary_search_by_key(&fk.0, |f| f.0) {
+                fks.insert(at, fk);
+            }
+        }
+        Ok(fks)
+    }
+
+    /// See [`NewestWindow`].
+    fn newest_create_window(
+        &self,
+        fks: &[Fk],
+        k: usize,
+        high: u32,
+        strict: bool,
+    ) -> Result<NewestWindow, QueryError> {
+        let mut rev = Vec::new();
+        let mut idx = fks.len();
+        let mut counted = 0usize;
+        let mut bound: Option<u32> = None;
+        while idx > 0 {
+            let start = idx.saturating_sub(NEWEST_TAIL_CHUNK);
+            let chunk = &fks[start..idx];
+            let heights = self.store.tx_height_get_batch(chunk)?;
+            if heights.len() != chunk.len() {
+                return Err(StoreError::Corrupt(
+                    "invariant: SH create height batch length",
+                ));
+            }
+            for (fk, h) in chunk.iter().zip(heights).rev() {
+                let h = h.unwrap_or(0);
+                if h > high {
+                    continue;
+                }
+                rev.push((h, *fk));
+                if strict && h >= high {
+                    continue;
+                }
+                counted = counted.saturating_add(1);
+                if counted == k {
+                    bound = Some(h);
+                }
+            }
+            idx = start;
+            if let Some(t) = bound {
+                if rev.last().is_some_and(|(h, _)| *h < t) {
+                    break;
+                }
+            }
+        }
+        let Some(low) = bound else {
+            return Ok(NewestWindow {
+                bound: None,
+                creates: rev,
+            });
+        };
+        rev.retain(|(h, _)| *h >= low);
+        Ok(NewestWindow {
+            bound: Some(low),
+            creates: rev,
+        })
+    }
+
+    /// Spends of a posting list shorter than the page limit.
+    ///
+    /// Every create that can still land on the page is in `creates`, so the
+    /// spend slots of those creates are the whole answer. One
+    /// [`Self::join_spends_wave`] is that batch. A spender above `high`
+    /// belongs on an earlier page. This is not [`Self::sh_join`]: a short
+    /// list can still sit above `--max-sh-creates`, and the page must not
+    /// fill the join slot.
+    fn spends_of_retained_creates(
+        &self,
+        scripthash: &[u8; 32],
+        creates: &[(u32, Fk)],
+        high: u32,
+        view: &ChainView,
+    ) -> Result<Vec<SpendHit>, QueryError> {
+        if creates.is_empty() || !self.spend_index_enabled() {
+            return Ok(Vec::new());
+        }
+        let fks: Vec<Fk> = creates.iter().map(|(_, fk)| *fk).collect();
+        let need = ShJoinNeed {
+            create_identity: false,
+            spender_identity: true,
+        };
+        let mut outs = Vec::new();
+        for wave in fks.chunks(SH_JOIN_WAVE) {
+            outs.extend(self.expand_create_fks_wave(scripthash, wave, need)?);
+        }
+        let mut hits = Vec::new();
+        for row in self.join_spends_wave(&outs, need, view)? {
+            for spender in row.spenders {
+                if spender.height > high {
+                    continue;
+                }
+                hits.push(SpendHit {
+                    spender: spender.fk,
+                    height: spender.height,
+                    parent: row.out.create_tx_fk,
+                    vout: row.out.vout,
+                });
+            }
+        }
+        Ok(hits)
+    }
+
+    fn spends_of_members(
+        &self,
+        members: &[Fk],
+        low: u32,
+        high: u32,
+    ) -> Result<Vec<SpendHit>, QueryError> {
+        if !self.spend_index_enabled() || members.is_empty() || low > high {
+            return Ok(Vec::new());
+        }
+        let mut hits = Vec::new();
+        for height in (low..=high).rev() {
+            let (first, n) = self.tx_fk_span_at_height(Height(height))?;
+            if n == 0 {
+                continue;
+            }
+            let last = first.0.saturating_add(u64::from(n)).saturating_sub(1);
+            let rows = self.store.input_edges_span(first.0, last)?;
+            if rows.len() != n as usize {
+                return Err(StoreError::Corrupt("invariant: input edge span length"));
+            }
+            for (i, edges) in rows.into_iter().enumerate() {
+                let Some(edges) = edges else {
+                    continue;
+                };
+                let spender = Fk(first.0.saturating_add(i as u64));
+                for edge in edges {
+                    if edge.parent.is_null() {
+                        continue;
+                    }
+                    if members
+                        .binary_search_by_key(&edge.parent.0, |fk| fk.0)
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    hits.push(SpendHit {
+                        spender,
+                        height,
+                        parent: edge.parent,
+                        vout: edge.vout,
+                    });
+                }
+            }
+        }
+        Ok(hits)
+    }
+
+    fn sh_matched_outs(
+        &self,
+        scripthash: &[u8; 32],
+        fks: &[Fk],
+    ) -> Result<HashMap<Fk, Vec<(u32, i64)>>, QueryError> {
+        if fks.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let loaded = super::load_creates_once(&self.store, fks, IdxBodyMode::Outs)?;
+        let mut matched = HashMap::new();
+        for create in loaded {
+            let Some((_tx, outs, _rels)) = &create.decoded_outs else {
+                return Err(StoreError::Corrupt(
+                    "invariant: SH create missing decoded outs",
+                ));
+            };
+            let mut rows = Vec::new();
+            for (vout, o) in outs.iter().enumerate() {
+                if script_hash(&o.script) != *scripthash {
+                    continue;
+                }
+                rows.push((vout as u32, o.value as i64));
+            }
+            matched.insert(create.fk, rows);
+        }
+        for fk in fks {
+            if !matched.contains_key(fk) {
+                return Err(StoreError::Corrupt(
+                    "invariant: SH create body missing after load",
+                ));
+            }
+        }
+        Ok(matched)
+    }
+
+    fn newest_limited_summaries(
+        &self,
+        scripthash: &[u8; 32],
+        filter: &HistoryFilter,
+        view: &ChainView,
+    ) -> Result<FilteredHistory<ScriptHashTxSummary>, QueryError> {
+        let Some(k) = filter.limit else {
+            return Err(StoreError::Corrupt("invariant: newest page limit"));
+        };
+        if let Some(to) = filter.to_height {
+            if to <= 0 {
+                return Ok(FilteredHistory {
+                    rows: Vec::new(),
+                    cursor_missing: filter.after_txid.is_some(),
+                });
+            }
+        }
+        let Some(scan) = self.newest_page_scan(filter, view)? else {
+            return Ok(FilteredHistory {
+                rows: Vec::new(),
+                cursor_missing: true,
+            });
+        };
+        let members = self.strong_sh_creates(scripthash, view)?;
+        let window = self.newest_create_window(&members, k, scan.high, scan.strict)?;
+        let hits = match window.bound {
+            Some(low) => self.spends_of_members(&members, low, scan.high)?,
+            None => {
+                self.spends_of_retained_creates(scripthash, &window.creates, scan.high, view)?
+            }
+        };
+        let mut decode = window.creates.iter().map(|(_, fk)| *fk).collect::<Vec<_>>();
+        for hit in &hits {
+            decode.push(hit.parent);
+        }
+        decode.sort_unstable_by_key(|fk| fk.0);
+        decode.dedup();
+        let matched = self.sh_matched_outs(scripthash, &decode)?;
+        let mut net: HashMap<Fk, i64> = HashMap::new();
+        let mut height_of: HashMap<Fk, u32> = HashMap::new();
+        for (h, fk) in window.creates {
+            let Some(outs) = matched.get(&fk) else {
+                continue;
+            };
+            if outs.is_empty() {
+                continue;
+            }
+            let sum = outs
+                .iter()
+                .fold(0i64, |acc, (_, value)| acc.saturating_add(*value));
+            net.insert(fk, sum);
+            height_of.insert(fk, h);
+        }
+        for hit in hits {
+            let Some(outs) = matched.get(&hit.parent) else {
+                continue;
+            };
+            let Some(value) = outs
+                .iter()
+                .find(|(vout, _)| *vout == hit.vout)
+                .map(|(_, v)| *v)
+            else {
+                continue;
+            };
+            height_of.entry(hit.spender).or_insert(hit.height);
+            net.entry(hit.spender)
+                .and_modify(|n| *n = n.saturating_sub(value))
+                .or_insert(0i64.saturating_sub(value));
+        }
+        let row_fks: Vec<Fk> = net.keys().copied().collect();
+        let txids = self.store.txids_get_many(&row_fks)?;
+        if txids.len() != row_fks.len() {
+            return Err(StoreError::Corrupt("invariant: SH page txid batch length"));
+        }
+        let mut items = Vec::with_capacity(row_fks.len());
+        for (fk, txid) in row_fks.iter().zip(txids) {
+            let Some(txid) = txid else {
+                return Err(StoreError::Corrupt("invariant: SH page missing txid"));
+            };
+            let Some(height) = height_of.get(fk).copied() else {
+                return Err(StoreError::Corrupt("invariant: SH page missing height"));
+            };
+            items.push(ScriptHashHistoryItem {
+                height: i64::from(height),
+                txid,
+                tx_fk: *fk,
+                fee: None,
+            });
+        }
+        let filtered = apply_history_filter(&items, filter);
+        let rows = filtered
+            .rows
+            .into_iter()
+            .map(|item| ScriptHashTxSummary {
+                txid: item.txid,
+                value: net.get(&item.tx_fk).copied().unwrap_or(0),
+                height: item.height,
+                tx_fk: item.tx_fk,
+            })
+            .collect();
+        Ok(FilteredHistory {
+            rows,
+            cursor_missing: filtered.cursor_missing,
+        })
+    }
+
     /// Confirmed history for a scripthash, filtered by height window / limit / cursor.
     ///
-    /// Assembles the full confirmed history (creates + confirmed spenders), then
-    /// applies [`apply_history_filter`]. When `filter.to_height` is set, create
-    /// outpoints with `create_height >= to_height` are skipped during expand
-    /// (spends of those creates are also ≥ create height, so they cannot fall
-    /// inside the window). Pins the SH watermark, not live tip.
+    /// A limited newest-first page walks the posting tail. When that walk
+    /// counts `limit` creates, it reads `input.body` from the cursor (or the
+    /// tip) down to that height so a spend of an older coin is included.
+    /// When the list is shorter, it reads the spend slots of the creates it
+    /// kept. Other filters assemble the confirmed history, then apply
+    /// [`apply_history_filter`].
+    /// Pins the SH watermark, not live tip.
     pub fn scripthash_history_filtered(
         &self,
         scripthash: &[u8; 32],
@@ -1048,6 +1493,22 @@ impl Query {
         filter: &HistoryFilter,
         view: &ChainView,
     ) -> Result<FilteredHistory<ScriptHashHistoryItem>, QueryError> {
+        if self.newest_limited_page(filter) {
+            let page = self.newest_limited_summaries(scripthash, filter, view)?;
+            return Ok(FilteredHistory {
+                cursor_missing: page.cursor_missing,
+                rows: page
+                    .rows
+                    .into_iter()
+                    .map(|row| ScriptHashHistoryItem {
+                        height: row.height,
+                        txid: row.txid,
+                        tx_fk: row.tx_fk,
+                        fee: None,
+                    })
+                    .collect(),
+            });
+        }
         let joined = self.sh_join_limited(
             scripthash,
             ShJoinNeed::HISTORY,
@@ -1138,6 +1599,9 @@ impl Query {
         filter: &HistoryFilter,
         view: &ChainView,
     ) -> Result<FilteredHistory<ScriptHashTxSummary>, QueryError> {
+        if self.newest_limited_page(filter) {
+            return self.newest_limited_summaries(scripthash, filter, view);
+        }
         let joined = self.sh_join_limited(
             scripthash,
             ShJoinNeed::HISTORY,

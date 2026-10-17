@@ -90,15 +90,20 @@ async fn last1_and_second_client(app: &Router, cache: &Mutex<JoinCache>, sh1: [u
     }
 }
 
-async fn bulk_reuses_wallet_slot(
-    q: Arc<Query>,
+/// A newest wallet page does not store a full join. The next page recomputes
+/// its window. `last_bulk` stays empty.
+async fn bulk_page_leaves_wallet_slot_empty(
     app: &Router,
-    cache: Arc<Mutex<JoinCache>>,
+    cache: &Mutex<JoinCache>,
     sh1: [u8; 32],
     sh2: [u8; 32],
 ) {
     let h1hex = block_hash_hex(&sh1);
     let h2hex = block_hash_hex(&sh2);
+    let t1 = block_hash_hex(&[
+        0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0xaa,
+    ]);
     let t2 = block_hash_hex(&[
         0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0xaa,
@@ -113,21 +118,15 @@ async fn bulk_reuses_wallet_slot(
         .unwrap();
     let (st, resp) = oneshot_http(app, req).await;
     assert_eq!(st, 200, "{resp}");
-    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
-    let st = join_only_state(q, Arc::clone(&cache));
-    let mut bag = HashMap::new();
-    st.seed_bulk(Some("wallet"), &mut bag);
-    assert_eq!(bag.len(), 2);
-    {
-        let g = cache.lock().unwrap();
-        let c = g.clients.get("wallet").expect("wallet bulk");
-        let packed: usize = c.last_bulk.values().map(|s| s.packed_bytes()).sum();
-        assert!(packed <= JOIN_BULK_CAP, "last-bulk stays under 16 MiB");
-        for (k, v) in &bag {
-            let cached = c.last_bulk.get(k).expect("seeded key");
-            assert!(Arc::ptr_eq(cached, v), "seed_bulk must Arc-clone last-bulk");
-        }
-    }
+    let rows: Value = serde_json::from_str(&resp).unwrap();
+    let ids: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["txid"].as_str())
+        .collect();
+    assert_eq!(ids, vec![t2.as_str(), t1.as_str()], "{resp}");
+    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 0);
     let req = axum::http::Request::builder()
         .method("POST")
         .uri(format!("/scripthashes/txs?after_txid={t2}"))
@@ -137,7 +136,15 @@ async fn bulk_reuses_wallet_slot(
         .unwrap();
     let (st, resp) = oneshot_http(app, req).await;
     assert_eq!(st, 200, "{resp}");
-    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
+    let rows: Value = serde_json::from_str(&resp).unwrap();
+    let ids: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["txid"].as_str())
+        .collect();
+    assert_eq!(ids, vec![t1.as_str()], "{resp}");
+    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 0);
 }
 
 async fn untrusted_header_is_ignored(q: Arc<Query>, sh1: [u8; 32]) {
@@ -233,6 +240,71 @@ async fn template_missing_tip_or_knob() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Cap below the create count: chain stats stay 503, and `/txs` matches
+/// `/txs/summary` including each row's net value.
+#[tokio::test]
+async fn address_page_under_cap_matches_summary() {
+    let (addr, spk) = regtest_p2wpkh();
+    let (dir, q) = temp_query("esplora-addr-page");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let pay0 = two_script_pay(0x11, spk.clone());
+    let pay0_txid = pay0.tx.txid;
+    let h0fk = q.connect_block(Height(0), &h0, &[cb0, pay0]).unwrap();
+    let create0 = q.block_tx_fks(Height(0)).unwrap()[1];
+
+    let (h1, cb1) = coinbase(1, h0fk, Some(h0.hash));
+    let pay1 = two_script_pay(0x22, spk.clone());
+    let pay1_txid = pay1.tx.txid;
+    let h1fk = q.connect_block(Height(1), &h1, &[cb1, pay1]).unwrap();
+
+    let (h2, cb2) = coinbase(2, h1fk, Some(h1.hash));
+    let pay2 = two_script_pay(0x33, spk);
+    let mut spend = two_script_pay(0x44, bitcoin::ScriptBuf::from_bytes(vec![0x00]));
+    spend.inputs[0].prev_txid = pay0_txid;
+    spend.inputs[0].parent = rbitcoin_store::InputParent::Prevout {
+        create_fk: create0,
+        vout: 0,
+    };
+    let spend_txid = spend.tx.txid;
+    let pay2_txid = pay2.tx.txid;
+    q.connect_block(Height(2), &h2, &[cb2, pay2, spend]).unwrap();
+    q.set_max_sh_creates(2);
+
+    let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    let handle = run_esplora(cfg, Arc::new(q), None).await.expect("listen");
+    let (st, body) = http_get(handle.local_addr, &format!("/address/{addr}")).await;
+    assert_eq!(st, 503, "{body}");
+    assert!(
+        body.contains("scripthash join exceeds --max-sh-creates"),
+        "{body}"
+    );
+
+    let (st, txs_body) = http_get(handle.local_addr, &format!("/address/{addr}/txs")).await;
+    assert_eq!(st, 200, "{txs_body}");
+    let (st, sum_body) = http_get(handle.local_addr, &format!("/address/{addr}/txs/summary")).await;
+    assert_eq!(st, 200, "{sum_body}");
+    let txs: Vec<Value> = serde_json::from_str(&txs_body).unwrap();
+    let sums: Vec<Value> = serde_json::from_str(&sum_body).unwrap();
+    let txids: Vec<&str> = txs.iter().map(|v| v["txid"].as_str().unwrap()).collect();
+    let sum_ids: Vec<&str> = sums.iter().map(|v| v["txid"].as_str().unwrap()).collect();
+    assert_eq!(txids, sum_ids);
+    assert_eq!(
+        txids,
+        vec![
+            block_hash_hex(&spend_txid),
+            block_hash_hex(&pay2_txid),
+            block_hash_hex(&pay1_txid),
+            block_hash_hex(&pay0_txid),
+        ]
+    );
+    assert_eq!(sums[0]["value"], -1_0000_0000);
+    assert_eq!(sums[1]["value"], 1_0000_0000);
+    assert_eq!(sums[2]["value"], 1_0000_0000);
+    assert_eq!(sums[3]["value"], 1_0000_0000);
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn esplora_sh_join_and_template() {
     let (a1, spk1) = regtest_p2wpkh();
@@ -263,7 +335,7 @@ async fn esplora_sh_join_and_template() {
     casa_reuses_last_slot(&app, &cache).await;
     two_addresses_each_have_one_utxo(&app, &a1, &a2).await;
     last1_and_second_client(&app, &cache, sh1, sh2).await;
-    bulk_reuses_wallet_slot(Arc::clone(&q), &app, Arc::clone(&cache), sh1, sh2).await;
+    bulk_page_leaves_wallet_slot_empty(&app, &cache, sh1, sh2).await;
     untrusted_header_is_ignored(Arc::clone(&q), sh1).await;
     template_cached_until_tip_moves(q, prev, h2.hash).await;
     template_missing_tip_or_knob().await;

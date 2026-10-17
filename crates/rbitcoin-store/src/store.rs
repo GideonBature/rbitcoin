@@ -839,6 +839,17 @@ impl Store {
         self.txs.input.edges(fk)
     }
 
+    /// Parent edges for contiguous creates `first..=last` (1-based ids).
+    ///
+    /// One locator read and one `input.body` read. `None` is an unstamped create.
+    pub fn input_edges_span(
+        &self,
+        first: u64,
+        last: u64,
+    ) -> Result<Vec<Option<Vec<crate::input::InputEdge>>>, StoreError> {
+        self.txs.input.edges_span(first, last)
+    }
+
     /// Copy parent edges onto seqsigwit records that do not store them.
     pub fn stamp_input_prevouts(
         &self,
@@ -1209,70 +1220,6 @@ impl Store {
             .into_iter()
             .map(|p| p.map(|x| x.spent))
             .collect())
-    }
-
-    /// One flag per range. True when a slot is a multi-spender or a single
-    /// spender's height is at or above `edge`. `None` and an empty span are cold.
-    pub fn spent_ranges_reach(
-        &self,
-        ranges: &[Option<(u64, u64)>],
-        edge: i64,
-    ) -> Result<Vec<bool>, StoreError> {
-        const SLOT: u64 = 8;
-        let mut reach = vec![false; ranges.len()];
-        let mut offs = Vec::new();
-        let mut owner = Vec::new();
-        for (ri, range) in ranges.iter().enumerate() {
-            let Some((start, len)) = *range else {
-                continue;
-            };
-            if len == 0 {
-                continue;
-            }
-            if !len.is_multiple_of(SLOT) {
-                return Err(StoreError::Corrupt("invariant: spent range length"));
-            }
-            let n = len / SLOT;
-            for i in 0..n {
-                offs.push(start.saturating_add(i.saturating_mul(SLOT)));
-                owner.push(ri);
-            }
-        }
-        let mut spenders: Vec<(usize, Fk)> = Vec::new();
-        for (chunk, own) in offs.chunks(4096).zip(owner.chunks(4096)) {
-            let metas = self.get_spender_meta_at_abs_batch(chunk)?;
-            if metas.len() != chunk.len() {
-                return Err(StoreError::Corrupt("invariant: spent meta batch length"));
-            }
-            for (meta, ri) in metas.into_iter().zip(own.iter().copied()) {
-                let Some((fk, flags, _)) = meta else {
-                    continue;
-                };
-                if flags & crate::compact::output_flags::MULTI_SPENDER != 0 {
-                    reach[ri] = true;
-                    continue;
-                }
-                if !fk.is_null() {
-                    spenders.push((ri, fk));
-                }
-            }
-        }
-        if spenders.is_empty() {
-            return Ok(reach);
-        }
-        let fks: Vec<Fk> = spenders.iter().map(|(_, fk)| *fk).collect();
-        let heights = self.tx_height_get_batch(&fks)?;
-        if heights.len() != spenders.len() {
-            return Err(StoreError::Corrupt(
-                "invariant: spender height batch length",
-            ));
-        }
-        for ((ri, _), h) in spenders.iter().zip(heights) {
-            if i64::from(h.unwrap_or(0)) >= edge {
-                reach[*ri] = true;
-            }
-        }
-        Ok(reach)
     }
 
     /// Completion-driven loc→body io_uring pipeline (confirm load / prep).
