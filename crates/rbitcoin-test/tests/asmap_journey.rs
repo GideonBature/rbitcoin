@@ -153,7 +153,20 @@ fn node_bin() -> PathBuf {
         }
         Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/dev"),
     };
-    let bin = target.join(profile).join("journey-node");
+    let plain = target.join(profile).join("journey-node");
+    // `cargo llvm-cov` keeps `CARGO_TARGET_DIR` and builds under
+    // `$CARGO_TARGET_DIR/llvm-cov-target`. The plain `debug/` bin is absent there.
+    let covered = target
+        .join("llvm-cov-target")
+        .join(profile)
+        .join("journey-node");
+    let bin = if covered.is_file()
+        && (std::env::var_os("CARGO_LLVM_COV").is_some() || !plain.is_file())
+    {
+        covered
+    } else {
+        plain
+    };
     assert!(
         bin.is_file(),
         "operator CLI missing at {} (journey-node is rbitcoin_node::cli_main)",
