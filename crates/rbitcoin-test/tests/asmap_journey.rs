@@ -297,71 +297,20 @@ async fn boot_refused(dir: &Path, file: &str, phrase: &str) {
     assert_stderr_refused(&stderr, phrase);
 }
 
-/// Each bad asmap is its own process. The node exits once tip entry is ready
-/// (`--max-run-secs 0`) and the refusal is on that process's stderr.
+/// One rejected bytecode and a missing path. Each is its own process. The
+/// other rejected bytecodes are `asmap_rejected_bytecodes_fail_sanity`.
 #[tokio::test(flavor = "multi_thread")]
 async fn asmap_refused_file_uses_prefix_netgroups() {
-    // Twelve process boots. The valid-map journey stays on the short wall.
-    let wall = llvm_cov_wall(60, 180);
-    let cases: &[(&str, &[u8], &str)] = &[
-        (
-            "second-default.dat",
-            rbitcoin_net::ASMAP_SECOND_DEFAULT,
-            "Sanity check of asmap file",
-        ),
-        (
-            "trailing-one.dat",
-            rbitcoin_net::ASMAP_TRAILING_ONE,
-            "Sanity check of asmap file",
-        ),
-        (
-            "eight-zeros.dat",
-            rbitcoin_net::ASMAP_EIGHT_TRAILING_ZEROS,
-            "Sanity check of asmap file",
-        ),
-        (
-            "two-short.dat",
-            rbitcoin_net::ASMAP_TWO_SHORT_MATCHES,
-            "Sanity check of asmap file",
-        ),
-        (
-            "match-past.dat",
-            rbitcoin_net::ASMAP_MATCH_PAST_END,
-            "Sanity check of asmap file",
-        ),
-        (
-            "jump-past.dat",
-            rbitcoin_net::ASMAP_JUMP_PAST_FILE,
-            "Sanity check of asmap file",
-        ),
-        (
-            "jump-short.dat",
-            rbitcoin_net::ASMAP_JUMP_SHORT_TAIL,
-            "Sanity check of asmap file",
-        ),
-        (
-            "jump-off.dat",
-            rbitcoin_net::ASMAP_JUMP_OFF_END,
-            "Sanity check of asmap file",
-        ),
-    ];
+    let wall = llvm_cov_wall(20, 60);
     let fut = async {
-        for (name, bytes, phrase) in cases {
-            let td = TestDatadir::new().unwrap();
-            let dir = td.path();
-            std::fs::write(dir.join(name), bytes).unwrap();
-            boot_refused(&dir, name, phrase).await;
-        }
-
         let td = TestDatadir::new().unwrap();
         let dir = td.path();
-        std::fs::write(dir.join("empty.dat"), []).unwrap();
-        boot_refused(&dir, "empty.dat", "Sanity check of asmap file").await;
-
-        let td = TestDatadir::new().unwrap();
-        let dir = td.path();
-        std::fs::write(dir.join("one.dat"), [0u8]).unwrap();
-        boot_refused(&dir, "one.dat", "Sanity check of asmap file").await;
+        std::fs::write(
+            dir.join("second-default.dat"),
+            rbitcoin_net::ASMAP_SECOND_DEFAULT,
+        )
+        .unwrap();
+        boot_refused(&dir, "second-default.dat", "Sanity check of asmap file").await;
 
         let td = TestDatadir::new().unwrap();
         boot_refused(&td.path(), "no-such-asmap", "Failed to open asmap file").await;

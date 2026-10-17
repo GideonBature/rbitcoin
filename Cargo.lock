@@ -1089,7 +1089,6 @@ version = "0.8.99"
 dependencies = [
  "binary_sv2",
  "bitcoin",
- "common_messages_sv2",
  "rbitcoin-cli",
  "rbitcoin-consensus",
  "rbitcoin-electrum",

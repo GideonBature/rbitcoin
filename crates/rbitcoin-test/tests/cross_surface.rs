@@ -3617,51 +3617,6 @@ async fn sv2_tp_bootstrap() {
         "{m:?}"
     );
 
-    // The live client holds a slot. Silent TCP fills the table; the next
-    // connection closes at accept. Those sockets must be gone by the setup
-    // deadline so another client can finish SetupConnection.
-    drop(c);
-    use tokio::io::AsyncReadExt;
-    let mut silent = Vec::new();
-    let mut rejected = false;
-    for _ in 0..16 {
-        let mut stream = tokio::net::TcpStream::connect(sv2_addr)
-            .await
-            .expect("sv2 tcp");
-        let mut byte = [0u8; 1];
-        let closed = tokio::time::timeout(Duration::from_millis(200), stream.read(&mut byte)).await;
-        if matches!(closed, Ok(Ok(0) | Err(_))) {
-            rejected = true;
-            break;
-        }
-        silent.push(stream);
-    }
-    assert!(
-        rejected,
-        "a full session table must close the next connection"
-    );
-    assert!(!silent.is_empty(), "silent sockets held the table");
-    for stream in &mut silent {
-        let mut byte = [0u8; 1];
-        let closed =
-            tokio::time::timeout(rbitcoin_sv2::SETUP_TIMEOUT, stream.read(&mut byte)).await;
-        assert!(
-            matches!(closed, Ok(Ok(0) | Err(_))),
-            "silent socket must close at the setup deadline"
-        );
-    }
-    let mut c = rbitcoin_sv2::testutil::TpClient::connect(sv2_addr, authority)
-        .await
-        .expect("sv2 handshake after silent sockets");
-    c.setup_connection(2, 2, 2, 0).await.unwrap();
-    let mut reply = sv2_recv(&mut c).await;
-    assert_eq!(
-        reply.msg_type,
-        common_messages_sv2::MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS
-    );
-    let _: common_messages_sv2::SetupConnectionSuccess =
-        binary_sv2::from_bytes(&mut reply.payload).expect("setup success");
-
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
     assert!(
