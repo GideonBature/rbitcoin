@@ -270,22 +270,31 @@ pub(crate) fn apply_block_transactions(
     finish_reconstructed(hsi.header, txdata)
 }
 
-/// BIP152: filled slots must merkle to the compact header and not be a
-/// Core `IsBlockMutated` body (empty → getdata).
-/// Equal adjacent txids keep `Block::check_merkle_root` (the odd-node duplicate
-/// matches CVE-2012-2459) and still must not be treated as this header's block.
-pub(crate) fn merkle_body_mutated(txdata: &[Transaction]) -> bool {
+/// Header merkle root and the CVE-2012-2459 mutation bit from one txid list.
+///
+/// `None` when `txdata` is empty. That list has no root, including when the
+/// header root is all zeros. Equal adjacent txids still match a root after
+/// odd-node duplication. That pair is the mutation bit.
+pub(crate) fn block_txid_merkle(txdata: &[Transaction]) -> Option<([u8; 32], bool)> {
+    if txdata.is_empty() {
+        return None;
+    }
     let leaves: Vec<[u8; 32]> = txdata
         .iter()
         .map(|tx| tx.compute_txid().to_byte_array())
         .collect();
-    rbitcoin_store::merkle_root_mutated(&leaves).1
+    Some(rbitcoin_store::merkle_root_mutated(&leaves))
 }
 
+/// BIP152: filled slots must merkle to the compact header and not be a
+/// Core `IsBlockMutated` body (empty → getdata).
 fn finish_reconstructed(header: Header, txdata: Vec<Transaction>) -> Result<Block, Vec<u64>> {
+    let Some((root, mutated)) = block_txid_merkle(&txdata) else {
+        return Err(Vec::new());
+    };
     let block = Block { header, txdata };
-    if !block.check_merkle_root()
-        || merkle_body_mutated(&block.txdata)
+    if root != block.header.merkle_root.to_byte_array()
+        || mutated
         || rbitcoin_consensus::block_mutated_without_coinbase(&block)
     {
         return Err(Vec::new());
@@ -690,12 +699,38 @@ mod tests {
         );
     }
 
+    /// One txid list matches rust-bitcoin's root. The mutation bit is the
+    /// duplicate pair only: that body still satisfies `check_merkle_root`.
+    #[test]
+    fn store_merkle_matches_check_merkle_root() {
+        let only = sealed_block(vec![coinbase()]);
+        let (root, mutated) = block_txid_merkle(&only.txdata).expect("coinbase");
+        assert!(only.check_merkle_root());
+        assert_eq!(root, only.header.merkle_root.to_byte_array());
+        assert!(!mutated);
+
+        let cb = coinbase();
+        let pair = sealed_block(vec![cb.clone(), cb]);
+        let (root, mutated) = block_txid_merkle(&pair.txdata).expect("pair");
+        assert!(pair.check_merkle_root());
+        assert_eq!(root, pair.header.merkle_root.to_byte_array());
+        assert!(mutated);
+    }
+
+    #[test]
+    fn empty_txdata_is_not_a_block() {
+        let header = dummy_header();
+        assert_eq!(header.merkle_root.to_byte_array(), [0u8; 32]);
+        let err = finish_reconstructed(header, Vec::new()).expect_err("empty body");
+        assert!(err.is_empty(), "getdata the hash, got {err:?}");
+    }
+
     #[test]
     fn repeated_pair_with_matching_root_is_not_a_block() {
         let cb = coinbase();
         let block = sealed_block(vec![cb.clone(), cb]);
         assert!(block.check_merkle_root());
-        assert!(merkle_body_mutated(&block.txdata));
+        assert!(block_txid_merkle(&block.txdata).expect("pair").1);
         let err = finish_reconstructed(block.header, block.txdata).expect_err("mutated pair");
         assert!(err.is_empty(), "getdata the hash, got {err:?}");
     }
