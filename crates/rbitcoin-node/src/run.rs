@@ -795,6 +795,10 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         }
     }
     if tip_follow_ready && !shutdown.requested() {
+        let header_mark = (
+            node.hub.initial_getheaders_sent(),
+            node.hub.headers_reply_count(),
+        );
         let follow_n = targets.len().min(max_out.min(3));
         if catch_up.dial_failed_all() {
             for peer in targets.iter().take(follow_n) {
@@ -839,6 +843,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         // without a live session, including ones past `follow_n`. Hostnames
         // were registered before catch-up (`set_connect_hosts`).
         node.peers.set_connect_addrs(config.listen.connect.clone());
+        // Materialize can outlast the miner. Do not publish Electrum until
+        // the follow `getheaders` round is connected and indexed.
+        wait_wallet_history(&node, config.shindex, &shutdown, header_mark).await;
     }
 
     let (mut electrum_handles, mut electrum_bridge, electrum_onion) = start_electrum_if_ready(
@@ -1935,6 +1942,38 @@ async fn start_i2p_named_forward(
         .map_err(|e| NodeError::Init(format!("i2p {name} STREAM FORWARD {port}: {e}")))?;
     info!("i2p {name} STREAM FORWARD to 127.0.0.1:{port}");
     Ok(sam)
+}
+
+/// Wallet bind waits out one follow `getheaders` round.
+///
+/// Scripthash materialize holds the process before dial. The miner can add
+/// a block in that window. Opening Electrum on the pre-dial tip serves a
+/// history that does not include it.
+async fn wait_wallet_history(node: &P2PNode, shindex: bool, shutdown: &Shutdown, mark: (u64, u64)) {
+    if node.follow_live_count() == 0 {
+        return;
+    }
+    let (sent0, reply0) = mark;
+    let started = Instant::now();
+    let deadline = Duration::from_secs(20);
+    let unsent_limit = Duration::from_secs(2);
+    loop {
+        if shutdown.requested() || started.elapsed() >= deadline {
+            return;
+        }
+        let sent = node.hub.initial_getheaders_sent().saturating_sub(sent0);
+        let replies = node.hub.headers_reply_count().saturating_sub(reply0);
+        let tip = node.tip_height().unwrap_or(0);
+        let best = node.hub.best_header_height();
+        let sh_ok = !shindex || node.hub.query.sh_is_tip_ready();
+        if sent > 0 && replies >= sent && best <= tip && sh_ok {
+            return;
+        }
+        if sent == 0 && started.elapsed() >= unsent_limit {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled

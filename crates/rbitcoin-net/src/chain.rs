@@ -388,6 +388,10 @@ pub struct ChainHub {
     chain_work_prefix: RwLock<Vec<Work>>,
     /// Once the relay-inhibited latch clears, stay out.
     finished_ibd: AtomicBool,
+    /// Initial `getheaders` queued by follow sessions since process start.
+    initial_getheaders_sent: AtomicU64,
+    /// `headers` messages applied since process start (including empty).
+    headers_replies: AtomicU64,
     /// A follow-session block inv during IBD. The walk asks its header peer.
     header_inv_challenge: AtomicBool,
     #[cfg(test)]
@@ -503,6 +507,8 @@ impl ChainHub {
             asked_blocks: RwLock::new(HashSet::new()),
             chain_work_prefix: RwLock::new(Vec::new()),
             finished_ibd: AtomicBool::new(false),
+            initial_getheaders_sent: AtomicU64::new(0),
+            headers_replies: AtomicU64::new(0),
             header_inv_challenge: AtomicBool::new(false),
             #[cfg(test)]
             block_at_height_calls: AtomicU64::new(0),
@@ -1162,6 +1168,22 @@ impl ChainHub {
             }
         }
         best
+    }
+
+    pub fn note_initial_getheaders_sent(&self) {
+        self.initial_getheaders_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn initial_getheaders_sent(&self) -> u64 {
+        self.initial_getheaders_sent.load(Ordering::Relaxed)
+    }
+
+    pub fn note_headers_reply(&self) {
+        self.headers_replies.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn headers_reply_count(&self) -> u64 {
+        self.headers_replies.load(Ordering::Relaxed)
     }
 
     fn note_header_tip(&self, header: &Header) {
