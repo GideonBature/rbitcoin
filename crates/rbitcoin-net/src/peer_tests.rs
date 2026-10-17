@@ -3018,6 +3018,57 @@ async fn rate_limited_block_request_disconnects_without_waiting_for_another_mess
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limit_disconnect_releases_the_session_block_asks() {
+    let mut t = paused_serve("rate-asks", 1, &["/rbitcoin:test(rate-asks)/"]).await;
+    let tip = t.node.hub.tip_header().unwrap();
+    let mut child = bitcoin::block::Header {
+        version: bitcoin::block::Version::from_consensus(4),
+        prev_blockhash: tip.block_hash(),
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array([0x33; 32]),
+        time: tip.time + 1,
+        bits: tip.bits,
+        nonce: 0,
+    };
+    rbitcoin_consensus::grind_regtest_pow(&mut child);
+    let hash = child.block_hash();
+    let (raw, _) = &mut t.clients[0];
+    write_peer_msg(raw, NetworkMessage::Headers(vec![child])).await;
+    let asked = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let NetworkMessage::GetData(inv) = next_peer_msg(raw).await.unwrap() {
+                if inv.iter().any(|i| {
+                    matches!(i, Inventory::WitnessBlock(h) | Inventory::CompactBlock(h) if *h == hash)
+                }) {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(asked.is_ok(), "the header announce must ask for its body");
+    assert!(t.node.hub.already_have_or_asked_block(&hash));
+    let ping = crate::v2::encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
+    for _ in 0..=crate::peer_dos::DEFAULT_MAX_MSGS_PER_SEC {
+        if raw.write_contents(&ping).await.is_err() {
+            break;
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !t.node.peers.live_peers().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "rate-limited session");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let still_asked = t.node.hub.already_have_or_asked_block(&hash);
+    raw.close();
+    t.node.shutdown().await;
+    let _ = std::fs::remove_dir_all(&t.dir);
+    assert!(
+        !still_asked,
+        "a disconnect must release the session's body asks for other peers"
+    );
+}
+
 /// Unknown BIP324 short id on a live follow session counts as `*other*`
 /// and the peer stays up (Core `test_msgtype`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

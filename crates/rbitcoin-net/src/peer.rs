@@ -1981,6 +1981,11 @@ pub async fn peer_session_with(
     }
     .await;
 
+    // `asked_blocks` is hub-wide: an ask this session never answered would
+    // keep every other peer from fetching that body.
+    for h in follow.requested_blocks.drain() {
+        hub.forget_asked_block(&h);
+    }
     drop(out_tx);
     // If select! already joined the writer, do not await again (would pend).
     if writer_task.is_finished() {
