@@ -88,6 +88,100 @@ through `VerifyScript`. Legacy rows are bare scripts with no flags.
 | `stack-1001-v0` | Witness v0 rejects a 1,001st stack push. A successful 1,000-deep witness script cannot also return to one element within the 201 opcode budget, so the accept side is the legacy and tapscript rows. |
 | `stack-exec-1000-tapscript` | Tapscript enforces the shared 1,000 cap after each opcode. 1,000 pushes and 999 drops leave one true item. |
 | `stack-exec-1001-tapscript` | Tapscript rejects the 1,001st push during execution. |
+| `disabled-cat-unexec-legacy` | OP_CAT (0x7e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-cat-unexec-v0` | OP_CAT (0x7e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-cat-unexec-tapscript` | OP_CAT (0x7e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-substr-unexec-legacy` | OP_SUBSTR (0x7f) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-substr-unexec-v0` | OP_SUBSTR (0x7f) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-substr-unexec-tapscript` | OP_SUBSTR (0x7f) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-left-unexec-legacy` | OP_LEFT (0x80) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-left-unexec-v0` | OP_LEFT (0x80) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-left-unexec-tapscript` | OP_LEFT (0x80) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-right-unexec-legacy` | OP_RIGHT (0x81) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-right-unexec-v0` | OP_RIGHT (0x81) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-right-unexec-tapscript` | OP_RIGHT (0x81) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-invert-unexec-legacy` | OP_INVERT (0x83) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-invert-unexec-v0` | OP_INVERT (0x83) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-invert-unexec-tapscript` | OP_INVERT (0x83) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-and-unexec-legacy` | OP_AND (0x84) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-and-unexec-v0` | OP_AND (0x84) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-and-unexec-tapscript` | OP_AND (0x84) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-or-unexec-legacy` | OP_OR (0x85) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-or-unexec-v0` | OP_OR (0x85) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-or-unexec-tapscript` | OP_OR (0x85) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-xor-unexec-legacy` | OP_XOR (0x86) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-xor-unexec-v0` | OP_XOR (0x86) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-xor-unexec-tapscript` | OP_XOR (0x86) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-2mul-unexec-legacy` | OP_2MUL (0x8d) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-2mul-unexec-v0` | OP_2MUL (0x8d) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-2mul-unexec-tapscript` | OP_2MUL (0x8d) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-2div-unexec-legacy` | OP_2DIV (0x8e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-2div-unexec-v0` | OP_2DIV (0x8e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-2div-unexec-tapscript` | OP_2DIV (0x8e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-mul-unexec-legacy` | OP_MUL (0x95) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-mul-unexec-v0` | OP_MUL (0x95) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-mul-unexec-tapscript` | OP_MUL (0x95) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-div-unexec-legacy` | OP_DIV (0x96) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-div-unexec-v0` | OP_DIV (0x96) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-div-unexec-tapscript` | OP_DIV (0x96) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-mod-unexec-legacy` | OP_MOD (0x97) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-mod-unexec-v0` | OP_MOD (0x97) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-mod-unexec-tapscript` | OP_MOD (0x97) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-lshift-unexec-legacy` | OP_LSHIFT (0x98) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-lshift-unexec-v0` | OP_LSHIFT (0x98) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-lshift-unexec-tapscript` | OP_LSHIFT (0x98) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-rshift-unexec-legacy` | OP_RSHIFT (0x99) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-rshift-unexec-v0` | OP_RSHIFT (0x99) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `disabled-rshift-unexec-tapscript` | OP_RSHIFT (0x99) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
+| `exec-reserved-legacy` | 0x50 (RESERVED) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-reserved-v0` | 0x50 (RESERVED) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-reserved-tapscript` | 0x50 (RESERVED) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `unexec-reserved-legacy` | 0x50 (RESERVED) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-reserved-v0` | 0x50 (RESERVED) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-reserved-tapscript` | 0x50 (RESERVED) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `exec-ver-legacy` | 0x62 (VER) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-ver-v0` | 0x62 (VER) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-ver-tapscript` | 0x62 (VER) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `unexec-ver-legacy` | 0x62 (VER) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-ver-v0` | 0x62 (VER) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-ver-tapscript` | 0x62 (VER) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `exec-reserved1-legacy` | 0x89 (RESERVED1) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-reserved1-v0` | 0x89 (RESERVED1) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-reserved1-tapscript` | 0x89 (RESERVED1) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `unexec-reserved1-legacy` | 0x89 (RESERVED1) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-reserved1-v0` | 0x89 (RESERVED1) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-reserved1-tapscript` | 0x89 (RESERVED1) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `exec-reserved2-legacy` | 0x8a (RESERVED2) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-reserved2-v0` | 0x8a (RESERVED2) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-reserved2-tapscript` | 0x8a (RESERVED2) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `unexec-reserved2-legacy` | 0x8a (RESERVED2) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-reserved2-v0` | 0x8a (RESERVED2) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-reserved2-tapscript` | 0x8a (RESERVED2) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `exec-success187-legacy` | 0xbb (SUCCESS187) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-success187-v0` | 0xbb (SUCCESS187) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-success187-tapscript` | 0xbb (SUCCESS187) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `unexec-success187-legacy` | 0xbb (SUCCESS187) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-success187-v0` | 0xbb (SUCCESS187) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-success187-tapscript` | 0xbb (SUCCESS187) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `exec-success254-legacy` | 0xfe (SUCCESS254) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-success254-v0` | 0xfe (SUCCESS254) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `exec-success254-tapscript` | 0xfe (SUCCESS254) rejects when executed on legacy and witness v0. Tapscript accepts it as OP_SUCCESS. |
+| `unexec-success254-legacy` | 0xfe (SUCCESS254) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-success254-v0` | 0xfe (SUCCESS254) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `unexec-success254-tapscript` | 0xfe (SUCCESS254) is not a legacy disabled opcode, so an unexecuted one is skipped. Tapscript still accepts it as OP_SUCCESS. |
+| `exec-return-legacy` | OP_RETURN rejects when executed in every signature version. |
+| `exec-return-v0` | OP_RETURN rejects when executed in every signature version. |
+| `exec-return-tapscript` | OP_RETURN rejects when executed in every signature version. |
+| `unexec-return-legacy` | OP_RETURN inside an unexecuted IF is skipped in every signature version. |
+| `unexec-return-v0` | OP_RETURN inside an unexecuted IF is skipped in every signature version. |
+| `unexec-return-tapscript` | OP_RETURN inside an unexecuted IF is skipped in every signature version. |
+| `exec-unknown-ff-legacy` | Opcode 0xff is not disabled and not OP_SUCCESS. Executing it rejects in every signature version. |
+| `exec-unknown-ff-v0` | Opcode 0xff is not disabled and not OP_SUCCESS. Executing it rejects in every signature version. |
+| `exec-unknown-ff-tapscript` | Opcode 0xff is not disabled and not OP_SUCCESS. Executing it rejects in every signature version. |
+| `unexec-unknown-ff-legacy` | Opcode 0xff inside an unexecuted IF is skipped in every signature version. |
+| `unexec-unknown-ff-v0` | Opcode 0xff inside an unexecuted IF is skipped in every signature version. |
+| `unexec-unknown-ff-tapscript` | Opcode 0xff inside an unexecuted IF is skipped in every signature version. |
+| `success-inside-push-tapscript` | An OP_SUCCESS byte inside a push is data. The following OP_RETURN still rejects. |
 | `initial-1000-tapscript` | Tapscript accepts an initial stack of 1,000, then 999 DROP leaves one true item. |
 | `initial-1001-tapscript` | Tapscript rejects an initial stack of 1,001 before the script runs. |
 | `initial-520-tapscript` | Tapscript accepts a 520-byte initial element. |
@@ -97,4 +191,5 @@ through `VerifyScript`. Legacy rows are bare scripts with no flags.
 | `success-skip-1001` | One OP_SUCCESS accepts before the initial-stack check, including 1,001 items. |
 | `success-unexec-1001` | OP_SUCCESS inside an unexecuted IF still accepts before the initial-stack check. |
 | `success-unparseable-tail` | OP_SUCCESS followed by a truncated PUSHDATA accepts before the stack check. The unparseable tail is not executed. |
+| `success187-skip-1001` | OP_SUCCESS187 accepts before the 1,001 initial-stack check. |
 | `success-skip-521` | OP_SUCCESS accepts before the 521-byte initial-element check. |
