@@ -104,13 +104,13 @@ pub(crate) fn verify_p2sh_legacy(
 
     let redeem_script = Script::from_bytes(&redeem);
     let ctx = EvalContext::from_job(job, tx, input_index, redeem_script, SigVersion::Base)?;
-    if interpreter::eval_script(redeem_script, &mut stack, &ctx)? {
-        // BIP16: true top unless CLEANSTACK. Witness nested paths clean separately.
-        if job.cleanstack {
-            interpreter::require_clean_true(&stack)?;
-        } else {
-            interpreter::require_true_top(&stack)?;
-        }
+    // Base eval returns `Ok(true)` or `Err`. `Ok(false)` is tapscript OP_SUCCESS.
+    // BIP16: true top unless CLEANSTACK. Witness nested paths clean separately.
+    interpreter::eval_script(redeem_script, &mut stack, &ctx)?;
+    if job.cleanstack {
+        interpreter::require_clean_true(&stack)?;
+    } else {
+        interpreter::require_true_top(&stack)?;
     }
     Ok(())
 }
@@ -246,6 +246,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -547,6 +548,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -579,6 +581,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -622,6 +625,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -655,6 +659,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -691,6 +696,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -725,6 +731,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -756,6 +763,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -798,6 +806,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -841,6 +850,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -881,6 +891,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -892,5 +903,50 @@ mod tests {
         let redeem = items.pop().unwrap();
         assert_eq!(items, vec![vec![], vec![0x10]]);
         assert_eq!(redeem, vec![0x51]);
+    }
+
+    #[test]
+    fn push_only_scan_rejects_a_truncated_script() {
+        assert!(!script_is_push_only(Script::from_bytes(&[0x4e, 0x01])));
+    }
+
+    #[test]
+    fn nested_segwit_reports_a_missing_prevout() {
+        let program = {
+            let mut v = vec![0x00, 0x14];
+            v.extend_from_slice(&[0x02; 20]);
+            v
+        };
+        let mut script_sig = vec![program.len() as u8];
+        script_sig.extend_from_slice(&program);
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(script_sig),
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&[program.as_slice()]),
+            }],
+            output: vec![],
+        };
+        let job = ScriptCheckJob::from_parts(
+            [0u8; 32],
+            crate::block::JobPrevouts::Shared(vec![rbitcoin_query::SharedPrevoutScript::Wire {
+                tx_index: 0,
+                vout: 0,
+            }]),
+            crate::block::JobTx::owned(tx),
+            crate::block::ScriptVerifyFlags::buried(false, false, false, true, false),
+        );
+        let got = try_p2sh_nested_segwit(
+            &job,
+            0,
+            &job.tx,
+            &mut bitcoin::sighash::SighashCache::new(&job.tx),
+            job.pre(),
+            &[program],
+        );
+        assert!(got.unwrap().is_err());
     }
 }

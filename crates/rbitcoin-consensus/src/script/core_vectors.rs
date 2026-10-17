@@ -337,6 +337,10 @@ fn script_row_job(
                 .extra
                 .iter()
                 .any(|e| e == "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM"),
+            discourage_upgradable_taproot: flags
+                .extra
+                .iter()
+                .any(|e| e == "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION"),
             const_scriptcode: flags.extra.iter().any(|e| e == "CONST_SCRIPTCODE"),
             cleanstack: flags.cleanstack,
         },
@@ -867,4 +871,22 @@ fn corpus_fast_paths_call_typed_verifiers() {
     );
     let tx: &Transaction = &job.tx;
     assert!(p2tr::verify(&job, 0, tx, &tap).is_err());
+
+    let spend = corpus_spend(&rows, "p2pkh-fast-ok");
+    let mut sig = spend.sig;
+    // Last byte of the 0x47-byte signature push is the hashtype. Flipping it
+    // keeps the DER encoding and fails the typed ECDSA check.
+    sig[0x47] = 0x03;
+    let job = script_row_job(
+        &sig,
+        &spend.pk,
+        Witness::new(),
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let owned = Transaction::clone(&job.tx);
+    let mut cache = SighashCache::new(&owned);
+    let err = p2pkh::verify(&job, 0, &owned, &mut cache).expect_err("bad hashtype");
+    assert!(format!("{err}").contains("ecdsa"), "{err}");
 }

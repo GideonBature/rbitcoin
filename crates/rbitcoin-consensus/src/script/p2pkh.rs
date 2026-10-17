@@ -133,6 +133,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },

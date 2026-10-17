@@ -49,9 +49,6 @@ pub(crate) fn witness_program(script: &Script) -> Option<(u8, &[u8])> {
     if b.len() != 2 + push_len {
         return None;
     }
-    if b[1] != push_len as u8 {
-        return None;
-    }
     Some((version, &b[2..]))
 }
 

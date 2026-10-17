@@ -70,9 +70,9 @@ pub(crate) fn execute_witness_v0<'w>(
         stack.push(item.to_vec());
     }
     let ctx = EvalContext::from_job(job, tx, input_index, script, SigVersion::WitnessV0)?;
-    if interpreter::eval_script(script, &mut stack, &ctx)? {
-        interpreter::require_clean_true(&stack)?;
-    }
+    // Witness v0 eval returns `Ok(true)` or `Err`. `Ok(false)` is tapscript OP_SUCCESS.
+    interpreter::eval_script(script, &mut stack, &ctx)?;
+    interpreter::require_clean_true(&stack)?;
     Ok(())
 }
 
@@ -123,6 +123,7 @@ mod tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },

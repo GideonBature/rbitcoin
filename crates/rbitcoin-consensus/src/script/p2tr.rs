@@ -193,7 +193,9 @@ fn verify_script_path(
     let (leaf, tapleaf_hash) = verify_control_commitment(&control_bytes, output_key_bytes, script)?;
 
     if leaf != TAPSCRIPT_LEAF {
-        if job.flags.discourage_upgradable_witness {
+        // Core uses DISCOURAGE_UPGRADABLE_TAPROOT_VERSION here, not the
+        // witness-program bit. That bit still rejects unknown witness versions.
+        if job.flags.discourage_upgradable_taproot {
             return Err(ConsensusError::Script(
                 "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION".into(),
             ));
@@ -302,6 +304,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -384,6 +387,7 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
+                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -463,6 +467,7 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
+                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -736,6 +741,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -806,6 +812,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -873,6 +880,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -960,6 +968,7 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
+                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -1005,6 +1014,7 @@ mod bip341_tests {
                     witness_pubkeytype: false,
                     witness_active: true,
                     discourage_upgradable_witness: false,
+                    discourage_upgradable_taproot: false,
                     const_scriptcode: false,
                     cleanstack: false,
                 },
@@ -1080,6 +1090,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1179,6 +1190,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1471,6 +1483,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1594,6 +1607,7 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
@@ -1648,11 +1662,90 @@ mod bip341_tests {
                 witness_pubkeytype: false,
                 witness_active: true,
                 discourage_upgradable_witness: false,
+                discourage_upgradable_taproot: false,
                 const_scriptcode: false,
                 cleanstack: false,
             },
             pre: std::sync::OnceLock::new(),
         };
         assert!(script::verify_job_all_inputs(&job).is_err());
+    }
+
+    #[test]
+    fn script_path_rejects_a_witness_shorter_than_script_and_control() {
+        let job = ScriptCheckJob::new(
+            vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes({
+                    let mut spk = vec![0x51, 0x20];
+                    spk.extend([2u8; 32]);
+                    spk
+                }),
+            }],
+            Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![],
+            },
+            crate::block::ScriptVerifyFlags::buried(false, false, false, true, true),
+        );
+        let err = verify_script_path(
+            &job,
+            0,
+            &job.tx,
+            &[2u8; 32],
+            &crypto::TapSpentHashes::default(),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("script path short"), "{err}");
+    }
+
+    #[test]
+    fn key_path_sighash_reports_a_missing_prevout() {
+        // Output key from the corpus key-path row. It is a real x-only point.
+        let output_key = [
+            0x2a, 0x64, 0xb1, 0xee, 0x33, 0x75, 0xf3, 0xbb, 0x4b, 0x36, 0x7b, 0x8c, 0xb8, 0x38,
+            0x4a, 0x47, 0xf7, 0x3c, 0xf2, 0x31, 0x71, 0x7f, 0x82, 0x7c, 0x6c, 0x6f, 0xbb, 0xf5,
+            0xae, 0xcf, 0x0c, 0x36,
+        ];
+        let mut spk = vec![0x51, 0x20];
+        spk.extend(output_key);
+        let job = ScriptCheckJob::from_parts(
+            [0u8; 32],
+            crate::block::JobPrevouts::Shared(vec![rbitcoin_query::SharedPrevoutScript::Wire {
+                tx_index: 0,
+                vout: 0,
+            }]),
+            crate::block::JobTx::owned(Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::from_slice(&[[0u8; 64].as_slice()]),
+                }],
+                output: vec![],
+            }),
+            crate::block::ScriptVerifyFlags::buried(false, false, false, true, true),
+        );
+        let err = verify_key_path(
+            &job,
+            0,
+            &job.tx,
+            &output_key,
+            &crypto::TapSpentHashes::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("invariant") || format!("{err}").contains("Corrupt"),
+            "{err}"
+        );
     }
 }

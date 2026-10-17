@@ -470,3 +470,10 @@ BIP16 and Taproot exception hashes change which scripts run. They are block-hash
 | `tapleaf-unknown-1001` | An unknown tapleaf version succeeds without running the leaf, so 1001 stack items are ignored. |
 | `tapleaf-known-521` | A known tapscript leaf rejects a 521-byte element. |
 | `tapleaf-known-1001` | A known tapscript leaf rejects 1001 stack items. |
+| `p2sh-witness-unexpected` | A non-empty witness on a legacy P2SH redeem is rejected. |
+| `p2sh-witness-empty-script` | P2SH with an empty scriptSig does not execute a redeem. WITNESS does not change that. |
+| `p2wpkh-low-s-witness-len` | LOW_S sends P2WPKH through the interpreter, which still rejects a one-item witness. |
+| `checksigverify-empty-32-tap` | Tapscript CHECKSIGVERIFY rejects an empty signature for a 32-byte key. |
+| `schnorr-bad-len-tap` | A tapscript signature that is neither 64 nor 65 bytes fails CHECKSIG. |
+| `tapleaf-unknown-discourage` | DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM does not reject an unknown tapleaf version. The spend still accepts. |
+| `tapleaf-unknown-taproot-discourage` | DISCOURAGE_UPGRADABLE_TAPROOT_VERSION rejects an unknown tapleaf version. |

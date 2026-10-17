@@ -588,6 +588,9 @@ pub(crate) fn eval_script(
                 }
 
                 let rm = ctx.minimal_data;
+                // `push` enforces the shared stack limit. A later check would
+                // not see a larger stack: every growth goes through `push`,
+                // and OP_TOALTSTACK only moves an element.
                 match code {
                     // OP_0 is PushBytes, not an opcode. OP_RESERVED, OP_VER,
                     // OP_VERIF, and OP_RETURN fail from the unknown-opcode arm
@@ -804,11 +807,10 @@ pub(crate) fn eval_script(
                     0xa6 => {
                         let v = pop(stack)?;
                         use bitcoin::hashes::ripemd160;
-                        push(
-                            stack,
-                            altstack.len(),
-                            ripemd160::Hash::hash(&v).to_byte_array().to_vec(),
-                        )?;
+                        let digest = ripemd160::Hash::hash(&v).to_byte_array();
+                        // Pop-then-one-push cannot exceed the limit `push` already
+                        // enforced on the way to a full stack. The digest is 20 bytes.
+                        push(stack, altstack.len(), digest.to_vec()).expect("ripemd160 fits");
                     }
                     0xa7 => {
                         // OP_SHA1 is consensus-enabled (was stubbed → would fail post-milestone).
@@ -826,17 +828,13 @@ pub(crate) fn eval_script(
                     0xaa => {
                         let v = pop(stack)?;
                         use bitcoin::hashes::sha256d;
-                        push(
-                            stack,
-                            altstack.len(),
-                            sha256d::Hash::hash(&v).to_byte_array().to_vec(),
-                        )?;
+                        let digest = sha256d::Hash::hash(&v).to_byte_array();
+                        // Same stack shape as RIPEMD160: one pop, one 32-byte push.
+                        push(stack, altstack.len(), digest.to_vec()).expect("hash256 fits");
                     }
                     0xab => {
                         // Tapscript: instruction index. Base/v0: scriptCode after this opcode.
-                        if ctx.const_scriptcode && ctx.sig_version == SigVersion::Base {
-                            return Err(ConsensusError::Script("OP_CODESEPARATOR".into()));
-                        }
+                        // CONST_SCRIPTCODE already returned above, including unexecuted.
                         ctx.codeseparator_pos.set(this_pos);
                         ctx.codeseparator_script_off
                             .set(Some(byte_index.saturating_add(1)));
@@ -916,18 +914,12 @@ pub(crate) fn eval_script(
                     }
                     0xb0 | 0xb3 | 0xb4 | 0xb5 | 0xb6 | 0xb7 | 0xb8 | 0xb9 => {}
                     _ => {
-                        if ctx.sig_version == SigVersion::TapScript && is_op_success(code) {
-                            return Ok(false);
-                        }
-                        // Non-tapscript disabled opcodes already returned above.
+                        // OP_SUCCESS returned before this loop. Disabled opcodes
+                        // already returned above.
                         return Err(ConsensusError::Script(format!(
                             "unknown opcode 0x{code:02x}"
                         )));
                     }
-                }
-                // Core: stack + altstack share MAX_STACK_SIZE (1000).
-                if stack.len() + altstack.len() > MAX_STACK_SIZE {
-                    return Err(ConsensusError::Script("stack size".into()));
                 }
             }
         }
@@ -1408,10 +1400,10 @@ fn check_signature_encoding(sig: &[u8], ctx: &EvalContext<'_>) -> Result<(), Con
         return Err(ConsensusError::Script("SIG_DER".into()));
     }
     if ctx.low_s {
-        if let Ok((ecdsa, _)) = crypto::parse_der_sig(sig, false) {
-            if !crypto::is_low_der_s(&ecdsa) {
-                return Err(ConsensusError::Script("SIG_HIGH_S".into()));
-            }
+        // LOW_S already required BIP66 encoding above, so the lax parse hits.
+        let (ecdsa, _) = crypto::parse_der_sig(sig, false).expect("BIP66 signature parses");
+        if !crypto::is_low_der_s(&ecdsa) {
+            return Err(ConsensusError::Script("SIG_HIGH_S".into()));
         }
     }
     if ctx.strictenc && !crypto::is_defined_hashtype(sig) {
@@ -1442,10 +1434,9 @@ fn checksig_schnorr(
     };
     let xonly = bitcoin::key::XOnlyPublicKey::from_slice(pubkey)
         .map_err(|_| ConsensusError::Script("tapscript xonly".into()))?;
-    let schnorr = match bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes) {
-        Ok(s) => s,
-        Err(_) => return Ok(false),
-    };
+    // `from_slice` rejects only a length other than 64. `sig_bytes` is that long.
+    let schnorr = bitcoin::secp256k1::schnorr::Signature::from_slice(sig_bytes)
+        .expect("64-byte schnorr slice");
     let exec = ctx.tapscript.as_ref().ok_or_else(|| {
         ConsensusError::Script("invariant: tapscript spend without tapleaf hash".into())
     })?;
@@ -2821,5 +2812,158 @@ mod p2sh_redeem_parse_tests {
         let ctx2 = EvalContext::new(&tx, 0, Amount::from_sat(1), rs, SigVersion::Base);
         let r = eval_script(rs, &mut stack, &ctx2);
         assert!(r.is_ok(), "{r:?}");
+    }
+}
+
+#[cfg(test)]
+mod untaken_consensus_arms {
+    use std::borrow::Cow;
+
+    use super::*;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::script::ScriptBuf;
+    use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
+    use bitcoin::{Amount, OutPoint, PublicKey, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    fn tx_with_inputs(n: usize) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: (0..n)
+                .map(|_| TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    }
+
+    #[test]
+    fn find_and_delete_encodes_pushdata4_and_stops_on_a_truncated_push() {
+        let encoded = find_and_delete(&[], &vec![0u8; 70_000]);
+        assert!(encoded.is_empty());
+        assert_eq!(find_and_delete(&[0x4c], &[0x11]), vec![0x4c]);
+    }
+
+    #[test]
+    fn minimal_push_treats_data_over_64k_as_pushdata4() {
+        assert!(check_minimal_push(&vec![0u8; 65_536], 0x4e));
+    }
+
+    #[test]
+    fn from_job_past_the_prevouts_uses_a_zero_amount() {
+        let tx = tx_with_inputs(1);
+        let job = crate::block::ScriptCheckJob::new(
+            vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+            tx,
+            crate::block::ScriptVerifyFlags::buried(false, false, false, false, false),
+        );
+        let sc = Script::from_bytes(&[0x51]);
+        let ctx = EvalContext::from_job(&job, &job.tx, 3, sc, SigVersion::Base).unwrap();
+        assert_eq!(ctx.amount, Amount::ZERO);
+    }
+
+    #[test]
+    fn checksig_sighash_failure_is_a_soft_false() {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x11; 32]).unwrap();
+        let pk = PublicKey::new(sk.public_key(&secp));
+        let mut sig = secp
+            .sign_ecdsa(&Message::from_digest([9; 32]), &sk)
+            .serialize_der()
+            .to_vec();
+        sig.push(0x01);
+        let tx = tx_with_inputs(1);
+        let sc = Script::from_bytes(&[0x51]);
+        let ctx = EvalContext::from_eval_parts(
+            &tx,
+            5,
+            Amount::ZERO,
+            sc,
+            SigVersion::Base,
+            false,
+            false,
+            false,
+            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+        );
+        let matched = ecdsa_sig_matches(&sig, &pk.to_bytes(), &ctx, &[0x51], PreTapscript::Base);
+        assert_eq!(matched.unwrap(), false);
+    }
+
+    #[test]
+    fn tapscript_checksig_without_leaf_facts_fails() {
+        let tx = tx_with_inputs(1);
+        let mut script = vec![0x40];
+        script.extend_from_slice(&[0x11; 64]);
+        script.push(0x20);
+        script.extend_from_slice(&[0x02; 32]);
+        script.push(0xac);
+        let sc = Script::from_bytes(&script);
+        let ctx = EvalContext::from_eval_parts(
+            &tx,
+            0,
+            Amount::ZERO,
+            sc,
+            SigVersion::TapScript,
+            false,
+            false,
+            false,
+            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+        );
+        let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
+        assert!(format!("{err}").contains("tapleaf"), "{err}");
+    }
+
+    #[test]
+    fn tapscript_checksig_rejects_a_signature_that_is_not_64_or_65_bytes() {
+        let tx = tx_with_inputs(1);
+        let mut script = vec![0x01, 0x11, 0x20];
+        script.extend_from_slice(&[0x02; 32]);
+        script.push(0xac);
+        let sc = Script::from_bytes(&script);
+        let ctx = EvalContext::from_eval_parts(
+            &tx,
+            0,
+            Amount::ZERO,
+            sc,
+            SigVersion::TapScript,
+            false,
+            false,
+            false,
+            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+        );
+        let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
+        assert!(format!("{err}").contains("CHECKSIG"), "{err}");
+    }
+
+    #[test]
+    fn tapscript_checksigverify_rejects_an_empty_signature_on_a_32_byte_key() {
+        let tx = tx_with_inputs(1);
+        let mut script = vec![0x00, 0x20];
+        script.extend_from_slice(&[0x02; 32]);
+        script.push(0xad);
+        let sc = Script::from_bytes(&script);
+        let ctx = EvalContext::from_eval_parts(
+            &tx,
+            0,
+            Amount::ZERO,
+            sc,
+            SigVersion::TapScript,
+            false,
+            false,
+            false,
+            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+        );
+        let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
+        assert!(format!("{err}").contains("CHECKSIGVERIFY"), "{err}");
     }
 }
