@@ -37,11 +37,11 @@ Unknown tokens (including deleted `mmap`) fall through to the platform default.
 | Token | Backend |
 |-------|---------|
 | `uring` / `io_uring` | Linux `io_uring`. On Windows the token opens **IOCP** |
-| `pool` | Worker-pool completion ring (Darwin **default**; Linux CI pin) |
+| `pool` | Worker-pool completion ring (opt-in on Darwin; Linux CI pin) |
 | `iocp` | Windows IOCP (Windows **default**) |
 | `pread` / `fd` / `libc` / `pwrite` | Disable session; libc positional IO (+ workers for reads) |
 
-**Defaults:** Linux `io_uring` if the ring opens, else libc **pread** (session off). Darwin **pool**.
+**Defaults:** Linux `io_uring` if the ring opens, else libc **pread** (session off). Darwin libc **pread** (session off).
 Windows **IOCP**. Windows IoRing is not supported.
 
 **Windows table handles** are `FILE_FLAG_OVERLAPPED` so IOCP can bind.
@@ -56,8 +56,11 @@ heap OVERLAPPEDs).
 **kqueue is not a regular-file backend.** Darwin files report ready immediately;
 `read` still blocks. POSIX AIO (`EVFILT_AIO`) and `dispatch_io` are also
 thread pools (`kern.aiomax` default 16) — same class as `pool`, not an
-SQ/CQ. The pool session is the honest Darwin completion ring. Pool
-**workers** are process-shared; each TLS session keeps its own CQE queue.
+SQ/CQ. The pool session is the honest Darwin completion ring, but each read
+costs a shared-queue lock and two thread wakeups. In signet IBD that cost more
+than the reads, warm or cold cache (about 20% slower end to end, four times the
+system CPU), so Darwin defaults to libc pread and `RBITCOIN_IO=pool` opts in.
+Pool **workers** are process-shared; each TLS session keeps its own CQE queue.
 
 **TLS session:** one completion session per OS thread (`with_thread_local`).
 Nested calls panic. Harvest tracks pending `(kind, epoch, slot)`. A CQE that
@@ -149,7 +152,7 @@ RAM fence (~15 MiB at 1M blocks), not a file.
 | Block index build (filters + tweaks) | `RBITCOIN_IO` | `read_index_window`: one held TLS session per window, four stages (`create.loc` / `input.loc` / `seqsigwit.loc` windows → block `txout` / `input.body` / `txid.body` spans → parent `create.loc` + P2TR-output `seqsigwit.body` + parent `txid.body` → parent `txout`), offsets from RAM checkpoints so nothing nests. Parents read once per window. Short/errno on a live session libc-completes; no session → serial pread through the same stages. Writes are not on the ring: one filter put and one tweak put per window. |
 | SP-tweak hole serve | `RBITCOIN_IO` | `tweaks_for_height` for heights the index has not sealed: idx ranges **before** TLS ring; uring/pread `txout.body`, then `seqsigwit` + parent `txout` for P2TR only. |
 
-Default: Linux uring if the ring opens else libc pread; Darwin pool; Windows
+Default: Linux uring if the ring opens else libc pread; Darwin pread; Windows
 IOCP. Ring depth **128** (merge may grow). `RBITCOIN_IO=pread` forces libc.
 
 ### Table transport (all fd)

@@ -1,8 +1,9 @@
 //! Completion-ring facade over a bounded worker pool.
 //!
 //! Same harvest contract as io_uring (`user_data`, drain, in-flight cap).
-//! Darwin's file AIO is a thread pool; this is the honest session there and
-//! the Linux CI pin (`RBITCOIN_IO=pool`).
+//! Darwin's file AIO is a thread pool; this is the honest session there when
+//! `RBITCOIN_IO=pool` asks for it (Darwin defaults to libc pread), and the
+//! Linux CI pin.
 //!
 //! Workers are **process-shared**. Each [`PoolEngine`] is a session handle
 //! with its own CQE queue so harvest does not steal another thread's

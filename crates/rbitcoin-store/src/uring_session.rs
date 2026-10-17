@@ -176,7 +176,7 @@ fn finish_drain_hard_cap(pending: usize) -> Result<(), StoreError> {
 pub enum SessionKind {
     /// Linux io_uring. On Windows this opens IOCP.
     Uring,
-    /// Worker-pool completion ring (Darwin default; Linux `RBITCOIN_IO=pool`).
+    /// Worker-pool completion ring (`RBITCOIN_IO=pool` on Darwin or Linux).
     Pool,
     /// Windows IOCP.
     Iocp,
@@ -1835,14 +1835,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", windows))]
     fn default_kind_follows_os_when_env_unset() {
         if std::env::var_os("RBITCOIN_IO").is_some() {
             return;
         }
         #[cfg(target_os = "linux")]
         assert_eq!(crate::bulk_io::resolved_session_kind(), SessionKind::Uring);
-        #[cfg(target_os = "macos")]
-        assert_eq!(crate::bulk_io::resolved_session_kind(), SessionKind::Pool);
         #[cfg(windows)]
         assert_eq!(crate::bulk_io::resolved_session_kind(), SessionKind::Iocp);
     }

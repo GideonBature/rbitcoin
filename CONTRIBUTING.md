@@ -60,7 +60,7 @@ using this cargo binary (not the musl `target/release/` install).
 ### What works on each OS
 
 Linux is the **supported operator IO** target (`io_uring` when the ring opens).
-Darwin defaults to the **pool** session; Windows to **IOCP** (no IoRing). Matrix:
+Darwin defaults to libc **pread** (`RBITCOIN_IO=pool` opts into the pool session); Windows to **IOCP** (no IoRing). Matrix:
 [`docs/io-modality.md`](./docs/io-modality.md). PR CI still smokes native store
 IO on Windows and Darwin.
 
