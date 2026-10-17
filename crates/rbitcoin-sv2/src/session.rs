@@ -50,6 +50,13 @@ const MAX_RETAINED: usize = 64;
 /// session is closed so the slot goes back to a real client.
 const MAX_SUPERSEDED_CONSTRAINTS: u32 = 8;
 
+/// When a changed budget rebuilds. `None` means [`crate::CONSTRAINTS_COOLDOWN`]
+/// has elapsed and the budget publishes on this message.
+pub(crate) fn constraints_rebuild_at(built_at: Instant, now: Instant) -> Option<Instant> {
+    let at = built_at + crate::CONSTRAINTS_COOLDOWN;
+    (at > now).then_some(at)
+}
+
 /// Fee-delta push settings (docs/sv2-template-provider.md C1).
 #[derive(Clone, Copy)]
 pub(crate) struct FeePush {
@@ -131,7 +138,6 @@ pub(crate) async fn serve(
     setup_timeout: Duration,
     write_timeout: Duration,
     fee_push: FeePush,
-    constraints_cooldown: Duration,
     stats: Arc<Sv2TpStats>,
 ) -> io::Result<()> {
     let deadline = Instant::now() + setup_timeout;
@@ -164,7 +170,6 @@ pub(crate) async fn serve(
         chain,
         stale_grace,
         fee_push,
-        constraints_cooldown,
         stats,
         constraints: None,
         templates: Templates::default(),
@@ -192,15 +197,13 @@ struct Session {
     chain: Arc<ChainHub>,
     stale_grace: Duration,
     fee_push: FeePush,
-    /// [`crate::CONSTRAINTS_COOLDOWN`] on a node. Tests pass a shorter wait.
-    constraints_cooldown: Duration,
     stats: Arc<Sv2TpStats>,
     /// Last `CoinbaseOutputConstraints`: `(max_additional_size, sigops)`.
     constraints: Option<(u32, u16)>,
     templates: Templates,
     /// When `publish` last sent a template.
     built_at: Option<Instant>,
-    /// Constraints-triggered rebuild deferred by `constraints_cooldown`.
+    /// Constraints-triggered rebuild deferred until [`crate::CONSTRAINTS_COOLDOWN`].
     rebuild_at: Option<Instant>,
     /// Budgets that replaced a queued rebuild's since the last build.
     superseded: u32,
@@ -286,8 +289,11 @@ impl Session {
                 if same || self.holding {
                     return Ok(true);
                 }
-                match self.built_at.map(|t| t + self.constraints_cooldown) {
-                    Some(at) if at > Instant::now() => {
+                match self
+                    .built_at
+                    .and_then(|t| constraints_rebuild_at(t, Instant::now()))
+                {
+                    Some(at) => {
                         if self.rebuild_at.replace(at).is_some() {
                             self.superseded += 1;
                             if self.superseded > MAX_SUPERSEDED_CONSTRAINTS {
@@ -614,7 +620,21 @@ async fn on_request_transaction_data(
 
 #[cfg(test)]
 mod tests {
-    use super::Templates;
+    use super::{constraints_rebuild_at, Templates};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn constraints_rebuild_at_uses_the_one_second_cooldown() {
+        let built_at = Instant::now();
+        let soon = built_at + Duration::from_millis(999);
+        assert_eq!(
+            constraints_rebuild_at(built_at, soon),
+            Some(built_at + Duration::from_secs(1))
+        );
+        let due = built_at + Duration::from_secs(1);
+        assert_eq!(constraints_rebuild_at(built_at, due), None);
+    }
 
     #[test]
     fn tip_event_rebuilds_a_template_built_before_it() {
