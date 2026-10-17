@@ -90,15 +90,20 @@ async fn last1_and_second_client(app: &Router, cache: &Mutex<JoinCache>, sh1: [u
     }
 }
 
-async fn bulk_reuses_wallet_slot(
-    q: Arc<Query>,
+/// A newest wallet page does not store a full join. The next page recomputes
+/// its window. `last_bulk` stays empty.
+async fn bulk_page_leaves_wallet_slot_empty(
     app: &Router,
-    cache: Arc<Mutex<JoinCache>>,
+    cache: &Mutex<JoinCache>,
     sh1: [u8; 32],
     sh2: [u8; 32],
 ) {
     let h1hex = block_hash_hex(&sh1);
     let h2hex = block_hash_hex(&sh2);
+    let t1 = block_hash_hex(&[
+        0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0xaa,
+    ]);
     let t2 = block_hash_hex(&[
         0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0xaa,
@@ -113,21 +118,15 @@ async fn bulk_reuses_wallet_slot(
         .unwrap();
     let (st, resp) = oneshot_http(app, req).await;
     assert_eq!(st, 200, "{resp}");
-    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
-    let st = join_only_state(q, Arc::clone(&cache));
-    let mut bag = HashMap::new();
-    st.seed_bulk(Some("wallet"), &mut bag);
-    assert_eq!(bag.len(), 2);
-    {
-        let g = cache.lock().unwrap();
-        let c = g.clients.get("wallet").expect("wallet bulk");
-        let packed: usize = c.last_bulk.values().map(|s| s.packed_bytes()).sum();
-        assert!(packed <= JOIN_BULK_CAP, "last-bulk stays under 16 MiB");
-        for (k, v) in &bag {
-            let cached = c.last_bulk.get(k).expect("seeded key");
-            assert!(Arc::ptr_eq(cached, v), "seed_bulk must Arc-clone last-bulk");
-        }
-    }
+    let rows: Value = serde_json::from_str(&resp).unwrap();
+    let ids: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["txid"].as_str())
+        .collect();
+    assert_eq!(ids, vec![t2.as_str(), t1.as_str()], "{resp}");
+    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 0);
     let req = axum::http::Request::builder()
         .method("POST")
         .uri(format!("/scripthashes/txs?after_txid={t2}"))
@@ -137,7 +136,15 @@ async fn bulk_reuses_wallet_slot(
         .unwrap();
     let (st, resp) = oneshot_http(app, req).await;
     assert_eq!(st, 200, "{resp}");
-    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 2);
+    let rows: Value = serde_json::from_str(&resp).unwrap();
+    let ids: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["txid"].as_str())
+        .collect();
+    assert_eq!(ids, vec![t1.as_str()], "{resp}");
+    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 0);
 }
 
 async fn untrusted_header_is_ignored(q: Arc<Query>, sh1: [u8; 32]) {
@@ -328,7 +335,7 @@ async fn esplora_sh_join_and_template() {
     casa_reuses_last_slot(&app, &cache).await;
     two_addresses_each_have_one_utxo(&app, &a1, &a2).await;
     last1_and_second_client(&app, &cache, sh1, sh2).await;
-    bulk_reuses_wallet_slot(Arc::clone(&q), &app, Arc::clone(&cache), sh1, sh2).await;
+    bulk_page_leaves_wallet_slot_empty(&app, &cache, sh1, sh2).await;
     untrusted_header_is_ignored(Arc::clone(&q), sh1).await;
     template_cached_until_tip_moves(q, prev, h2.hash).await;
     template_missing_tip_or_knob().await;
