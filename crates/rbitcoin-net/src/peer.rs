@@ -3738,13 +3738,14 @@ async fn on_block(
     block: &Block,
 ) -> Result<(), NetError> {
     let hash = block.block_hash();
-    if !block.check_merkle_root() {
+    let (root, mutated) = crate::compact::block_txid_merkle(&block.txdata);
+    if root != block.header.merkle_root.to_byte_array() {
         rbitcoin_log::info!("Block mutated: bad-txnmrklroot, hashMerkleRoot mismatch");
         take_requested_block(hub, &mut follow.requested_blocks, &hash);
         misbehaving(&mut follow.ban_score, session);
         return Ok(());
     }
-    if crate::compact::merkle_body_mutated(&block.txdata) {
+    if mutated {
         rbitcoin_log::info!("Block mutated: bad-txns-duplicate");
         take_requested_block(hub, &mut follow.requested_blocks, &hash);
         misbehaving(&mut follow.ban_score, session);
