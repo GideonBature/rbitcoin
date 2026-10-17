@@ -18,8 +18,9 @@ libc = "0.2"
 getrandom = "0.4"
 
 [features]
-# Consensus tests interleave a disconnect inside a spend checkpoint.
-# A downstream dev-dependency turns this on. A production build leaves it off.
+# Downstream tests call hooks a production build does not compile:
+# spend-checkpoint interleaving, and a raw confirmed slot.
+# A crate's dev-dependency turns this on. A production build leaves it off.
 test-hooks = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
