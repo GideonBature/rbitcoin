@@ -124,10 +124,6 @@ pub struct ElectrumConfig {
     pub max_scripthash_subs: usize,
     /// Max hex length accepted by `blockchain.transaction.broadcast`.
     pub max_broadcast_hex: usize,
-    /// `blockchain.tweaks.subscribe` sends `done` at a wave boundary after
-    /// this wall time so Cake resubscribes. [`Duration::ZERO`] seals after
-    /// wave 0 (tests). Default [`crate::tweaks::SUBSCRIBE_CHUNK`].
-    pub tweaks_chunk: Duration,
     /// Omit served P2TR outs with `value <=` this (sats). `0` serves all.
     /// Default [`crate::tweaks::DEFAULT_TWEAKS_MIN_DUST`].
     pub tweaks_min_dust: u64,
@@ -147,7 +143,6 @@ impl ElectrumConfig {
             limits: ServeLimits::for_public_proxy(),
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
-            tweaks_chunk: crate::tweaks::SUBSCRIBE_CHUNK,
             tweaks_min_dust: crate::tweaks::DEFAULT_TWEAKS_MIN_DUST,
             onion_tcp: Arc::new(OnceLock::new()),
         }
@@ -616,7 +611,6 @@ where
                         &params_v,
                         idle,
                         max_line,
-                        config.tweaks_chunk,
                         config.tweaks_min_dust,
                     )
                     .await?;
@@ -995,7 +989,6 @@ async fn serve_tweaks_subscribe<R, W>(
     params_v: &Value,
     idle: Duration,
     max_line: usize,
-    chunk: Duration,
     min_dust: u64,
 ) -> Result<(), std::io::Error>
 where
@@ -1052,9 +1045,11 @@ where
     let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_serve_limits(req.historical);
     let more = next <= last;
-    if more && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
+    if more
+        && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), crate::tweaks::SUBSCRIBE_CHUNK, more)
+    {
         serve_tweaks_follow_waves(
-            reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, chunk, t0,
+            reader, writer, query, chain, peer, last, limits, min_dust, idle, max_line, t0,
             &mut next,
         )
         .await?;
@@ -1155,7 +1150,6 @@ async fn serve_tweaks_follow_waves<R, W>(
     min_dust: u64,
     idle: Duration,
     max_line: usize,
-    chunk: Duration,
     t0: Instant,
     next: &mut u32,
 ) -> Result<(), std::io::Error>
@@ -1199,11 +1193,23 @@ where
         let n = batch.consumed.max(1);
         *next = batch_start.saturating_add(n);
         let more = *next <= last;
-        if more && !crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
+        if more
+            && !crate::tweaks::seal_subscribe_chunk(
+                t0.elapsed(),
+                crate::tweaks::SUBSCRIBE_CHUNK,
+                more,
+            )
+        {
             handle = spawn_wave(*next);
         }
         write_raw_lines(writer, &batch.lines).await?;
-        if !more || crate::tweaks::seal_subscribe_chunk(t0.elapsed(), chunk, more) {
+        if !more
+            || crate::tweaks::seal_subscribe_chunk(
+                t0.elapsed(),
+                crate::tweaks::SUBSCRIBE_CHUNK,
+                more,
+            )
+        {
             break;
         }
         batch_start = *next;

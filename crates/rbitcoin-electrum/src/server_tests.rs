@@ -21,7 +21,6 @@ fn config_helpers_and_param_parsers() {
         rbitcoin_primitives::display_hash_hex(&params.genesis_hash.to_byte_array())
     );
     assert!(cfg.banner.contains("rbitcoin"));
-    assert_eq!(cfg.tweaks_chunk, crate::tweaks::SUBSCRIBE_CHUNK);
     assert_eq!(cfg.tweaks_min_dust, crate::tweaks::DEFAULT_TWEAKS_MIN_DUST);
 
     let sh = electrum_scripthash_hex(&[0x51]);
@@ -1115,7 +1114,7 @@ fn serve_limits_public_proxy_defaults() {
 }
 
 #[tokio::test]
-async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
+async fn tweaks_subscribe_dones_when_the_first_wave_finishes_count() {
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::TxApply;
     use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
@@ -1165,8 +1164,7 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
     let params = ChainParams::regtest();
     let q = std::sync::Arc::new(q);
     let (tip_tx, _) = broadcast::channel(4);
-    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
-    cfg.tweaks_chunk = Duration::ZERO;
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
     let handle = run_electrum(cfg, q, params, tip_tx, None)
         .await
         .expect("listen");
@@ -1191,7 +1189,7 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
         stream.write_all(line.as_bytes()).await.unwrap();
     }
 
-    subscribe(&mut stream, "scan", 1, 3).await;
+    subscribe(&mut stream, "scan", 1, 1).await;
     let mut reader = BufReader::new(&mut stream);
 
     let result = read_json(&mut reader).await;
@@ -1204,11 +1202,11 @@ async fn tweaks_subscribe_zero_chunk_dones_after_wave0_then_resubscribe() {
     assert_eq!(done["method"], "blockchain.tweaks.subscribe");
     assert_eq!(
         done["params"][0]["message"], "done",
-        "zero chunk must done after wave 0 with heights left, got {done}"
+        "count that fits in wave 0 must done, got {done}"
     );
 
     drop(reader);
-    subscribe(&mut stream, "scan2", 2, 2).await;
+    subscribe(&mut stream, "scan2", 2, 1).await;
     let mut reader = BufReader::new(&mut stream);
     let result2 = read_json(&mut reader).await;
     assert_eq!(result2["id"], "scan2");
