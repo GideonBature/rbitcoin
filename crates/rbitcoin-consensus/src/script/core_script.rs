@@ -1,11 +1,11 @@
 //! Shared Core script-language assembler and hex decode (unit-test only).
 
-pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+pub fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     rbitcoin_primitives::hex_decode(s.trim()).map_err(|e| e.to_string())
 }
 
 /// Assemble Core script string ("1 2 ADD", "0x4c 0x01 0x07", "'Az'") to bytes.
-pub(crate) fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
+pub fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut i = 0;
     let b = src.as_bytes();
@@ -327,6 +327,83 @@ fn opcode_byte(name: &str) -> Option<u8> {
         }
     }
     None
+}
+
+/// `scriptPubKey` cell, including Core's `#TAPROOTOUTPUT#` placeholder.
+pub fn assemble_script_pubkey(src: &str, tap_out: Option<[u8; 32]>) -> Result<Vec<u8>, String> {
+    if src.trim() == "0x51 0x20 #TAPROOTOUTPUT#" {
+        let out = tap_out.ok_or_else(|| "#TAPROOTOUTPUT# without control block".to_string())?;
+        let mut b = vec![0x51, 0x20];
+        b.extend_from_slice(&out);
+        return Ok(b);
+    }
+    assemble_script(src)
+}
+
+/// Control block and tweaked output key for one tapscript leaf.
+///
+/// Internal key is Core `script_tests.cpp` `vchKey0`: 31 zero bytes, then `0x01`.
+pub fn taproot_leaf_control(leaf: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> {
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+    use bitcoin::taproot::{LeafVersion, TaprootBuilder};
+
+    let secp = Secp256k1::new();
+    let mut sk_bytes = [0u8; 32];
+    sk_bytes[31] = 1;
+    let sk = SecretKey::from_slice(&sk_bytes).map_err(|e| format!("taproot internal sk: {e}"))?;
+    let kp = Keypair::from_secret_key(&secp, &sk);
+    let (internal_xonly, _) = kp.x_only_public_key();
+    let leaf_script = bitcoin::script::ScriptBuf::from_bytes(leaf.to_vec());
+    let builder = TaprootBuilder::new()
+        .add_leaf(0, leaf_script.clone())
+        .map_err(|e| format!("taproot add_leaf: {e:?}"))?;
+    let spend_info = builder
+        .finalize(&secp, internal_xonly)
+        .map_err(|e| format!("taproot finalize: {e:?}"))?;
+    let control = spend_info
+        .control_block(&(leaf_script, LeafVersion::TapScript))
+        .ok_or_else(|| "taproot control_block missing".to_string())?;
+    let output = spend_info.output_key().to_x_only_public_key().serialize();
+    Ok((control.serialize(), output))
+}
+
+/// One Core `script_tests` witness string (`#SCRIPT#`, `#CONTROLBLOCK#`, or hex).
+pub fn push_core_witness_token(
+    stack: &mut Vec<Vec<u8>>,
+    tap_out: &mut Option<[u8; 32]>,
+    token: &str,
+) -> Result<(), String> {
+    if token.is_empty() {
+        stack.push(vec![]);
+        return Ok(());
+    }
+    if let Some(rest) = token.strip_prefix("#SCRIPT#") {
+        stack.push(assemble_script(rest.trim())?);
+        return Ok(());
+    }
+    if token == "#CONTROLBLOCK#" {
+        let leaf = stack
+            .last()
+            .ok_or_else(|| "#CONTROLBLOCK# without leaf script".to_string())?
+            .clone();
+        let (control, output) = taproot_leaf_control(&leaf)?;
+        stack.push(control);
+        *tap_out = Some(output);
+        return Ok(());
+    }
+    let hex = token.trim_start_matches("0x").trim_start_matches("0X");
+    if !hex.len().is_multiple_of(2) {
+        return Err(format!("odd witness hex: {token}"));
+    }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("witness is not hex: {token}"));
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for j in (0..hex.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&hex[j..j + 2], 16).map_err(|e| e.to_string())?);
+    }
+    stack.push(bytes);
+    Ok(())
 }
 
 #[cfg(test)]

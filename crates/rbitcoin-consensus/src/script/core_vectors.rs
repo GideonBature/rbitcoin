@@ -220,14 +220,6 @@ fn parse_witness_and_amount(first: &Value) -> Result<(Witness, Amount, Option<[u
     let mut amount = Amount::ZERO;
     let mut stack: Vec<Vec<u8>> = Vec::new();
     let mut taproot_output: Option<[u8; 32]> = None;
-    // Core KeyData::key0 secret: 31 zero bytes + 0x01 (script_tests.cpp vchKey0).
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let mut sk_bytes = [0u8; 32];
-    sk_bytes[31] = 1;
-    let sk = bitcoin::secp256k1::SecretKey::from_slice(&sk_bytes)
-        .map_err(|e| format!("taproot internal sk: {e}"))?;
-    let kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk);
-    let (internal_xonly, _) = kp.x_only_public_key();
 
     for (i, cell) in arr.iter().enumerate() {
         if let Some(n) = cell.as_f64() {
@@ -239,49 +231,7 @@ fn parse_witness_and_amount(first: &Value) -> Result<(Witness, Amount, Option<[u
             }
         }
         if let Some(s) = cell.as_str() {
-            if s.is_empty() {
-                stack.push(vec![]);
-                continue;
-            }
-            // Core: `#SCRIPT# <asm>` → assemble leaf, push as witness element.
-            if let Some(rest) = s.strip_prefix("#SCRIPT#") {
-                let script_bytes = assemble(rest.trim())?;
-                stack.push(script_bytes);
-                continue;
-            }
-            // Core: `#CONTROLBLOCK#` — single-leaf tree with key0 internal key.
-            if s == "#CONTROLBLOCK#" {
-                let leaf = stack
-                    .last()
-                    .ok_or_else(|| "#CONTROLBLOCK# without leaf script".to_string())?
-                    .clone();
-                let leaf_script = ScriptBuf::from_bytes(leaf);
-                let builder = bitcoin::taproot::TaprootBuilder::new()
-                    .add_leaf(0, leaf_script.clone())
-                    .map_err(|e| format!("taproot add_leaf: {e:?}"))?;
-                let spend_info = builder
-                    .finalize(&secp, internal_xonly)
-                    .map_err(|e| format!("taproot finalize: {e:?}"))?;
-                let control = spend_info
-                    .control_block(&(leaf_script, bitcoin::taproot::LeafVersion::TapScript))
-                    .ok_or_else(|| "taproot control_block missing".to_string())?;
-                stack.push(control.serialize());
-                taproot_output = Some(spend_info.output_key().to_x_only_public_key().serialize());
-                continue;
-            }
-            let hex = s.trim_start_matches("0x").trim_start_matches("0X");
-            if !hex.len().is_multiple_of(2) {
-                return Err(format!("odd witness hex: {s}"));
-            }
-            // Non-hex tokens (that are not special flags) are hard errors in Core.
-            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("witness is not hex: {s}"));
-            }
-            let mut bytes = Vec::with_capacity(hex.len() / 2);
-            for j in (0..hex.len()).step_by(2) {
-                bytes.push(u8::from_str_radix(&hex[j..j + 2], 16).map_err(|e| e.to_string())?);
-            }
-            stack.push(bytes);
+            super::core_script::push_core_witness_token(&mut stack, &mut taproot_output, s)?;
         } else if let Some(n) = cell.as_f64() {
             let sats = (n * 100_000_000.0).round() as i64;
             amount = Amount::from_sat(sats.max(0) as u64);
@@ -620,32 +570,16 @@ fn run_all_script_rows() -> RowStats {
                 continue;
             }
         };
-        // Core: `0x51 0x20 #TAPROOTOUTPUT#` → OP_1 + 32-byte tweaked output key.
-        let pk_bytes = if pk_s.trim() == "0x51 0x20 #TAPROOTOUTPUT#" {
-            let Some(out) = tap_out else {
+        let pk_bytes = match super::core_script::assemble_script_pubkey(pk_s, tap_out) {
+            Ok(b) => b,
+            Err(e) => {
                 st.ran += 1;
                 st.fail += 1;
                 if st.failures.len() < 40 {
                     st.failures
-                        .push(format!("#{idx} #TAPROOTOUTPUT# without control block"));
+                        .push(format!("#{idx} assemble scriptPubKey: {e} pk={pk_s:?}"));
                 }
                 continue;
-            };
-            let mut b = vec![0x51, 0x20];
-            b.extend_from_slice(&out);
-            b
-        } else {
-            match assemble(pk_s) {
-                Ok(b) => b,
-                Err(e) => {
-                    st.ran += 1;
-                    st.fail += 1;
-                    if st.failures.len() < 40 {
-                        st.failures
-                            .push(format!("#{idx} assemble scriptPubKey: {e} pk={pk_s:?}"));
-                    }
-                    continue;
-                }
             }
         };
 
@@ -714,17 +648,42 @@ fn script_corpus_rows_match_our_interpreter() {
         let cells = row["row"]
             .as_array()
             .unwrap_or_else(|| panic!("{id}: missing row"));
-        assert!(
-            cells.len() >= 4,
-            "{id}: row needs scriptSig, scriptPubKey, flags, result"
-        );
-        let sig = assemble(cells[0].as_str().unwrap_or(""))
-            .unwrap_or_else(|e| panic!("{id} scriptSig: {e}"));
-        let pk = assemble(cells[1].as_str().unwrap_or(""))
+        let (witness, amount, sig_s, pk_s, flags_s, expect, tap_out) = if cells[0].is_array() {
+            assert!(
+                cells.len() >= 5,
+                "{id}: witness row needs witness, scriptSig, scriptPubKey, flags, result"
+            );
+            let (witness, amount, tap_out) =
+                parse_witness_and_amount(&cells[0]).unwrap_or_else(|e| panic!("{id} witness: {e}"));
+            (
+                witness,
+                amount,
+                cells[1].as_str().unwrap_or(""),
+                cells[2].as_str().unwrap_or(""),
+                cells[3].as_str().unwrap_or(""),
+                cells[4].as_str().unwrap_or(""),
+                tap_out,
+            )
+        } else {
+            assert!(
+                cells.len() >= 4,
+                "{id}: row needs scriptSig, scriptPubKey, flags, result"
+            );
+            (
+                Witness::new(),
+                Amount::ZERO,
+                cells[0].as_str().unwrap_or(""),
+                cells[1].as_str().unwrap_or(""),
+                cells[2].as_str().unwrap_or(""),
+                cells[3].as_str().unwrap_or(""),
+                None,
+            )
+        };
+        let sig = assemble(sig_s).unwrap_or_else(|e| panic!("{id} scriptSig: {e}"));
+        let pk = super::core_script::assemble_script_pubkey(pk_s, tap_out)
             .unwrap_or_else(|e| panic!("{id} scriptPubKey: {e}"));
-        let flags = parse_flags(cells[2].as_str().unwrap_or("NONE"));
-        let expect = cells[3].as_str().unwrap_or("");
-        let got = run_script_row(&sig, &pk, Witness::new(), Amount::ZERO, &flags);
+        let flags = parse_flags(flags_s);
+        let got = run_script_row(&sig, &pk, witness, amount, &flags);
         assert!(
             outcome_matches(expect, &got),
             "{id}: expect {expect} got {got:?}"

@@ -11,5 +11,8 @@ description = "Bitcoin Core v31.1 VerifyScript oracle for the script corpus. Not
 bitcoin = "=0.32.102"
 serde_json = "1"
 
+[dev-dependencies]
+rbitcoin-consensus = { path = "../crates/rbitcoin-consensus", features = ["corpus"] }
+
 [build-dependencies]
 cc = "1"

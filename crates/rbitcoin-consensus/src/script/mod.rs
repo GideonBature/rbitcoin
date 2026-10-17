@@ -16,8 +16,8 @@ mod p2wsh;
 mod core_bip341;
 #[cfg(test)]
 mod core_fixture;
-#[cfg(test)]
-pub(crate) mod core_script;
+#[cfg(any(test, feature = "corpus"))]
+pub mod core_script;
 #[cfg(test)]
 mod core_sighash;
 #[cfg(test)]

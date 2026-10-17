@@ -82,7 +82,12 @@ mod tests {
     }
 
     /// Core `script_tests.cpp` credit transaction: two `OP_0` pushes on a null input.
-    fn credit_and_spend(script_pubkey: ScriptBuf, script_sig: ScriptBuf) -> (Transaction, Vec<u8>) {
+    fn credit_and_spend(
+        script_pubkey: ScriptBuf,
+        script_sig: ScriptBuf,
+        witness: Witness,
+        amount: Amount,
+    ) -> (Transaction, Vec<u8>) {
         let credit = Transaction {
             version: bitcoin::transaction::Version::ONE,
             lock_time: LockTime::ZERO,
@@ -93,7 +98,7 @@ mod tests {
                 witness: Witness::new(),
             }],
             output: vec![TxOut {
-                value: Amount::ZERO,
+                value: amount,
                 script_pubkey: script_pubkey.clone(),
             }],
         };
@@ -107,17 +112,17 @@ mod tests {
                 },
                 script_sig,
                 sequence: Sequence::MAX,
-                witness: Witness::new(),
+                witness,
             }],
             output: vec![TxOut {
-                value: Amount::ZERO,
+                value: amount,
                 script_pubkey: ScriptBuf::new(),
             }],
         };
         (spend, script_pubkey.to_bytes())
     }
 
-    fn core_accepts(spend: &Transaction, spk: &[u8], flags: u64) -> Result<bool, i32> {
+    fn core_accepts(spend: &Transaction, spk: &[u8], amount: i64, flags: u64) -> Result<bool, i32> {
         let raw = serialize(spend);
         let rc = unsafe {
             rbtc_core_verify(
@@ -125,7 +130,7 @@ mod tests {
                 raw.len(),
                 spk.as_ptr(),
                 spk.len(),
-                0,
+                amount,
                 0,
                 flags,
             )
@@ -137,12 +142,34 @@ mod tests {
         }
     }
 
-    fn assemble_push_op1() -> ScriptBuf {
-        // Core asm "1" is OP_1. Kept here so the smoke row does not need the
-        // consensus crate's assembler. Other rows go through that assembler
-        // once the corpus grows past single opcodes; this smoke row is the
-        // harness pin.
-        ScriptBuf::from_bytes(vec![0x51])
+    fn witness_from_cell(cell: &serde_json::Value) -> (Witness, Amount, Option<[u8; 32]>) {
+        let arr = cell.as_array().expect("witness cell");
+        let mut amount = Amount::ZERO;
+        let mut stack: Vec<Vec<u8>> = Vec::new();
+        let mut tap_out = None;
+        for (i, item) in arr.iter().enumerate() {
+            if let Some(n) = item.as_f64() {
+                if i + 1 == arr.len() || item.as_str().is_none() {
+                    let sats = (n * 100_000_000.0).round() as i64;
+                    amount = Amount::from_sat(sats.max(0) as u64);
+                    continue;
+                }
+            }
+            if let Some(s) = item.as_str() {
+                rbitcoin_consensus::core_script::push_core_witness_token(
+                    &mut stack,
+                    &mut tap_out,
+                    s,
+                )
+                .unwrap_or_else(|e| panic!("witness token: {e}"));
+            } else if let Some(n) = item.as_f64() {
+                let sats = (n * 100_000_000.0).round() as i64;
+                amount = Amount::from_sat(sats.max(0) as u64);
+            }
+        }
+        let refs: Vec<&[u8]> = stack.iter().map(|v| v.as_slice()).collect();
+        let witness = Witness::from_slice(&refs);
+        (witness, amount, tap_out)
     }
 
     #[test]
@@ -155,20 +182,49 @@ mod tests {
         for row in &rows {
             let id = row["id"].as_str().unwrap();
             let cells = row["row"].as_array().unwrap();
-            let sig_asm = cells[0].as_str().unwrap();
-            let pk_asm = cells[1].as_str().unwrap();
-            let flag_text = cells[2].as_str().unwrap();
-            let expect = cells[3].as_str().unwrap();
-            assert_eq!(
-                sig_asm, "",
-                "{id}: smoke harness only assembles an empty scriptSig"
+            let (witness, amount, sig_s, pk_s, flag_text, expect, tap_out) = if cells[0].is_array()
+            {
+                assert!(cells.len() >= 5, "{id}");
+                let (witness, amount, tap_out) = witness_from_cell(&cells[0]);
+                (
+                    witness,
+                    amount,
+                    cells[1].as_str().unwrap(),
+                    cells[2].as_str().unwrap(),
+                    cells[3].as_str().unwrap(),
+                    cells[4].as_str().unwrap(),
+                    tap_out,
+                )
+            } else {
+                assert!(cells.len() >= 4, "{id}");
+                (
+                    Witness::new(),
+                    Amount::ZERO,
+                    cells[0].as_str().unwrap(),
+                    cells[1].as_str().unwrap(),
+                    cells[2].as_str().unwrap(),
+                    cells[3].as_str().unwrap(),
+                    None,
+                )
+            };
+            let sig = rbitcoin_consensus::core_script::assemble_script(sig_s)
+                .unwrap_or_else(|e| panic!("{id} scriptSig: {e}"));
+            let pk = rbitcoin_consensus::core_script::assemble_script_pubkey(pk_s, tap_out)
+                .unwrap_or_else(|e| panic!("{id} scriptPubKey: {e}"));
+            let (spend, spk) = credit_and_spend(
+                ScriptBuf::from_bytes(pk),
+                ScriptBuf::from_bytes(sig),
+                witness,
+                amount,
             );
-            assert_eq!(pk_asm, "1", "{id}: smoke harness only assembles OP_1");
-            let (spend, spk) = credit_and_spend(assemble_push_op1(), ScriptBuf::new());
-            let got = core_accepts(&spend, &spk, flags_from_core(flag_text))
-                .unwrap_or_else(|rc| panic!("{id}: Core verify status {rc}"));
-            let want = expect == "OK";
-            assert_eq!(got, want, "{id}");
+            let got = core_accepts(
+                &spend,
+                &spk,
+                amount.to_sat() as i64,
+                flags_from_core(flag_text),
+            )
+            .unwrap_or_else(|rc| panic!("{id}: Core verify status {rc}"));
+            assert_eq!(got, expect == "OK", "{id}");
         }
     }
 }
