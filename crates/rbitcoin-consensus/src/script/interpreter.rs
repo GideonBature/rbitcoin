@@ -2893,7 +2893,7 @@ mod untaken_consensus_arms {
             false,
             false,
             false,
-            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+            Cow::Owned(crate::TxPrecompute::from_tx(&tx)),
         );
         let matched = ecdsa_sig_matches(&sig, &pk.to_bytes(), &ctx, &[0x51], PreTapscript::Base);
         assert!(!matched.unwrap());
@@ -2917,7 +2917,7 @@ mod untaken_consensus_arms {
             false,
             false,
             false,
-            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+            Cow::Owned(crate::TxPrecompute::from_tx(&tx)),
         );
         let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
         assert!(format!("{err}").contains("tapleaf"), "{err}");
@@ -2939,7 +2939,7 @@ mod untaken_consensus_arms {
             false,
             false,
             false,
-            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+            Cow::Owned(crate::TxPrecompute::from_tx(&tx)),
         );
         let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
         assert!(format!("{err}").contains("CHECKSIG"), "{err}");
@@ -2961,7 +2961,7 @@ mod untaken_consensus_arms {
             false,
             false,
             false,
-            Cow::Owned(rbitcoin_query::TxPrecompute::from_tx(&tx)),
+            Cow::Owned(crate::TxPrecompute::from_tx(&tx)),
         );
         let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
         assert!(format!("{err}").contains("CHECKSIGVERIFY"), "{err}");

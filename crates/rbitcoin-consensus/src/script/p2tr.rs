@@ -1700,7 +1700,7 @@ mod bip341_tests {
         spk.extend(output_key);
         let job = ScriptCheckJob::from_parts(
             [0u8; 32],
-            crate::block::JobPrevouts::Shared(vec![rbitcoin_query::SharedPrevoutScript::Wire {
+            crate::block::JobPrevouts::Shared(vec![crate::block::SharedPrevout::Wire {
                 tx_index: 0,
                 vout: 0,
             }]),
