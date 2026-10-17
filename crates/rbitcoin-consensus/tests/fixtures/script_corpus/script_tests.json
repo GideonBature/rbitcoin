@@ -10357,5 +10357,383 @@
       "P2SH,WITNESS",
       "ERR"
     ]
+  },
+  {
+    "row": [
+      "",
+      "1 OP_CLTV 1 EQUAL",
+      "NONE",
+      "OK"
+    ],
+    "id": "cltv-off-does-not-pop"
+  },
+  {
+    "row": [
+      "",
+      "1 OP_CSV 1 EQUAL",
+      "NONE",
+      "OK"
+    ],
+    "id": "csv-off-does-not-pop"
+  },
+  {
+    "row": [
+      "",
+      "-1 OP_CLTV OP_DROP 1",
+      "NONE",
+      "OK"
+    ],
+    "id": "cltv-off-negative-nop"
+  },
+  {
+    "row": [
+      "",
+      "-1 OP_CSV OP_DROP 1",
+      "NONE",
+      "OK"
+    ],
+    "id": "csv-off-negative-nop"
+  },
+  {
+    "row": [
+      "",
+      "-1 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "id": "cltv-negative"
+  },
+  {
+    "row": [
+      "",
+      "-1 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "ERR"
+    ],
+    "id": "csv-negative"
+  },
+  {
+    "row": [
+      "",
+      "0x050100000000 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "locktime": 1,
+      "sequence": 0
+    },
+    "id": "cltv-5byte-ok"
+  },
+  {
+    "row": [
+      "",
+      "0x06010000000000 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "locktime": 1,
+      "sequence": 0
+    },
+    "id": "cltv-6byte"
+  },
+  {
+    "row": [
+      "",
+      "0x050100000000 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "version": 2,
+      "sequence": 1
+    },
+    "id": "csv-5byte-ok"
+  },
+  {
+    "row": [
+      "",
+      "0x06010000000000 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "version": 2,
+      "sequence": 1
+    },
+    "id": "csv-6byte"
+  },
+  {
+    "row": [
+      "",
+      "500000000 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "locktime": 0,
+      "sequence": 0
+    },
+    "id": "cltv-type-mismatch-time-vs-height"
+  },
+  {
+    "row": [
+      "",
+      "0 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "locktime": 500000000,
+      "sequence": 0
+    },
+    "id": "cltv-type-mismatch-height-vs-time"
+  },
+  {
+    "row": [
+      "",
+      "100 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "locktime": 100,
+      "sequence": 0
+    },
+    "id": "cltv-equal-height"
+  },
+  {
+    "row": [
+      "",
+      "101 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "locktime": 100,
+      "sequence": 0
+    },
+    "id": "cltv-greater-height"
+  },
+  {
+    "row": [
+      "",
+      "500000000 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "locktime": 500000000,
+      "sequence": 0
+    },
+    "id": "cltv-equal-time"
+  },
+  {
+    "row": [
+      "",
+      "500000001 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "locktime": 500000000,
+      "sequence": 0
+    },
+    "id": "cltv-greater-time"
+  },
+  {
+    "row": [
+      "",
+      "0 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "locktime": 0,
+      "sequence": 4294967295
+    },
+    "id": "cltv-final-sequence"
+  },
+  {
+    "row": [
+      "",
+      "0 OP_CLTV OP_DROP 1",
+      "CHECKLOCKTIMEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "locktime": 0,
+      "sequence": 0
+    },
+    "id": "cltv-sequence-not-final"
+  },
+  {
+    "row": [
+      "",
+      "2147483648 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "version": 1,
+      "sequence": 0
+    },
+    "id": "csv-disable-bit-skips-version"
+  },
+  {
+    "row": [
+      "",
+      "1 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "version": 1,
+      "sequence": 1
+    },
+    "id": "csv-version-below-2"
+  },
+  {
+    "row": [
+      "",
+      "1 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "version": 4294967295,
+      "sequence": 1
+    },
+    "id": "csv-version-ffffffff"
+  },
+  {
+    "row": [
+      "",
+      "1 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "version": 2,
+      "sequence": 1
+    },
+    "id": "csv-equal"
+  },
+  {
+    "row": [
+      "",
+      "2 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "version": 2,
+      "sequence": 1
+    },
+    "id": "csv-one-less"
+  },
+  {
+    "row": [
+      "",
+      "4194304 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "version": 2,
+      "sequence": 0
+    },
+    "id": "csv-type-mismatch"
+  },
+  {
+    "row": [
+      "",
+      "4194304 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "version": 2,
+      "sequence": 4194304
+    },
+    "id": "csv-type-match"
+  },
+  {
+    "row": [
+      "",
+      "1 OP_CSV OP_DROP 1",
+      "CHECKSEQUENCEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "version": 2,
+      "sequence": 2147483649
+    },
+    "id": "csv-input-disable"
+  },
+  {
+    "row": [
+      [
+        "#SCRIPT# -1 OP_CLTV OP_DROP 1",
+        0.0
+      ],
+      "",
+      "0x0020a55085984de539799a1d52718964ddb5916308722bd27978a77595781672465e",
+      "P2SH,WITNESS,CHECKLOCKTIMEVERIFY",
+      "ERR"
+    ],
+    "id": "cltv-negative-v0"
+  },
+  {
+    "row": [
+      [
+        "#SCRIPT# 100 OP_CLTV OP_DROP 1",
+        0.0
+      ],
+      "",
+      "0x0020ffc97e170f4e2333ba540c2653f78f5d7a690ca84820942ddcd198a4f7b0b26a",
+      "P2SH,WITNESS,CHECKLOCKTIMEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "locktime": 100,
+      "sequence": 0
+    },
+    "id": "cltv-equal-height-v0"
+  },
+  {
+    "row": [
+      [
+        "#SCRIPT# 1 OP_CSV OP_DROP 1",
+        0.0
+      ],
+      "",
+      "0x0020987d3d170f7a0080d9c052f6f61e57d3fa08c153724b7e9b07475afa368e88f8",
+      "P2SH,WITNESS,CHECKSEQUENCEVERIFY",
+      "ERR"
+    ],
+    "spend": {
+      "version": 1,
+      "sequence": 1
+    },
+    "id": "csv-version-below-2-v0"
+  },
+  {
+    "row": [
+      [
+        "#SCRIPT# 1 OP_CSV OP_DROP 1",
+        0.0
+      ],
+      "",
+      "0x0020987d3d170f7a0080d9c052f6f61e57d3fa08c153724b7e9b07475afa368e88f8",
+      "P2SH,WITNESS,CHECKSEQUENCEVERIFY",
+      "OK"
+    ],
+    "spend": {
+      "version": 4294967295,
+      "sequence": 1
+    },
+    "id": "csv-version-ffffffff-v0"
   }
 ]

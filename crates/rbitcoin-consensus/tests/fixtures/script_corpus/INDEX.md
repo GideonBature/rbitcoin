@@ -403,3 +403,40 @@ Tapscript validation weight: one non-empty CHECKSIGADD against a 1-byte pubkey a
 | `nulldummy-cms-tap` | Tapscript CHECKMULTISIG fails before the dummy is interpreted. |
 | `nulldummy-cmsverify-tap` | Tapscript CHECKMULTISIGVERIFY fails before the dummy is interpreted. |
 | `multisig-m-gt-n-v0` | Witness v0 CHECKMULTISIG rejects m > n. |
+
+## CLTV and CSV
+
+`OP_CLTV` and `OP_CSV` are the same opcodes in every signature version. The rows are bare scripts, plus witness v0 copies of the negative locktime, the equal height, and the version compare. A missing `spend` object keeps version 1, locktime 0, sequence `0xffffffff`, and one output. `version` is the consensus i32 bit pattern, compared as an unsigned value.
+
+| Id | Predicate |
+|----|-----------|
+| `cltv-off-does-not-pop` | With CHECKLOCKTIMEVERIFY off, OP_CLTV is a NOP and does not pop. |
+| `csv-off-does-not-pop` | With CHECKSEQUENCEVERIFY off, OP_CSV is a NOP and does not pop. |
+| `cltv-off-negative-nop` | Flag-off OP_CLTV leaves a negative number on the stack. DROP can still remove it. |
+| `csv-off-negative-nop` | Flag-off OP_CSV leaves a negative number on the stack. |
+| `cltv-negative` | OP_CLTV rejects a negative locktime. |
+| `csv-negative` | OP_CSV rejects a negative sequence argument. |
+| `cltv-5byte-ok` | A 5-byte locktime that still fits is accepted when minimal checks are off. |
+| `cltv-6byte` | A 6-byte locktime is rejected. |
+| `csv-5byte-ok` | A 5-byte sequence argument that still fits is accepted when minimal checks are off. |
+| `csv-6byte` | A 6-byte sequence argument is rejected. |
+| `cltv-type-mismatch-time-vs-height` | A time locktime against a height locktime rejects. The threshold is 500000000. |
+| `cltv-type-mismatch-height-vs-time` | A height locktime against a time locktime rejects. |
+| `cltv-equal-height` | OP_CLTV accepts a height equal to the transaction locktime. |
+| `cltv-greater-height` | OP_CLTV rejects a height one above the transaction locktime. |
+| `cltv-equal-time` | OP_CLTV accepts a time locktime equal to the transaction locktime. |
+| `cltv-greater-time` | OP_CLTV rejects a time locktime one above the transaction locktime. |
+| `cltv-final-sequence` | OP_CLTV rejects a final nSequence even when the locktime matches. |
+| `cltv-sequence-not-final` | OP_CLTV accepts locktime 0 when nSequence is not final. |
+| `csv-disable-bit-skips-version` | The CSV disable bit succeeds and does not apply the version check. |
+| `csv-version-below-2` | With the disable bit clear, a transaction version below 2 rejects. |
+| `csv-version-ffffffff` | Version 0xFFFFFFFF passes the unsigned version compare. It is not below 2. |
+| `csv-equal` | OP_CSV accepts a matching sequence type and value. |
+| `csv-one-less` | OP_CSV rejects a sequence value one below the argument. |
+| `csv-type-mismatch` | OP_CSV rejects a type-bit mismatch. |
+| `csv-type-match` | OP_CSV accepts when the type bit and the value both match. |
+| `csv-input-disable` | OP_CSV rejects when the input sequence has its disable bit set. |
+| `cltv-negative-v0` | Witness v0 OP_CLTV rejects a negative locktime. |
+| `cltv-equal-height-v0` | Witness v0 OP_CLTV accepts a matching height. |
+| `csv-version-below-2-v0` | Witness v0 OP_CSV rejects version 1. |
+| `csv-version-ffffffff-v0` | Witness v0 OP_CSV accepts version 0xFFFFFFFF. |
