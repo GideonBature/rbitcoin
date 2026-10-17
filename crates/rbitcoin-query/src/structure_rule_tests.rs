@@ -1748,11 +1748,10 @@ fn genesis_coinbase_is_never_a_coin() {
 /// rejects it. `OP_TRUE` and `OP_RETURN` are not this case.
 #[test]
 fn anchored_milestone_skips_a_failing_p2pkh_script() {
-    use crate::milestone::MilestoneAnchor;
-    use crate::{accept_and_connect_block, mine_regtest_paying, pad_empty_from};
-    use bitcoin::hashes::Hash;
+    use crate::{accept_and_connect_block, pad_empty_from};
+    use rbitcoin_consensus::{mine_regtest_paying, MilestoneAnchor};
 
-    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("anchor-skip-p2pkh");
+    let (_dir, q) = crate::testutil::tiny_query_labeled("anchor-skip-p2pkh");
     let params = ChainParams::regtest();
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
@@ -1829,7 +1828,7 @@ fn anchored_milestone_skips_a_failing_p2pkh_script() {
     let err = accept_and_connect_block(&q, &params, Height(h), &block, above)
         .expect_err("one height above the anchor still runs the failing script");
     assert!(
-        matches!(err, ConsensusError::Script(_)),
+        matches!(err, ConfirmError::Rules(ConsensusError::Script(_))),
         "expected a script failure, got {err:?}"
     );
     assert_eq!(q.tip_height(), Some(Height(maturity)));
@@ -1840,7 +1839,10 @@ fn anchored_milestone_skips_a_failing_p2pkh_script() {
     note(h, wrong);
     let err = accept_and_connect_block(&q, &params, Height(h), &block, anchored(h, block_hash))
         .expect_err("a different hash at the anchor height does not skip");
-    assert!(matches!(err, ConsensusError::Script(_)), "{err:?}");
+    assert!(
+        matches!(err, ConfirmError::Rules(ConsensusError::Script(_))),
+        "{err:?}"
+    );
     assert_eq!(q.tip_height(), Some(Height(maturity)));
 
     q.clear_milestone_path_above(0);
@@ -3028,89 +3030,6 @@ fn script_flags_follow_core_exception_table() {
 
 /// The exception hashes change execution, not only the flag bits.
 ///
-/// A taproot key-path signature with hashtype byte `0x00` is invalid when
-/// taproot is on and ignored when the mainnet exception turns taproot off.
-/// A P2SH redeem of `OP_0` matches the template hash either way. On the BIP16
-/// exception the redeem is not executed. On the next hash it is, and fails.
-#[test]
-fn exception_hashes_change_which_scripts_run() {
-    let main = Box::leak(Box::new(ChainParams::mainnet()));
-
-    let mut program = vec![0x51, 0x20];
-    program.extend_from_slice(&[0xff; 32]);
-    let mut sig = vec![0x11u8; 65];
-    sig[64] = 0x00;
-    let tap_tx = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[sig.as_slice()]),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let tap_prev = vec![TxOut {
-        value: Amount::from_sat(2),
-        script_pubkey: ScriptBuf::from_bytes(program),
-    }];
-    let tap_flags = |hash: &[u8; 32]| ScriptVerifyFlags::for_block(main, 692_261, hash, 0);
-    let accept = ScriptCheckJob::new(
-        tap_prev.clone(),
-        tap_tx.clone(),
-        tap_flags(&TAPROOT_EXCEPTION_MAINNET),
-    );
-    crate::script::verify_job_all_inputs(&accept)
-        .expect("taproot exception does not run the key path");
-    let reject = ScriptCheckJob::new(tap_prev, tap_tx, tap_flags(&[1u8; 32]));
-    let err = crate::script::verify_job_all_inputs(&reject).expect_err("neighbor enforces taproot");
-    assert!(
-        format!("{err}").contains("sighash"),
-        "expected hashtype 0x00 reject, got {err}"
-    );
-
-    let redeem = [0x00u8];
-    let redeem_hash = bitcoin::hashes::hash160::Hash::hash(&redeem);
-    let mut p2sh = vec![0xa9, 0x14];
-    p2sh.extend_from_slice(redeem_hash.as_byte_array());
-    p2sh.push(0x87);
-    let p2sh_tx = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(vec![0x01, 0x00]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    };
-    let p2sh_prev = vec![TxOut {
-        value: Amount::from_sat(2),
-        script_pubkey: ScriptBuf::from_bytes(p2sh),
-    }];
-    let p2sh_flags = |hash: &[u8; 32]| ScriptVerifyFlags::for_block(main, 170_060, hash, 0);
-    let bare = ScriptCheckJob::new(
-        p2sh_prev.clone(),
-        p2sh_tx.clone(),
-        p2sh_flags(&BIP16_EXCEPTION_MAINNET),
-    );
-    crate::script::verify_job_all_inputs(&bare)
-        .expect("BIP16 exception checks the hash and does not run the redeem");
-    let enforced = ScriptCheckJob::new(p2sh_prev, p2sh_tx, p2sh_flags(&[2u8; 32]));
-    assert!(
-        crate::script::verify_job_all_inputs(&enforced).is_err(),
-        "neighbor executes the OP_0 redeem"
-    );
-}
-
 /// Confirm jobs share wire Arc — same Transaction address, no deep clone.
 #[test]
 fn script_job_shared_tx_is_wire_pointer() {

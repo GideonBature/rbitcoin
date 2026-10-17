@@ -216,7 +216,6 @@ fn structural_bip68_height_lock_skips_missing_coin_mtp() {
 /// BIP68 walks `txdata[1..]`. A coinbase whose relative lock would fail still connects.
 #[test]
 fn bip68_skips_a_coinbase_whose_relative_lock_would_fail() {
-    use bitcoin::hashes::Hash;
     use rbitcoin_consensus::{
         mine_empty_regtest, prepare_regtest_candidate, ConsensusError, Milestone,
     };
@@ -245,13 +244,7 @@ fn bip68_skips_a_coinbase_whose_relative_lock_would_fail() {
         bare_tx(1, LockTime::ZERO, Sequence::MAX),
         bare_tx(2, LockTime::ZERO, Sequence::from_consensus(200)),
     ]);
-    let spends = [(
-        [0u8; 32],
-        0u32,
-        rbitcoin_primitives::Fk::NULL,
-        create,
-        0u32,
-    )];
+    let spends = [([0u8; 32], 0u32, rbitcoin_primitives::Fk::NULL, create, 0u32)];
     let mut cache = crate::U32Map::default();
     cache.insert(5, 1_500_000);
     let err = crate::block_pipeline::structural_bip68(
