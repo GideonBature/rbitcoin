@@ -20,7 +20,7 @@ use rbitcoin_consensus::{grind_regtest_pow, ChainParams, ConsensusError, Milesto
 use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Height;
 use rbitcoin_query::accept_and_connect_block;
-use rbitcoin_query::Query;
+use rbitcoin_query::{ConfirmError, Query};
 use rbitcoin_test::mine::{mine_regtest_block, regtest_genesis, spend_anyone_can_spend};
 use rbitcoin_test::{
     assert_reconstruct_eq, open_mature_regtest_with_spend, pad_empty_from, MatureRegtestChain,
@@ -156,8 +156,10 @@ fn analog_milestone_and_mempool_persist() {
     assert!(
         matches!(
             err,
-            ConsensusError::MissingPrevout
-                | ConsensusError::BadTx("bad-txns-inputs-missingorspent")
+            ConfirmError::Rules(
+                ConsensusError::MissingPrevout
+                    | ConsensusError::BadTx("bad-txns-inputs-missingorspent"),
+            )
         ),
         "expected missing-prevout class under milestone, got: {err}"
     );

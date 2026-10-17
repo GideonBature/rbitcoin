@@ -910,6 +910,10 @@ impl JobPrevouts {
             Self::Shared(v) => v.len(),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Script-verify job for one non-coinbase create.

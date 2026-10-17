@@ -19,6 +19,7 @@ use rbitcoin_primitives::{Fk, Height};
 use crate::index_rows::{self, IndexRows};
 use rbitcoin_consensus::silent_payments::{is_p2tr, tweak_from_tx};
 use rbitcoin_consensus::ConsensusError;
+use rbitcoin_store::StoreError;
 
 use super::{LoadedBatch, Prepared};
 
@@ -368,7 +369,7 @@ pub(super) fn seal_live_indexes(query: &Query, seal: IndexSeal) -> Result<u64, C
 }
 
 fn corrupt(msg: &'static str) -> ConfirmError {
-    ConfirmError::Rules(ConsensusError::Internal(msg))
+    ConfirmError::Store(StoreError::Corrupt(msg))
 }
 
 #[cfg(test)]

@@ -910,6 +910,7 @@ dependencies = [
  "bitcoin_hashes 0.14.101",
  "mutants",
  "rbitcoin-primitives",
+ "rbitcoin-store",
  "ruzstd",
  "serde_json",
 ]

@@ -73,7 +73,6 @@ pub fn validate_header_hashed(
 
 /// Contextual checks when the parent is a known header, not necessarily on the
 /// best chain (`header_at_height` would miss).
-
 pub fn median_time_past(query: &Query, height: Height) -> Result<u32, ConfirmError> {
     let times = mtp_times_ending_at(query, height)?;
     rbitcoin_consensus::block::median_or_bad_header(&times).map_err(ConfirmError::from)
@@ -167,7 +166,6 @@ pub fn expected_next_bits(
 /// `period_first_time` is the timestamp of the header at `height - interval`
 /// when `height` is a retarget boundary. `bits_at` supplies earlier `nBits`
 /// for the testnet min-difficulty walk. `None` means an ancestor is missing.
-
 pub fn period_first_time(
     query: &Query,
     params: &ChainParams,

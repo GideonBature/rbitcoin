@@ -282,10 +282,10 @@ pub fn reject_vout_past_n_out(max_vout: u32, n_out: Option<u64>) -> Result<(), C
     }
 }
 
-pub fn require_same_block_output<'a>(
-    tx: Option<&'a Transaction>,
+pub fn require_same_block_output(
+    tx: Option<&Transaction>,
     vout: usize,
-) -> Result<&'a bitcoin::TxOut, ConsensusError> {
+) -> Result<&bitcoin::TxOut, ConsensusError> {
     let tx = tx.ok_or(ConsensusError::MissingPrevout)?;
     tx.output.get(vout).ok_or(ConsensusError::MissingPrevout)
 }

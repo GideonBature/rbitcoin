@@ -20,6 +20,7 @@ pub struct ParentHeader {
 /// `mtp_times` ends at the parent (up to 11 timestamps). `period_first_time`
 /// is the header `interval` blocks before a retarget height. `bits_at` supplies
 /// earlier `nBits` for the testnet min-difficulty walk.
+#[allow(clippy::too_many_arguments)] // each argument is one caller fact
 pub fn check_header(
     params: &ChainParams,
     height: Height,

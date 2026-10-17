@@ -41,11 +41,9 @@ fn assemble_parent_mtp_and_bits(
             });
         }
     }
-    let parent = parent.ok_or_else(|| {
-        ConfirmError::Store(StoreError::Corrupt(
-            "confirm: load incomplete (parent header plan missing above tip)",
-        ))
-    })?;
+    let parent = parent.ok_or(ConfirmError::Store(StoreError::Corrupt(
+        "confirm: load incomplete (parent header plan missing above tip)",
+    )))?;
     let period_first = retarget_first_time(query, params, height.0)?;
     rbitcoin_consensus::check_header(
         params,

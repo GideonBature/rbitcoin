@@ -1422,7 +1422,6 @@ fn pin_plan_none_stamp_of_archived_spend(
     b_spend: &Block,
     spend_h: u32,
 ) {
-    use rbitcoin_consensus::ConsensusError;
     use rbitcoin_query::confirm_wire_lookup_stamp;
 
     let hash = b_spend.block_hash().to_byte_array();
@@ -3059,7 +3058,9 @@ fn pin_confirm_refuses_without_advancing_tip(
     let non_contiguous = [(Height(1), g.clone()), (Height(3), g)];
     for batch in [&[][..], &non_contiguous[..]] {
         match confirm_wire_load_phase(q, params, ms, batch, &none) {
-            Err(rbitcoin_consensus::ConsensusError::BadBlock(_)) => {}
+            Err(rbitcoin_query::ConfirmError::Rules(
+                rbitcoin_consensus::ConsensusError::BadBlock(_),
+            )) => {}
             Err(e) => panic!("expected BadBlock, got {e}"),
             Ok(_) => panic!("load of {} blocks must refuse", batch.len()),
         }
