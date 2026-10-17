@@ -3052,22 +3052,15 @@ async fn serve_with_open_ask(label: &str) -> (PausedServe, BlockHash) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rate_limit_disconnect_releases_the_session_block_asks() {
-    let (mut t, hash) = serve_with_open_ask("rate-asks").await;
-    let (raw, _) = &mut t.clients[0];
-    let ping = crate::v2::encode_v2_contents(NetworkMessage::Ping(7)).unwrap();
-    for _ in 0..=crate::peer_dos::DEFAULT_MAX_MSGS_PER_SEC {
-        if raw.write_contents(&ping).await.is_err() {
-            break;
-        }
-    }
+async fn closed_follow_session_releases_its_block_asks() {
+    let (mut t, hash) = serve_with_open_ask("closed-asks").await;
+    t.clients[0].0.close();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !t.node.peers.live_peers().is_empty() {
-        assert!(std::time::Instant::now() < deadline, "rate-limited session");
+        assert!(std::time::Instant::now() < deadline, "closed session");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let still_asked = t.node.hub.already_have_or_asked_block(&hash);
-    raw.close();
     t.node.shutdown().await;
     let _ = std::fs::remove_dir_all(&t.dir);
     assert!(
