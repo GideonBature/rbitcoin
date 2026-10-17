@@ -11,8 +11,10 @@ repository treats as mainnet block 840000
 (`0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5`,
 Core assumeutxo). Script checks are skipped when that hash occupies the
 header path at 840000 and the block under connect occupies the path at
-its own height. `min_work_be` is stored and not read. A missing lookup
-does not skip. Explicit `--milestone HEIGHT` stays a height-only skip.
+its own height. The stored minimum chain work is not a script-skip gate.
+The header walk and adopt-file retirement still compare against it.
+A missing lookup does not skip. Explicit `--milestone HEIGHT` stays a
+height-only skip.
 How that differs from Core assumevalid: [`COMPAT.md`](../../COMPAT.md).
 
 The gate is two height-keyed lookups (`ibd: perf_dbg milestone_us`). It
