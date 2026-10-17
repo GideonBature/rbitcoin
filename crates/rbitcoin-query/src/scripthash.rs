@@ -97,6 +97,15 @@ pub struct HistoryFilter {
     /// Esplora `last_seen_txid`: after sort, drop through this txid (inclusive), keep following.
     pub after_txid: Option<[u8; 32]>,
     pub order: HistoryOrder,
+    /// A missing `after_txid` keeps rows strictly older than that tx in
+    /// newest-first order instead of clearing the page. `cursor_missing`
+    /// stays set so the caller can see this scripthash did not contain it.
+    /// Single-address pages leave this false.
+    pub after_absent_keeps_older: bool,
+    /// Confirmed height of `after_txid`. The newest-page walk fills this
+    /// when `after_absent_keeps_older` is set. `None` keeps every row the
+    /// walk already bounded.
+    pub after_height: Option<i64>,
 }
 
 impl Default for HistoryFilter {
@@ -107,6 +116,8 @@ impl Default for HistoryFilter {
             limit: None,
             after_txid: None,
             order: HistoryOrder::HeightAsc,
+            after_absent_keeps_older: false,
+            after_height: None,
         }
     }
 }
@@ -124,6 +135,8 @@ impl HistoryFilter {
             limit: None,
             after_txid: None,
             order: HistoryOrder::HeightAsc,
+            after_absent_keeps_older: false,
+            after_height: None,
         }
     }
 
@@ -135,6 +148,8 @@ impl HistoryFilter {
             limit: Some(25),
             after_txid,
             order: HistoryOrder::NewestFirst,
+            after_absent_keeps_older: false,
+            after_height: None,
         }
     }
 }
@@ -143,8 +158,9 @@ impl HistoryFilter {
 ///
 /// `cursor_missing` is set when `after_txid` was given and that tx is not in
 /// the history. `rows` is then empty, so a caller that serves them does not
-/// restart the first page. A cursor that is the last row is not missing:
-/// `rows` is empty and `cursor_missing` is false (the next page).
+/// restart the first page, unless `after_absent_keeps_older` kept the older
+/// window. A cursor that is the last row is not missing: `rows` is empty and
+/// `cursor_missing` is false (the next page).
 #[derive(Debug)]
 pub struct FilteredHistory<T> {
     pub rows: Vec<T>,
@@ -189,6 +205,14 @@ pub fn apply_history_filter(
     if let Some(after) = filter.after_txid {
         if let Some(pos) = out.iter().position(|i| i.txid == after) {
             out = out.split_off(pos.saturating_add(1));
+        } else if filter.after_absent_keeps_older {
+            // Not this scripthash. Keep rows strictly older than the cursor
+            // so a merged page can still use them. `cursor_missing` tells
+            // the caller the cursor itself was absent.
+            cursor_missing = true;
+            if let Some(high) = filter.after_height {
+                out.retain(|i| i.height < high || (i.height == high && i.txid < after));
+            }
         } else {
             // Not this history. Empty, not the first page: a wallet that
             // retries the same cursor must not loop.
@@ -677,9 +701,10 @@ impl Query {
         Ok(out)
     }
 
-    /// A height window never wants the whole join. A limited newest-first page
-    /// never fills it, at every cap. A height-ascending page skips it only
-    /// when the unpaged join would hit `--max-sh-creates`.
+    /// A `from_height` above 0 scans that window and never fills the join.
+    /// Any `to_height` also skips the stored join. A limited newest-first
+    /// page never fills it, at every cap. A height-ascending page skips it
+    /// only when the unpaged join would hit `--max-sh-creates`.
     fn page_without_full_slot(
         &self,
         scripthash: &[u8; 32],
@@ -692,6 +717,11 @@ impl Query {
             .is_some_and(|s| Self::sh_join_slot_hit(s, scripthash, view))
         {
             return Ok(false);
+        }
+        // A catch-up from a later height scans that window. It must not
+        // fill the join or trip `--max-sh-creates`.
+        if filter.from_height > 0 {
+            return Ok(true);
         }
         if filter.to_height.is_some() {
             return Ok(true);
@@ -1447,7 +1477,11 @@ impl Query {
                 fee: None,
             });
         }
-        let filtered = apply_history_filter(&items, filter);
+        let mut applied = filter.clone();
+        if applied.after_absent_keeps_older && scan.strict {
+            applied.after_height = Some(i64::from(scan.high));
+        }
+        let filtered = apply_history_filter(&items, &applied);
         let rows = filtered
             .rows
             .into_iter()
@@ -1487,6 +1521,98 @@ impl Query {
         self.scripthash_history_filtered_in(scripthash, filter, &view)
     }
 
+    /// Confirmed rows in `[from_height, to_height)`.
+    ///
+    /// Creates below `from_height` stay as foreign keys. Spends of those
+    /// coins come from [`Self::spends_of_members`] on the window's blocks
+    /// (`input.body`), not from their spend slots, and not from [`Self::sh_join`].
+    /// A hit counts only when that input's output pays this script.
+    fn height_window_history(
+        &self,
+        scripthash: &[u8; 32],
+        filter: &HistoryFilter,
+        view: &ChainView,
+    ) -> Result<FilteredHistory<ScriptHashHistoryItem>, QueryError> {
+        let Some(high) = Self::window_high(filter, view) else {
+            return Ok(FilteredHistory {
+                rows: Vec::new(),
+                cursor_missing: filter.after_txid.is_some(),
+            });
+        };
+        let from = filter.from_height;
+        if from > high {
+            return Ok(apply_history_filter(&[], filter));
+        }
+        let members = self.strong_sh_creates(scripthash, view)?;
+        let heights = self.store.tx_height_get_batch(&members)?;
+        if heights.len() != members.len() {
+            return Err(StoreError::Corrupt(
+                "invariant: SH create height batch length",
+            ));
+        }
+        let mut height_of: HashMap<Fk, u32> = HashMap::new();
+        for (fk, h) in members.iter().zip(heights) {
+            let h = h.unwrap_or(0);
+            if h < from || h > high {
+                continue;
+            }
+            height_of.insert(*fk, h);
+        }
+        let hits = self.spends_of_members(&members, from, high)?;
+        let mut parents: Vec<Fk> = hits.iter().map(|hit| hit.parent).collect();
+        parents.sort_unstable_by_key(|fk| fk.0);
+        parents.dedup();
+        let matched = self.sh_matched_outs(scripthash, &parents)?;
+        for hit in hits {
+            if hit.height < from || hit.height > high {
+                continue;
+            }
+            let Some(outs) = matched.get(&hit.parent) else {
+                continue;
+            };
+            if !outs.iter().any(|(vout, _)| *vout == hit.vout) {
+                continue;
+            }
+            height_of.entry(hit.spender).or_insert(hit.height);
+        }
+        let mut row_fks: Vec<Fk> = height_of.keys().copied().collect();
+        row_fks.sort_unstable_by_key(|fk| fk.0);
+        let txids = self.store.txids_get_many(&row_fks)?;
+        if txids.len() != row_fks.len() {
+            return Err(StoreError::Corrupt("invariant: SH page txid batch length"));
+        }
+        let mut items = Vec::with_capacity(row_fks.len());
+        for (fk, txid) in row_fks.iter().zip(txids) {
+            let Some(txid) = txid else {
+                return Err(StoreError::Corrupt("invariant: SH page missing txid"));
+            };
+            let Some(height) = height_of.get(fk).copied() else {
+                return Err(StoreError::Corrupt("invariant: SH page missing height"));
+            };
+            items.push(ScriptHashHistoryItem {
+                height: i64::from(height),
+                txid,
+                tx_fk: *fk,
+                fee: None,
+            });
+        }
+        Ok(apply_history_filter(&items, filter))
+    }
+
+    /// Exclusive `to_height` clipped to the pinned view. `None` when the
+    /// window is empty.
+    fn window_high(filter: &HistoryFilter, view: &ChainView) -> Option<u32> {
+        let mut high = view.height.0;
+        if let Some(to) = filter.to_height {
+            if to <= 0 {
+                return None;
+            }
+            let cap = u32::try_from(to.saturating_sub(1)).unwrap_or(u32::MAX);
+            high = high.min(cap);
+        }
+        Some(high)
+    }
+
     pub fn scripthash_history_filtered_in(
         &self,
         scripthash: &[u8; 32],
@@ -1508,6 +1634,9 @@ impl Query {
                     })
                     .collect(),
             });
+        }
+        if filter.from_height > 0 {
+            return self.height_window_history(scripthash, filter, view);
         }
         let joined = self.sh_join_limited(
             scripthash,
@@ -2023,6 +2152,8 @@ mod history_filter_tests {
             limit: Some(1),
             after_txid: Some(after),
             order: HistoryOrder::NewestFirst,
+            after_absent_keeps_older: false,
+            after_height: None,
         };
         let got = apply_history_filter(&items, &f);
         assert!(!got.cursor_missing);
@@ -2043,6 +2174,8 @@ mod history_filter_tests {
             limit: Some(1),
             after_txid: Some([0xff; 32]),
             order: HistoryOrder::NewestFirst,
+            after_absent_keeps_older: false,
+            after_height: None,
         };
         let got = apply_history_filter(&items, &f);
         assert!(got.cursor_missing);
@@ -2066,6 +2199,8 @@ mod history_filter_tests {
             limit: Some(3),
             after_txid: None,
             order: HistoryOrder::HeightAsc,
+            after_absent_keeps_older: false,
+            after_height: None,
         };
         let got = apply_history_filter(&items, &f);
         assert_eq!(got.rows.len(), 3);

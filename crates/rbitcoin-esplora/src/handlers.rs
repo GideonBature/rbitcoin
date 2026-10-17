@@ -32,6 +32,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MULTI_ADDRESS_LIMIT: usize = 300;
+/// Esplora mempool history on `/txs` and `/txs/mempool`.
+const MEMPOOL_TX_PAGE: usize = 50;
 
 type JoinBag = HashMap<[u8; 32], Arc<ShJoinSlot>>;
 
@@ -1177,25 +1179,28 @@ fn combined_txs(
             return after_txid_not_found();
         }
     }
-    // Membership is this script's mempool rows. A tx sitting in the pool for
-    // some other script must not restart this script's first page.
-    let mempool_rows = if asof.is_none() {
-        mempool_txs_json(st, sh)
+    // A confirmed cursor is absent from this script's mempool index, so the
+    // chain page is read without mempool tx bodies. A cursor inside the first
+    // mempool page keeps only the rows after it. A mempool-only cursor past
+    // that page is not a chain cursor. A tx in the pool for some other script
+    // must not restart this script's first page.
+    let mempool = if asof.is_none() {
+        mempool_page_json(st, sh, after)
     } else {
-        Vec::new()
+        MempoolPage::Absent
     };
-    let after_in_mempool = after.is_some_and(|id| {
-        let hex = block_hash_hex(&id);
-        mempool_rows.iter().any(|v| v["txid"] == hex)
-    });
     let mut out = Vec::new();
-    if asof.is_none() && (after.is_none() || after_in_mempool) {
-        out.extend(match after {
-            Some(id) if after_in_mempool => skip_mempool_after(mempool_rows, &id),
-            _ => mempool_rows,
-        });
-    }
-    let chain_after = if after_in_mempool { None } else { after };
+    let chain_after = match mempool {
+        MempoolPage::OnPage(rows) => {
+            out.extend(rows);
+            None
+        }
+        MempoolPage::PastPage => match after {
+            Some(id) if !txid_on_chain(st, &id) => None,
+            other => other,
+        },
+        MempoolPage::Absent => after,
+    };
     let filter = HistoryFilter::esplora_chain_page(chain_after);
     let (page, view) = match sh_at_view(
         st,
@@ -1329,58 +1334,69 @@ fn dedup_txid(rows: Vec<Value>) -> Vec<Value> {
     out
 }
 
-#[allow(clippy::result_large_err)] // public error enum
-fn combined_tx_vec(
-    st: &AppState,
-    sh: &[u8; 32],
-    asof: Option<[u8; 32]>,
-    bag: Option<&mut JoinBag>,
-) -> Result<Vec<Value>, Response> {
-    let mut out = Vec::new();
-    if asof.is_none() {
-        out.extend(mempool_txs_json(st, sh));
-    }
-    let filter = HistoryFilter::esplora_chain_page(None);
-    let (page, _) = sh_at_view(
-        st,
-        sh,
-        asof,
-        |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
-        |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
-        cursor_page(None),
-        None,
-        bag,
-    )?;
-    let items = page.rows;
-    let chain = history_items_to_tx_json(&st.query, &items, st.network).map_err(store_err)?;
-    out.extend(chain);
-    Ok(out)
+/// One newest window per script. More than one script keeps a cursor that
+/// is absent from some of them. One script stays the single-address rule:
+/// a foreign cursor is 422.
+fn multi_page_filter(after: Option<[u8; 32]>, script_count: usize) -> HistoryFilter {
+    let mut filter = HistoryFilter::esplora_chain_page(after);
+    filter.after_absent_keeps_older = after.is_some() && script_count > 1;
+    filter
 }
 
 #[allow(clippy::result_large_err)] // public error enum
-fn summary_vec(
-    st: &AppState,
-    sh: &[u8; 32],
-    asof: Option<[u8; 32]>,
-    bag: Option<&mut JoinBag>,
-) -> Result<Vec<Value>, Response> {
-    let filter = HistoryFilter::esplora_chain_page(None);
-    let (page, _) = sh_at_view(
-        st,
-        sh,
-        asof,
-        |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
-        |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
-        cursor_page(None),
-        None,
-        bag,
-    )?;
-    let items = page.rows;
-    match summaries_json(&st.query, &items) {
-        Ok(Value::Array(v)) => Ok(v),
-        Ok(_) => Ok(Vec::new()),
-        Err(e) => Err(store_err(e)),
+fn accept_script_page<T>(
+    page: rbitcoin_query::FilteredHistory<T>,
+    keep_absent: bool,
+    saw_cursor: &mut bool,
+) -> Result<Vec<T>, Response> {
+    if page.cursor_missing && !keep_absent {
+        return Err(after_txid_not_found());
     }
+    if !page.cursor_missing {
+        *saw_cursor = true;
+    }
+    Ok(page.rows)
+}
+
+fn truncate_page(rows: &mut Vec<Value>, limit: usize) {
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+}
+
+/// Higher block first, then the larger internal txid. The next page cuts
+/// on that key. Display hex is the byte reverse, so it would pick a
+/// different last row at the same height.
+fn newer_internal_txid(left_hex: &str, right_hex: &str) -> std::cmp::Ordering {
+    let left = parse_hash32(left_hex).unwrap_or([0u8; 32]);
+    let right = parse_hash32(right_hex).unwrap_or([0u8; 32]);
+    right.cmp(&left)
+}
+
+fn sort_confirmed_txs(rows: &mut [Value]) {
+    rows.sort_by(|a, b| {
+        let ha = a["status"]["block_height"].as_u64().unwrap_or(0);
+        let hb = b["status"]["block_height"].as_u64().unwrap_or(0);
+        hb.cmp(&ha).then_with(|| {
+            newer_internal_txid(
+                a["txid"].as_str().unwrap_or(""),
+                b["txid"].as_str().unwrap_or(""),
+            )
+        })
+    });
+}
+
+fn sort_summaries_newest(rows: &mut [Value]) {
+    rows.sort_by(|a, b| {
+        let ha = a["height"].as_i64().unwrap_or(0);
+        let hb = b["height"].as_i64().unwrap_or(0);
+        hb.cmp(&ha).then_with(|| {
+            newer_internal_txid(
+                a["txid"].as_str().unwrap_or(""),
+                b["txid"].as_str().unwrap_or(""),
+            )
+        })
+    });
 }
 
 fn multi_txs(
@@ -1397,20 +1413,70 @@ fn multi_txs(
     }
     let mut bag = JoinBag::new();
     st.seed_bulk(client, &mut bag);
-    let mut rows = Vec::new();
+    let mut mempool_rows = Vec::new();
+    if asof.is_none() {
+        for sh in &scripts {
+            mempool_rows.extend(mempool_txs_json(st, sh));
+        }
+        mempool_rows = dedup_txid(mempool_rows);
+        sort_txs_newest_first(&mut mempool_rows);
+    }
+    let after_in_mempool = after.is_some_and(|id| {
+        let hex = block_hash_hex(&id);
+        mempool_rows.iter().any(|v| v["txid"] == hex)
+    });
+    let past_unconfirmed = after.is_some_and(|id| {
+        !after_in_mempool
+            && scripts.iter().any(|sh| mempool_indexes(st, sh, &id))
+            && !txid_on_chain(st, &id)
+    });
+    let chain_after = if after_in_mempool || past_unconfirmed {
+        None
+    } else {
+        after
+    };
+    if after.is_some() && !after_in_mempool {
+        mempool_rows.clear();
+    } else if let Some(id) = after {
+        mempool_rows = skip_rows_after(mempool_rows, Some(id)).unwrap_or_default();
+    }
+    let filter = multi_page_filter(chain_after, scripts.len());
+    let limit = filter.limit.unwrap_or(25);
+    let mut saw_cursor = chain_after.is_none();
+    let mut chain = Vec::new();
     for sh in &scripts {
-        match combined_tx_vec(st, sh, asof, Some(&mut bag)) {
-            Ok(part) => rows.extend(part),
+        let (page, _) = match sh_at_view(
+            st,
+            sh,
+            asof,
+            |q, view| q.scripthash_history_filtered_in(sh, &filter, view),
+            |q, slot, view| q.scripthash_history_filtered_slot_in(sh, &filter, slot, view),
+            cursor_page(chain_after),
+            client,
+            Some(&mut bag),
+        ) {
+            Ok(x) => x,
             Err(r) => return r,
+        };
+        let items = match accept_script_page(page, filter.after_absent_keeps_older, &mut saw_cursor)
+        {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match history_items_to_tx_json(&st.query, &items, st.network) {
+            Ok(part) => chain.extend(part),
+            Err(e) => return store_err(e),
         }
     }
     st.promote_bulk(client, bag);
-    let mut rows = dedup_txid(rows);
-    sort_txs_newest_first(&mut rows);
-    let Some(rows) = skip_rows_after(rows, after) else {
+    if !saw_cursor {
         return after_txid_not_found();
-    };
-    Json(rows).into_response()
+    }
+    let mut chain = dedup_txid(chain);
+    sort_confirmed_txs(&mut chain);
+    truncate_page(&mut chain, limit);
+    mempool_rows.extend(chain);
+    Json(mempool_rows).into_response()
 }
 
 fn multi_summary(
@@ -1427,28 +1493,42 @@ fn multi_summary(
     }
     let mut bag = JoinBag::new();
     st.seed_bulk(client, &mut bag);
+    let filter = multi_page_filter(after, scripts.len());
+    let limit = filter.limit.unwrap_or(25);
+    let mut saw_cursor = after.is_none();
     let mut rows = Vec::new();
     for sh in &scripts {
-        match summary_vec(st, sh, asof, Some(&mut bag)) {
-            Ok(part) => rows.extend(part),
+        let (page, _) = match sh_at_view(
+            st,
+            sh,
+            asof,
+            |q, view| q.scripthash_history_summary_filtered_in(sh, &filter, view),
+            |q, slot, view| q.scripthash_history_summary_filtered_slot_in(sh, &filter, slot, view),
+            cursor_page(after),
+            client,
+            Some(&mut bag),
+        ) {
+            Ok(x) => x,
             Err(r) => return r,
+        };
+        let items = match accept_script_page(page, filter.after_absent_keeps_older, &mut saw_cursor)
+        {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match summaries_json(&st.query, &items) {
+            Ok(Value::Array(v)) => rows.extend(v),
+            Ok(_) => {}
+            Err(e) => return store_err(e),
         }
     }
     st.promote_bulk(client, bag);
-    let mut rows = dedup_txid(rows);
-    rows.sort_by(|a, b| {
-        let ha = a["height"].as_i64().unwrap_or(0);
-        let hb = b["height"].as_i64().unwrap_or(0);
-        hb.cmp(&ha).then_with(|| {
-            b["txid"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(a["txid"].as_str().unwrap_or(""))
-        })
-    });
-    let Some(rows) = skip_rows_after(rows, after) else {
+    if !saw_cursor {
         return after_txid_not_found();
-    };
+    }
+    let mut rows = dedup_txid(rows);
+    sort_summaries_newest(&mut rows);
+    truncate_page(&mut rows, limit);
     Json(rows).into_response()
 }
 
@@ -1639,32 +1719,82 @@ pub async fn address_txs_mempool(
 }
 
 fn mempool_txs_json(st: &AppState, sh: &[u8; 32]) -> Vec<Value> {
+    match mempool_page_json(st, sh, None) {
+        MempoolPage::OnPage(rows) => rows,
+        MempoolPage::Absent | MempoolPage::PastPage => Vec::new(),
+    }
+}
+
+/// Where `after` sits in this script's mempool index.
+enum MempoolPage {
+    /// Not in the index. The caller keeps `after` as a chain cursor.
+    Absent,
+    /// Rows that stay on the page. A cursor on the page is already dropped.
+    OnPage(Vec<Value>),
+    /// In the index, past the first [`MEMPOOL_TX_PAGE`] rows. No body loaded.
+    PastPage,
+}
+
+fn mempool_indexes(st: &AppState, sh: &[u8; 32], id: &[u8; 32]) -> bool {
     let Some(mp) = st.mempool.as_ref() else {
-        return Vec::new();
+        return false;
     };
-    let mut out = Vec::new();
-    for item in mp.scripthash_mempool(sh).into_iter().take(50) {
-        if let Ok(Some((fk, _))) = st.query.get_tx_by_txid(&item.txid) {
-            if let Ok(v) = build_tx_json(&st.query, fk, st.network) {
-                out.push(v);
-                continue;
-            }
-        }
-        let txid = Txid::from_byte_array(item.txid);
-        let Some(tx) = mp.get_tx(&txid) else {
-            continue;
-        };
-        if let Ok(v) = build_tx_json_from_tx(
-            &st.query,
-            &tx,
-            st.network,
-            Some(item.fee),
-            Some(mp.as_ref()),
-        ) {
-            out.push(v);
+    mp.scripthash_indexes_tx(sh, &Txid::from_byte_array(*id))
+}
+
+fn txid_on_chain(st: &AppState, id: &[u8; 32]) -> bool {
+    st.query.get_tx_by_txid(id).ok().flatten().is_some()
+}
+
+/// Mempool JSON that stays on this `/txs` page.
+///
+/// A cursor outside the index loads nothing. A cursor on the first page
+/// keeps the tail. A cursor past that page loads nothing and is [`MempoolPage::PastPage`],
+/// so a mempool-only tx is not mistaken for a chain cursor.
+fn mempool_page_json(st: &AppState, sh: &[u8; 32], after: Option<[u8; 32]>) -> MempoolPage {
+    let Some(mp) = st.mempool.as_ref() else {
+        return MempoolPage::Absent;
+    };
+    if let Some(id) = after {
+        if !mempool_indexes(st, sh, &id) {
+            return MempoolPage::Absent;
         }
     }
-    out
+    let mut rows = mp.scripthash_mempool_fees(sh);
+    rows.truncate(MEMPOOL_TX_PAGE);
+    if let Some(id) = after {
+        let Some(i) = rows.iter().position(|(txid, _)| *txid == id) else {
+            return MempoolPage::PastPage;
+        };
+        rows.drain(..=i);
+    }
+    let mut out = Vec::new();
+    for (txid, fee) in rows {
+        push_mempool_tx_json(st, mp, txid, fee, &mut out);
+    }
+    MempoolPage::OnPage(out)
+}
+
+fn push_mempool_tx_json(
+    st: &AppState,
+    mp: &MempoolHub,
+    txid: [u8; 32],
+    fee: i64,
+    out: &mut Vec<Value>,
+) {
+    if let Ok(Some((fk, _))) = st.query.get_tx_by_txid(&txid) {
+        if let Ok(v) = build_tx_json(&st.query, fk, st.network) {
+            out.push(v);
+            return;
+        }
+    }
+    let id = Txid::from_byte_array(txid);
+    let Some(tx) = mp.get_tx(&id) else {
+        return;
+    };
+    if let Ok(v) = build_tx_json_from_tx(&st.query, &tx, st.network, Some(fee), Some(mp)) {
+        out.push(v);
+    }
 }
 
 fn mempool_txs_for_sh(st: &AppState, sh: &[u8; 32]) -> Response {
@@ -1695,14 +1825,6 @@ fn txid_is_known(st: &AppState, id: &[u8; 32]) -> bool {
     let tid = Txid::from_byte_array(*id);
     st.mempool.as_ref().is_some_and(|m| m.contains(&tid))
         || st.query.get_tx_by_txid(id).ok().flatten().is_some()
-}
-
-fn skip_mempool_after(rows: Vec<Value>, after: &[u8; 32]) -> Vec<Value> {
-    let hex = block_hash_hex(after);
-    match rows.iter().position(|v| v["txid"] == hex) {
-        Some(i) => rows[i.saturating_add(1)..].to_vec(),
-        None => rows,
-    }
 }
 
 #[derive(Deserialize)]

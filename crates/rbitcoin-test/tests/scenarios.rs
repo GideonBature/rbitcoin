@@ -2116,6 +2116,8 @@ fn pin_scripthash_views_on_pad(
         limit: Some(2),
         after_txid: None,
         order: HistoryOrder::NewestFirst,
+        after_absent_keeps_older: false,
+        after_height: None,
     };
     assert_eq!(heights(&newest), [top, top]);
 

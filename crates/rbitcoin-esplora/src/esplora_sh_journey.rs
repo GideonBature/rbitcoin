@@ -147,6 +147,156 @@ async fn bulk_page_leaves_wallet_slot_empty(
     assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 0);
 }
 
+fn pay_height(h: u32, spk: bitcoin::ScriptBuf) -> TxApply {
+    let mut txid = [0u8; 32];
+    txid[0..4].copy_from_slice(&h.to_le_bytes());
+    txid[31] = 0xaa;
+    TxApply {
+        tx: TxRecord {
+            txid,
+            version: 2,
+            locktime: 0,
+            input_start_fk: Fk::NULL,
+            input_count: 1,
+            output_start_fk: Fk::NULL,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord {
+            prev_txid: [0u8; 32],
+            parent: rbitcoin_store::InputParent::Coinbase,
+            sequence: u32::MAX,
+            script_sig: vec![],
+            witness: vec![],
+        }],
+        outputs: vec![OutputRecord::unspent(1_0000_0000, spk.to_bytes())],
+    }
+}
+
+async fn post_wallet_rows(
+    app: &Router,
+    path: &str,
+    body: &[u8],
+    after: Option<&str>,
+) -> Vec<Value> {
+    let uri = match after {
+        Some(id) => format!("{path}?after_txid={id}"),
+        None => path.to_string(),
+    };
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("X-Rbitcoin-Client", "wallet")
+        .body(axum::body::Body::from(body.to_vec()))
+        .unwrap();
+    let (st, resp) = oneshot_http(app, req).await;
+    assert_eq!(st, 200, "{path}: {resp}");
+    serde_json::from_str(&resp).unwrap()
+}
+
+fn row_txids(rows: &[Value]) -> Vec<&str> {
+    rows.iter().filter_map(|v| v["txid"].as_str()).collect()
+}
+
+/// Script A has 30 creates, all newer than script B's 30. The merged page is
+/// 25. The second page is A's remainder plus the front of B, and the third
+/// page is the rest of B. One script over the create cap still returns 200
+/// and leaves the wallet join slot empty.
+#[tokio::test]
+async fn multi_page_is_one_newest_window_per_script() {
+    let (_a, spk_a) = regtest_p2wpkh();
+    let (_b, spk_b) = regtest_p2wpkh_sk(9);
+    let sh_a = block_hash_hex(&script_hash(spk_a.as_bytes()));
+    let sh_b = block_hash_hex(&script_hash(spk_b.as_bytes()));
+    let (dir, q) = temp_query("multi-window");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let mut prev = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let mut parent = h0.hash;
+    let mut older = Vec::new();
+    let mut newer = Vec::new();
+    for h in 1u32..=60 {
+        let (header, cb) = coinbase(h, prev, Some(parent));
+        let spk = if h <= 30 { spk_b.clone() } else { spk_a.clone() };
+        let pay = pay_height(h, spk);
+        let id = block_hash_hex(&pay.tx.txid);
+        if h <= 30 {
+            older.push(id);
+        } else {
+            newer.push(id);
+        }
+        prev = q.connect_block(Height(h), &header, &[cb, pay]).unwrap();
+        parent = header.hash;
+    }
+    let a_new: Vec<&str> = newer.iter().rev().map(String::as_str).collect();
+    let b_new: Vec<&str> = older.iter().rev().map(String::as_str).collect();
+    let page1: Vec<&str> = a_new[..25].to_vec();
+    let mut page2: Vec<&str> = a_new[25..].to_vec();
+    page2.extend_from_slice(&b_new[..20]);
+    let page3: Vec<&str> = b_new[20..].to_vec();
+
+    q.set_max_sh_creates(10);
+    let q = Arc::new(q);
+    let cache = Arc::new(Mutex::new(JoinCache::default()));
+    let app = app_with_join(Arc::clone(&q), Arc::clone(&cache), true);
+    let body = serde_json::to_vec(&json!([sh_a, sh_b])).unwrap();
+
+    let rows = post_wallet_rows(&app, "/scripthashes/txs", &body, None).await;
+    assert_eq!(row_txids(&rows), page1);
+    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 0);
+    let rows = post_wallet_rows(&app, "/scripthashes/txs", &body, Some(page1[24])).await;
+    assert_eq!(row_txids(&rows), page2);
+    assert_eq!(cache.lock().unwrap().bulk_len("wallet"), 0);
+    let rows = post_wallet_rows(&app, "/scripthashes/txs", &body, Some(page2[24])).await;
+    assert_eq!(row_txids(&rows), page3);
+
+    let rows = post_wallet_rows(&app, "/scripthashes/txs/summary", &body, None).await;
+    assert_eq!(row_txids(&rows), page1);
+    assert!(rows.iter().all(|v| v["value"] == 1_0000_0000));
+    let rows = post_wallet_rows(&app, "/scripthashes/txs/summary", &body, Some(page1[24])).await;
+    assert_eq!(row_txids(&rows), page2);
+    assert!(rows.iter().all(|v| v["value"] == 1_0000_0000));
+    let rows = post_wallet_rows(&app, "/scripthashes/txs/summary", &body, Some(page2[24])).await;
+    assert_eq!(row_txids(&rows), page3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn same_height_pay(mark: u8, second: u8, spk: bitcoin::ScriptBuf) -> TxApply {
+    let mut txid = [0u8; 32];
+    txid[0] = mark;
+    txid[1] = second;
+    txid[31] = 0xaa;
+    let mut pay = pay_height(0, spk);
+    pay.tx.txid = txid;
+    pay
+}
+
+/// Same-height rows are ordered by internal txid, the key the next page
+/// uses. Display hex would put a different row last and repeat the others.
+#[tokio::test]
+async fn multi_page_same_height_follows_internal_txid() {
+    let (_a, spk) = regtest_p2wpkh();
+    let sh = block_hash_hex(&script_hash(spk.as_bytes()));
+    let (dir, q) = temp_query("same-height-page");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let prev = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let w = same_height_pay(0x10, 0x00, spk.clone());
+    let c = same_height_pay(0x02, 0x00, spk.clone());
+    let v = same_height_pay(0x01, 0xff, spk);
+    let ids = [w.tx.txid, c.tx.txid, v.tx.txid].map(|id| block_hash_hex(&id));
+    let (h1, cb1) = coinbase(1, prev, Some(h0.hash));
+    q.connect_block(Height(1), &h1, &[cb1, w, c, v]).unwrap();
+    let q = Arc::new(q);
+    let app = app_with_join(q, Arc::new(Mutex::new(JoinCache::default())), true);
+    let body = serde_json::to_vec(&json!([sh])).unwrap();
+    for path in ["/scripthashes/txs", "/scripthashes/txs/summary"] {
+        let rows = post_wallet_rows(&app, path, &body, None).await;
+        assert_eq!(row_txids(&rows), ids.iter().map(String::as_str).collect::<Vec<_>>(), "{path}");
+        let rows = post_wallet_rows(&app, path, &body, Some(&ids[2])).await;
+        assert!(row_txids(&rows).is_empty(), "{path} page 2: {rows:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 async fn untrusted_header_is_ignored(q: Arc<Query>, sh1: [u8; 32]) {
     let h1hex = block_hash_hex(&sh1);
     let public = Arc::new(Mutex::new(JoinCache::default()));
