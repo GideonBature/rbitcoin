@@ -1017,7 +1017,13 @@ mod tests {
             "127.0.0.1:8333".parse().unwrap(),
             "192.0.2.1:8333".parse().unwrap(),
             "0.0.0.0:8333".parse().unwrap(),
+            "100.64.0.1:8333".parse().unwrap(),
+            "198.18.0.1:8333".parse().unwrap(),
+            "240.0.0.1:8333".parse().unwrap(),
             "[2001:db8::1]:8333".parse().unwrap(),
+            "[2001:10::1]:8333".parse().unwrap(),
+            "[2001:20::1]:8333".parse().unwrap(),
+            "[100::1]:8333".parse().unwrap(),
             public,
         ]);
         assert_eq!(book.len(), 1);

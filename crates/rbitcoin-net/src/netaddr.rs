@@ -50,10 +50,39 @@ pub(crate) fn addr_allowed(addr: NetAddr, only: &[OnlyNet]) -> bool {
     only.is_empty() || only.iter().any(|n| n.matches_addr(addr))
 }
 
-/// `2001:db8::/32`. `Ipv6Addr::is_documentation` is still unstable on 1.95.
-fn ipv6_documentation(v: Ipv6Addr) -> bool {
+/// Prefixes `Ipv6Addr` does not classify on 1.95.
+///
+/// `2001:db8::/32` documentation, `2001:10::/28` ORCHID, `2001:20::/28`
+/// ORCHIDv2, and `100::/64` discard. `is_documentation` is still unstable.
+fn ipv6_special_unroutable(v: Ipv6Addr) -> bool {
     let o = v.octets();
-    o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8 {
+        return true;
+    }
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && (o[3] & 0xf0) == 0x10 {
+        return true;
+    }
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && (o[3] & 0xf0) == 0x20 {
+        return true;
+    }
+    o[0] == 0x01 && o[1] == 0x00 && o[2..8].iter().all(|&b| b == 0)
+}
+
+/// `100.64.0.0/10`. `Ipv4Addr::is_shared` is still unstable on 1.95.
+fn ipv4_shared(v: Ipv4Addr) -> bool {
+    let o = v.octets();
+    o[0] == 100 && (o[1] & 0xc0) == 64
+}
+
+/// `198.18.0.0/15`. `Ipv4Addr::is_benchmarking` is still unstable on 1.95.
+fn ipv4_benchmarking(v: Ipv4Addr) -> bool {
+    let o = v.octets();
+    o[0] == 198 && (o[1] & 0xfe) == 18
+}
+
+/// `240.0.0.0/4`. `Ipv4Addr::is_reserved` is still unstable on 1.95.
+fn ipv4_reserved(v: Ipv4Addr) -> bool {
+    v.octets()[0] & 0xf0 == 240
 }
 
 fn ipv4_unroutable(v: Ipv4Addr) -> bool {
@@ -64,6 +93,9 @@ fn ipv4_unroutable(v: Ipv4Addr) -> bool {
         || v.is_broadcast()
         || v.is_multicast()
         || v.is_documentation()
+        || ipv4_shared(v)
+        || ipv4_benchmarking(v)
+        || ipv4_reserved(v)
 }
 
 /// Clearnet bogon. CJDNS `fc00::/8` is an overlay, not a unique-local bogon.
@@ -82,7 +114,7 @@ pub(crate) fn clearnet_unroutable(ip: IpAddr) -> bool {
                 || v.is_unicast_link_local()
                 || v.is_unique_local()
                 || v.is_multicast()
-                || ipv6_documentation(v)
+                || ipv6_special_unroutable(v)
         }
     }
 }
