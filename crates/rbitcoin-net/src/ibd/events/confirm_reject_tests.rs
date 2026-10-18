@@ -2724,6 +2724,10 @@ fn archived_retry_pins_a_same_block_parent() {
         "rejects={rejects:?} last={:?}",
         rig.last_reject_err
     );
+    assert!(
+        rejects.contains(&(h1, ConfirmRejectClass::Cascade, 2)),
+        "the wave must be retried from the archive: {rejects:?}"
+    );
     assert!(!rig.st.engine_fault_seen.contains(&h1), "{rejects:?}");
     assert!(rig.st.reorg.invalid.contains(h2.to_byte_array()));
     assert_eq!(rig.hub.tip_height(), Some(t + 1), "{rejects:?}");
