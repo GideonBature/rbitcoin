@@ -314,6 +314,7 @@ impl Query {
             return Ok(Vec::new());
         }
         let commit = self.lock_tip_commit()?;
+        let durable_before = self.tip_height();
         for w in items.windows(2) {
             if w[1].height.0 != w[0].height.0.saturating_add(1) {
                 return Err(StoreError::Corrupt("confirm run not contiguous heights"));
@@ -398,7 +399,8 @@ impl Query {
         // L2 write-behind barrier: complete-or-fail Class C image to disk. Tip
         // mode returns after it. IBD returns before it and may dequeue the RAM
         // body queue: a kill then loses at most one more batch to re-download.
-        if self.index_mode()?.is_tip() {
+        let inline = self.index_mode()?.is_tip();
+        if inline {
             self.store.flush_class_c_tip()?;
         } else {
             self.spawn_tip_flush()?;
@@ -414,7 +416,14 @@ impl Query {
         if let Some(tip) = self.tip_height() {
             let _ = self.ensure_height_by_hash_index(tip);
         }
-        self.record_confirmed_seqsigwit_window(items)?;
+        // Prune below a durable tip: this one after an inline flush, the one
+        // before it while this batch's flush still runs.
+        let durable = if inline {
+            self.tip_height()
+        } else {
+            durable_before
+        };
+        self.record_confirmed_seqsigwit_window(items, durable)?;
 
         Ok(out)
     }
@@ -422,8 +431,9 @@ impl Query {
     fn record_confirmed_seqsigwit_window(
         &self,
         items: &[ConfirmPrepared],
+        durable: Option<Height>,
     ) -> Result<(), QueryError> {
-        self.apply_prune_seqsigwit_tip()?;
+        self.prune_seqsigwit_below(durable)?;
         if !self.prune_seqsigwit() {
             return Ok(());
         }

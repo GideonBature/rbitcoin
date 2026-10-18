@@ -1166,7 +1166,8 @@ fn empty_regtest_run(last: u32) -> Vec<(Height, Block)> {
     let (mut tip, mut time) = (genesis.block_hash(), genesis.header.time);
     (1..=last)
         .map(|h| {
-            let b = mine_regtest_block(tip, time + 600, h, vec![]);
+            let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+            let b = rbitcoin_consensus::mine_regtest_paying(tip, time + 600, h, op_true, vec![]);
             (tip, time) = (b.block_hash(), b.header.time);
             (Height(h), b)
         })
@@ -1213,6 +1214,23 @@ fn ibd_tip_flush_finishes_before_disconnect_and_drop() {
         Some(Height(3)),
         "drop waits for the tip flush"
     );
+}
+
+/// IBD prunes witness data below the tip that is already durable, not the
+/// tip whose flush may still run: a crash reopens on a tip that keeps its
+/// window.
+#[test]
+fn ibd_seqsigwit_prune_follows_the_durable_tip() {
+    use rbitcoin_query::confirm_wire_run;
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let run = empty_regtest_run(400);
+    let q = ibd_query_on_genesis(&td);
+    q.set_prune_seqsigwit(true).unwrap();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[..300]).unwrap();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[300..]).unwrap();
+    let keep = Query::SEQSIGWIT_KEEP_HEIGHTS;
+    assert_eq!(q.pruneheight(), Some(Height(300 - keep)));
 }
 
 /// A failed IBD tip flush stops every later commit, even once the disk

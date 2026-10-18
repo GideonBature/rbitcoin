@@ -901,10 +901,15 @@ impl Query {
     pub const SEQSIGWIT_KEEP_HEIGHTS: u32 = 288;
 
     pub fn apply_prune_seqsigwit_tip(&self) -> Result<(), QueryError> {
+        self.prune_seqsigwit_below(self.tip_height())
+    }
+
+    /// Keep the last [`Self::SEQSIGWIT_KEEP_HEIGHTS`] heights at or below `tip`.
+    pub(crate) fn prune_seqsigwit_below(&self, tip: Option<Height>) -> Result<(), QueryError> {
         if !self.prune_seqsigwit() {
             return Ok(());
         }
-        let Some(tip) = self.tip_height() else {
+        let Some(tip) = tip else {
             return Ok(());
         };
         if tip.0 <= Self::SEQSIGWIT_KEEP_HEIGHTS {
