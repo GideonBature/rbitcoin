@@ -645,11 +645,13 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         rbitcoin_query::expected_next_bits(ctx.query.as_ref(), &params, Height(next_h), curtime)
             .map(|c| c.to_consensus())
             .unwrap_or(tip_bits);
+    // Core `GetMinimumTime`: the next block must be above the tip median.
     let mintime = if tip_h == 0 {
         tip_time
     } else {
         rbitcoin_query::median_time_past(ctx.query.as_ref(), Height(tip_h)).unwrap_or(tip_time)
-    };
+    }
+    .saturating_add(1);
     let selected = mempool_block_txs(ctx);
     let mut fees = 0u64;
     let mut tx_json = Vec::with_capacity(selected.len());

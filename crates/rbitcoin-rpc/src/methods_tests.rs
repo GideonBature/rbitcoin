@@ -3893,6 +3893,24 @@ fn submitblock_store_fault_does_not_cache_block_invalid() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `GetMinimumTime`: `mintime` is the lowest time the next block can
+/// carry, one past the tip median. At genesis that median is its time.
+#[test]
+fn getblocktemplate_mintime_is_one_past_the_tip_median() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let tip = Height(hub.tip_height().unwrap());
+    let mtp = rbitcoin_query::median_time_past(hub.query.as_ref(), tip).unwrap();
+    assert_eq!(gbt["mintime"], u64::from(mtp) + 1, "{gbt}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let (ctx, dir, hub) = ctx_regtest_hub();
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let genesis = hub.tip_header().unwrap().time;
+    assert_eq!(gbt["mintime"], u64::from(genesis) + 1, "{gbt}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A sibling that spends the coin the current tip also spent is a competing
 /// block, not a permanent `duplicate-invalid`.
 #[test]
