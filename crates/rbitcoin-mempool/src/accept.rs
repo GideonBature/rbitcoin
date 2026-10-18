@@ -1970,7 +1970,7 @@ impl ActiveMempool {
 
     fn note_invalid(&mut self, txid: Txid) {
         if self.recent_invalid.len() >= RECENT_INVALID_CAP {
-            self.recent_invalid.clear();
+            return;
         }
         self.recent_invalid.insert(txid);
     }
@@ -4161,6 +4161,32 @@ mod tests {
         mp.note_extra(&t2);
         assert!(mp.extra_by_txid(t1.compute_txid()).is_some());
         assert!(mp.extra_by_txid(t2.compute_txid()).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Filling the invalid set must not erase the oldest id. A new id past
+    /// the cap is not stored.
+    #[test]
+    fn recent_invalid_keeps_the_oldest() {
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let first = Txid::from_byte_array({
+            let mut b = [0u8; 32];
+            b[0] = 1;
+            b
+        });
+        mp.note_invalid(first);
+        // 2..4097 is 4095 ids and does not collide with `first`.
+        for i in 2..4_097u32 {
+            let mut b = [0u8; 32];
+            b[0..4].copy_from_slice(&i.to_le_bytes());
+            mp.note_invalid(Txid::from_byte_array(b));
+        }
+        let extra = Txid::from_byte_array([0xff; 32]);
+        mp.note_invalid(extra);
+        assert!(mp.recent_invalid.contains(&first));
+        assert!(!mp.recent_invalid.contains(&extra));
+        assert_eq!(mp.recent_invalid.len(), RECENT_INVALID_CAP);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
