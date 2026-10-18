@@ -6,8 +6,10 @@
 //! rehydrate. In-flight holds CreatePins until load drops map rows below a
 //! lookup-wave drain+fence snapshot taken before TipOnly. Same-wave creates are
 //! omitted from that skeleton. Class A `CreatePin::set_loc` after append;
-//! later-wave stamp reads pin loc. IBD (`skeleton = Some`) never loc-by-fk:
-//! spent is pin loc, skeleton TipOnly loc, or unset for write fill.
+//! later-wave stamp reads pin loc. IBD (`skeleton = Some`) never loc-by-fk
+//! here: spent is pin loc, skeleton TipOnly loc, or unset for write fill. The
+//! all-archived retry (`stamp_parent_pin_archived`) loc-fills its archived
+//! parents that have no body. External IBD parents still must not.
 
 use crate::{CreatePin, InFlight, QueryError, U64Map};
 use crate::{IdMap, TxidHasher};

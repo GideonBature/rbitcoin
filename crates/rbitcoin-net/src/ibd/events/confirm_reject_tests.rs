@@ -2726,11 +2726,94 @@ fn archived_retry_pins_a_same_block_parent() {
     );
     assert!(
         rejects.contains(&(h1, ConfirmRejectClass::Cascade, 2)),
-        "the wave must be retried from the archive: {rejects:?}"
+        "both blocks in one wave: {rejects:?}"
     );
     assert!(!rig.st.engine_fault_seen.contains(&h1), "{rejects:?}");
     assert!(rig.st.reorg.invalid.contains(h2.to_byte_array()));
     assert_eq!(rig.hub.tip_height(), Some(t + 1), "{rejects:?}");
+    rig.finish();
+}
+
+/// Archived blocks above the tip, as a crash between the Class A write and
+/// the tip advance leaves them. The wave is longer than one load batch, so
+/// the last block loads in the next chunk and spends a create from the
+/// first, noted in flight with no outs.
+#[test]
+fn archived_wave_pins_a_parent_from_the_previous_chunk() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::state::InflightReq;
+    use bitcoin::ScriptBuf;
+    use rbitcoin_consensus::mine_regtest_paying;
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("archived-cross-chunk", 1);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let n = super::super::confirm::CONFIRM_RUN_MAX_BLOCKS as u32 + 1;
+    let parent = WireRig::spend(cbs[0]);
+    let mut child = Some(WireRig::spend(parent.compute_txid()));
+    let mut extra = vec![parent];
+    let mut blocks: Vec<bitcoin::Block> = Vec::new();
+    for i in 1..=n {
+        let prev = blocks.last().map_or(rig.tip, |b| b.block_hash());
+        if i == n {
+            extra = child.take().into_iter().collect();
+        }
+        let b = mine_regtest_paying(
+            prev,
+            rig.tip_time + 600 * i,
+            t + i,
+            op_true.clone(),
+            std::mem::take(&mut extra),
+        );
+        blocks.push(b);
+    }
+    // One Class A write for the run, as the write stage does, with no tip advance.
+    let bodies: Vec<_> = blocks.iter().cloned().map(std::sync::Arc::new).collect();
+    let fks: Vec<_> = bodies
+        .iter()
+        .map(|b| rig.hub.ensure_header_fk(&b.header).unwrap())
+        .collect();
+    let txids: Vec<Vec<[u8; 32]>> = bodies
+        .iter()
+        .map(|b| {
+            b.txdata
+                .iter()
+                .map(|t| t.compute_txid().to_byte_array())
+                .collect()
+        })
+        .collect();
+    let items: Vec<_> = bodies
+        .iter()
+        .zip(&fks)
+        .zip(&txids)
+        .map(|((b, fk), ids)| (*fk, b, ids.as_slice()))
+        .collect();
+    rig.hub.query.archive_class_a_from_wire(&items).unwrap();
+    assert_eq!(rig.hub.tip_height(), Some(t));
+    let refs: Vec<&bitcoin::Block> = blocks.iter().collect();
+    rig.plant(&refs);
+    for body in &blocks {
+        let hash = body.block_hash();
+        rig.st.slots[0].in_flight.insert(hash);
+        rig.st.inflight.insert(hash, InflightReq::new(1));
+        rig.deliver(1, body);
+    }
+    rig.start_engine();
+
+    let last = blocks.last().unwrap().block_hash();
+    let by_hash: std::collections::HashMap<_, _> =
+        blocks.iter().map(|b| (b.block_hash(), b.clone())).collect();
+    let rejects = rig.pump(
+        |_, hash| by_hash[&hash].clone(),
+        |st, hub, _| st.halt.is_some() || hub.tip_hash() == Some(last),
+    );
+    assert_eq!(
+        rig.st.halt, None,
+        "rejects={rejects:?} last={:?}",
+        rig.last_reject_err
+    );
+    assert_eq!(rig.hub.tip_height(), Some(t + n), "{rejects:?}");
     rig.finish();
 }
 
