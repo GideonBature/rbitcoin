@@ -1189,31 +1189,79 @@ fn ibd_query_on_genesis(td: &TestDatadir) -> Query {
     q
 }
 
-/// IBD returns from a commit before its tip flush finishes. A disconnect or
-/// dropping the query waits for that flush, so the disk never keeps a tip
-/// the node already left.
+/// Clears `hold` after 100 ms. `released` is set first, so a call that
+/// returned while the flush was held still sees it false.
+fn release_after(
+    hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::sync::atomic::Ordering;
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = std::sync::Arc::clone(&released);
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        seen.store(true, Ordering::SeqCst);
+        hold.store(false, Ordering::SeqCst);
+    });
+    (released, t)
+}
+
+/// A disconnect and dropping the query both wait for the IBD tip flush
+/// still running, so the disk never sees two barriers at once.
 #[test]
-fn ibd_tip_flush_finishes_before_disconnect_and_drop() {
+fn disconnect_and_drop_wait_for_the_ibd_tip_flush() {
     use rbitcoin_query::confirm_wire_run;
+    use std::sync::atomic::Ordering;
     let td = TestDatadir::new().unwrap();
     let params = ChainParams::regtest();
     let run = empty_regtest_run(3);
     let q = ibd_query_on_genesis(&td);
-    confirm_wire_run(&q, &params, Milestone::NONE, &run).unwrap();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[..2]).unwrap();
+    q.flush_for_shutdown().unwrap();
+    let hold = q.hold_tip_flushes();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[2..]).unwrap();
+    let (released, t) = release_after(hold);
     q.disconnect_tip().unwrap();
+    assert!(
+        released.load(Ordering::SeqCst),
+        "disconnect ran beside the tip flush"
+    );
+    t.join().unwrap();
     drop(q);
-
     let q = Query::open_or_create_tiny(td.store_path()).unwrap();
     assert_eq!(q.tip_height(), Some(Height(2)), "disconnect is durable");
+
     q.enter_direct_index_mode_sh(false).unwrap();
+    let hold = q.hold_tip_flushes();
     confirm_wire_run(&q, &params, Milestone::NONE, &run[2..]).unwrap();
+    let (released, t) = release_after(hold);
+    drop(q);
+    assert!(
+        released.load(Ordering::SeqCst),
+        "drop returned before the tip flush"
+    );
+    t.join().unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+    assert_eq!(q.tip_height(), Some(Height(3)));
+}
+
+/// When the IBD tip flush thread cannot start, the commit flushes inline,
+/// so a commit that returned Ok is on disk.
+#[test]
+fn ibd_commit_flushes_inline_when_its_thread_cannot_start() {
+    use rbitcoin_query::confirm_wire_run;
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let run = empty_regtest_run(2);
+    let q = ibd_query_on_genesis(&td);
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[..1]).unwrap();
+    q.fail_next_tip_flush_spawn();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[1..]).unwrap();
     drop(q);
     let q = Query::open_or_create_tiny(td.store_path()).unwrap();
-    assert_eq!(
-        q.tip_height(),
-        Some(Height(3)),
-        "drop waits for the tip flush"
-    );
+    assert_eq!(q.tip_height(), Some(Height(2)));
 }
 
 /// IBD prunes witness data below the tip that is already durable, not the

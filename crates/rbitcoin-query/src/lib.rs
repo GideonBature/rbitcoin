@@ -446,6 +446,12 @@ pub struct Query {
     /// IBD tip barrier on `rbtc-tip-flush`, or the failure of one. The next
     /// `tip_commit` taker joins it.
     tip_flush: Mutex<connect::TipFlush>,
+    /// Test hook: IBD tip flush threads wait before writing while this is set.
+    #[cfg(any(test, feature = "test-hooks"))]
+    tip_flush_hold: Arc<std::sync::atomic::AtomicBool>,
+    /// Test hook: the next IBD tip flush thread fails to start.
+    #[cfg(any(test, feature = "test-hooks"))]
+    tip_flush_spawn_fail: std::sync::atomic::AtomicBool,
     /// Confirm / archive / load window meters (`ibd: perf`). One instance per Query.
     confirm_stats: Arc<ConfirmStats>,
     /// Tip height of last in-process io_uring recover (`u32::MAX` = none).
@@ -596,6 +602,10 @@ impl Query {
             owned_sizes_published: arc_swap::ArcSwap::from_pointee(ProcessOwnedSizes::default()),
             tip_commit: Mutex::new(()),
             tip_flush: Mutex::new(connect::TipFlush::Idle),
+            #[cfg(any(test, feature = "test-hooks"))]
+            tip_flush_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test-hooks"))]
+            tip_flush_spawn_fail: std::sync::atomic::AtomicBool::new(false),
             confirm_stats: Arc::new(ConfirmStats::default()),
             uring_recover_tip: AtomicU32::new(u32::MAX),
             pruneheight: AtomicU32::new(ph),

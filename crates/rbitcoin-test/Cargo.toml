@@ -27,6 +27,10 @@ serde_json = { workspace = true }
 binary_sv2 = { workspace = true }
 template_distribution_sv2 = { workspace = true }
 
+[dev-dependencies]
+# Tip-flush journeys hold or fail the IBD flush thread. Dependents do not.
+rbitcoin-query = { workspace = true, features = ["test-hooks"] }
+
 [[test]]
 name = "scenarios"
 path = "tests/scenarios.rs"

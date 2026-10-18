@@ -165,12 +165,62 @@ impl Query {
     /// stays the same.
     fn spawn_tip_flush(&self) -> Result<(), QueryError> {
         let store = Arc::clone(&self.store);
-        let flush = std::thread::Builder::new()
-            .name("rbtc-tip-flush".into())
-            .spawn(move || store.flush_class_c_tip())
-            .map_err(|e| StoreError::io(self.store.path(), e))?;
-        *self.tip_flush.lock().unwrap_or_else(|e| e.into_inner()) = TipFlush::Running(flush);
-        Ok(())
+        #[cfg(any(test, feature = "test-hooks"))]
+        let hold = Arc::clone(&self.tip_flush_hold);
+        let flush = if self.tip_flush_spawn_fails() {
+            Err(std::io::Error::other("test hook: no tip flush thread"))
+        } else {
+            std::thread::Builder::new()
+                .name("rbtc-tip-flush".into())
+                .spawn(move || {
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    while hold.load(Ordering::Acquire) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    store.flush_class_c_tip()
+                })
+        };
+        let mut state = self.tip_flush.lock().unwrap_or_else(|e| e.into_inner());
+        let e = match flush {
+            Ok(f) => {
+                *state = TipFlush::Running(f);
+                return Ok(());
+            }
+            Err(e) => e,
+        };
+        // The batch is already committed in RAM: flush it here, and a failure
+        // sticks like a background one.
+        rbitcoin_log::warn!("store: no IBD tip flush thread ({e}); flushing inline");
+        let inline = self.store.flush_class_c_tip();
+        if inline.is_err() {
+            *state = TipFlush::Failed;
+        }
+        inline
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn tip_flush_spawn_fails(&self) -> bool {
+        self.tip_flush_spawn_fail.swap(false, Ordering::SeqCst)
+    }
+
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    fn tip_flush_spawn_fails(&self) -> bool {
+        false
+    }
+
+    /// IBD tip flush threads wait before writing until the returned flag is cleared.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn hold_tip_flushes(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.tip_flush_hold.store(true, Ordering::SeqCst);
+        Arc::clone(&self.tip_flush_hold)
+    }
+
+    /// The next IBD tip flush thread fails to start.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn fail_next_tip_flush_spawn(&self) {
+        self.tip_flush_spawn_fail.store(true, Ordering::SeqCst);
     }
 
     /// One header read at open, so the first orchestration pass does not

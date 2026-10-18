@@ -468,7 +468,6 @@ mod tests {
         })
         .unwrap();
         second.unwrap().join().unwrap();
-        t.flush().unwrap();
         drop(t);
         let t = ArrayTable::open(&path, TableKind::ArrayLink).unwrap();
         assert_eq!((t.get(0).unwrap(), t.get(1).unwrap()), (20, 21));
