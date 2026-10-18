@@ -880,13 +880,11 @@ impl Query {
     }
 
     fn disconnect_tip_body(&self, drop_pending: bool) -> Result<(), QueryError> {
-        // The remembered BIP34 header is this chain's. A shorter tip may
-        // have replaced that block.
-        self.clear_bip34_ancestor();
         let _utxo_view = self.store.hold_utxo_view();
         let height = self
             .tip_height()
             .ok_or(StoreError::Corrupt("no tip to disconnect"))?;
+        self.forget_bip34_ancestor_if_reorged(height.0);
         self.require_seqsigwit_at(height)?;
         self.drop_seqsigwit_ram_height(height.0);
         let _appender = self.sh.appender.lock().unwrap();

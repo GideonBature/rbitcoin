@@ -368,7 +368,7 @@ pub struct Query {
     /// Block-structured confirm parent cache.
     confirm_parents: confirm_parent_cache::ConfirmParentCache,
     /// Confirmed header hash at BIP34 height. The header row is the durable
-    /// record; this avoids reading it on every later block. Cleared on disconnect.
+    /// record. Dropped only when that block is disconnected.
     bip34_ancestor: std::sync::Mutex<Option<crate::chain_view::Bip34AncestorNote>>,
     /// In-RAM body rows. `has_hash` is a map lookup on this mutex, not a scan.
     ///

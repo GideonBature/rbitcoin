@@ -625,7 +625,7 @@ pub fn structural_validate_spends(
     class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
     abs_jobs: &[StructuralAbsJob],
-    bip34_in_write: Option<bitcoin::BlockHash>,
+    bip34_ancestor: Option<bitcoin::BlockHash>,
 ) -> Result<StructuralPhaseNs, ConfirmError> {
     use std::time::Instant;
 
@@ -640,7 +640,7 @@ pub fn structural_validate_spends(
         pending_spent,
         run_create_height,
         scratch,
-        bip34_in_write,
+        bip34_ancestor,
     )?;
     let t_abs = Instant::now();
     structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
@@ -1201,10 +1201,10 @@ fn reject_bip30_unspent_overwrite(
     pending_spent: &BatchSpent,
     run_create_height: &RunCreateHeight,
     scratch: &mut StructuralScratch,
-    bip34_in_write: Option<bitcoin::BlockHash>,
+    bip34_ancestor: Option<bitcoin::BlockHash>,
 ) -> Result<(), ConfirmError> {
     if ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
-        || bip34_ancestry_skips_bip30(query, ctx, bip34_in_write)
+        || bip34_ancestry_skips_bip30(ctx, bip34_ancestor)
     {
         return Ok(());
     }
@@ -1331,23 +1331,15 @@ fn release_repeated_outputs(
 }
 
 fn bip34_ancestry_skips_bip30(
-    query: &Query,
     ctx: &rbitcoin_consensus::ValidationContext<'_>,
-    bip34_in_write: Option<bitcoin::BlockHash>,
+    ancestor: Option<bitcoin::BlockHash>,
 ) -> bool {
     let height = ctx.height.0;
-    if ctx.params.bip34_hash.is_none() {
+    if ctx.params.bip34_hash.is_none() || height <= ctx.params.btc.bip34_height {
         return false;
     }
-    if height <= ctx.params.btc.bip34_height {
-        return false;
-    }
-    // `bip34_in_write` is set only when this write contains that height, and
-    // it is not remembered: a failed write must not skip on the next chain.
-    // Otherwise the confirmed header is read once and kept until disconnect.
-    // Not `get_header_plan`: that plan can be a sibling fork.
-    let bip34_height = ctx.params.btc.bip34_height;
-    let ancestor = bip34_in_write.or_else(|| query.confirmed_bip34_ancestor(bip34_height));
+    // `ancestor` is resolved once for this write. Not `get_header_plan`:
+    // that plan can be a sibling fork.
     ctx.params
         .bip30_skipped_for_bip34_ancestry(height, ancestor)
 }

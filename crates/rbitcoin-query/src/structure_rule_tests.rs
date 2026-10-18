@@ -476,6 +476,7 @@ fn plant_bip34_ancestor(q: &crate::Query, hash: [u8; 32]) {
         .confirmed
         .set(Height(main.btc.bip34_height), hfk)
         .unwrap();
+    q.clear_bip34_ancestor();
 }
 
 fn bip30_message_at_mainnet_above_bip34(
@@ -505,7 +506,7 @@ fn bip30_message_at_mainnet_above_bip34(
         &ClassAWave::default(),
         &mut StructuralScratch::default(),
         &abs_jobs,
-        None,
+        q.confirmed_bip34_ancestor(main.btc.bip34_height),
     )
     .map(|_| ())
 }

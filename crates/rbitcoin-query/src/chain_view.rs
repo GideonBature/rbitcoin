@@ -211,16 +211,17 @@ impl Query {
     }
 }
 
-/// Confirmed header hash at one height, remembered for this process.
+/// Confirmed header hash at the BIP34 height, remembered for this process.
 #[derive(Clone, Copy)]
 pub(crate) struct Bip34AncestorNote {
+    height: u32,
     hash: Option<bitcoin::BlockHash>,
 }
 
 impl Query {
     /// Header at `height` on the confirmed chain. The first call reads the
-    /// store; later calls reuse that hash until [`Self::clear_bip34_ancestor`].
-    /// A read error is not remembered.
+    /// store. Later calls reuse that hash until the block at `height` is
+    /// disconnected. A read error is not remembered.
     pub(crate) fn confirmed_bip34_ancestor(&self, height: u32) -> Option<bitcoin::BlockHash> {
         if let Some(note) = *self.bip34_ancestor.lock().expect("bip34 ancestor") {
             return note.hash;
@@ -229,11 +230,25 @@ impl Query {
             Ok(row) => row.map(|(_, rec)| bitcoin::BlockHash::from_byte_array(rec.hash)),
             Err(_) => return None,
         };
-        *self.bip34_ancestor.lock().expect("bip34 ancestor") =
-            Some(Bip34AncestorNote { hash: found });
+        self.remember_bip34_ancestor(height, found);
         found
     }
 
+    pub(crate) fn remember_bip34_ancestor(&self, height: u32, hash: Option<bitcoin::BlockHash>) {
+        *self.bip34_ancestor.lock().expect("bip34 ancestor") =
+            Some(Bip34AncestorNote { height, hash });
+    }
+
+    /// Drop the remembered header when `disconnected` is that block or below it.
+    /// A reorg above it leaves the ancestor in place.
+    pub(crate) fn forget_bip34_ancestor_if_reorged(&self, disconnected: u32) {
+        let mut slot = self.bip34_ancestor.lock().expect("bip34 ancestor");
+        if slot.is_some_and(|note| disconnected <= note.height) {
+            *slot = None;
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn clear_bip34_ancestor(&self) {
         *self.bip34_ancestor.lock().expect("bip34 ancestor") = None;
     }

@@ -311,6 +311,7 @@ fn write_phase(
         let cc0 = query.confirm_stats().class_c_ns.load(Ordering::Relaxed);
         let t_cc = Instant::now();
         let out = class_c_commit(query, &mut batch.prepared, &write_create_pins)?;
+        super::phases::remember_connected_bip34(query, params, &batch.prepared);
         let class_c_wall_ns = t_cc.elapsed().as_nanos() as u64;
         let class_c_ns = query
             .confirm_stats()
