@@ -396,6 +396,40 @@ fn spend_op_true(
     (h1, spend, spend_txid)
 }
 
+/// A one-block catch-up still returns the spend. A clipped window above
+/// eight weeks is refused before the block scan.
+#[test]
+fn history_window_wider_than_eight_weeks_is_refused() {
+    let (dir, q) = temp_query("history-window-width");
+    q.set_spend_index(true);
+    let (h0, ta0) = funded_op_true_coinbase(0, Fk::NULL, None);
+    let create_txid = ta0.tx.txid;
+    let hfk0 = q.connect_block(Height(0), &h0, &[ta0]).unwrap();
+    let create_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+    let (h1, spend, spend_txid) = spend_op_true(hfk0, h0.hash, create_fk, create_txid);
+    q.connect_block(Height(1), &h1, &[spend]).unwrap();
+    let sh = rbitcoin_store::script_hash(&[0x51]);
+
+    let narrow = crate::scripthash::HistoryFilter::height_window(1, Some(2));
+    let rows = q.scripthash_history_filtered(&sh, &narrow).unwrap();
+    assert_eq!(
+        rows.rows.iter().map(|row| row.txid).collect::<Vec<_>>(),
+        vec![spend_txid]
+    );
+
+    let mut wide_view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    wide_view.height = Height(1 + 8_064);
+    let wide = crate::scripthash::HistoryFilter::height_window(1, None);
+    let err = q
+        .scripthash_history_filtered_in(&sh, &wide, &wide_view)
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Rejected("history window too wide")),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Slow-pin log is only emitted when load work_ms > 2s — keep the formatter unit.
 #[test]
 fn format_slow_pin_omits_retired_tokens() {
