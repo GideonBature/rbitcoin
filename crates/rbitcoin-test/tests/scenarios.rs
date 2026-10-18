@@ -1160,6 +1160,172 @@ fn chain_connect_reorg_and_growth() {
     pin_disconnect_to_genesis_reconnect_and_tip_shrink(q, &td, N, &saved);
 }
 
+/// Empty regtest blocks `1..=last` on genesis, for confirm runs.
+fn empty_regtest_run(last: u32) -> Vec<(Height, Block)> {
+    let genesis = regtest_genesis();
+    let (mut tip, mut time) = (genesis.block_hash(), genesis.header.time);
+    (1..=last)
+        .map(|h| {
+            let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+            let b = rbitcoin_consensus::mine_regtest_paying(tip, time + 600, h, op_true, vec![]);
+            (tip, time) = (b.block_hash(), b.header.time);
+            (Height(h), b)
+        })
+        .collect()
+}
+
+fn ibd_query_on_genesis(td: &TestDatadir) -> Query {
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+    q.enter_direct_index_mode_sh(false).unwrap();
+    let params = ChainParams::regtest();
+    accept_and_connect_block(
+        &q,
+        &params,
+        Height::GENESIS,
+        &regtest_genesis(),
+        Milestone::NONE,
+    )
+    .unwrap();
+    q
+}
+
+/// Clears `hold` after 100 ms. `released` is set first, so a call that
+/// returned while the flush was held still sees it false.
+fn release_after(
+    hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::sync::atomic::Ordering;
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = std::sync::Arc::clone(&released);
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        seen.store(true, Ordering::SeqCst);
+        hold.store(false, Ordering::SeqCst);
+    });
+    (released, t)
+}
+
+/// A disconnect and dropping the query both wait for the IBD tip flush
+/// still running, so the disk never sees two barriers at once.
+#[test]
+fn disconnect_and_drop_wait_for_the_ibd_tip_flush() {
+    use rbitcoin_query::confirm_wire_run;
+    use std::sync::atomic::Ordering;
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let run = empty_regtest_run(3);
+    let q = ibd_query_on_genesis(&td);
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[..2]).unwrap();
+    q.flush_for_shutdown().unwrap();
+    let hold = q.hold_tip_flushes();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[2..]).unwrap();
+    let (released, t) = release_after(hold);
+    q.disconnect_tip().unwrap();
+    assert!(
+        released.load(Ordering::SeqCst),
+        "disconnect ran beside the tip flush"
+    );
+    t.join().unwrap();
+    drop(q);
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+    assert_eq!(q.tip_height(), Some(Height(2)), "disconnect is durable");
+
+    q.enter_direct_index_mode_sh(false).unwrap();
+    let hold = q.hold_tip_flushes();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[2..]).unwrap();
+    let (released, t) = release_after(hold);
+    drop(q);
+    assert!(
+        released.load(Ordering::SeqCst),
+        "drop returned before the tip flush"
+    );
+    t.join().unwrap();
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+    assert_eq!(q.tip_height(), Some(Height(3)));
+}
+
+/// When the IBD tip flush thread cannot start, the commit flushes inline,
+/// so a commit that returned Ok is on disk.
+#[test]
+fn ibd_commit_flushes_inline_when_its_thread_cannot_start() {
+    use rbitcoin_query::confirm_wire_run;
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let run = empty_regtest_run(2);
+    let q = ibd_query_on_genesis(&td);
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[..1]).unwrap();
+    q.fail_next_tip_flush_spawn();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[1..]).unwrap();
+    drop(q);
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+    assert_eq!(q.tip_height(), Some(Height(2)));
+}
+
+/// IBD prunes witness data below the tip that is already durable, not the
+/// tip whose flush may still run: a crash reopens on a tip that keeps its
+/// window.
+#[test]
+fn ibd_seqsigwit_prune_follows_the_durable_tip() {
+    use rbitcoin_query::confirm_wire_run;
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let run = empty_regtest_run(400);
+    let q = ibd_query_on_genesis(&td);
+    q.set_prune_seqsigwit(true).unwrap();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[..300]).unwrap();
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[300..]).unwrap();
+    let keep = Query::SEQSIGWIT_KEEP_HEIGHTS;
+    assert_eq!(q.pruneheight(), Some(Height(300 - keep)));
+}
+
+/// A failed IBD tip flush stops every later commit, even once the disk
+/// recovers: a failed `fsync` is not retried. Restart opens on the last
+/// durable tip.
+#[cfg(unix)]
+#[test]
+fn failed_ibd_tip_flush_stops_commits_until_restart() {
+    use rbitcoin_query::confirm_wire_run;
+    use std::os::unix::fs::PermissionsExt;
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let run = empty_regtest_run(4);
+    let q = ibd_query_on_genesis(&td);
+    confirm_wire_run(&q, &params, Milestone::NONE, &run[..2]).unwrap();
+    q.flush_for_shutdown().unwrap();
+
+    // The tip seal is a new file in the store directory.
+    let set_mode = |mode| {
+        std::fs::set_permissions(td.store_path(), std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    set_mode(0o555);
+    if std::fs::write(td.store_path().join("probe"), b"").is_ok() {
+        set_mode(0o755);
+        eprintln!("skip: a read-only directory is writable here (root)");
+        return;
+    }
+    let failing = confirm_wire_run(&q, &params, Milestone::NONE, &run[2..3]);
+    let next = confirm_wire_run(&q, &params, Milestone::NONE, &run[3..]);
+    set_mode(0o755);
+    assert!(
+        failing.is_ok(),
+        "IBD returns before its tip flush: {failing:?}"
+    );
+    assert!(next.is_err(), "the commit after a failed flush fails");
+    let retry = confirm_wire_run(&q, &params, Milestone::NONE, &run[3..]);
+    assert!(
+        matches!(&retry, Err(e) if e.to_string().contains("tip flush")),
+        "still failing after the disk recovers: {retry:?}"
+    );
+    assert!(q.flush_for_shutdown().is_err());
+    drop(q);
+
+    let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+    assert_eq!(q.tip_height(), Some(Height(2)));
+}
+
 /// Simulate kill -9 mid Class C: `strong_tx` written for tip+1 but
 /// `confirmed[]` not advanced. Class A does not write spend point edges
 /// (confirm `post_commit` annotates after tip). Re-confirm must not

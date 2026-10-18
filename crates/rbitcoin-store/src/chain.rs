@@ -428,9 +428,7 @@ impl StrongTxTable {
                     .write_at(crate::file::FILE_HEADER_LEN as u64 + disk, &suffix)?;
             }
             self.disk_bytes.store(body_len, Ordering::Release);
-            if crate::array_table::dirty_epoch_try_clean(&self.dirty_epoch, e0) {
-                self.dirty_lo_bit.store(u64::MAX, Ordering::Release);
-            }
+            crate::array_table::dirty_try_clean(&self.dirty_epoch, &self.dirty_lo_bit, e0, || {});
             return Ok(());
         }
 
@@ -446,9 +444,7 @@ impl StrongTxTable {
             self.bits.set_logical_len(logical)?;
         }
         self.disk_bytes.store(body_len, Ordering::Release);
-        if crate::array_table::dirty_epoch_try_clean(&self.dirty_epoch, e0) {
-            self.dirty_lo_bit.store(u64::MAX, Ordering::Release);
-        }
+        crate::array_table::dirty_try_clean(&self.dirty_epoch, &self.dirty_lo_bit, e0, || {});
         Ok(())
     }
 

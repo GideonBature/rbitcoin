@@ -146,6 +146,8 @@ confirm_window! {
     idx_put_ns,
     ensure_layout_ns,
     write_class_c_join_ns,
+    // Commit wait for the previous IBD batch's tip flush (`rbtc-tip-flush`).
+    write_tip_flush_wait_ns,
     write_drain_join_ns,
     write_dequeue_ns,
     write_plan_take_ns,

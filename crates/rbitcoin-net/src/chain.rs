@@ -2569,7 +2569,10 @@ impl ChainHub {
         if let Some(fh) = fork_height {
             self.disconnect_to(fh)?;
         } else {
-            let _commit = self.query.lock_tip_commit();
+            let _commit = self
+                .query
+                .lock_tip_commit()
+                .map_err(|e| NetError::Store(e.to_string()))?;
             while self.query.tip_height().is_some() {
                 if let Some(th) = self.tip_hash() {
                     self.confirmed.write().unwrap().remove(&th);
@@ -2676,7 +2679,9 @@ impl ChainHub {
             return Err(NetError::Protocol("rewind above tip"));
         }
         let _commit = if wait {
-            self.query.lock_tip_commit()
+            self.query
+                .lock_tip_commit()
+                .map_err(|e| NetError::Store(e.to_string()))?
         } else if let Some(g) = self.query.try_lock_tip_commit() {
             g
         } else {
@@ -3123,7 +3128,10 @@ impl ChainHub {
     }
 
     fn disconnect_to(&self, keep_height: u32) -> Result<(), NetError> {
-        let _commit = self.query.lock_tip_commit();
+        let _commit = self
+            .query
+            .lock_tip_commit()
+            .map_err(|e| NetError::Store(e.to_string()))?;
         self.disconnect_to_in_commit(keep_height)
     }
 
@@ -3836,7 +3844,10 @@ fn seed_confirmed_tip(query: &Query) -> HashSet<BlockHash> {
 /// commit, which a disconnect also holds while it drops hashes above the new
 /// tip, so a block removed before the copy is not inserted again.
 fn publish_confirmed_heights(query: &Query, confirmed: &RwLock<HashSet<BlockHash>>) -> bool {
-    let _commit = query.lock_tip_commit();
+    let Ok(_commit) = query.lock_tip_commit() else {
+        warn!("ibd: confirmed-set seed skipped; tip flush failed");
+        return false;
+    };
     let Some(hashes) = query.indexed_chain_hashes() else {
         warn!("ibd: confirmed-set seed skipped; height index does not match the tip");
         return false;
@@ -4450,7 +4461,7 @@ mod tests {
         let b1 = mine(gen, 1_300_041_000, 1);
         hub.accept_block(b1).unwrap();
         assert_eq!(hub.tip_height(), Some(1));
-        let hold = hub.query.lock_tip_commit();
+        let hold = hub.query.lock_tip_commit().unwrap();
         assert!(
             !hub.try_rewind_to_height(0).unwrap(),
             "rewind must not disconnect while the tip commit is open"

@@ -44,6 +44,15 @@ pub struct ConfirmPrepared {
     pub hash: [u8; 32],
 }
 
+/// IBD tip barrier. At most one runs; the next `tip_commit` taker joins it.
+#[derive(Default)]
+pub(crate) enum TipFlush {
+    #[default]
+    Idle,
+    Running(std::thread::JoinHandle<Result<(), StoreError>>),
+    Failed,
+}
+
 impl Query {
     /// Tip hash from the last confirm or disconnect, if it still matches `height`.
     pub fn published_tip(&self) -> Option<PublishedTip> {
@@ -96,19 +105,136 @@ impl Query {
         self.published_tip.store(None);
     }
 
-    /// Block until the in-flight tip flush or disconnect releases the commit.
-    pub fn lock_tip_commit(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.tip_commit.lock().unwrap_or_else(|e| e.into_inner())
+    /// Block until the in-flight tip flush or disconnect releases the commit,
+    /// then join an IBD tip flush that is still running.
+    pub fn lock_tip_commit(&self) -> Result<std::sync::MutexGuard<'_, ()>, QueryError> {
+        let commit = self.tip_commit.lock().unwrap_or_else(|e| e.into_inner());
+        self.join_tip_flush()?;
+        Ok(commit)
     }
 
-    /// `None` while a confirm flush or disconnect holds the commit.
+    /// `None` while a confirm flush or disconnect holds the commit, while an
+    /// IBD tip flush is still running, or after one failed.
     /// Rewind uses this so the orchestration task does not wait on that disk.
     pub fn try_lock_tip_commit(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
-        match self.tip_commit.try_lock() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
+        let commit = match self.tip_commit.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let running = matches!(
+            &*self.tip_flush.lock().unwrap_or_else(|e| e.into_inner()),
+            TipFlush::Running(h) if !h.is_finished()
+        );
+        if running || self.join_tip_flush().is_err() {
+            return None;
         }
+        Some(commit)
+    }
+
+    /// Wait for the IBD tip barrier. Its failure sticks: a failed `fsync` is
+    /// not retried, so every later commit fails until restart.
+    pub(crate) fn join_tip_flush(&self) -> Result<(), QueryError> {
+        let mut state = self.tip_flush.lock().unwrap_or_else(|e| e.into_inner());
+        let joined = match std::mem::take(&mut *state) {
+            TipFlush::Idle => return Ok(()),
+            TipFlush::Failed => Err(StoreError::io(
+                self.store.path(),
+                std::io::Error::other("an earlier IBD tip flush failed; restart the node"),
+            )),
+            TipFlush::Running(flush) => {
+                let t = std::time::Instant::now();
+                let r = flush
+                    .join()
+                    .unwrap_or(Err(StoreError::Corrupt("IBD tip flush thread panicked")));
+                crate::note_confirm(
+                    &self.confirm_stats().write_tip_flush_wait_ns,
+                    t.elapsed().as_nanos() as u64,
+                );
+                r
+            }
+        };
+        if joined.is_err() {
+            *state = TipFlush::Failed;
+        }
+        joined
+    }
+
+    /// L2 write-behind barrier: the complete-or-fail Class C image to disk.
+    /// Tip mode returns after it. IBD returns before it and may dequeue the
+    /// RAM body queue: a kill then loses at most one more batch to download
+    /// again. Returns the tip that is durable now (`before` while the IBD
+    /// flush runs), which seqsigwit prune keeps its window below.
+    fn flush_tip(&self, before: Option<Height>) -> Result<Option<Height>, QueryError> {
+        if self.index_mode()?.is_tip() {
+            self.store.flush_class_c_tip()?;
+            return Ok(self.tip_height());
+        }
+        self.spawn_tip_flush()?;
+        Ok(before)
+    }
+
+    /// IBD: the next batch's archive and checks run while this batch's
+    /// barrier syncs. That batch's commit joins it first, so the disk order
+    /// stays the same.
+    fn spawn_tip_flush(&self) -> Result<(), QueryError> {
+        let store = Arc::clone(&self.store);
+        #[cfg(any(test, feature = "test-hooks"))]
+        let hold = Arc::clone(&self.tip_flush_hold);
+        let flush = if self.tip_flush_spawn_fails() {
+            Err(std::io::Error::other("test hook: no tip flush thread"))
+        } else {
+            std::thread::Builder::new()
+                .name("rbtc-tip-flush".into())
+                .spawn(move || {
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    while hold.load(Ordering::Acquire) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    store.flush_class_c_tip()
+                })
+        };
+        let mut state = self.tip_flush.lock().unwrap_or_else(|e| e.into_inner());
+        let e = match flush {
+            Ok(f) => {
+                *state = TipFlush::Running(f);
+                return Ok(());
+            }
+            Err(e) => e,
+        };
+        // The batch is already committed in RAM: flush it here, and a failure
+        // sticks like a background one.
+        rbitcoin_log::warn!("store: no IBD tip flush thread ({e}); flushing inline");
+        let inline = self.store.flush_class_c_tip();
+        if inline.is_err() {
+            *state = TipFlush::Failed;
+        }
+        inline
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn tip_flush_spawn_fails(&self) -> bool {
+        self.tip_flush_spawn_fail.swap(false, Ordering::SeqCst)
+    }
+
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    fn tip_flush_spawn_fails(&self) -> bool {
+        false
+    }
+
+    /// IBD tip flush threads wait before writing until the returned flag is cleared.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn hold_tip_flushes(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.tip_flush_hold.store(true, Ordering::SeqCst);
+        Arc::clone(&self.tip_flush_hold)
+    }
+
+    /// The next IBD tip flush thread fails to start.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn fail_next_tip_flush_spawn(&self) {
+        self.tip_flush_spawn_fail.store(true, Ordering::SeqCst);
     }
 
     /// One header read at open, so the first orchestration pass does not
@@ -236,22 +362,10 @@ impl Query {
         self.confirm_blocks_run_with_create_pins(items, None)
     }
 
-    /// Like [`Self::confirm_blocks_run`], with optional write-batch create pins.
-    ///
-    /// `create_pins` is `create_fk → CreatePin` for creates committed on this write
-    /// path. Collect runs after tip (cheap); records sit on the job so queries
-    /// join them before durable seed. Enqueue is after the tip commit: a collect
-    /// failure can surface after `confirmed[]` advanced; retry is the heal
-    /// (re-confirm at the same height is idempotent).
-    pub fn confirm_blocks_run_with_create_pins(
-        &self,
-        items: &[ConfirmPrepared],
-        create_pins: Option<&crate::FkMap<CreatePin>>,
-    ) -> Result<Vec<Fk>, QueryError> {
-        if items.is_empty() {
-            return Ok(Vec::new());
-        }
-        let commit = self.lock_tip_commit();
+    /// The run must be contiguous, start at tip+1 (genesis on an empty
+    /// chain), and name real headers. `Some(fk)` is a one-block retry of the
+    /// block already confirmed at that height.
+    fn check_run_extends_tip(&self, items: &[ConfirmPrepared]) -> Result<Option<Fk>, QueryError> {
         for w in items.windows(2) {
             if w[1].height.0 != w[0].height.0.saturating_add(1) {
                 return Err(StoreError::Corrupt("confirm run not contiguous heights"));
@@ -270,7 +384,7 @@ impl Query {
                     if items.len() == 1 {
                         if let Some(fk) = self.store.confirmed.get(items[0].height)? {
                             if fk == items[0].header_fk {
-                                return Ok(vec![fk]);
+                                return Ok(Some(fk));
                             }
                         }
                     }
@@ -283,6 +397,29 @@ impl Query {
             if item.header_fk.is_null() {
                 return Err(StoreError::InvalidFk);
             }
+        }
+        Ok(None)
+    }
+
+    /// Like [`Self::confirm_blocks_run`], with optional write-batch create pins.
+    ///
+    /// `create_pins` is `create_fk → CreatePin` for creates committed on this write
+    /// path. Collect runs after tip (cheap); records sit on the job so queries
+    /// join them before durable seed. Enqueue is after the tip commit: a collect
+    /// failure can surface after `confirmed[]` advanced; retry is the heal
+    /// (re-confirm at the same height is idempotent).
+    pub fn confirm_blocks_run_with_create_pins(
+        &self,
+        items: &[ConfirmPrepared],
+        create_pins: Option<&crate::FkMap<CreatePin>>,
+    ) -> Result<Vec<Fk>, QueryError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let commit = self.lock_tip_commit()?;
+        let durable_before = self.tip_height();
+        if let Some(fk) = self.check_run_extends_tip(items)? {
+            return Ok(vec![fk]);
         }
 
         let t_strong = std::time::Instant::now();
@@ -333,10 +470,7 @@ impl Query {
         }
         // Do not forget pending here: drain may still be inserting tx.head
         // (67438). Write forgets after drain.join() *and* this extend.
-        // L2 write-behind barrier: complete-or-fail Class C image to disk **before**
-        // callers dequeue the body queue. Kill after this returns → tip durable;
-        // kill before → BQ still holds blocks for re-drive.
-        self.store.flush_class_c_tip()?;
+        let durable = self.flush_tip(durable_before)?;
         drop(commit);
         crate::note_confirm(
             &self.confirm_stats().tip_ns,
@@ -348,7 +482,7 @@ impl Query {
         if let Some(tip) = self.tip_height() {
             let _ = self.ensure_height_by_hash_index(tip);
         }
-        self.record_confirmed_seqsigwit_window(items)?;
+        self.record_confirmed_seqsigwit_window(items, durable)?;
 
         Ok(out)
     }
@@ -356,8 +490,9 @@ impl Query {
     fn record_confirmed_seqsigwit_window(
         &self,
         items: &[ConfirmPrepared],
+        durable: Option<Height>,
     ) -> Result<(), QueryError> {
-        self.apply_prune_seqsigwit_tip()?;
+        self.prune_seqsigwit_below(durable)?;
         if !self.prune_seqsigwit() {
             return Ok(());
         }
@@ -857,7 +992,7 @@ impl Query {
     /// Logs [`format_disconnect_tip_line`] at **warn** before the scripthash
     /// unlink and again after the tip shrink commits.
     pub fn disconnect_tip(&self) -> Result<(), QueryError> {
-        let _commit = self.lock_tip_commit();
+        let _commit = self.lock_tip_commit()?;
         self.disconnect_tip_body(true)
     }
 
@@ -869,7 +1004,7 @@ impl Query {
 
     /// Class C disconnect without dropping RAM SH pending (reorg reaccept first).
     pub fn disconnect_tip_keep_pending(&self) -> Result<(), QueryError> {
-        let _commit = self.lock_tip_commit();
+        let _commit = self.lock_tip_commit()?;
         self.disconnect_tip_body(false)
     }
 
