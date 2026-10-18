@@ -23,7 +23,7 @@ use rbitcoin_query::{
     confirm_wire_load_phase_pipelined, confirm_write_phase, header_to_record, validate_header,
     PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 thread_local! {
@@ -170,7 +170,42 @@ impl HeldBodies {
     }
 }
 
+/// Dial and reconsider hints. Not a validity set: the oldest drops at the cap.
+const FORK_TIP_CAP: usize = 64;
+
+struct ForkTips {
+    tips: VecDeque<BlockHash>,
+}
+
+impl ForkTips {
+    fn new() -> Self {
+        Self {
+            tips: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, hash: BlockHash) {
+        if self.tips.contains(&hash) {
+            return;
+        }
+        if self.tips.len() == FORK_TIP_CAP {
+            self.tips.pop_front();
+        }
+        self.tips.push_back(hash);
+    }
+
+    fn remove(&mut self, hash: &BlockHash) {
+        self.tips.retain(|h| h != hash);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = BlockHash> + '_ {
+        self.tips.iter().copied()
+    }
+}
+
 /// Operator-invalidated hashes and best-chain paths (hashes only, height order).
+///
+/// Uncapped. Forgetting an invalid hash would make that block acceptable again.
 struct Invalidated {
     set: RwLock<HashSet<BlockHash>>,
     paths: RwLock<Vec<Vec<BlockHash>>>,
@@ -369,7 +404,7 @@ pub struct ChainHub {
     held_bodies: RwLock<HeldBodies>,
     precious: RwLock<Option<BlockHash>>,
     /// Losing tips after a most-work reorg (hashes only). Bodies via archive.
-    fork_tips: RwLock<HashSet<BlockHash>>,
+    fork_tips: RwLock<ForkTips>,
     /// Header-only tips (`submitheader` / P2P headers): hash → (prev, height).
     header_tips: RwLock<HeaderTips>,
     /// Set around `accept_branch` connect so each `TipEvent` carries branch length.
@@ -496,7 +531,7 @@ impl ChainHub {
             invalidated: Invalidated::new(),
             held_bodies: RwLock::new(HeldBodies::new()),
             precious: RwLock::new(None),
-            fork_tips: RwLock::new(HashSet::new()),
+            fork_tips: RwLock::new(ForkTips::new()),
             header_tips: RwLock::new(HeaderTips::new()),
             announce_reorg_len: AtomicU32::new(0),
             minimum_chain_work: RwLock::new(None),
@@ -1007,7 +1042,7 @@ impl ChainHub {
                 }
             };
 
-        for h in self.fork_tips.read().unwrap().iter().copied() {
+        for h in self.fork_tips.read().unwrap().iter() {
             record(&mut out, h, "valid-fork");
         }
         // The header and held walks below re-read `header_tips` and
@@ -2086,7 +2121,7 @@ impl ChainHub {
     fn try_apply_after_invalidate(&self) -> Result<Option<AcceptOutcome>, NetError> {
         let inv = self.invalidated.set.read().unwrap().clone();
         let precious = *self.precious.read().unwrap();
-        let mut starts: Vec<BlockHash> = self.fork_tips.read().unwrap().iter().copied().collect();
+        let mut starts: Vec<BlockHash> = self.fork_tips.read().unwrap().iter().collect();
         starts.extend(self.held_bodies.read().unwrap().keys());
         if let Some(p) = precious {
             if !starts.contains(&p) {
@@ -3936,6 +3971,34 @@ pub(crate) fn sixty_four_byte_body(prev: BlockHash, time: u32) -> Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_tips_drop_the_oldest_at_the_cap() {
+        let mut tips = ForkTips::new();
+        let hashes: Vec<BlockHash> = (0..65u8)
+            .map(|i| BlockHash::from_byte_array([i; 32]))
+            .collect();
+        for hash in &hashes {
+            tips.insert(*hash);
+        }
+        let kept: Vec<BlockHash> = tips.iter().collect();
+        assert_eq!(kept.len(), FORK_TIP_CAP);
+        assert!(!kept.contains(&hashes[0]));
+        assert_eq!(kept[0], hashes[1]);
+        assert_eq!(*kept.last().unwrap(), hashes[64]);
+        tips.remove(&hashes[1]);
+        assert!(!tips.iter().any(|h| h == hashes[1]));
+        let before = tips.iter().count();
+        tips.insert(hashes[64]);
+        assert_eq!(
+            tips.iter().count(),
+            before,
+            "a hash already kept is not moved"
+        );
+        tips.insert(hashes[1]);
+        assert_eq!(tips.iter().count(), before + 1);
+        assert_eq!(tips.iter().last(), Some(hashes[1]));
+    }
     use crate::most_work::sum_work;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::Version;
