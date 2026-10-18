@@ -4054,6 +4054,48 @@ fn misbehavior_disconnect_does_not_refuse_loopback() {
     );
 }
 
+/// An onion session's VERSION socket is `0.0.0.0`. The refusal is the
+/// `NetAddr`, and a later session with that net is discouraged.
+#[test]
+fn overlay_misbehavior_discourages_that_net() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_000);
+    let onion = crate::NetAddr::Onion {
+        pk: [9; 32],
+        port: 8333,
+    };
+    let sock = std::net::SocketAddr::from(([0, 0, 0, 0], 8333));
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(&sock, bitcoin::p2p::ServiceFlags::NONE),
+        sender: bitcoin::p2p::address::Address::new(&sock, bitcoin::p2p::ServiceFlags::NONE),
+        nonce: 9,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = peers.register_net(
+        sock,
+        onion,
+        sock,
+        &ver,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
+    let mut score = 0u32;
+    punish_disconnect(&mut score, Some(peer.as_ref()));
+    assert!(
+        peers.net_discouraged(onion),
+        "a misbehavior disconnect refuses that overlay net"
+    );
+    assert!(
+        !peers.inbound_discouraged(sock),
+        "0.0.0.0 must not become a clearnet refusal"
+    );
+}
+
 #[test]
 fn threshold_exit_refuses_the_address_without_punish_disconnect() {
     let peers = crate::peers::PeerHub::new();

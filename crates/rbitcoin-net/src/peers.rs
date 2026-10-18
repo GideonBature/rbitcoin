@@ -1384,6 +1384,38 @@ pub struct PeerInfo {
 
 #[allow(clippy::type_complexity)] // session table: live peers, manual hosts, dials
 /// Thread-safe session table + addnode remembered addrs.
+/// In-memory misbehavior key. Clearnet is the IP. Onion and I2P are the
+/// overlay identity, because their TCP socket is `0.0.0.0` or loopback.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DiscourageKey {
+    Ip(IpAddr),
+    Overlay(crate::NetAddr),
+}
+
+impl DiscourageKey {
+    pub(crate) fn from_net(net: crate::NetAddr) -> Option<Self> {
+        match net {
+            crate::NetAddr::Onion { .. } | crate::NetAddr::I2p { .. } => Some(Self::Overlay(net)),
+            crate::NetAddr::Cjdns { ip, .. } => Some(Self::Ip(IpAddr::V6(ip))),
+            crate::NetAddr::Ip(sock) => {
+                let ip = sock.ip();
+                if ip_skips_discourage(ip) {
+                    None
+                } else {
+                    Some(Self::Ip(ip))
+                }
+            }
+        }
+    }
+}
+
+fn ip_skips_discourage(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => v.is_loopback() || v.octets()[0] == 0,
+        IpAddr::V6(v) => v.is_loopback(),
+    }
+}
+
 pub struct PeerHub {
     next_id: AtomicU64,
     live: RwLock<HashMap<u64, Arc<LivePeer>>>,
@@ -1445,12 +1477,12 @@ pub struct PeerHub {
     mempool: Mutex<Option<Weak<crate::tx_relay::MempoolHub>>>,
     /// Core `-whitelist` / `-whitebind` grants (`getpeerinfo.permissions`).
     net_perms: Mutex<crate::net_permissions::NetPermTable>,
-    /// Misbehavior addresses → unix second the refusal ends. In memory only.
-    discouraged_addrs: Mutex<HashMap<IpAddr, u64>>,
+    /// Misbehavior keys → unix second the refusal ends. In memory only.
+    discouraged_addrs: Mutex<HashMap<DiscourageKey, u64>>,
     /// Netgroup → unix second a slot-loss refusal ends.
     discouraged_groups: Mutex<HashMap<u64, u64>>,
-    /// Rate-limit disconnect address → unix second its strike ends.
-    rate_strikes: Mutex<HashMap<IpAddr, u64>>,
+    /// Rate-limit disconnect key → unix second its strike ends.
+    rate_strikes: Mutex<HashMap<DiscourageKey, u64>>,
 }
 
 fn canonical_bind(addr: SocketAddr) -> SocketAddr {
@@ -2051,31 +2083,35 @@ impl PeerHub {
     /// Record `ip` until [`Self::DISCOURAGE_TTL_SECS`] from now. At the cap a
     /// new address is ignored; an address already stored is refreshed.
     pub(crate) fn note_misbehavior_addr(&self, ip: IpAddr) {
+        self.note_misbehavior_key(DiscourageKey::Ip(ip));
+    }
+
+    pub(crate) fn note_misbehavior_key(&self, key: DiscourageKey) {
         let now = self.now_secs();
         let until = now.saturating_add(Self::DISCOURAGE_TTL_SECS);
         let mut g = self
             .discouraged_addrs
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if !g.contains_key(&ip) && g.len() >= Self::DISCOURAGE_CAP {
+        if !g.contains_key(&key) && g.len() >= Self::DISCOURAGE_CAP {
             return;
         }
-        g.insert(ip, until);
+        g.insert(key, until);
     }
 
     /// True when `ip` still has a strike from an earlier rate-limit
     /// disconnect; that strike is spent. Otherwise records one for
     /// [`Self::RATE_STRIKE_SECS`]. Expired strikes are dropped here. At
     /// [`Self::DISCOURAGE_CAP`] a new address is not recorded.
-    pub(crate) fn note_rate_strike(&self, ip: IpAddr) -> bool {
+    pub(crate) fn note_rate_strike(&self, key: DiscourageKey) -> bool {
         let now = self.now_secs();
         let mut g = self.rate_strikes.lock().unwrap_or_else(|e| e.into_inner());
         g.retain(|_, until| *until > now);
-        if g.remove(&ip).is_some() {
+        if g.remove(&key).is_some() {
             return true;
         }
         if g.len() < Self::DISCOURAGE_CAP {
-            g.insert(ip, now.saturating_add(Self::RATE_STRIKE_SECS));
+            g.insert(key, now.saturating_add(Self::RATE_STRIKE_SECS));
         }
         false
     }
@@ -2096,19 +2132,31 @@ impl PeerHub {
         g.insert(group, until);
     }
 
+    /// Overlay identity, or the clearnet address inside an IP `NetAddr`.
+    pub(crate) fn net_discouraged(&self, net: crate::NetAddr) -> bool {
+        match net {
+            crate::NetAddr::Ip(s) => self.inbound_discouraged(s),
+            crate::NetAddr::Cjdns { ip, port } => {
+                self.inbound_discouraged(SocketAddr::from((ip, port)))
+            }
+            overlay => DiscourageKey::from_net(overlay).is_some_and(|key| self.key_refused(key)),
+        }
+    }
+
+    fn key_refused(&self, key: DiscourageKey) -> bool {
+        let now = self.now_secs();
+        self.sweep_discouraged(now);
+        self.discouraged_addrs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&key)
+    }
+
     /// True when this inbound address or its accept-time netgroup is still
     /// refused. Expired rows are dropped here, which is the only sweep.
     pub(crate) fn inbound_discouraged(&self, addr: SocketAddr) -> bool {
-        let now = self.now_secs();
-        self.sweep_discouraged(now);
-        // `sweep_discouraged` already dropped rows with `until <= now`.
-        if self
-            .discouraged_addrs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&addr.ip())
-            .is_some()
-        {
+        // `key_refused` drops expired rows.
+        if self.key_refused(DiscourageKey::Ip(addr.ip())) {
             return true;
         }
         let group = crate::eviction::eviction_netgroup(addr);

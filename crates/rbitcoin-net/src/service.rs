@@ -632,6 +632,9 @@ async fn prepare_outbound_session(
     // already dialling. A queued dial was counted when it was queued.
     let _dialing = in_flight.unwrap_or_else(|| peers.dial_in_flight(&peer));
     let peer_net = peer.net_addr();
+    if peers.net_discouraged(peer_net) {
+        return Err(NetError::Protocol("discouraged"));
+    }
     let stream = tokio::time::timeout(
         crate::connect_timeout_for(peer_net, OUTBOUND_CONNECT_TIMEOUT),
         dialer.connect_net(peer_net),
