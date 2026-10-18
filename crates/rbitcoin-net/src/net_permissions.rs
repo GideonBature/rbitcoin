@@ -10,21 +10,16 @@ impl NetPermissionFlags {
     pub const NONE: Self = Self(0);
     pub const BLOOM: Self = Self(1 << 1);
     pub const RELAY: Self = Self(1 << 3);
-    pub const FORCE_RELAY: Self = Self((1 << 2) | (1 << 3));
+    /// Bits 2 and 3. ForceRelay implies Relay.
+    pub const FORCE_RELAY: Self = Self(0b1100);
     pub const DOWNLOAD: Self = Self(1 << 6);
-    pub const NOBAN: Self = Self((1 << 4) | (1 << 6));
+    /// Bits 4 and 6. NoBan implies Download.
+    pub const NOBAN: Self = Self(0b0101_0000);
     pub const MEMPOOL: Self = Self(1 << 5);
     pub const ADDR: Self = Self(1 << 7);
     pub const IMPLICIT: Self = Self(1 << 31);
-    pub const ALL: Self = Self(
-        Self::BLOOM.0
-            | Self::FORCE_RELAY.0
-            | Self::RELAY.0
-            | Self::NOBAN.0
-            | Self::MEMPOOL.0
-            | Self::DOWNLOAD.0
-            | Self::ADDR.0,
-    );
+    /// Bits 1 through 7. Relay sits inside ForceRelay, and Download sits inside NoBan.
+    pub const ALL: Self = Self(0b1111_1110);
 
     pub const fn has(self, f: Self) -> bool {
         (self.0 & f.0) == f.0
@@ -589,5 +584,31 @@ mod tests {
         let mut t = NetPermTable::default();
         t.whitelist.push(g);
         assert!(t.strings_for(ip(), true, bind()).is_empty());
+    }
+
+    #[test]
+    fn permission_masks_keep_their_implied_bits() {
+        assert!(NetPermissionFlags::FORCE_RELAY.has(NetPermissionFlags::RELAY));
+        assert_ne!(NetPermissionFlags::FORCE_RELAY, NetPermissionFlags::RELAY);
+        assert!(NetPermissionFlags::NOBAN.has(NetPermissionFlags::DOWNLOAD));
+        assert_ne!(NetPermissionFlags::NOBAN, NetPermissionFlags::DOWNLOAD);
+        assert_eq!(NetPermissionFlags::NOBAN.0 & (1 << 4), 1 << 4);
+        for flag in [
+            NetPermissionFlags::BLOOM,
+            NetPermissionFlags::FORCE_RELAY,
+            NetPermissionFlags::RELAY,
+            NetPermissionFlags::NOBAN,
+            NetPermissionFlags::MEMPOOL,
+            NetPermissionFlags::DOWNLOAD,
+            NetPermissionFlags::ADDR,
+        ] {
+            assert!(NetPermissionFlags::ALL.has(flag), "{flag:?}");
+        }
+        let mut flagged = NetPermissionFlags::ALL;
+        flagged.add(NetPermissionFlags::IMPLICIT);
+        assert!(flagged.has(NetPermissionFlags::IMPLICIT));
+        flagged.clear_implicit();
+        assert!(!flagged.has(NetPermissionFlags::IMPLICIT));
+        assert!(flagged.has(NetPermissionFlags::MEMPOOL));
     }
 }

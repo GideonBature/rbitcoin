@@ -445,15 +445,15 @@ pub async fn ibd_cancellable(
             warn!("ibd: block_queue rehydrate failed (continuing; may re-getdata): {e}");
         }
     }
+    // A positive count is already logged inside `rehydrate_class_a_into_body_queue`
+    // (a body-queue row or an archived body above the tip). This match only
+    // speaks when that walk fills nothing.
     match rehydrate_class_a_into_body_queue(
         hub.as_ref(),
         &mut st,
         confirm_feed.as_ref(),
         TIP_HOLE_MAX,
     ) {
-        Ok(n) if n > 0 => {
-            info!("ibd: Class A rehydrate filled {n} body-queue height(s) for tip batch");
-        }
         Ok(0) => {
             rbitcoin_log::debug!(
                 "ibd: Class A rehydrate filled 0 (tip+1 missing height map, has_block, or no Class A)"

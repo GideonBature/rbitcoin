@@ -192,9 +192,8 @@ pub(crate) fn reconstruct<T: Borrow<Transaction>>(
                 }
                 *slot = Some(cands[0].borrow().clone());
             }
-            Some(cands) if cands.len() > 1 => {
-                missing.push(abs as u64);
-            }
+            // One candidate fills the slot. Every other count, including a
+            // short-id collision, is missing for getblocktxn.
             _ => missing.push(abs as u64),
         }
     }
@@ -1034,6 +1033,20 @@ mod tests {
         assert_eq!(classify_v2_cmpct_peer(&ping), CmpctPeerFrame::Ping(7));
         let pong = crate::v2::encode_v2_contents(NetworkMessage::Pong(7)).unwrap();
         assert_eq!(classify_v2_cmpct_peer(&pong), CmpctPeerFrame::Pong(7));
+        let block_hash = BlockHash::from_byte_array([7; 32]);
+        let get = crate::v2::encode_v2_contents(NetworkMessage::GetBlockTxn(
+            bitcoin::p2p::message_compact_blocks::GetBlockTxn {
+                txs_request: bitcoin::bip152::BlockTransactionsRequest {
+                    block_hash,
+                    indexes: vec![1, 4],
+                },
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            classify_v2_cmpct_peer(&get),
+            CmpctPeerFrame::GetBlockTxn(vec![1, 4])
+        );
         assert_eq!(classify_v2_cmpct_peer(&[]), CmpctPeerFrame::Other);
     }
 
@@ -1262,7 +1275,13 @@ mod tests {
         assert_eq!(stats.fetched_n, 0);
         assert_eq!(stats.fetched_bytes, 0);
         assert_eq!(stats.mempool_n, 2);
+        assert_eq!(
+            stats.mempool_bytes,
+            tx_wire_len(&b1) + tx_wire_len(&b2),
+            "mempool fill bytes are the sum of the filled transactions"
+        );
         assert_eq!(stats.prefill_n, 1);
+        assert_eq!(stats.prefill_bytes, tx_wire_len(&block.txdata[0]));
         assert!(!stats.getdata);
         let line = stats.to_string();
         assert!(
@@ -1344,8 +1363,32 @@ mod tests {
         };
         let stats = reconstruct_stats(&hsi, &recon, &fill, &[]);
         assert_eq!(stats.extra_n, 1);
+        assert_eq!(stats.extra_bytes, tx_wire_len(&b1));
         assert_eq!(stats.mempool_n, 0);
         assert_eq!(stats.fetched_n, 0);
+    }
+
+    #[test]
+    fn cmpct_reconstruct_stats_orphan_bytes_sum() {
+        let b1 = spend(15);
+        let block = sealed_block(vec![coinbase(), b1.clone()]);
+        let hsi = HeaderAndShortIds::from_block(&block, 8, 2, &[]).unwrap();
+        let recon = try_reconstruct(
+            &hsi,
+            &shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]),
+            2,
+        )
+        .expect("orphan fill");
+        let fill = CmpctFillSets {
+            mempool: Default::default(),
+            extra: Default::default(),
+            orphan: [b1.compute_wtxid()].into_iter().collect(),
+        };
+        let stats = reconstruct_stats(&hsi, &recon, &fill, &[]);
+        assert_eq!(stats.orphan_n, 1);
+        assert_eq!(stats.orphan_bytes, tx_wire_len(&b1));
+        assert_eq!(stats.extra_n, 0);
+        assert_eq!(stats.mempool_n, 0);
     }
 
     #[test]
@@ -1452,6 +1495,30 @@ mod tests {
         assert!(
             outbound_prefill_indexes(&block, None).is_none(),
             "missed mempool read is not an empty fill"
+        );
+    }
+
+    #[test]
+    fn prefill_indexes_keeps_a_tx_that_fills_the_budget_exactly() {
+        let mut pad = EXTRA_PREFILL_BUDGET;
+        let tx = loop {
+            let candidate = spend_padded(40, pad);
+            let sz = tx_wire_len(&candidate);
+            if sz == EXTRA_PREFILL_BUDGET {
+                break candidate;
+            }
+            if sz > EXTRA_PREFILL_BUDGET {
+                pad = pad.saturating_sub(sz - EXTRA_PREFILL_BUDGET);
+            } else {
+                pad += EXTRA_PREFILL_BUDGET - sz;
+            }
+        };
+        assert_eq!(tx_wire_len(&tx), EXTRA_PREFILL_BUDGET);
+        let block = sealed_block(vec![coinbase(), tx]);
+        assert_eq!(
+            prefill_indexes(&block, &CmpctFillSets::default()),
+            vec![0, 1],
+            "a transaction that lands on the extra-prefill budget is packed"
         );
     }
 }

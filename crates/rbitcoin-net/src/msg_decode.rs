@@ -152,4 +152,13 @@ mod tests {
         });
         assert!(*done.lock().unwrap());
     }
+
+    #[test]
+    fn decode_permit_pools_are_wider_than_one_slot() {
+        let blocks = block_decode_permits();
+        let ctrl = ctrl_decode_permits();
+        assert!(blocks >= 64, "block decodes keep a wide pool, got {blocks}");
+        assert!(ctrl >= 8, "header decodes keep their own pool, got {ctrl}");
+        assert!(blocks > ctrl);
+    }
 }
