@@ -712,25 +712,43 @@ fn collect_page_chain_span(
     Ok(Some((out, last_next)))
 }
 
-fn collect_page_chain_linked(body: &TableFile, first_page: u64) -> Result<Vec<Fk>, StoreError> {
-    let mut out = Vec::new();
-    let mut prev_last: Option<u64> = None;
+/// Same stop as `hashhead` multi-list walks. A two-page cycle never returns otherwise.
+const SH_PAGE_CHAIN_MAX: u32 = 1_000_000;
+
+fn collect_linked_pages(
+    body: &TableFile,
+    first_page: u64,
+    out: &mut Vec<Fk>,
+    prev_last: &mut Option<u64>,
+) -> Result<(), StoreError> {
+    if first_page == 0 {
+        return Ok(());
+    }
     let mut cur = [0u8; SH_PAGE_SIZE];
     let mut nxt = [0u8; SH_PAGE_SIZE];
-    if first_page == 0 {
-        return Ok(out);
-    }
     read_sh_page_bytes(body, first_page, &mut cur)?;
+    let mut guard = 0u32;
     loop {
+        guard = guard.saturating_add(1);
+        if guard > SH_PAGE_CHAIN_MAX {
+            return Err(StoreError::Corrupt("scripthash page chain cycle"));
+        }
         let at = out.len();
-        let next = sh_page_decode_slice_into(&cur, &mut out)?;
-        extend_page_entries(&out, &mut prev_last, at)?;
+        let next = sh_page_decode_slice_into(&cur, out)?;
+        extend_page_entries(out, prev_last, at)?;
         if next == 0 {
             break;
         }
         read_sh_page_bytes(body, next, &mut nxt)?;
         cur = nxt;
     }
+    Ok(())
+}
+
+fn collect_page_chain_linked(body: &TableFile, first_page: u64) -> Result<Vec<Fk>, StoreError> {
+    let mut out = Vec::new();
+    let mut prev_last = None;
+    collect_linked_pages(body, first_page, &mut out, &mut prev_last)?;
     Ok(out)
 }
 
@@ -768,19 +786,7 @@ fn collect_extent_then_tail(body: &TableFile, last_page: u64) -> Result<Vec<Fk>,
         ));
     }
     let mut prev_last = out.last().map(|fk| fk.0);
-    let mut cur = [0u8; SH_PAGE_SIZE];
-    let mut nxt = [0u8; SH_PAGE_SIZE];
-    read_sh_page_bytes(body, tail_off, &mut cur)?;
-    loop {
-        let at = out.len();
-        let next = sh_page_decode_slice_into(&cur, &mut out)?;
-        extend_page_entries(&out, &mut prev_last, at)?;
-        if next == 0 {
-            break;
-        }
-        read_sh_page_bytes(body, next, &mut nxt)?;
-        cur = nxt;
-    }
+    collect_linked_pages(body, tail_off, &mut out, &mut prev_last)?;
     Ok(out)
 }
 

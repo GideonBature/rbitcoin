@@ -3653,3 +3653,32 @@ fn pack_one_shard_unlinks_only_its_postings() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[test]
+fn scripthash_page_cycle_is_corrupt() {
+    let dir = tmp();
+    let path = dir.join("cycle.body");
+    let body =
+        crate::file::TableFile::create(&path, rbitcoin_primitives::TableKind::ScriptHash).unwrap();
+    let page_a = 4096u64;
+    let page_b = 8192u64;
+    let mut a = [0u8; SH_PAGE_SIZE];
+    let mut b = [0u8; SH_PAGE_SIZE];
+    crate::scripthash_pages::sh_page_init_empty(&mut a);
+    crate::scripthash_pages::sh_page_init_empty(&mut b);
+    sh_page_set_next(&mut a, page_b).unwrap();
+    sh_page_set_next(&mut b, page_a).unwrap();
+    body.write_at(page_a, &a).unwrap();
+    body.write_at(page_b, &b).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = super::collect_page_chain_linked(&body, page_a);
+        let _ = tx.send(res.map(|_| ()));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(Ok(())) => panic!("cycle returned entries"),
+        Ok(Err(StoreError::Corrupt(msg))) => assert!(msg.contains("cycle"), "{msg}"),
+        Ok(Err(other)) => panic!("{other}"),
+        Err(_) => panic!("page cycle did not return"),
+    }
+}
