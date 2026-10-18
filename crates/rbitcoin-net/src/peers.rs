@@ -2082,6 +2082,7 @@ impl PeerHub {
 
     /// Record `ip` until [`Self::DISCOURAGE_TTL_SECS`] from now. At the cap a
     /// new address is ignored; an address already stored is refreshed.
+    #[cfg(test)]
     pub(crate) fn note_misbehavior_addr(&self, ip: IpAddr) {
         self.note_misbehavior_key(DiscourageKey::Ip(ip));
     }
