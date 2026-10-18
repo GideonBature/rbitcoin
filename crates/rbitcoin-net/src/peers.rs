@@ -1382,8 +1382,6 @@ pub struct PeerInfo {
     pub best_known: Option<BlockHash>,
 }
 
-#[allow(clippy::type_complexity)] // session table: live peers, manual hosts, dials
-/// Thread-safe session table + addnode remembered addrs.
 /// In-memory misbehavior key. Clearnet is the IP. Onion and I2P are the
 /// overlay identity, because their TCP socket is `0.0.0.0` or loopback.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -1416,6 +1414,8 @@ fn ip_skips_discourage(ip: IpAddr) -> bool {
     }
 }
 
+#[allow(clippy::type_complexity)] // session table: live peers, manual hosts, dials
+/// Thread-safe session table + addnode remembered addrs.
 pub struct PeerHub {
     next_id: AtomicU64,
     live: RwLock<HashMap<u64, Arc<LivePeer>>>,
