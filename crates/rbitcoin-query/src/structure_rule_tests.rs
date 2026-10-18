@@ -362,7 +362,7 @@ fn padded_spend(data_len: usize) -> Transaction {
 /// 91842/91880 grandfather). Signet activates BIP34 at height 1, and Core's
 /// empty BIP34 hash still enforces BIP30 on every signet block.
 fn rejects_unspent_overwrite(q: &crate::Query, first: &Transaction) {
-    use crate::{BatchParents, OutPointSet, U32Map};
+    use crate::{BatchParents, U32Map};
     use rbitcoin_primitives::Fk;
     let dup = block_with(vec![first.clone()]);
     let signet = Box::leak(Box::new(ChainParams::signet()));
@@ -385,7 +385,7 @@ fn rejects_unspent_overwrite(q: &crate::Query, first: &Transaction) {
             Some(&[Fk(2)]),
             &[],
             0,
-            &mut OutPointSet::default(),
+            &mut crate::block_pipeline::BatchSpent::default(),
             &parents,
             &mut U32Map::default(),
             &heights,
@@ -481,7 +481,7 @@ fn bip30_message_at_mainnet_above_bip34(
     q: &crate::Query,
     block: &Block,
 ) -> Result<(), ConfirmError> {
-    use crate::{BatchParents, OutPointSet, U32Map};
+    use crate::{BatchParents, U32Map};
     use rbitcoin_primitives::Fk;
     let main = Box::leak(Box::new(ChainParams::mainnet()));
     let ctx = ValidationContext::at(main, Height(main.btc.bip34_height + 1), Milestone::NONE);
@@ -497,7 +497,7 @@ fn bip30_message_at_mainnet_above_bip34(
         Some(&[Fk(2)]),
         &[],
         0,
-        &mut OutPointSet::default(),
+        &mut crate::block_pipeline::BatchSpent::default(),
         &parents,
         &mut U32Map::default(),
         &heights,
@@ -2327,7 +2327,7 @@ fn bip30_and_immature_coinbase_reject_from_facts() {
 /// overwrite. A spendable unspent output still does.
 #[test]
 fn bip30_ignores_unspendable_outputs() {
-    use crate::{BatchParents, OutPointSet, U32Map};
+    use crate::{BatchParents, U32Map};
     let outputs = vec![
         TxOut {
             value: Amount::from_sat(50_0000_0000),
@@ -2363,7 +2363,7 @@ fn bip30_ignores_unspendable_outputs() {
             Some(&[rbitcoin_primitives::Fk(3)]),
             &[],
             0,
-            &mut OutPointSet::default(),
+            &mut crate::block_pipeline::BatchSpent::default(),
             &parents,
             &mut mtp_cache,
             &RunCreateHeight::Spans(Vec::new()),

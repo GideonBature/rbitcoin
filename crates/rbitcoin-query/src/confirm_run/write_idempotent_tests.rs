@@ -1339,7 +1339,7 @@ fn fill_same_batch_abs_from_append_loc_ram() {
 #[test]
 fn structural_same_batch_overlay_skips_meta_pread() {
     use crate::block_pipeline::{structural_validate_spends, RunCreateHeight};
-    use crate::{BatchParents, FkMap, OutPointSet};
+    use crate::{BatchParents, FkMap};
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -1459,7 +1459,7 @@ fn structural_same_batch_overlay_skips_meta_pread() {
     let run = RunCreateHeight::Map(map);
     let params = ChainParams::regtest();
     let ctx = rbitcoin_consensus::block::ValidationContext::at(&params, Height(1), Milestone::NONE);
-    let mut pending = OutPointSet::default();
+    let mut pending = crate::block_pipeline::BatchSpent::default();
     let mut mtp = crate::U32Map::<u32>::default();
     mtp.insert(0, 1_300_000_000);
     let mut scratch = crate::block_pipeline::StructuralScratch::default();
@@ -1515,7 +1515,7 @@ fn structural_same_batch_overlay_skips_meta_pread() {
 #[test]
 fn structural_scratch_second_block_does_not_replay_first_slots() {
     use crate::block_pipeline::{structural_validate_spends, RunCreateHeight, StructuralScratch};
-    use crate::{BatchParents, OutPointSet};
+    use crate::BatchParents;
     use bitcoin::absolute::LockTime;
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash;
@@ -1609,7 +1609,7 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
     block.header.merkle_root = block.compute_merkle_root().unwrap();
     let params = ChainParams::regtest();
     let ctx = rbitcoin_consensus::block::ValidationContext::at(&params, Height(1), Milestone::NONE);
-    let mut pending = OutPointSet::default();
+    let mut pending = crate::block_pipeline::BatchSpent::default();
     let mut mtp = crate::U32Map::<u32>::default();
     mtp.insert(0, 1_300_000_000);
     let mut scratch = StructuralScratch::default();
@@ -3321,7 +3321,7 @@ fn structural_run_clears_reused_scratch_between_batches() {
         .scratch
         .slots
         .push((999, Fk(1), 0, Fk(8), 0), (Fk::NULL, 0, 0));
-    reuse.pending.insert(([0x41; 32], 0u32));
+    reuse.pending.insert(([0x41; 32], 0u32), fks[0]);
 
     let run = |reuse: &mut StructuralReuse| {
         structural_run(

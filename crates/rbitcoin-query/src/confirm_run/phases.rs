@@ -273,7 +273,7 @@ pub(super) fn assemble_run(
 #[derive(Default)]
 pub(super) struct StructuralReuse {
     pub scratch: crate::block_pipeline::StructuralScratch,
-    pub pending: crate::OutPointSet,
+    pub pending: crate::block_pipeline::BatchSpent,
 }
 
 /// Durable spentness + maturity + subsidy after scripts (height order).

@@ -813,8 +813,18 @@ fn connect_in_batches(
     chain: &[(Height, bitcoin::Block)],
     cuts: &[usize],
 ) -> Result<Option<Height>, String> {
+    connect_in_batches_bip34_at(chain, cuts, 1_000)
+}
+
+fn connect_in_batches_bip34_at(
+    chain: &[(Height, bitcoin::Block)],
+    cuts: &[usize],
+    bip34_height: u32,
+) -> Result<Option<Height>, String> {
     let (_td, q, mut params) = regtest_q();
-    params.apply_test_activation_height("bip34", 1_000).unwrap();
+    params
+        .apply_test_activation_height("bip34", bip34_height)
+        .unwrap();
     connect_genesis(&q, &params);
     let mut lo = 0usize;
     for hi in cuts
@@ -828,6 +838,160 @@ fn connect_in_batches(
         lo = hi;
     }
     Ok(q.tip_height())
+}
+
+/// After BIP34 a coinbase can still repeat an older one whose scriptSig
+/// already starts with the later height (Core's 490,897 / 1,983,702 case).
+/// With BIP34 at 100, Core 31.1 accepts: h1 creates X with scriptSig
+/// push(150), h149 spends X:0, h150 creates X again, h250 spends the new X:0.
+fn bip34_era_repeat_chain() -> Chain {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    let x =
+        rbitcoin_consensus::regtest_coinbase(150, Amount::from_sat(25_0000_0000), op_true.clone());
+    let g = regtest_genesis();
+    let mut run: Chain = Vec::new();
+    for h in 1..=250u32 {
+        let (prev, time) = run
+            .last()
+            .map(|(_, b)| (b.block_hash(), b.header.time + 600))
+            .unwrap_or((g.block_hash(), g.header.time + 600));
+        let txs = match h {
+            149 => vec![spend_anyone_can_spend(
+                x.compute_txid(),
+                0,
+                Amount::from_sat(24_0000_0000),
+            )],
+            250 => vec![spend_anyone_can_spend(
+                x.compute_txid(),
+                0,
+                Amount::from_sat(23_0000_0000),
+            )],
+            _ => vec![],
+        };
+        let mut b = rbitcoin_consensus::mine_regtest_paying(prev, time, h, op_true.clone(), txs);
+        if h == 1 || h == 150 {
+            b.txdata[0] = x.clone();
+            b.header.merkle_root = b.compute_merkle_root().unwrap();
+            rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+        }
+        run.push((Height(h), b));
+    }
+    run
+}
+
+#[test]
+fn bip34_era_repeat_connects_in_any_batch_split() {
+    let chain = bip34_era_repeat_chain();
+    for cuts in [
+        &[][..],
+        &[148],
+        &[149],
+        &[148, 150],
+        &[100, 200],
+        &[148, 149, 150, 249],
+    ] {
+        assert_eq!(
+            connect_in_batches_bip34_at(&chain, cuts, 100),
+            Ok(Some(Height(250))),
+            "cuts {cuts:?}"
+        );
+    }
+}
+
+/// IBD's write path: load each slice ahead of the write (in-flight parents,
+/// reserved fks), run scripts, merge the slices into one write batch, write once.
+fn connect_merged(
+    chain: &[(Height, bitcoin::Block)],
+    load_cuts: &[usize],
+    bip34_height: u32,
+) -> Result<Option<Height>, String> {
+    use rbitcoin_query::{
+        confirm_scripts_phase, confirm_wire_load_phase_pipelined, confirm_write_phase, InFlight,
+        ScriptPreverified, WireLoadPipeline,
+    };
+    let (_td, q, mut params) = regtest_q();
+    params
+        .apply_test_activation_height("bip34", bip34_height)
+        .unwrap();
+    connect_genesis(&q, &params);
+    q.enter_direct_index_mode().unwrap();
+    let none = ScriptPreverified::new();
+    let mut inflight = InFlight::new();
+    let mut next_tx_start = q.tx_body_count().saturating_add(1).max(1);
+    let mut merged: Option<rbitcoin_query::ScriptOkBatch> = None;
+    let mut lo = 0usize;
+    for hi in load_cuts
+        .iter()
+        .copied()
+        .filter(|&c| c < chain.len())
+        .chain([chain.len()])
+    {
+        let slice = &chain[lo..hi];
+        let pipe = WireLoadPipeline {
+            path_lo: slice[0].0 .0,
+            parent_hash: lo
+                .checked_sub(1)
+                .map(|i| chain[i].1.block_hash().to_byte_array()),
+            next_tx_start,
+            in_flight: &inflight,
+            skeleton: None,
+            carried_need: Vec::new(),
+            carried_header_fks: Vec::new(),
+            carried_header_hashes: Vec::new(),
+        };
+        let mat = confirm_wire_load_phase_pipelined(
+            &q,
+            &params,
+            Milestone::NONE,
+            slice,
+            &none,
+            Some(&pipe),
+        )
+        .map_err(|e| format!("load {}..={hi}: {e:?}", lo + 1))?;
+        let plan = mat.batch.archive_plan.as_ref().expect("wire plan");
+        inflight.note_pins(
+            plan.planned_fks.iter().copied().zip(plan.batch_pin.iter()),
+            Some(slice[slice.len() - 1].0 .0),
+        );
+        if let Some(last) = plan.planned_fks.last().and_then(|f| f.get()) {
+            next_tx_start = last + 1;
+        }
+        let ok = confirm_scripts_phase(mat.batch)
+            .map_err(|e| format!("scripts {}..={hi}: {e:?}", lo + 1))?;
+        merged = Some(match merged.take() {
+            None => ok.batch,
+            Some(mut m) => {
+                if m.append_contiguous(ok.batch).is_err() {
+                    return Err(format!("merge at {}", lo + 1));
+                }
+                m
+            }
+        });
+        lo = hi;
+    }
+    confirm_write_phase(&q, &params, Milestone::NONE, merged.expect("one slice"))
+        .map_err(|e| format!("write: {e:?}"))?;
+    Ok(q.tip_height())
+}
+
+#[test]
+fn repeated_coinbase_connects_when_ibd_merges_load_batches() {
+    let pre = repeated_coinbase_chain(203, 48_0000_0000, true);
+    for cuts in [&[102][..], &[101, 103], &[54, 103, 150]] {
+        assert_eq!(
+            connect_merged(&pre, cuts, 1_000),
+            Ok(Some(Height(203))),
+            "pre-BIP34, load cuts {cuts:?}"
+        );
+    }
+    let era = bip34_era_repeat_chain();
+    for cuts in [&[149][..], &[100, 149, 200], &[148, 150]] {
+        assert_eq!(
+            connect_merged(&era, cuts, 100),
+            Ok(Some(Height(250))),
+            "BIP34 era, load cuts {cuts:?}"
+        );
+    }
 }
 
 /// The Core-valid chain above connects however IBD splits it into batches.
@@ -855,12 +1019,9 @@ fn repeated_coinbase_chain_rejects_what_core_rejects() {
         (
             "h203 spends X:0 again without a new X",
             repeated_coinbase_chain(203, 48_0000_0000, false),
-            &[
-                "PrevoutSpent",
-                "double spend",
-                "MissingPrevout",
-                "missingorspent",
-            ],
+            // Only spent errors: MissingPrevout would also match a spend bound
+            // to a later copy, which is the bug this guards against.
+            &["PrevoutSpent", "double spend"],
         ),
         (
             "h150 spends the new X before it matures",
