@@ -60,6 +60,7 @@ name = "asmap_journey"
 path = "tests/asmap_journey.rs"
 
 [features]
+mutants = []
 # Live private-mesh journeys. Default `cargo test` stays fake SOCKS/SAM/control.
 overlay = []
 

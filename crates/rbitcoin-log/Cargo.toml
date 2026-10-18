@@ -16,6 +16,7 @@ workspace = true
 # product graph. These targets exist so `cargo fmt --all` still formats it;
 # required-features keeps cargo test / clippy from compiling those files.
 [features]
+mutants = []
 fmt-fuzz-anchor = []
 
 [[test]]

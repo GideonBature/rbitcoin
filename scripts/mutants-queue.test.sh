@@ -435,5 +435,39 @@ assert_ok "missing state branch falls back to the artifact" \
 assert_ok "missing branch and artifact start from an empty cursor" \
   grep -E -q '"old_index": ?0' "$tmp/restored-empty.json"
 
+assert_ok "consensus mutants dependency is optional" \
+  grep -q 'mutants = { version = "0.0.4", optional = true }' "$ROOT/crates/rbitcoin-consensus/Cargo.toml"
+assert_ok "query mutants dependency is optional" \
+  grep -q 'mutants = { version = "0.0.4", optional = true }' "$ROOT/crates/rbitcoin-query/Cargo.toml"
+assert_ok "consensus mutants feature is the optional dep" \
+  grep -q 'mutants = \["dep:mutants"\]' "$ROOT/crates/rbitcoin-consensus/Cargo.toml"
+assert_ok "query mutants feature is the optional dep" \
+  grep -q 'mutants = \["dep:mutants"\]' "$ROOT/crates/rbitcoin-query/Cargo.toml"
+assert_ok "csv mask skip is behind the mutants feature" \
+  grep -q 'cfg_attr(feature = "mutants", mutants::skip)' \
+  "$ROOT/crates/rbitcoin-consensus/src/script/interpreter.rs"
+assert_ok "parent stamp skip is behind the mutants feature" \
+  grep -q 'cfg_attr(feature = "mutants", mutants::skip)' \
+  "$ROOT/crates/rbitcoin-query/src/stamp.rs"
+assert_ok "nightly list builds the mutants feature" \
+  grep -q -- '--features mutants --workspace' "$NIGHTLY"
+assert_ok "mutants.toml passes the feature to cargo" \
+  grep -q 'additional_cargo_args = "--features mutants"' "$TOML"
+for toml in "$ROOT"/crates/*/Cargo.toml; do
+  assert_ok "mutants feature in $(basename "$(dirname "$toml")")" \
+    grep -q '^mutants = ' "$toml"
+done
+set +e
+cargo tree -p rbitcoin-consensus -i mutants --prefix none >"$tmp/mutants-tree.txt" 2>&1
+tree_ec=$?
+set -e
+assert_ok "default consensus build does not link mutants" test "$tree_ec" -ne 0
+set +e
+cargo tree -p rbitcoin-consensus --features mutants -i mutants --prefix none >"$tmp/mutants-on.txt" 2>&1
+tree_on=$?
+set -e
+assert_ok "mutants feature links the attribute crate" test "$tree_on" -eq 0
+assert_ok "mutants feature tree names the crate" grep -q '^mutants ' "$tmp/mutants-on.txt"
+
 echo "$PASS passed, $FAIL failed"
 test "$FAIL" -eq 0

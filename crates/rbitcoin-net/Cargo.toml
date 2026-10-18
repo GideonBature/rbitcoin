@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Bitcoin P2P (BIP324, IBD, tip follow, compact v2, tx relay)"
 
+[features]
+mutants = []
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-log = { workspace = true }

@@ -14,6 +14,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [features]
+mutants = []
 default = []
 cli = []
 

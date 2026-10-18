@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Core-class JSON-RPC HTTP server (subset; not full Core parity)"
 
+[features]
+mutants = []
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-log = { workspace = true }

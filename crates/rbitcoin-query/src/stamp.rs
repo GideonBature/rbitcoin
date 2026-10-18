@@ -162,7 +162,7 @@ fn stamp_inflight_hits<'a>(
 }
 
 // Capacity is not an observable result: empty maps insert the same keys.
-#[mutants::skip]
+#[cfg_attr(feature = "mutants", mutants::skip)]
 fn external_parent_stamp(need_len: usize) -> ExternalParentStamp {
     ExternalParentStamp {
         resolved: TxidFkMap::with_capacity_and_hasher(need_len / 2, Default::default()),
