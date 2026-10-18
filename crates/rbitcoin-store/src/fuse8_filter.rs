@@ -470,7 +470,7 @@ mod tests {
         body.extend_from_slice(&1u64.to_le_bytes());
         body.extend_from_slice(&64u32.to_le_bytes());
         body.extend_from_slice(&63u32.to_le_bytes());
-        body.extend_from_slice(&10_000u32.to_le_bytes());
+        body.extend_from_slice(&(64u32 * 156).to_le_bytes());
         body.extend_from_slice(&8u64.to_le_bytes());
         body.extend_from_slice(&[0u8; 8]);
         match decode_body(&body) {
