@@ -1038,6 +1038,8 @@ mod tests {
             "[64:ff9b:1:1::102:304]:8333".parse().unwrap(),
             "[2001:0:102:304::f5ff:fffe]:8333".parse().unwrap(),
             "[3fff::1]:8333".parse().unwrap(),
+            "[2001:2::1]:8333".parse().unwrap(),
+            "[2001:2:0:ffff:ffff:ffff:ffff:ffff]:8333".parse().unwrap(),
             public,
         ]);
         assert_eq!(book.len(), 1);
@@ -1048,6 +1050,7 @@ mod tests {
         let siit_public: SocketAddr = "[::ffff:0:102:304]:8333".parse().unwrap();
         let nat64_local_public: SocketAddr = "[64:ff9b:1::102:304]:8333".parse().unwrap();
         let mapped_public: SocketAddr = "[::ffff:102:304]:8333".parse().unwrap();
+        let bench_outside: SocketAddr = "[2001:2:1::1]:8333".parse().unwrap();
         book.inject([
             sixto4_public,
             nat64_public,
@@ -1055,6 +1058,7 @@ mod tests {
             siit_public,
             nat64_local_public,
             mapped_public,
+            bench_outside,
         ]);
         assert!(
             book.entry(&sixto4_public).is_some(),
@@ -1068,6 +1072,10 @@ mod tests {
         assert!(book.entry(&siit_public).is_some());
         assert!(book.entry(&nat64_local_public).is_some());
         assert!(book.entry(&mapped_public).is_some());
+        assert!(
+            book.entry(&bench_outside).is_some(),
+            "2001:2:1::/48 is outside the benchmarking prefix"
+        );
         let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
         assert!(book.add_learned(lan, 64));
         assert!(book.entry(&lan).is_some());

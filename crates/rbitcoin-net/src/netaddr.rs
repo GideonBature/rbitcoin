@@ -52,9 +52,9 @@ pub(crate) fn addr_allowed(addr: NetAddr, only: &[OnlyNet]) -> bool {
 
 /// Prefixes `Ipv6Addr` does not classify on 1.95.
 ///
-/// `2001:db8::/32` and `3fff::/20` documentation, `2001:10::/28` ORCHID,
-/// `2001:20::/28` ORCHIDv2, and `100::/64` discard. `is_documentation` is
-/// still unstable.
+/// `2001:db8::/32` and `3fff::/20` documentation, `2001:2::/48` benchmarking,
+/// `2001:10::/28` ORCHID, `2001:20::/28` ORCHIDv2, and `100::/64` discard.
+/// `is_documentation` is still unstable.
 fn ipv6_special_unroutable(v: Ipv6Addr) -> bool {
     let o = v.octets();
     if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8 {
@@ -68,6 +68,12 @@ fn ipv6_special_unroutable(v: Ipv6Addr) -> bool {
         return true;
     }
     if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && (o[3] & 0xf0) == 0x20 {
+        return true;
+    }
+    // RFC 5180 benchmarking. The IPv4 twin is `198.18.0.0/15`. The last
+    // 80 bits are free, so the whole prefix has to go.
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && o[3] == 0x02 && o[4] == 0x00 && o[5] == 0x00
+    {
         return true;
     }
     o[0] == 0x01 && o[1] == 0x00 && o[2..8].iter().all(|&b| b == 0)
