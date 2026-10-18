@@ -94,6 +94,12 @@ through `VerifyScript`. Legacy rows are bare scripts with no flags.
 | `stack-1001-v0` | Witness v0 rejects a 1,001st stack push. A successful 1,000-deep witness script cannot also return to one element within the 201 opcode budget, so the accept side is the legacy and tapscript rows. |
 | `stack-exec-1000-tapscript` | Tapscript enforces the shared 1,000 cap after each opcode. 1,000 pushes and 999 drops leave one true item. |
 | `stack-exec-1001-tapscript` | Tapscript rejects the 1,001st push during execution. |
+| `tuck-1000-legacy` | OP_TUCK counts toward the shared 1,000 cap. 999 pushes and TUCK make 1,000 and accept. |
+| `tuck-1001-legacy` | OP_TUCK on a stack of 1,000 makes 1,001 and rejects. |
+| `tuck-1000-tapscript` | Tapscript OP_TUCK to 1,000, then 999 drops leave one true item. |
+| `tuck-1001-tapscript` | Tapscript OP_TUCK to 1,001 rejects, even though later drops would leave one true item. |
+| `initial-1001-ripemd160-v0` | Witness v0 has no initial stack check. RIPEMD160 on 1,001 items leaves 1,001 and rejects. |
+| `initial-1001-hash256-v0` | Witness v0 has no initial stack check. HASH256 on 1,001 items leaves 1,001 and rejects. |
 | `disabled-cat-unexec-legacy` | OP_CAT (0x7e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
 | `disabled-cat-unexec-v0` | OP_CAT (0x7e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
 | `disabled-cat-unexec-tapscript` | OP_CAT (0x7e) rejects in legacy and witness v0 even inside an unexecuted IF. In tapscript that byte is OP_SUCCESS and accepts. |
