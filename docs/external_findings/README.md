@@ -97,6 +97,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [090](./090-getdata-serve-pause.md) | medium | Served getdata past the writer queue was dropped | fixed | `getdata_past_serve_cap_waits_for_writer`, `paused_session_still_times_out_a_silent_peer`, `paused_getdata_tail_is_served_before_the_next_getdata`, `uncounted_bodies_do_not_open_serve_slots` |
 | [092](./092-orphan-promote-stack.md) | medium | Orphan promotion recurses down the parked chain | fixed | `orphan_chain_promotes_to_the_cluster_cap` |
 | [093](./093-history-window.md) | high | History catch-up scans every block in the window | fixed | `history_window_wider_than_eight_weeks_is_refused` |
+| [094](./094-electrum-write-deadline.md) | high | Electrum writes have no deadline | fixed | `stalled_electrum_write_is_closed` |
 | [102](./102-fuse8-body-length.md) | high | fuse8 body length cannot wrap the size check | fixed | `fuse8_wrapped_body_length_is_corrupt` |
 | [103](./103-fuse8-segment-multiple.md) | high | fuse8 segment count must divide the array | fixed | `fuse8_segment_count_must_be_a_multiple_of_segment_length` |
 | [104](./104-body-read-cap.md) | high | A body read is capped before it allocates | fixed | `body_read_above_the_cap_is_refused`, `index_read_above_the_cap_is_refused` |

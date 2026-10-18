@@ -1734,4 +1734,44 @@ async fn sp_scan_stops_when_the_client_hangs_up() {
     );
 }
 
+/// A client that never reads must not hold the request. The write itself
+/// returns; the connection task drops on that error.
+#[tokio::test]
+async fn stalled_electrum_write_is_closed() {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
+
+    struct PendingWriter;
+    impl AsyncWrite for PendingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let mut writer = PendingWriter;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::write_line(
+            &mut writer,
+            &json!({"jsonrpc":"2.0","id": 1, "result": null}),
+            std::time::Duration::from_millis(40),
+        ),
+    )
+    .await
+    .expect("a stalled write returns before the test bound");
+    let err = result.expect_err("stalled write is an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
 include!("electrum_sh_journey.rs");
