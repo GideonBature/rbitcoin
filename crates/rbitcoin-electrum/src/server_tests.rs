@@ -4,7 +4,7 @@ use rbitcoin_query::testutil::FixtureChain;
 
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
@@ -381,20 +381,31 @@ fn negotiate_protocol_intersection_and_asof_dialect() {
         .contains("unsupported"));
 }
 
+/// One line, one byte at a time. A `BufReader` can pull the next server line
+/// into its buffer and drop it, so a later read sees the wrong message.
+async fn read_exact_line(stream: &mut TcpStream) -> String {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut byte))
+            .await
+            .expect("timeout")
+            .unwrap();
+        assert_ne!(n, 0, "electrum peer closed");
+        buf.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    String::from_utf8(buf).unwrap()
+}
+
 async fn electrum_tcp_rpc(stream: &mut TcpStream, id: u32, method: &str, params: Value) -> Value {
     let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
     let mut line = serde_json::to_string(&req).unwrap();
     line.push('\n');
     stream.write_all(line.as_bytes()).await.unwrap();
-    let mut reader = BufReader::new(&mut *stream);
-    let mut resp = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        reader.read_line(&mut resp),
-    )
-    .await
-    .expect("timeout")
-    .unwrap();
+    let resp = read_exact_line(stream).await;
     serde_json::from_str(&resp).unwrap()
 }
 
@@ -461,6 +472,9 @@ async fn accept_client_ping_and_shutdown() {
     )
     .await;
     assert_eq!(probe["result"], json!({"0": {}}));
+    let done: Value = serde_json::from_str(&read_exact_line(&mut stream).await).unwrap();
+    assert_eq!(done["method"], "blockchain.tweaks.subscribe");
+    assert_eq!(done["params"][0]["message"], "done");
 
     let banner_v = electrum_tcp_rpc(&mut stream, 5, "server.banner", json!([])).await;
     assert_eq!(banner_v["result"].as_str().unwrap(), banner);
