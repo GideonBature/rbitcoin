@@ -333,6 +333,9 @@ impl AddrMan {
 
     pub fn inject(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
         for a in addrs {
+            if crate::netaddr::clearnet_unroutable(a.ip()) {
+                continue;
+            }
             self.add(a);
         }
         self.sort_order_ipv4_first();
@@ -1002,6 +1005,36 @@ mod tests {
 
     fn addr(o: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, o)), 8333)
+    }
+
+    #[test]
+    fn inject_drops_unroutable_and_add_learned_keeps_it() {
+        use std::net::Ipv6Addr;
+        let mut book = AddrMan::new();
+        let public = addr(4);
+        book.inject([
+            "10.0.0.1:8333".parse().unwrap(),
+            "127.0.0.1:8333".parse().unwrap(),
+            "192.0.2.1:8333".parse().unwrap(),
+            "0.0.0.0:8333".parse().unwrap(),
+            "[2001:db8::1]:8333".parse().unwrap(),
+            public,
+        ]);
+        assert_eq!(book.len(), 1);
+        assert!(book.entry(&public).is_some());
+        let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
+        assert!(book.add_learned(lan, 64));
+        assert!(book.entry(&lan).is_some());
+        let cjdns: SocketAddr =
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)), 8333);
+        book.set_cjdns_reachable(true);
+        book.inject([cjdns]);
+        assert!(
+            book.entries()
+                .iter()
+                .any(|e| matches!(e.addr, NetAddr::Cjdns { .. })),
+            "fc00::/8 is CJDNS, not a unique-local bogon"
+        );
     }
 
     fn addr_n(i: u32) -> SocketAddr {

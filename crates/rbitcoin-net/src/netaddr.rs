@@ -4,7 +4,7 @@ use crate::error::NetError;
 use bitcoin::p2p::address::{AddrV2, AddrV2Message};
 use sha3::{Digest, Sha3_256};
 use std::fmt;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 const B32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -48,6 +48,51 @@ impl OnlyNet {
 
 pub(crate) fn addr_allowed(addr: NetAddr, only: &[OnlyNet]) -> bool {
     only.is_empty() || only.iter().any(|n| n.matches_addr(addr))
+}
+
+/// `2001:db8::/32`. `Ipv6Addr::is_documentation` is still unstable on 1.95.
+fn ipv6_documentation(v: Ipv6Addr) -> bool {
+    let o = v.octets();
+    o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8
+}
+
+fn ipv4_unroutable(v: Ipv4Addr) -> bool {
+    v.is_unspecified()
+        || v.is_loopback()
+        || v.is_private()
+        || v.is_link_local()
+        || v.is_broadcast()
+        || v.is_multicast()
+        || v.is_documentation()
+}
+
+/// Clearnet bogon. CJDNS `fc00::/8` is an overlay, not a unique-local bogon.
+pub(crate) fn clearnet_unroutable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => ipv4_unroutable(v),
+        IpAddr::V6(v) => {
+            if is_cjdns_ip(v) {
+                return false;
+            }
+            if let Some(v4) = v.to_ipv4_mapped() {
+                return ipv4_unroutable(v4);
+            }
+            v.is_unspecified()
+                || v.is_loopback()
+                || v.is_unicast_link_local()
+                || v.is_unique_local()
+                || v.is_multicast()
+                || ipv6_documentation(v)
+        }
+    }
+}
+
+/// Seed inject and peer addr gossip. Onion, I2P, and CJDNS are not IP bogons.
+pub(crate) fn netaddr_unroutable_gossip(addr: NetAddr) -> bool {
+    match addr {
+        NetAddr::Ip(s) => clearnet_unroutable(s.ip()),
+        NetAddr::Onion { .. } | NetAddr::I2p { .. } | NetAddr::Cjdns { .. } => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
