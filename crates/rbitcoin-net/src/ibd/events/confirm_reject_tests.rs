@@ -2678,6 +2678,58 @@ fn batched_spend_of_a_later_block_is_rejected_alone() {
     rig.finish();
 }
 
+/// A wave whose first block spends a create from its own block and whose
+/// second block is invalid at write. The cascade retries the first block from
+/// the archive, and that retry must still pin the same-block parent.
+#[test]
+fn archived_retry_pins_a_same_block_parent() {
+    use super::super::assign::tests::lock_default_assign_stop;
+    use super::super::state::InflightReq;
+    use bitcoin::{Amount, ScriptBuf};
+    use rbitcoin_consensus::{grind_regtest_pow, mine_regtest_paying};
+
+    let _env = lock_default_assign_stop();
+    let mut rig = WireRig::new("archived-same-block", 2);
+    let (t, cbs) = (rig.t, rig.cbs.clone());
+    let spk = ScriptBuf::from_bytes(vec![0x51]);
+    let parent = WireRig::spend(cbs[0]);
+    let child = WireRig::spend(parent.compute_txid());
+    let b1 = mine_regtest_paying(
+        rig.tip,
+        rig.tip_time + 600,
+        t + 1,
+        spk.clone(),
+        vec![parent, child],
+    );
+    let mut b2 = mine_regtest_paying(b1.block_hash(), rig.tip_time + 1200, t + 2, spk, vec![]);
+    b2.txdata[0].output[0].value += Amount::from_sat(1);
+    b2.header.merkle_root = b2.compute_merkle_root().unwrap();
+    grind_regtest_pow(&mut b2.header);
+    let (h1, h2) = (b1.block_hash(), b2.block_hash());
+    rig.plant(&[&b1, &b2]);
+    for (peer, body) in [(1, &b1), (2, &b2)] {
+        let hash = body.block_hash();
+        rig.st.slots[peer - 1].in_flight.insert(hash);
+        rig.st.inflight.insert(hash, InflightReq::new(peer));
+        rig.deliver(peer, body);
+    }
+    rig.start_engine();
+
+    let rejects = rig.pump(
+        |_, hash| if hash == h1 { b1.clone() } else { b2.clone() },
+        |st, _, _| st.halt.is_some() || st.reorg.invalid.contains(h2.to_byte_array()),
+    );
+    assert_eq!(
+        rig.st.halt, None,
+        "rejects={rejects:?} last={:?}",
+        rig.last_reject_err
+    );
+    assert!(!rig.st.engine_fault_seen.contains(&h1), "{rejects:?}");
+    assert!(rig.st.reorg.invalid.contains(h2.to_byte_array()));
+    assert_eq!(rig.hub.tip_height(), Some(t + 1), "{rejects:?}");
+    rig.finish();
+}
+
 /// tip+1 is the last block on the path, and load cannot read its header
 /// row when it stamps the wave: a local store fault, not a block verdict.
 /// The wave goes back to lookup, so once the row reads again tip+1

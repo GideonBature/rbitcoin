@@ -366,6 +366,17 @@ pub(super) fn stamp_parent_pin_archived(
             query.confirm_stats(),
         )
         .map_err(ConfirmError::from)?;
+    } else {
+        // The IBD skeleton carries external ranges. This batch's own creates
+        // are already archived (plan=None), so only the store has theirs.
+        let mut own: U64Map<crate::ParentIdent> = metas
+            .iter()
+            .flat_map(|m| m.tx_fks.iter().filter_map(|f| f.get()))
+            .filter_map(|id| stamp.idents.remove_entry(&id))
+            .collect();
+        crate::fill_missing_parent_ranges(query.store(), ifo, &mut own, query.confirm_stats())
+            .map_err(ConfirmError::from)?;
+        stamp.idents.extend(own);
     }
     for ident in stamp.idents.values() {
         if ident.txid == [0u8; 32] {
