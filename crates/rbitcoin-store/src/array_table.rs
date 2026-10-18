@@ -33,10 +33,18 @@ pub(crate) fn dirty_epoch_bump(epoch: &AtomicU64) {
     });
 }
 
-pub(crate) fn dirty_epoch_try_clean(epoch: &AtomicU64, e0: u64) -> bool {
-    epoch
+/// Mark clean after a persist that sampled generation `e0`. `lo` resets
+/// first: a `set` that lands here bumps the generation, the clean fails, and
+/// its index survives for the next flush.
+pub(crate) fn dirty_try_clean(epoch: &AtomicU64, lo: &AtomicU64, e0: u64, between: impl FnOnce()) {
+    let prev = lo.swap(u64::MAX, Ordering::AcqRel);
+    between();
+    if epoch
         .compare_exchange(e0, 0, Ordering::Release, Ordering::Relaxed)
-        .is_ok()
+        .is_err()
+    {
+        lo.fetch_min(prev, Ordering::AcqRel);
+    }
 }
 
 const ELEM: u64 = 8;
@@ -255,13 +263,15 @@ impl ArrayTable {
             .unwrap_or(0)
     }
 
-    fn note_flush_clean(&self, e0: u64) {
-        if dirty_epoch_try_clean(&self.dirty_epoch, e0) {
-            self.dirty_lo.store(u64::MAX, Ordering::Release);
-        }
+    fn note_flush_clean(&self, e0: u64, between: impl FnOnce(&Self)) {
+        dirty_try_clean(&self.dirty_epoch, &self.dirty_lo, e0, || between(self));
     }
 
     pub fn flush_dirty(&self) -> Result<(), StoreError> {
+        self.flush_dirty_between(|_| {})
+    }
+
+    fn flush_dirty_between(&self, between: impl FnOnce(&Self)) -> Result<(), StoreError> {
         let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
         let Some(ref v) = *guard else {
             return Ok(());
@@ -279,13 +289,13 @@ impl ArrayTable {
             let logical = FILE_HEADER_LEN as u64 + n * ELEM;
             self.file.set_logical_len(logical)?;
             self.disk_len.store(n, Ordering::Release);
-            self.note_flush_clean(e0);
+            self.note_flush_clean(e0, between);
             return Ok(());
         }
 
         if n == disk && dirty_lo >= disk {
             drop(guard);
-            self.note_flush_clean(e0);
+            self.note_flush_clean(e0, between);
             return Ok(());
         }
 
@@ -301,7 +311,7 @@ impl ArrayTable {
             debug_assert_eq!(self.file.logical_len(), logical);
             let _ = logical;
             self.disk_len.store(n, Ordering::Release);
-            self.note_flush_clean(e0);
+            self.note_flush_clean(e0, between);
             return Ok(());
         }
 
@@ -319,7 +329,7 @@ impl ArrayTable {
             self.file.set_logical_len(logical)?;
         }
         self.disk_len.store(n, Ordering::Release);
-        self.note_flush_clean(e0);
+        self.note_flush_clean(e0, between);
         Ok(())
     }
 
@@ -382,6 +392,24 @@ mod tests {
         for r in readers {
             assert!(r.join().is_ok(), "get panicked racing truncate");
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `set` that lands while flush marks the table clean is written by
+    /// the next flush. The IBD tip flush runs beside the next batch's archive.
+    #[test]
+    fn set_during_flush_clean_is_flushed_next() {
+        let path = tmp_path();
+        let _ = std::fs::remove_file(&path);
+        let t = ArrayTable::create(&path, TableKind::ArrayLink).unwrap();
+        t.set_many(&[(0, 10), (1, 11), (2, 12), (3, 13)]).unwrap();
+        t.flush().unwrap();
+        t.set(3, 23).unwrap();
+        t.flush_dirty_between(|t| t.set(1, 21).unwrap()).unwrap();
+        t.flush().unwrap();
+        drop(t);
+        let t = ArrayTable::open(&path, TableKind::ArrayLink).unwrap();
+        assert_eq!((t.get(1).unwrap(), t.get(3).unwrap()), (21, 23));
         let _ = std::fs::remove_file(&path);
     }
 
