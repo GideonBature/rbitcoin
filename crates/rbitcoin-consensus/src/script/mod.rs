@@ -879,6 +879,22 @@ pub(crate) mod crypto {
             assert!(!is_valid_signature_encoding(&sm));
 
             assert!(is_valid_signature_encoding(&valid_der_sig()));
+            // BIP66 does not range-check the hashtype byte. STRICTENC does,
+            // via `is_defined_hashtype`. `0x00`, `0x04`, `0x80`, and `0x85`
+            // stay valid DER.
+            for ht in [0x00u8, 0x04, 0x80, 0x85] {
+                let mut sig = valid_der_sig();
+                let last = sig.len() - 1;
+                sig[last] = ht;
+                assert!(
+                    is_valid_signature_encoding(&sig),
+                    "BIP66 keeps hashtype {ht:#x}"
+                );
+                assert!(
+                    !is_defined_hashtype(&sig),
+                    "STRICTENC rejects hashtype {ht:#x}"
+                );
+            }
             // A one-byte zero integer is minimal. `len > 1` must not become `>=`.
             assert!(is_valid_signature_encoding(&[
                 0x30, 0x06, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01, 0x01

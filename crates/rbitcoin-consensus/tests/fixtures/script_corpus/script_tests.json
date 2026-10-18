@@ -693,6 +693,78 @@
     ]
   },
   {
+    "id": "verif-exec-legacy",
+    "row": [
+      "",
+      "0x516365675168",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "verif-exec-v0",
+    "row": [
+      [
+        "516365675168",
+        0.0
+      ],
+      "",
+      "0x0020e06680f1661ad5b946977b6213d642e746144e4443619c0348079c83fd1bccbb",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "verif-exec-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x516365675168",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
+    "id": "vernotif-exec-legacy",
+    "row": [
+      "",
+      "0x516366675168",
+      "NONE",
+      "ERR"
+    ]
+  },
+  {
+    "id": "vernotif-exec-v0",
+    "row": [
+      [
+        "516366675168",
+        0.0
+      ],
+      "",
+      "0x00201ed8d3cebff162c775e607217c2c3679321e4b2df8bf70aeb71a2e5fd0a7dfe7",
+      "P2SH,WITNESS",
+      "ERR"
+    ]
+  },
+  {
+    "id": "vernotif-exec-tapscript",
+    "row": [
+      [
+        "#SCRIPT# 0x516366675168",
+        "#CONTROLBLOCK#",
+        0.0
+      ],
+      "",
+      "0x51 0x20 #TAPROOTOUTPUT#",
+      "P2SH,WITNESS,TAPROOT",
+      "ERR"
+    ]
+  },
+  {
     "id": "stack-1000-legacy",
     "row": [
       "",
@@ -9503,6 +9575,213 @@
       "",
       "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
       "P2SH,WITNESS,STRICTENC",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type00-dersig-legacy",
+    "row": [
+      "0x483045022100a4c88cbf157bcb0c2a083675614690ce35d6a9577b7e28bc0f5831e182e1a9f00220109b1f54ade4786d10aa7d787609d9ba92a56f4b55c85c640dbce00cfedf2cd300",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "DERSIG",
+      "OK"
+    ]
+  },
+  {
+    "id": "sighash-type00-strictenc-legacy",
+    "row": [
+      "0x483045022100a4c88cbf157bcb0c2a083675614690ce35d6a9577b7e28bc0f5831e182e1a9f00220109b1f54ade4786d10aa7d787609d9ba92a56f4b55c85c640dbce00cfedf2cd300",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "STRICTENC",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type00-as-01-legacy",
+    "row": [
+      "0x483045022100a4c88cbf157bcb0c2a083675614690ce35d6a9577b7e28bc0f5831e182e1a9f00220109b1f54ade4786d10aa7d787609d9ba92a56f4b55c85c640dbce00cfedf2cd301",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "DERSIG",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type00-dersig-v0",
+    "row": [
+      [
+        "3045022100970bf0ef00ef0c9c70871a2722fc659c726f8eef60ab2bd91f3d4146f8e0ed4f022017706ddd9d97351e5b9c02b76dd2587764fd692df8a57e2e510bde5856351fd600",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,DERSIG",
+      "OK"
+    ]
+  },
+  {
+    "id": "sighash-type00-strictenc-v0",
+    "row": [
+      [
+        "3045022100970bf0ef00ef0c9c70871a2722fc659c726f8eef60ab2bd91f3d4146f8e0ed4f022017706ddd9d97351e5b9c02b76dd2587764fd692df8a57e2e510bde5856351fd600",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,STRICTENC",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type00-as-01-v0",
+    "row": [
+      [
+        "3045022100970bf0ef00ef0c9c70871a2722fc659c726f8eef60ab2bd91f3d4146f8e0ed4f022017706ddd9d97351e5b9c02b76dd2587764fd692df8a57e2e510bde5856351fd601",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,DERSIG",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type80-dersig-legacy",
+    "row": [
+      "0x483045022100fdcc007649c5545067c1e1caaeb229deb358ccd1a4c912b3c90d63919ffa2f6902205741a9a1b8dd4ebd9d9f656285f773fb0276567c475f62a1c4a9a37f4f37319a80",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "DERSIG",
+      "OK"
+    ]
+  },
+  {
+    "id": "sighash-type80-strictenc-legacy",
+    "row": [
+      "0x483045022100fdcc007649c5545067c1e1caaeb229deb358ccd1a4c912b3c90d63919ffa2f6902205741a9a1b8dd4ebd9d9f656285f773fb0276567c475f62a1c4a9a37f4f37319a80",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "STRICTENC",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type80-as-81-legacy",
+    "row": [
+      "0x483045022100fdcc007649c5545067c1e1caaeb229deb358ccd1a4c912b3c90d63919ffa2f6902205741a9a1b8dd4ebd9d9f656285f773fb0276567c475f62a1c4a9a37f4f37319a81",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "DERSIG",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type80-dersig-v0",
+    "row": [
+      [
+        "3045022100a29b93bdbe099c4bcd88071d890be29b1c2f1a5c43ee2adeda66e6960e08cc2602200c4ece9d140cf6fe3d61e9ba03c4f7d2a9a31cc6e1982ce07e14ecac8b0cf37980",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,DERSIG",
+      "OK"
+    ]
+  },
+  {
+    "id": "sighash-type80-strictenc-v0",
+    "row": [
+      [
+        "3045022100a29b93bdbe099c4bcd88071d890be29b1c2f1a5c43ee2adeda66e6960e08cc2602200c4ece9d140cf6fe3d61e9ba03c4f7d2a9a31cc6e1982ce07e14ecac8b0cf37980",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,STRICTENC",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type80-as-81-v0",
+    "row": [
+      [
+        "3045022100a29b93bdbe099c4bcd88071d890be29b1c2f1a5c43ee2adeda66e6960e08cc2602200c4ece9d140cf6fe3d61e9ba03c4f7d2a9a31cc6e1982ce07e14ecac8b0cf37981",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,DERSIG",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type85-dersig-legacy",
+    "row": [
+      "0x4730440220480d07c26876b82c87089d7450fb055416c603fb747c41f5c0ea598521cd11fd02201127b240fb977b1c15c5b98e7786aaea96bc4e44e166d4e4cc80eb7496dafd9085",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "DERSIG",
+      "OK"
+    ]
+  },
+  {
+    "id": "sighash-type85-strictenc-legacy",
+    "row": [
+      "0x4730440220480d07c26876b82c87089d7450fb055416c603fb747c41f5c0ea598521cd11fd02201127b240fb977b1c15c5b98e7786aaea96bc4e44e166d4e4cc80eb7496dafd9085",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "STRICTENC",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type85-as-81-legacy",
+    "row": [
+      "0x4730440220480d07c26876b82c87089d7450fb055416c603fb747c41f5c0ea598521cd11fd02201127b240fb977b1c15c5b98e7786aaea96bc4e44e166d4e4cc80eb7496dafd9081",
+      "0x21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+      "DERSIG",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type85-dersig-v0",
+    "row": [
+      [
+        "304502210090ac2a7e4b7ee1d1c6c89916029d1a98e7f5633e2fe426a0e8a45396482c95e1022044ee303bf6b4e069776d34c3da602364acbae6ce9f38ed3bc4693ef60ffe5e9c85",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,DERSIG",
+      "OK"
+    ]
+  },
+  {
+    "id": "sighash-type85-strictenc-v0",
+    "row": [
+      [
+        "304502210090ac2a7e4b7ee1d1c6c89916029d1a98e7f5633e2fe426a0e8a45396482c95e1022044ee303bf6b4e069776d34c3da602364acbae6ce9f38ed3bc4693ef60ffe5e9c85",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,STRICTENC",
+      "ERR"
+    ]
+  },
+  {
+    "id": "sighash-type85-as-81-v0",
+    "row": [
+      [
+        "304502210090ac2a7e4b7ee1d1c6c89916029d1a98e7f5633e2fe426a0e8a45396482c95e1022044ee303bf6b4e069776d34c3da602364acbae6ce9f38ed3bc4693ef60ffe5e9c81",
+        "21034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac",
+        0.0
+      ],
+      "",
+      "0x00208f30ec1925eaa1916f4d67a9742d938c247d220c796bef6550111eaa90327245",
+      "P2SH,WITNESS,DERSIG",
       "ERR"
     ]
   },
