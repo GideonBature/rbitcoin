@@ -392,6 +392,7 @@ fn rejects_unspent_overwrite(q: &crate::Query, first: &Transaction) {
             &ClassAWave::default(),
             &mut StructuralScratch::default(),
             &abs_jobs,
+            None,
         )
         .expect_err("an unspent overwrite must trip BIP30");
         let msg = format!("{err}");
@@ -475,6 +476,7 @@ fn plant_bip34_ancestor(q: &crate::Query, hash: [u8; 32]) {
         .confirmed
         .set(Height(main.btc.bip34_height), hfk)
         .unwrap();
+    q.clear_bip34_ancestor();
 }
 
 fn bip30_message_at_mainnet_above_bip34(
@@ -504,6 +506,7 @@ fn bip30_message_at_mainnet_above_bip34(
         &ClassAWave::default(),
         &mut StructuralScratch::default(),
         &abs_jobs,
+        q.confirmed_bip34_ancestor(main.btc.bip34_height),
     )
     .map(|_| ())
 }
@@ -2370,6 +2373,7 @@ fn bip30_ignores_unspendable_outputs() {
             &ClassAWave::default(),
             &mut StructuralScratch::default(),
             &abs_jobs,
+            None,
         )
         .err()
         .map(|e| format!("{e}"))

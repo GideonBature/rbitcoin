@@ -840,6 +840,157 @@ fn connect_in_batches_bip34_at(
     Ok(q.tip_height())
 }
 
+/// Height 1 (BIP34 still off) creates a coinbase whose scriptSig already pushes
+/// 3. Height 2 is an ordinary BIP34 coinbase. Height 3 repeats the height-1
+/// coinbase while its output is still unspent. Subsidy matches at 1 and 3.
+/// Core accepts height 3 only when the header at BIP34 height is `bip34_hash`.
+fn future_height_coinbase_over_unspent() -> Chain {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    let regtest = ChainParams::regtest();
+    let value = rbitcoin_consensus::block::block_subsidy(1, &regtest);
+    assert_eq!(
+        value,
+        rbitcoin_consensus::block::block_subsidy(3, &regtest),
+        "heights 1 and 3 must pay the same subsidy"
+    );
+    let x =
+        rbitcoin_consensus::regtest_coinbase(3, Amount::from_sat(value as u64), op_true.clone());
+    let g = regtest_genesis();
+    let mut run: Chain = Vec::new();
+    for h in 1..=3 {
+        let (prev, time) = run
+            .last()
+            .map(|(_, b)| (b.block_hash(), b.header.time + 600))
+            .unwrap_or((g.block_hash(), g.header.time + 600));
+        let mut b = rbitcoin_consensus::mine_regtest_paying(prev, time, h, op_true.clone(), vec![]);
+        if h != 2 {
+            b.txdata[0] = x.clone();
+            b.header.merkle_root = b.compute_merkle_root().unwrap();
+            rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+        }
+        run.push((Height(h), b));
+    }
+    run
+}
+
+/// `bip34_height` is 2. `one_write` connects 1..=3 in one `confirm_wire_run`.
+fn connect_with_bip34_ancestor(
+    chain: &Chain,
+    bip34_hash: BlockHash,
+    one_write: bool,
+) -> Result<Option<Height>, String> {
+    let (_td, q, mut params) = regtest_q();
+    params.btc.bip34_height = 2;
+    params.bip34_hash = Some(bip34_hash);
+    connect_genesis(&q, &params);
+    let connect = |slice: &[(Height, bitcoin::Block)]| {
+        confirm_wire_run(&q, &params, Milestone::NONE, slice).map_err(|e| {
+            format!(
+                "{e:?}; tip {}",
+                q.tip_height().map(|h| h.0).unwrap_or(u32::MAX)
+            )
+        })
+    };
+    if one_write {
+        connect(chain)?;
+    } else {
+        for i in 0..chain.len() {
+            connect(&chain[i..i + 1])?;
+        }
+    }
+    Ok(q.tip_height())
+}
+
+/// The BIP34 block and the later overwrite share one write. The skip must see
+/// this write's header at BIP34 height, which is not committed yet.
+#[test]
+fn bip34_ancestor_in_the_same_write_skips_bip30() {
+    let chain = future_height_coinbase_over_unspent();
+    let ancestor = chain[1].1.block_hash();
+    assert_eq!(
+        connect_with_bip34_ancestor(&chain, ancestor, true),
+        Ok(Some(Height(3)))
+    );
+}
+
+/// One block at a time commits the BIP34 header before the overwrite.
+#[test]
+fn bip34_ancestor_already_committed_skips_bip30() {
+    let chain = future_height_coinbase_over_unspent();
+    let ancestor = chain[1].1.block_hash();
+    assert_eq!(
+        connect_with_bip34_ancestor(&chain, ancestor, false),
+        Ok(Some(Height(3)))
+    );
+}
+
+/// A different hash at BIP34 height keeps BIP30 on, in one write and one
+/// block at a time. A failed write commits nothing, so the one-write tip
+/// stays genesis. The one-block path stops at 2.
+#[test]
+fn wrong_bip34_ancestor_keeps_bip30_on() {
+    let chain = future_height_coinbase_over_unspent();
+    let wrong = chain[0].1.block_hash();
+    let one_write = connect_with_bip34_ancestor(&chain, wrong, true);
+    assert!(
+        matches!(&one_write, Err(e) if e.contains("BIP30") && e.contains("tip 0")),
+        "one write: {one_write:?}"
+    );
+    let one_by_one = connect_with_bip34_ancestor(&chain, wrong, false);
+    assert!(
+        matches!(&one_by_one, Err(e) if e.contains("BIP30") && e.contains("tip 2")),
+        "one block at a time: {one_by_one:?}"
+    );
+}
+
+/// After the match is remembered, disconnecting the BIP34 block must not
+/// keep skipping on the replacement chain.
+#[test]
+fn bip34_ancestor_reorg_drops_the_match() {
+    let chain = future_height_coinbase_over_unspent();
+    let ancestor = chain[1].1.block_hash();
+    let (_td, q, mut params) = regtest_q();
+    params.btc.bip34_height = 2;
+    params.bip34_hash = Some(ancestor);
+    connect_genesis(&q, &params);
+    for i in 0..chain.len() {
+        confirm_wire_run(&q, &params, Milestone::NONE, &chain[i..i + 1])
+            .expect("one block at a time");
+    }
+    assert_eq!(q.tip_height(), Some(Height(3)));
+    q.disconnect_tip().unwrap();
+    q.disconnect_tip().unwrap();
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let b1 = &chain[0].1;
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    let b2 = rbitcoin_consensus::mine_regtest_paying(
+        b1.block_hash(),
+        b1.header.time + 1_200,
+        2,
+        op_true.clone(),
+        vec![],
+    );
+    assert_ne!(b2.block_hash(), ancestor);
+    let mut b3 = rbitcoin_consensus::mine_regtest_paying(
+        b2.block_hash(),
+        b2.header.time + 600,
+        3,
+        op_true,
+        vec![],
+    );
+    b3.txdata[0] = b1.txdata[0].clone();
+    b3.header.merkle_root = b3.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut b3.header);
+    confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(2), b2)]).unwrap();
+    let err = confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(3), b3)]);
+    assert!(
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("BIP30")),
+        "replacement ancestor must keep BIP30 on: {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(2)));
+}
+
 /// After BIP34 a coinbase can still repeat an older one whose scriptSig
 /// already starts with the later height (Core's 490,897 / 1,983,702 case).
 /// With BIP34 at 100, Core 31.1 accepts: h1 creates X with scriptSig

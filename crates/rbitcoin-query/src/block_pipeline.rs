@@ -625,6 +625,7 @@ pub fn structural_validate_spends(
     class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
     abs_jobs: &[StructuralAbsJob],
+    bip34_ancestor: Option<bitcoin::BlockHash>,
 ) -> Result<StructuralPhaseNs, ConfirmError> {
     use std::time::Instant;
 
@@ -632,7 +633,15 @@ pub fn structural_validate_spends(
     let maturity = ctx.params.coinbase_maturity();
     // BIP30's txid batch is inside `spent_ns` (signet runs it on every block).
     let t_spent = Instant::now();
-    reject_bip30_unspent_overwrite(query, block, ctx, pending_spent, run_create_height, scratch)?;
+    reject_bip30_unspent_overwrite(
+        query,
+        block,
+        ctx,
+        pending_spent,
+        run_create_height,
+        scratch,
+        bip34_ancestor,
+    )?;
     let t_abs = Instant::now();
     structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
     let tip = query.tip_height().map(|h| h.0);
@@ -1192,9 +1201,10 @@ fn reject_bip30_unspent_overwrite(
     pending_spent: &BatchSpent,
     run_create_height: &RunCreateHeight,
     scratch: &mut StructuralScratch,
+    bip34_ancestor: Option<bitcoin::BlockHash>,
 ) -> Result<(), ConfirmError> {
     if ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
-        || bip34_ancestry_skips_bip30(query, ctx)
+        || bip34_ancestry_skips_bip30(ctx, bip34_ancestor)
     {
         return Ok(());
     }
@@ -1321,21 +1331,15 @@ fn release_repeated_outputs(
 }
 
 fn bip34_ancestry_skips_bip30(
-    query: &Query,
     ctx: &rbitcoin_consensus::ValidationContext<'_>,
+    ancestor: Option<bitcoin::BlockHash>,
 ) -> bool {
     let height = ctx.height.0;
-    if ctx.params.bip34_hash.is_none() {
+    if ctx.params.bip34_hash.is_none() || height <= ctx.params.btc.bip34_height {
         return false;
     }
-    if height <= ctx.params.btc.bip34_height {
-        return false;
-    }
-    let ancestor = query
-        .header_at_height(Height(ctx.params.btc.bip34_height))
-        .ok()
-        .flatten()
-        .map(|(_, rec)| bitcoin::BlockHash::from_byte_array(rec.hash));
+    // `ancestor` is resolved once for this write. Not `get_header_plan`:
+    // that plan can be a sibling fork.
     ctx.params
         .bip30_skipped_for_bip34_ancestry(height, ancestor)
 }

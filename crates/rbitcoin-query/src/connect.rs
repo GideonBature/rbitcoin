@@ -884,6 +884,7 @@ impl Query {
         let height = self
             .tip_height()
             .ok_or(StoreError::Corrupt("no tip to disconnect"))?;
+        self.forget_bip34_ancestor_if_reorged(height.0);
         self.require_seqsigwit_at(height)?;
         self.drop_seqsigwit_ram_height(height.0);
         let _appender = self.sh.appender.lock().unwrap();

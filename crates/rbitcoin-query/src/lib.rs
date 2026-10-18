@@ -367,6 +367,9 @@ pub struct Query {
     index_released_through: AtomicU32,
     /// Block-structured confirm parent cache.
     confirm_parents: confirm_parent_cache::ConfirmParentCache,
+    /// Confirmed header hash at BIP34 height. The header row is the durable
+    /// record. Dropped only when that block is disconnected.
+    bip34_ancestor: std::sync::Mutex<Option<crate::chain_view::Bip34AncestorNote>>,
     /// In-RAM body rows. `has_hash` is a map lookup on this mutex, not a scan.
     ///
     /// RAM-only by design: avoids double-writing every block (queue + Class A).
@@ -554,6 +557,7 @@ impl Query {
             sh: ShWriteBehind::new(),
             index_released_through: AtomicU32::new(0),
             confirm_parents: confirm_parent_cache::ConfirmParentCache::new(),
+            bip34_ancestor: std::sync::Mutex::new(None),
             block_queue: Mutex::new(rbitcoin_store::BlockQueue::open_or_create(&store_path)?),
             bq_resolved: Mutex::new(HashMap::new()),
             block_queue_pressure: AtomicBool::new(false),
