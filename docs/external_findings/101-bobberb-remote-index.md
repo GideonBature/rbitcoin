@@ -14,7 +14,7 @@ regression. No reproduction steps.
 | D6 | — | Replacement feerate uses the full descendant set | won't-fix | Direct-set pricing stays. See [051](./051-rbfr-direct-set.md) |
 | D7 | medium | Replacement may add an unconfirmed input | fixed | `replacement_unconfirmed_inputs_follow_libre_rule` ([096](./096-unconfirmed-rbf-input.md)) |
 | D8 | low | Invalid-txid set clears at 4096 | fixed | `recent_invalid_keeps_the_oldest` ([097](./097-recent-invalid-cap.md)) |
-| D9 | medium | Overlay misbehavior is not remembered | fixed | `overlay_misbehavior_discourages_that_net` ([098](./098-overlay-discourage.md)) |
+| D9 | medium | Overlay misbehavior is not remembered | fixed | `overlay_misbehavior_discourages_that_net`, `slot_evict_does_not_block_an_outbound_dial` ([098](./098-overlay-discourage.md)) |
 | D10 | medium | GET /broadcast has no Origin check | fixed | `esplora_unix_internal` ([099](./099-esplora-get-broadcast.md)) |
 | D11 | — | Default history ignores the create cap | partial | The open window is [093](./093-history-window.md). One-argument history stays under `--max-sh-creates` |
 | D12 | — | Constraint rebuilds are unbounded | won't-fix | The 1s cooldown is the limit (`template_constraint_rebuilds_are_rate_limited`) |

@@ -2133,15 +2133,9 @@ impl PeerHub {
         g.insert(group, until);
     }
 
-    /// Overlay identity, or the clearnet address inside an IP `NetAddr`.
+    /// Misbehavior key for this net. A slot-eviction netgroup stays inbound-only.
     pub(crate) fn net_discouraged(&self, net: crate::NetAddr) -> bool {
-        match net {
-            crate::NetAddr::Ip(s) => self.inbound_discouraged(s),
-            crate::NetAddr::Cjdns { ip, port } => {
-                self.inbound_discouraged(SocketAddr::from((ip, port)))
-            }
-            overlay => DiscourageKey::from_net(overlay).is_some_and(|key| self.key_refused(key)),
-        }
+        DiscourageKey::from_net(net).is_some_and(|key| self.key_refused(key))
     }
 
     fn key_refused(&self, key: DiscourageKey) -> bool {

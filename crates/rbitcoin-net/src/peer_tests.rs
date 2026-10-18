@@ -4323,6 +4323,44 @@ fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
     );
 }
 
+/// A full inbound table evicts one peer and pauses that netgroup. The pause
+/// must not refuse outbound dials to the rest of the prefix.
+#[test]
+fn slot_evict_does_not_block_an_outbound_dial() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_800_000_000);
+    let evicted = "8.8.1.1:8333".parse().unwrap();
+    peers.note_slot_evict(crate::eviction::eviction_netgroup(evicted));
+    let neighbor: std::net::SocketAddr = "8.8.9.9:8333".parse().unwrap();
+    assert!(
+        peers.inbound_discouraged(neighbor),
+        "the slot wait still refuses another inbound from that /16"
+    );
+    assert!(
+        !peers.net_discouraged(crate::NetAddr::Ip(neighbor)),
+        "the slot wait must not refuse an outbound dial in that /16"
+    );
+    let cjdns_ip = std::net::Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1);
+    let cjdns_sock = std::net::SocketAddr::from((cjdns_ip, 8333));
+    peers.note_slot_evict(crate::eviction::eviction_netgroup(cjdns_sock));
+    assert!(
+        peers.inbound_discouraged(cjdns_sock),
+        "the slot wait still refuses another inbound from that cjdns group"
+    );
+    assert!(
+        !peers.net_discouraged(crate::NetAddr::Cjdns {
+            ip: cjdns_ip,
+            port: 8333,
+        }),
+        "the slot wait must not refuse an outbound cjdns dial in that group"
+    );
+    peers.note_misbehavior_addr(neighbor.ip());
+    assert!(
+        peers.net_discouraged(crate::NetAddr::Ip(neighbor)),
+        "a misbehavior key still refuses an outbound dial to that address"
+    );
+}
+
 #[tokio::test]
 async fn inv_getdata_charges_send_budget() {
     use bitcoin::hashes::Hash;

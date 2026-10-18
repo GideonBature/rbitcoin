@@ -20,7 +20,10 @@ Fixed
   the ones already stored.
 - **Onion and I2P misbehavior is remembered for a day.** The key is
   the overlay address. Loopback is still not recorded, and nothing is
-  written to `banlist.dat`.
+  written to `banlist.dat`. An outbound dial is refused only for that
+  key. A netgroup that just lost an inbound slot still cannot take
+  another inbound slot, and it does not block dials to the rest of
+  the prefix.
 - **`GET /broadcast` is not served.** `POST /tx` remains the admit path.
 - **A panicking script-pool chunk releases the wave.** `wait_done`
   returns, and the worker keeps running.

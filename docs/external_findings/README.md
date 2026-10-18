@@ -101,7 +101,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [095](./095-sv2-idle-deadline.md) | high | SV2 session has no idle deadline after setup | fixed | `session_silent_after_constraints_is_dropped_at_the_idle_deadline` |
 | [096](./096-unconfirmed-rbf-input.md) | medium | Replacement may add an unconfirmed input | fixed | `replacement_unconfirmed_inputs_follow_libre_rule` |
 | [097](./097-recent-invalid-cap.md) | low | Invalid-txid set clears at 4096 | fixed | `recent_invalid_keeps_the_oldest` |
-| [098](./098-overlay-discourage.md) | medium | Overlay misbehavior is not remembered | fixed | `overlay_misbehavior_discourages_that_net` |
+| [098](./098-overlay-discourage.md) | medium | Overlay misbehavior is not remembered | fixed | `overlay_misbehavior_discourages_that_net`, `slot_evict_does_not_block_an_outbound_dial` |
 | [099](./099-esplora-get-broadcast.md) | medium | GET /broadcast has no Origin check | fixed | `esplora_unix_internal` |
 | [100](./100-script-pool-panic.md) | medium | Script-pool panic sticks the wave | fixed | `chunk_panic_releases_the_wave` |
 | [101](./101-bobberb-remote-index.md) | — | Remote-limit review index | — | — |
