@@ -146,6 +146,8 @@ pub struct TableFile {
     kind: TableKind,
     /// Payload/HWM written since last successful `sync_data` (Class C barrier skip).
     needs_sync: AtomicBool,
+    /// One flusher at a time, so a second never returns before the first's sync.
+    flush_lock: Mutex<()>,
     /// [`GrowPolicy`] as u8. Idx uses 1 MiB; SH body uses 64 KiB; Class A slabs.
     grow_policy: AtomicU8,
 }
@@ -281,6 +283,7 @@ impl TableFile {
             trailing_ext: [0u8; 16],
             kind,
             needs_sync: AtomicBool::new(false),
+            flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         })
     }
@@ -309,6 +312,7 @@ impl TableFile {
             trailing_ext: [0u8; 16],
             kind,
             needs_sync: AtomicBool::new(false),
+            flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         };
         s.write_trailer(initial)?;
@@ -360,6 +364,7 @@ impl TableFile {
                 trailing_ext,
                 kind,
                 needs_sync: AtomicBool::new(false),
+                flush_lock: Mutex::new(()),
                 grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
             },
             trailing_ext,
@@ -484,6 +489,7 @@ impl TableFile {
             trailing_ext: [0u8; 16],
             kind,
             needs_sync: AtomicBool::new(false),
+            flush_lock: Mutex::new(()),
             grow_policy: AtomicU8::new(GrowPolicy::Slab as u8),
         })
     }
@@ -785,18 +791,31 @@ impl TableFile {
     /// successful sync (Class C tip barrier: avoid fsyncing multi‑GiB tables
     /// that were not dirtied this batch).
     pub fn flush(&self) -> Result<(), StoreError> {
-        if !self.needs_sync.load(Ordering::Acquire) {
+        self.flush_between(|_| {})
+    }
+
+    fn flush_between(&self, between: impl FnOnce(&Self)) -> Result<(), StoreError> {
+        let _one = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Clear before reading the length: a write that lands later sets it again.
+        if !self.needs_sync.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
+        let synced = self.persist_and_sync();
+        between(self);
+        if synced.is_err() {
+            self.needs_sync.store(true, Ordering::Release);
+        }
+        synced
+    }
+
+    fn persist_and_sync(&self) -> Result<(), StoreError> {
         let logical = self.published_len.load(Ordering::Acquire);
         self.persist_logical_len(logical)?;
         self.file
             .lock()
             .unwrap()
             .sync_data()
-            .map_err(|e| StoreError::io(&self.path, e))?;
-        self.needs_sync.store(false, Ordering::Release);
-        Ok(())
+            .map_err(|e| StoreError::io(&self.path, e))
     }
 
     /// Persist HWM / trailer without waiting on `sync_data`.
@@ -1406,6 +1425,25 @@ mod advise_tests {
         let mut got2 = [0u8; 4];
         f.read_at(off2, &mut got2).unwrap();
         assert_eq!(&got2, more);
+        drop(f);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A write that lands while a flush syncs keeps the file dirty, so the next
+    /// barrier syncs it. The IBD tip flush runs beside the next batch's writes.
+    #[test]
+    fn write_during_flush_stays_pending() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("rbitcoin-flush-late-{id}"));
+        let _ = std::fs::remove_file(&path);
+        let f = TableFile::create(&path, TableKind::TxOut).unwrap();
+        f.write_at_pwrite(FILE_HEADER_LEN as u64, &[0x5Au8; 64])
+            .unwrap();
+        let end = f.logical_len();
+        f.flush_between(|f| f.write_at_pwrite(end, b"LATE").unwrap())
+            .unwrap();
+        assert!(f.pending_sync(), "the late write still needs a sync");
         drop(f);
         let _ = std::fs::remove_file(&path);
     }
