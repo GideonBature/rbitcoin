@@ -3660,9 +3660,12 @@ mod tests {
         (parent, child)
     }
 
-    /// Conflicts removed by a replacement that does not stay come back even
-    /// when the rolling floor now prices them out, including a CPFP parent
-    /// that cannot pay min relay alone.
+    /// Conflicts removed by a replacement come back after that replacement's
+    /// package child is evicted, even when the rolling floor now prices them
+    /// out. Includes a CPFP parent that cannot pay min relay alone.
+    ///
+    /// The child spends the low-fee anchor. The replacement does not: the
+    /// anchor is not a parent of the conflict.
     #[test]
     fn failed_replacement_restores_below_floor_and_cpfp_set() {
         let value = 50_000_000u64;
@@ -3689,26 +3692,24 @@ mod tests {
         mp.accept_tx(&anchor, &utxos, TIP_OK).expect("anchor");
         mp.accept_tx(&victim, &utxos, TIP_OK)
             .expect("victim at the pre-eviction floor");
-        let replacement = heavy_conflict(
-            low_op,
-            OutPoint {
-                txid: anchor.compute_txid(),
-                vout: 0,
-            },
-            value + anchor.output[0].value.to_sat(),
-            30_000,
-            victim_wu + 500,
+        let replacement = spend_tx_fee(low_op, value, 30_000);
+        let replacement_id = replacement.compute_txid();
+        let held = anchor_wu + replacement.weight().to_wu();
+        assert!(
+            held <= mp.max_weight,
+            "replacement must fit beside the anchor"
         );
+        let child = child_evicted_with_anchor(&replacement, &anchor, 50_000, mp.max_weight - held);
         let err = mp
-            .accept_tx(&replacement, &utxos, TIP_OK)
-            .expect_err("replacement over budget");
+            .accept_package(&[replacement, child], &utxos, TIP_OK)
+            .expect_err("child over budget");
         assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
         let enforced = mp.mempool_min_fee_sat_kvb();
         assert!(
             enforced > victim_rate,
             "eviction must price out the victim ({victim_rate} vs {enforced})"
         );
-        assert!(!mp.graph.contains(&replacement.compute_txid()));
+        assert!(!mp.graph.contains(&replacement_id));
         assert!(
             mp.graph.contains(&victim_id),
             "below-floor conflict must stay"
@@ -3736,19 +3737,16 @@ mod tests {
         mp.accept_tx(&anchor, &utxos, TIP_OK).expect("anchor");
         mp.accept_package(&[parent.clone(), child.clone()], &utxos, TIP_OK)
             .expect("CPFP package");
-        let replacement = heavy_conflict(
-            parent_op,
-            OutPoint {
-                txid: anchor.compute_txid(),
-                vout: 0,
-            },
-            value + anchor.output[0].value.to_sat(),
-            90_000,
-            parent.weight().to_wu() + child.weight().to_wu() + 500,
+        let replacement = spend_tx_fee(parent_op, value, 90_000);
+        let held = anchor.weight().to_wu() + replacement.weight().to_wu();
+        assert!(
+            held <= mp.max_weight,
+            "replacement must fit beside the anchor"
         );
+        let over = child_evicted_with_anchor(&replacement, &anchor, 50_000, mp.max_weight - held);
         let err = mp
-            .accept_tx(&replacement, &utxos, TIP_OK)
-            .expect_err("replacement over budget");
+            .accept_package(&[replacement, over], &utxos, TIP_OK)
+            .expect_err("child over budget");
         assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
         assert!(
             mp.graph.contains(&parent.compute_txid()),
@@ -3792,19 +3790,16 @@ mod tests {
         mp.accept_tx(&anchor, &utxos, TIP_OK).expect("anchor");
         mp.accept_tx(&victim, &utxos, TIP_OK).expect("victim");
         clock.store(t0 + 600, Ordering::Relaxed);
-        let replacement = heavy_conflict(
-            low_op,
-            OutPoint {
-                txid: anchor.compute_txid(),
-                vout: 0,
-            },
-            value + anchor.output[0].value.to_sat(),
-            30_000,
-            victim_wu + 500,
+        let replacement = spend_tx_fee(low_op, value, 30_000);
+        let held = anchor_wu + replacement.weight().to_wu();
+        assert!(
+            held <= mp.max_weight,
+            "replacement must fit beside the anchor"
         );
+        let child = child_evicted_with_anchor(&replacement, &anchor, 50_000, mp.max_weight - held);
         let err = mp
-            .accept_tx(&replacement, &utxos, TIP_OK)
-            .expect_err("replacement over budget");
+            .accept_package(&[replacement, child], &utxos, TIP_OK)
+            .expect_err("child over budget");
         assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
         assert!(mp.graph.contains(&victim_id), "conflict restored");
         mp.store.flush().unwrap();
@@ -3906,27 +3901,37 @@ mod tests {
         vsize.saturating_mul(sat_kvb).div_ceil(1000).max(1)
     }
 
-    fn heavy_conflict(
-        conflict: OutPoint,
-        anchor: OutPoint,
-        input_value: u64,
+    /// Package child of `replacement` that also spends `anchor`.
+    ///
+    /// Weight above `over_wu` (the room left after the replacement sits beside
+    /// the anchor) makes eviction drop this child with the anchor.
+    fn child_evicted_with_anchor(
+        replacement: &Transaction,
+        anchor: &Transaction,
         fee: u64,
-        min_wu: u64,
+        over_wu: u64,
     ) -> Transaction {
-        let mut n = 64usize;
+        let input_value = replacement.output[0].value.to_sat() + anchor.output[0].value.to_sat();
+        let mut n = 1usize;
         loop {
             let tx = Transaction {
                 version: Version::TWO,
                 lock_time: LockTime::ZERO,
                 input: vec![
                     TxIn {
-                        previous_output: conflict,
+                        previous_output: OutPoint {
+                            txid: replacement.compute_txid(),
+                            vout: 0,
+                        },
                         script_sig: ScriptBuf::new(),
                         sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                         witness: Witness::new(),
                     },
                     TxIn {
-                        previous_output: anchor,
+                        previous_output: OutPoint {
+                            txid: anchor.compute_txid(),
+                            vout: 0,
+                        },
                         script_sig: ScriptBuf::new(),
                         sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                         witness: Witness::new(),
@@ -3937,11 +3942,11 @@ mod tests {
                     script_pubkey: ScriptBuf::from_bytes(vec![0x51; n]),
                 }],
             };
-            if tx.weight().to_wu() > min_wu {
+            if tx.weight().to_wu() > over_wu {
                 return tx;
             }
             n += 32;
-            assert!(n < 20_000, "conflict replacement never got heavy enough");
+            assert!(n < 10_000, "package child never got heavy enough");
         }
     }
 
