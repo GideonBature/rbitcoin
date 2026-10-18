@@ -81,6 +81,12 @@ through `VerifyScript`. Legacy rows are bare scripts with no flags.
 | `vernotif-unexec-legacy` | OP_VERNOTIF rejects even inside an unexecuted IF, in every signature version. |
 | `vernotif-unexec-v0` | OP_VERNOTIF rejects even inside an unexecuted IF, in every signature version. |
 | `vernotif-unexec-tapscript` | OP_VERNOTIF rejects even inside an unexecuted IF, in every signature version. |
+| `verif-exec-legacy` | OP_VERIF in the taken IF branch rejects, in every signature version. |
+| `verif-exec-v0` | OP_VERIF in the taken IF branch rejects, in every signature version. |
+| `verif-exec-tapscript` | OP_VERIF in the taken IF branch rejects, in every signature version. |
+| `vernotif-exec-legacy` | OP_VERNOTIF in the taken IF branch rejects, in every signature version. |
+| `vernotif-exec-v0` | OP_VERNOTIF in the taken IF branch rejects, in every signature version. |
+| `vernotif-exec-tapscript` | OP_VERNOTIF in the taken IF branch rejects, in every signature version. |
 | `stack-1000-legacy` | Legacy main stack of 1,000 accepts. Cleanstack is off. |
 | `stack-1001-legacy` | Legacy main stack of 1,001 rejects. |
 | `stack-alt-1000-legacy` | Legacy main stack plus altstack of 1,000 accepts: 201 items moved aside, then 799 more. |
@@ -297,7 +303,7 @@ Core `script_tests.json` already has both an accept and a reject for NOP, VERIFY
 
 An optional `spend` object sets `version`, `locktime`, `sequence`, and `n_outputs` on the spending transaction only. A missing object is version 1, locktime 0, sequence `0xffffffff`, and one output. `version` is the consensus i32 bit pattern.
 
-Unknown hashtype bytes are a STRICTENC check. DERSIG checks the DER encoding and still accepts hashtype `0x04`. LOW_S stays off.
+Unknown hashtype bytes are a STRICTENC check. DERSIG checks the DER encoding and still accepts hashtype `0x00`, `0x04`, `0x80`, and `0x85`. The signature is over that raw byte, so rewriting it to a standard type rejects. LOW_S stays off.
 
 FindAndDelete is observed with an empty signature. Its needle is the single byte `OP_0`. A verifying signature is not placed in `scriptPubKey`, because this credit template would make that signature commit to a txid that already contains it. A `0x00` buried in a push is the off-boundary case. A signature longer than `scriptCode` is the no-op already covered by `sighash-all-legacy`.
 
@@ -338,6 +344,24 @@ Tapscript validation weight: one non-empty CHECKSIGADD against a 1-byte pubkey a
 | `sighash-type04-strictenc-legacy` | STRICTENC rejects hashtype 0x04. LOW_S stays off. |
 | `sighash-type04-dersig-v0` | Witness v0 DERSIG alone accepts hashtype 0x04. |
 | `sighash-type04-strictenc-v0` | Witness v0 STRICTENC rejects hashtype 0x04. |
+| `sighash-type00-dersig-legacy` | DERSIG accepts hashtype 0x00. The digest uses that raw byte, not SIGHASH_ALL. |
+| `sighash-type00-strictenc-legacy` | STRICTENC rejects hashtype 0x00. |
+| `sighash-type00-as-01-legacy` | The 0x00 signature with its type byte rewritten to 0x01 rejects. |
+| `sighash-type00-dersig-v0` | Witness v0 DERSIG accepts hashtype 0x00. |
+| `sighash-type00-strictenc-v0` | Witness v0 STRICTENC rejects hashtype 0x00. |
+| `sighash-type00-as-01-v0` | Witness v0 rejects the 0x00 signature rewritten to 0x01. |
+| `sighash-type80-dersig-legacy` | DERSIG accepts hashtype 0x80 (ANYONECANPAY with base 0). |
+| `sighash-type80-strictenc-legacy` | STRICTENC rejects hashtype 0x80. |
+| `sighash-type80-as-81-legacy` | The 0x80 signature rewritten to 0x81 rejects. |
+| `sighash-type80-dersig-v0` | Witness v0 DERSIG accepts hashtype 0x80. |
+| `sighash-type80-strictenc-v0` | Witness v0 STRICTENC rejects hashtype 0x80. |
+| `sighash-type80-as-81-v0` | Witness v0 rejects the 0x80 signature rewritten to 0x81. |
+| `sighash-type85-dersig-legacy` | DERSIG accepts hashtype 0x85 (ANYONECANPAY with base 5). |
+| `sighash-type85-strictenc-legacy` | STRICTENC rejects hashtype 0x85. |
+| `sighash-type85-as-81-legacy` | The 0x85 signature rewritten to 0x81 rejects. |
+| `sighash-type85-dersig-v0` | Witness v0 DERSIG accepts hashtype 0x85. |
+| `sighash-type85-strictenc-v0` | Witness v0 STRICTENC rejects hashtype 0x85. |
+| `sighash-type85-as-81-v0` | Witness v0 rejects the 0x85 signature rewritten to 0x81. |
 | `dersig-off-nondet-legacy` | With DERSIG and LOW_S off, a non-minimal S that the lax parser accepts still verifies. |
 | `dersig-on-nondet-legacy` | DERSIG rejects that non-minimal S. LOW_S stays off. |
 | `dersig-off-nondet-v0` | Witness v0 with DERSIG off accepts the same non-minimal S. |
