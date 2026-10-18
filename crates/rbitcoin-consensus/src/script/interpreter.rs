@@ -588,9 +588,10 @@ pub(crate) fn eval_script(
                 }
 
                 let rm = ctx.minimal_data;
-                // `push` enforces the shared stack limit. A later check would
-                // not see a larger stack: every growth goes through `push`,
-                // and OP_TOALTSTACK only moves an element.
+                // `push` enforces the shared stack limit. Every growth goes
+                // through `push`, and OP_TOALTSTACK only moves an element. A
+                // witness v0 stack can start above the limit, so a pop and a
+                // push can still fail.
                 match code {
                     // OP_0 is PushBytes, not an opcode. OP_RESERVED, OP_VER,
                     // OP_VERIF, and OP_RETURN fail from the unknown-opcode arm
@@ -720,7 +721,9 @@ pub(crate) fn eval_script(
                     0x7d => {
                         require_n(stack, 2)?;
                         let v = stack[stack.len() - 1].clone();
-                        stack.insert(stack.len() - 2, v);
+                        push(stack, altstack.len(), v)?;
+                        let n = stack.len();
+                        stack.swap(n - 3, n - 2);
                     }
                     0x82 => {
                         require_n(stack, 1)?;
@@ -808,9 +811,7 @@ pub(crate) fn eval_script(
                         let v = pop(stack)?;
                         use bitcoin::hashes::ripemd160;
                         let digest = ripemd160::Hash::hash(&v).to_byte_array();
-                        // Pop-then-one-push cannot exceed the limit `push` already
-                        // enforced on the way to a full stack. The digest is 20 bytes.
-                        push(stack, altstack.len(), digest.to_vec()).expect("ripemd160 fits");
+                        push(stack, altstack.len(), digest.to_vec())?;
                     }
                     0xa7 => {
                         // OP_SHA1 is consensus-enabled (was stubbed → would fail post-milestone).
@@ -829,8 +830,7 @@ pub(crate) fn eval_script(
                         let v = pop(stack)?;
                         use bitcoin::hashes::sha256d;
                         let digest = sha256d::Hash::hash(&v).to_byte_array();
-                        // Same stack shape as RIPEMD160: one pop, one 32-byte push.
-                        push(stack, altstack.len(), digest.to_vec()).expect("hash256 fits");
+                        push(stack, altstack.len(), digest.to_vec())?;
                     }
                     0xab => {
                         // Tapscript: instruction index. Base/v0: scriptCode after this opcode.
