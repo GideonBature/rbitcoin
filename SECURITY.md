@@ -53,7 +53,11 @@ that affect consensus, P2P attack surface, or Electrum/query integrity.
 - **P2P:** BIP324 v2-only. DoS parity with Bitcoin Core is **not** claimed, but
   mitigations are intentional operator surface: max inbound sessions
   (`--max-inbound`, default 125), per-session message/byte
-  rate windows, misbehavior score disconnect.
+  rate windows, misbehavior score disconnect. Peer AEAD is the
+  `chacha20-poly1305` 0.1 that `bip324` 0.11 links. That is current
+  `rust-bitcoin/bip324` master, not a local pin. `noise_sv2` already uses
+  the renamed `chacha20poly1305` crate. No version bump until upstream
+  publishes one.
 - **Electrum and Esplora:** plain TCP/HTTP; TLS is an operator reverse-proxy
   concern. Wallet clients and electrs HTTP (except address-prefix)
   ([`COMPAT.md`](./COMPAT.md)).
