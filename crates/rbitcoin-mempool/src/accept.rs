@@ -1316,11 +1316,7 @@ impl ActiveMempool {
         } else {
             BTreeSet::new()
         };
-        let parent_txids: BTreeSet<Txid> = scan
-            .parent_txids
-            .into_iter()
-            .filter(|p| !conflict_set.contains(p))
-            .collect();
+        let parent_txids = scan.parent_txids;
         // Cluster limits count raw weight (Libre): at 20 B/sigop an adjusted
         // cap would reject any tx above ~20,200 sigop cost.
         let (n_members, base_w) = self
@@ -1334,6 +1330,11 @@ impl ActiveMempool {
                 count: n_members + 1,
                 weight: combined_w,
             });
+        }
+        // Core `bad-txns-spends-conflicting-tx`. A parent in the conflict set
+        // is evicted by this accept, and its outputs with it.
+        if parent_txids.iter().any(|p| conflict_set.contains(p)) {
+            return Err(AcceptError::Policy("bad-txns-spends-conflicting-tx"));
         }
 
         Ok((conflict_set, fee_sat, weight))
