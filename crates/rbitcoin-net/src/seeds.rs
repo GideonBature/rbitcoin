@@ -1027,10 +1027,24 @@ mod tests {
             "[2001:10::1]:8333".parse().unwrap(),
             "[2001:20::1]:8333".parse().unwrap(),
             "[100::1]:8333".parse().unwrap(),
+            "0.1.2.3:8333".parse().unwrap(),
+            "[2002:0a00:1::]:8333".parse().unwrap(),
+            "[64:ff9b::a00:1]:8333".parse().unwrap(),
             public,
         ]);
         assert_eq!(book.len(), 1);
         assert!(book.entry(&public).is_some());
+        let sixto4_public: SocketAddr = "[2002:0102:0304::]:8333".parse().unwrap();
+        let nat64_public: SocketAddr = "[64:ff9b::102:304]:8333".parse().unwrap();
+        book.inject([sixto4_public, nat64_public]);
+        assert!(
+            book.entry(&sixto4_public).is_some(),
+            "6to4 of a public IPv4 stays"
+        );
+        assert!(
+            book.entry(&nat64_public).is_some(),
+            "NAT64 of a public IPv4 stays"
+        );
         let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
         assert!(book.add_learned(lan, 64));
         assert!(book.entry(&lan).is_some());

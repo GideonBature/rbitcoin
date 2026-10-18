@@ -68,6 +68,24 @@ fn ipv6_special_unroutable(v: Ipv6Addr) -> bool {
     o[0] == 0x01 && o[1] == 0x00 && o[2..8].iter().all(|&b| b == 0)
 }
 
+/// 6to4 `2002::/16` and well-known NAT64 `64:ff9b::/96` when the embedded
+/// IPv4 is itself unroutable. A public embedded address stays.
+fn ipv6_embedded_bogon(v: Ipv6Addr) -> bool {
+    let o = v.octets();
+    if o[0] == 0x20 && o[1] == 0x02 {
+        return ipv4_unroutable(Ipv4Addr::new(o[2], o[3], o[4], o[5]));
+    }
+    if o[0] == 0x00
+        && o[1] == 0x64
+        && o[2] == 0xff
+        && o[3] == 0x9b
+        && o[4..12].iter().all(|&b| b == 0)
+    {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    false
+}
+
 /// `100.64.0.0/10`. `Ipv4Addr::is_shared` is still unstable on 1.95.
 fn ipv4_shared(v: Ipv4Addr) -> bool {
     let o = v.octets();
@@ -85,6 +103,11 @@ fn ipv4_reserved(v: Ipv4Addr) -> bool {
     v.octets()[0] & 0xf0 == 240
 }
 
+/// `0.0.0.0/8`. `is_unspecified` is only `0.0.0.0`.
+fn ipv4_this_network(v: Ipv4Addr) -> bool {
+    v.octets()[0] == 0
+}
+
 fn ipv4_unroutable(v: Ipv4Addr) -> bool {
     v.is_unspecified()
         || v.is_loopback()
@@ -96,6 +119,7 @@ fn ipv4_unroutable(v: Ipv4Addr) -> bool {
         || ipv4_shared(v)
         || ipv4_benchmarking(v)
         || ipv4_reserved(v)
+        || ipv4_this_network(v)
 }
 
 /// Clearnet bogon. CJDNS `fc00::/8` is an overlay, not a unique-local bogon.
@@ -115,6 +139,7 @@ pub(crate) fn clearnet_unroutable(ip: IpAddr) -> bool {
                 || v.is_unique_local()
                 || v.is_multicast()
                 || ipv6_special_unroutable(v)
+                || ipv6_embedded_bogon(v)
         }
     }
 }
