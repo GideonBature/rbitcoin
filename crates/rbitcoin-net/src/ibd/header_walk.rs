@@ -1676,24 +1676,35 @@ fn judge_refill(st: &mut IbdWorkState, hub: &ChainHub, start_h: u32, headers: &[
 fn unproved_anchor(st: &IbdWorkState, hub: &ChainHub) -> Option<(BlockHash, u32)> {
     let front = st.ordered.front().copied()?;
     let front_h = st.hash_height.get(&front).copied()?;
-    let reached = st.ordered.iter().any(|hash| {
-        st.hash_height.get(hash).is_some_and(|ht| {
-            st.header_walk
-                .checkpoints
+    // One comparison: a checkpoint at or above the queue front is the proof
+    // when some stored hash has reached it. Anything lower is the anchor a
+    // replacement batch has to build on. `c.height < front_h` is that same
+    // split, so it is not a second check.
+    let mut reached = false;
+    let mut below: Option<&Checkpoint> = None;
+    for c in &st.header_walk.checkpoints {
+        if c.height >= front_h {
+            let covered = st
+                .ordered
                 .iter()
-                .any(|c| *ht >= c.height && c.height >= front_h)
-        })
-    });
+                .any(|hash| st.hash_height.get(hash).is_some_and(|ht| *ht >= c.height));
+            if covered {
+                reached = true;
+            }
+        } else {
+            let replace = match below {
+                Some(best) => c.height > best.height,
+                None => true,
+            };
+            if replace {
+                below = Some(c);
+            }
+        }
+    }
     if reached {
         return None;
     }
-    if let Some(cp) = st
-        .header_walk
-        .checkpoints
-        .iter()
-        .filter(|c| c.height < front_h)
-        .max_by_key(|c| c.height)
-    {
+    if let Some(cp) = below {
         return Some((cp.hash, cp.height));
     }
     let tip_h = hub.tip_height()?;
@@ -6974,5 +6985,432 @@ mod tests {
         let (work, _) = stored_path_state(&st, &hub, next.block_hash())
             .expect("the confirmed tip prices a header the base cannot reach");
         assert_eq!(work, hub.chain_work().unwrap() + next.work());
+    }
+
+    fn byte_hash(n: u8) -> BlockHash {
+        let mut raw = [0u8; 32];
+        raw[31] = n;
+        BlockHash::from_byte_array(raw)
+    }
+
+    fn mark_checkpoint(hash: BlockHash, height: u32) -> Checkpoint {
+        Checkpoint {
+            hash,
+            height,
+            work: [0; 32],
+            header: None,
+            times: Vec::new(),
+            diff: DiffSnap::default(),
+        }
+    }
+
+    fn fresh_walk() -> IbdWorkState {
+        let (peer, _rx) = slot(0);
+        IbdWorkState::new(vec![peer], None, None)
+    }
+
+    fn plant_challenger(st: &mut IbdWorkState, fork: BlockHash) {
+        st.header_walk.challenger = Some(Challenger {
+            fork_hash: fork,
+            fork_height: 1,
+            tip: WalkTip::default(),
+            checkpoints: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn retain_challenger_keeps_a_fork_that_is_still_on_the_candidate() {
+        let fork = byte_hash(1);
+        let other = byte_hash(2);
+        let mut st = fresh_walk();
+        st.header_walk.base_hash = Some(fork);
+        plant_challenger(&mut st, fork);
+        retain_challenger(&mut st);
+        assert!(
+            st.header_walk.challenger.is_some(),
+            "the walk base still holds the fork"
+        );
+
+        st.header_walk.base_hash = Some(other);
+        st.header_walk.checkpoints.push(mark_checkpoint(fork, 4));
+        retain_challenger(&mut st);
+        assert!(
+            st.header_walk.challenger.is_some(),
+            "a checkpoint still holds the fork"
+        );
+
+        st.header_walk.checkpoints.clear();
+        retain_challenger(&mut st);
+        assert!(
+            st.header_walk.challenger.is_none(),
+            "a fork off the candidate is dropped"
+        );
+    }
+
+    #[test]
+    fn adopt_heavier_keeps_the_milestone_at_the_fork_height() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("hdr-adopt-pin");
+        hub.ensure_genesis().unwrap();
+        let prev = byte_hash(3);
+        let header = Header {
+            version: bitcoin::block::Version::from_consensus(4),
+            prev_blockhash: prev,
+            merkle_root: TxMerkleNode::from_byte_array([4; 32]),
+            time: 1_600_000_100,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 1,
+        };
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], hub.tip_hash(), hub.tip_height());
+        st.hash_height.insert(prev, 5);
+        hub.milestone.height = 5;
+        let marker = byte_hash(9);
+        st.header_walk.tip.milestone_hash = Some(marker);
+        let mut raw = [0u8; 32];
+        raw[31] = 9;
+        let passed = Work::from_be_bytes(raw);
+        adopt_heavier(&mut st, &hub, prev, &[header], passed);
+        assert_eq!(st.header_walk.tip.milestone_hash, Some(marker));
+        assert_eq!(st.header_walk.tip.work, passed);
+    }
+
+    #[test]
+    fn walk_ahead_of_stored_is_strictly_above_the_recorded_height() {
+        let mut st = fresh_walk();
+        st.header_walk.origin = true;
+        st.header_walk.tip.height = 4;
+        st.max_ordered_height = 4;
+        assert!(!walk_ahead_of_stored(&st));
+        st.header_walk.tip.height = 5;
+        assert!(walk_ahead_of_stored(&st));
+    }
+
+    #[test]
+    fn classify_pins_an_unlinked_batch_a_refill_and_the_first_checkpoint() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-classify-pin");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let good = mine(gen, 1);
+        let mut broken = mine(good.block_hash(), 2);
+        broken.prev_blockhash = byte_hash(8);
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        assert_eq!(
+            classify(&st, &hub, HeaderAsk::InWindow, &[good, broken]),
+            HeaderClass::Fork,
+            "an unlinked batch is not a refill of the stored tip"
+        );
+        assert_eq!(
+            classify(&st, &hub, HeaderAsk::InWindow, &[good]),
+            HeaderClass::Refill
+        );
+
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = Some(gen);
+        st.header_walk.tip.height = 0;
+        assert_eq!(
+            classify(&st, &hub, HeaderAsk::InWindow, &[good]),
+            HeaderClass::WalkAbsorb,
+            "the first solicited continuation is a checkpoint"
+        );
+    }
+
+    #[test]
+    fn headers_late_is_logged_only_for_a_late_extension() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-late-pin");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let good = mine(gen, 7);
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = Some(gen);
+        st.header_walk.tip.height = 0;
+        st.header_walk.tip.header = hub.tip_header();
+        rbitcoin_log::capture_logs(true);
+        assert!(absorb_lookahead(
+            &mut st,
+            &hub,
+            0,
+            HeaderAsk::InWindow,
+            &[good]
+        ));
+        let on_time = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            on_time
+                .iter()
+                .all(|(_, line)| !line.contains("ibd: headers late")),
+            "an in-window extension is not late: {on_time:?}"
+        );
+
+        let next = mine(good.block_hash(), 8);
+        rbitcoin_log::capture_logs(true);
+        assert!(absorb_lookahead(&mut st, &hub, 0, HeaderAsk::Late, &[next]));
+        let late = rbitcoin_log::take_logs();
+        rbitcoin_log::capture_logs(false);
+        assert!(
+            late.iter()
+                .any(|(_, line)| line.contains("ibd: headers late")),
+            "a late extension names itself: {late:?}"
+        );
+    }
+
+    fn floor_above(hub: &mut ChainHub) {
+        hub.milestone = rbitcoin_consensus::Milestone {
+            height: 100,
+            anchor: Some(rbitcoin_consensus::MilestoneAnchor {
+                hash: byte_hash(1),
+                min_work_be: [0xff; 32],
+            }),
+        };
+    }
+
+    #[test]
+    fn ignore_below_floor_pins_the_floor_gate_and_the_queue_cap() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("hdr-floor-pin");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let good = mine(gen, 1);
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = Some(byte_hash(3));
+        st.header_walk.tip.work = Work::from_be_bytes([0; 32]);
+        st.header_walk.dead_ends.insert(gen);
+        assert!(
+            !ignore_below_floor(&st, &hub, &[good]),
+            "above the floor a dead-end parent is not ignored"
+        );
+
+        floor_above(&mut hub);
+        st.header_walk.origin = false;
+        assert!(
+            !ignore_below_floor(&st, &hub, &[good]),
+            "below the floor a walk that has not started is not ignored"
+        );
+        st.header_walk.origin = true;
+        st.header_walk.dead_ends.clear();
+        assert!(
+            !ignore_below_floor(&st, &hub, &[good]),
+            "under the cap the stored tip's child is still the download path"
+        );
+        fill_queue(&mut st);
+        plant_on_queue(&mut st, gen, 0);
+        assert!(
+            ignore_below_floor(&st, &hub, &[good]),
+            "a full queue does not keep writing that child"
+        );
+    }
+
+    fn heavy_proved(st: &mut IbdWorkState, hub: &ChainHub) {
+        st.header_walk.origin = true;
+        st.header_walk.proven = true;
+        st.header_walk.tip.hash = hub.tip_hash();
+        st.header_walk.tip.height = hub.tip_height().unwrap_or(0);
+        st.header_walk.tip.work = Work::from_be_bytes([0xff; 32]);
+    }
+
+    #[test]
+    fn reject_refill_miss_pins_each_reason_it_returns() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-refill-pin");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let good = mine(gen, 3);
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        heavy_proved(&mut st, &hub);
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(9), 1));
+        st.header_walk.origin = false;
+        assert!(
+            !reject_refill_miss(&mut st, &hub, &[good]),
+            "a walk with no origin does not judge the refill"
+        );
+
+        heavy_proved(&mut st, &hub);
+        st.header_walk.checkpoints.clear();
+        let queued = byte_hash(8);
+        st.ordered.push_back(queued);
+        st.ordered_set.insert(queued);
+        st.hash_height.insert(queued, 1);
+        assert!(
+            !reject_refill_miss(&mut st, &hub, &[good]),
+            "no checkpoint means there is nothing to miss"
+        );
+        st.ordered.clear();
+        st.ordered_set.clear();
+        st.hash_height.remove(&queued);
+
+        heavy_proved(&mut st, &hub);
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(9), 1));
+        fill_queue(&mut st);
+        plant_on_queue(&mut st, gen, 0);
+        assert!(
+            !reject_refill_miss(&mut st, &hub, &[good]),
+            "a full queue is not a refill"
+        );
+
+        let stray = mine(byte_hash(7), 4);
+        let (peer, _rx) = slot(1);
+        let mut open = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        heavy_proved(&mut open, &hub);
+        open.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(9), 1));
+        open.header_walk.tip.hash = Some(byte_hash(6));
+        assert!(
+            !reject_refill_miss(&mut open, &hub, &[stray]),
+            "a batch that does not build on the confirmed tip is not a refill miss"
+        );
+    }
+
+    #[test]
+    fn proved_above_floor_requires_both() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-proved-pin");
+        hub.ensure_genesis().unwrap();
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], hub.tip_hash(), Some(0));
+        st.header_walk.proven = false;
+        st.header_walk.tip.work = Work::from_be_bytes([0xff; 32]);
+        assert!(!proved_above_floor(&st, &hub));
+        st.header_walk.proven = true;
+        assert!(proved_above_floor(&st, &hub));
+    }
+
+    #[test]
+    fn unproved_anchor_stops_at_a_met_checkpoint_and_keeps_the_one_below() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-anchor-pin");
+        hub.ensure_genesis().unwrap();
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], hub.tip_hash(), Some(0));
+        let front = byte_hash(5);
+        st.ordered.push_back(front);
+        st.ordered_set.insert(front);
+        st.hash_height.insert(front, 5);
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(3), 3));
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(4), 5));
+        assert!(unproved_anchor(&st, &hub).is_none());
+
+        st.header_walk.checkpoints.pop();
+        assert_eq!(unproved_anchor(&st, &hub), Some((byte_hash(3), 3)));
+    }
+
+    #[test]
+    fn candidate_prev_accepts_base_tip_and_checkpoint() {
+        let prev = byte_hash(1);
+        let mut st = fresh_walk();
+        st.header_walk.base_hash = Some(prev);
+        assert!(candidate_prev(&st, prev));
+        st.header_walk.base_hash = None;
+        st.header_walk.tip.hash = Some(prev);
+        assert!(candidate_prev(&st, prev));
+        st.header_walk.tip.hash = None;
+        st.header_walk.checkpoints.push(mark_checkpoint(prev, 2));
+        assert!(candidate_prev(&st, prev));
+        st.header_walk.checkpoints.clear();
+        assert!(!candidate_prev(&st, prev));
+    }
+
+    fn prefix_body(st: &mut IbdWorkState, _hub: &ChainHub, prev: BlockHash) -> Vec<Header> {
+        st.header_walk.proven = true;
+        st.header_walk.origin = true;
+        st.header_walk.tip.work = Work::from_be_bytes([0xff; 32]);
+        st.header_walk.base_hash = Some(prev);
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(9), 50));
+        vec![mine(prev, 11)]
+    }
+
+    #[test]
+    fn proven_header_prefix_writes_the_whole_reply_until_the_candidate_is_proved() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("hdr-prefix-pin");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        let prev = byte_hash(4);
+        let headers = prefix_body(&mut st, &hub, prev);
+        st.header_walk.proven = false;
+        assert_eq!(proven_header_prefix(&st, &hub, &headers), headers.len());
+        st.header_walk.proven = true;
+        st.header_walk.origin = false;
+        assert_eq!(proven_header_prefix(&st, &hub, &headers), headers.len());
+        st.header_walk.origin = true;
+        floor_above(&mut hub);
+        st.header_walk.tip.work = Work::from_be_bytes([0; 32]);
+        assert_eq!(proven_header_prefix(&st, &hub, &headers), headers.len());
+        hub.milestone.anchor = None;
+        st.header_walk.tip.work = Work::from_be_bytes([0xff; 32]);
+        assert_eq!(
+            proven_header_prefix(&st, &hub, &headers),
+            0,
+            "a proved candidate writes no header that misses the checkpoint"
+        );
+    }
+
+    #[test]
+    fn refill_misses_checkpoint_only_above_the_queue_tail() {
+        let tail = byte_hash(1);
+        let first = mine(tail, 21);
+        let second = mine(first.block_hash(), 22);
+        let mut st = fresh_walk();
+        st.header_walk.checkpoints.push(mark_checkpoint(tail, 5));
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(first.block_hash(), 6));
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(8), 7));
+        assert!(refill_misses_checkpoint(&st, 5, &[first, second]));
+        st.header_walk.checkpoints.clear();
+        st.header_walk.checkpoints.push(mark_checkpoint(tail, 5));
+        assert!(!refill_misses_checkpoint(&st, 5, &[first]));
+    }
+
+    #[test]
+    fn note_empty_rewinds_only_when_every_taller_peer_is_empty() {
+        let (_dir, mut hub) = crate::chain::tiny_regtest_hub_labeled("hdr-empty-pin");
+        hub.ensure_genesis().unwrap();
+        floor_above(&mut hub);
+        let gen = hub.tip_hash().unwrap();
+        let (mut tall, _rx0) = slot(0);
+        tall.peer_height = 10;
+        let (mut level, _rx1) = slot(1);
+        level.peer_height = 3;
+        let mut st = IbdWorkState::new(vec![tall, level], Some(gen), Some(0));
+        st.header_walk.origin = true;
+        st.header_walk.base_hash = Some(gen);
+        st.header_walk.base_height = 0;
+        st.header_walk.tip.hash = Some(byte_hash(4));
+        st.header_walk.tip.height = 3;
+        st.header_walk.tip.work = Work::from_be_bytes([0; 32]);
+        assert!(note_empty(&mut st, &hub, 0));
+        assert_eq!(st.header_walk.tip_hash(), Some(gen));
+    }
+
+    #[test]
+    fn note_stored_candidate_ignores_a_batch_that_does_not_link() {
+        let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-stored-pin");
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let mut broken = mine(gen, 30);
+        broken.bits = CompactTarget::from_consensus(0x1d00ffff);
+        let (peer, _rx) = slot(0);
+        let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
+        st.header_walk.origin = true;
+        st.header_walk.tip.hash = Some(gen);
+        st.header_walk.tip.height = 0;
+        note_stored_candidate(&mut st, &hub, &[broken]);
+        assert_eq!(st.header_walk.tip_hash(), Some(gen));
+        assert!(st.header_walk.checkpoints.is_empty());
     }
 }

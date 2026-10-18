@@ -421,7 +421,8 @@ fn decode_i2p_b64(s: &str) -> Result<Vec<u8>, NetError> {
                 )));
             }
         };
-        acc = (acc << 6) | v;
+        // `v` is six bits, so it does not overlap the shifted accumulator.
+        acc = (acc << 6) + v;
         n += 6;
         if n >= 8 {
             n -= 8;
@@ -1143,5 +1144,176 @@ mod tests {
         );
         assert!(i2p_addr_from_sam_b64("!!!").is_err());
         assert!(i2p_addr_from_sam_b64(&i2p_b64_encode(&[1, 2, 3])).is_err());
+    }
+
+    fn enc(msg: &str) -> NetError {
+        NetError::Encode(msg.to_string())
+    }
+
+    #[test]
+    fn sam_errors_name_the_socket_and_the_reply_that_retry() {
+        let io = NetError::Io(std::io::Error::other("sam io"));
+        assert!(session_dead(&io));
+        assert!(session_dead(&NetError::Disconnected));
+        assert!(sam_retry(&io));
+        assert!(sam_retry(&NetError::Disconnected));
+        assert!(stream_retry(&io));
+        assert!(stream_retry(&NetError::Disconnected));
+        assert!(session_dead(&enc("STREAM CONNECT: refused")));
+        assert!(!session_dead(&enc("i2p sam dial: connection refused")));
+        for needle in [
+            "connection reset",
+            "connection closed",
+            "i2p sam connect",
+            "early eof",
+            "unexpected eof",
+            "broken pipe",
+        ] {
+            assert!(sam_retry(&enc(needle)), "{needle}");
+        }
+        assert!(!sam_retry(&enc("i2p sam stream: RESULT=I2P_ERROR")));
+        for needle in [
+            "unexpected eof",
+            "broken pipe",
+            "connection reset",
+            "connection closed",
+            "cant_reach",
+            "early eof",
+            "timeout",
+        ] {
+            assert!(stream_retry(&enc(needle)), "{needle}");
+        }
+        assert!(!stream_retry(&enc("i2p sam stream: RESULT=I2P_ERROR")));
+    }
+
+    #[test]
+    fn i2p_b64_round_trips_digits_dash_and_tilde() {
+        for raw in [
+            vec![0, 0, 52],
+            vec![0, 0, 62],
+            vec![0, 0, 63],
+            vec![1, 2, 3, 4, 5],
+        ] {
+            let text = i2p_b64_encode(&raw);
+            assert_eq!(decode_i2p_b64(&text).unwrap(), raw, "{text}");
+            let plus = text.replace('-', "+");
+            let slash = text.replace('~', "/");
+            assert_eq!(decode_i2p_b64(&plus).unwrap(), raw, "{plus}");
+            assert_eq!(decode_i2p_b64(&slash).unwrap(), raw, "{slash}");
+        }
+    }
+
+    async fn sam_reply(lines: &'static [&'static str]) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    for reply in lines {
+                        if read_line(&mut sock).await.is_err() {
+                            return;
+                        }
+                        if write_line(&mut sock, reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hello_requires_the_reply_prefix_and_result_ok() {
+        let ok = sam_reply(&["HELLO REPLY RESULT=OK VERSION=3.1"]).await;
+        let mut sock = TcpStream::connect(ok).await.unwrap();
+        hello(&mut sock).await.unwrap();
+
+        let missing = sam_reply(&["HELLO REPLY RESULT=NOVERSION"]).await;
+        let mut sock = TcpStream::connect(missing).await.unwrap();
+        let err = hello(&mut sock).await.unwrap_err();
+        assert!(err.to_string().contains("i2p sam hello"), "{err}");
+
+        let bare = sam_reply(&["RESULT=OK"]).await;
+        let mut sock = TcpStream::connect(bare).await.unwrap();
+        let err = hello(&mut sock).await.unwrap_err();
+        assert!(err.to_string().contains("i2p sam hello"), "{err}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_line_stops_at_16kib() {
+        async fn once(n: usize) -> Result<usize, NetError> {
+            use tokio::io::AsyncWriteExt;
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let body = vec![b'a'; n];
+                sock.write_all(&body).await.unwrap();
+                sock.write_all(b"\n").await.unwrap();
+            });
+            let mut sock = TcpStream::connect(addr).await.unwrap();
+            let got = read_line(&mut sock).await.map(|s| s.len());
+            let _ = server.await;
+            got
+        }
+        assert_eq!(once(16 * 1024).await.unwrap(), 16 * 1024);
+        assert!(once(16 * 1024 + 1).await.is_err());
+        assert_eq!(once(16 + 1024 + 1).await.unwrap(), 16 + 1024 + 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_status_error_is_not_retried() {
+        let addr = sam_reply(&[
+            "HELLO REPLY RESULT=OK VERSION=3.1",
+            "STREAM STATUS RESULT=I2P_ERROR",
+        ])
+        .await;
+        let dialer = I2pDialer {
+            sam_addr: addr,
+            session_id: "once".into(),
+            destination: "dest".into(),
+            forward_port: None,
+        };
+        let started = std::time::Instant::now();
+        let err = dialer.stream_connect("peer.b32.i2p").await.unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a SAM status error is returned, not slept on"
+        );
+        assert!(err.to_string().contains("i2p sam stream"), "{err}");
+
+        let forward_addr = sam_reply(&[
+            "HELLO REPLY RESULT=OK VERSION=3.1",
+            "STREAM STATUS RESULT=I2P_ERROR",
+        ])
+        .await;
+        let (control, _held) = {
+            let hold = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let hold_addr = hold.local_addr().unwrap();
+            let accepted = tokio::spawn(async move {
+                let _ = hold.accept().await;
+            });
+            let control = TcpStream::connect(hold_addr).await.unwrap();
+            (control, accepted)
+        };
+        let mut sam = I2pSam {
+            sam_addr: forward_addr,
+            session_id: "fwd".into(),
+            destination: "dest".into(),
+            forward_port: None,
+            _control: control,
+            _forward: None,
+        };
+        let started = std::time::Instant::now();
+        let err = sam.stream_forward(9).await.unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a forward status error is returned, not slept on"
+        );
+        assert!(err.to_string().contains("i2p sam forward"), "{err}");
     }
 }

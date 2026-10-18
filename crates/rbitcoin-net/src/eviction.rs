@@ -106,9 +106,6 @@ fn remove_first_k(cands: &mut Vec<InboundEvictCandidate>, k: usize) {
 
 /// Protect up to `k` peers from the largest keyed netgroups (Core netgroup protect).
 fn protect_by_netgroup(cands: &mut Vec<InboundEvictCandidate>, k: usize) {
-    if k == 0 || cands.is_empty() {
-        return;
-    }
     use std::collections::HashMap;
     let mut counts: HashMap<u64, usize> = HashMap::new();
     for c in cands.iter() {
@@ -260,6 +257,35 @@ mod tests {
         // Fewer than protect budget → nothing to evict.
         let cands: Vec<_> = (0..8).map(|i| cand(i, i, Some(0.1), i, i)).collect();
         assert!(select_inbound_eviction(cands).is_none());
+    }
+
+    #[test]
+    fn protect_by_netgroup_keeps_one_peer_from_each_largest_group() {
+        let mut untouched = vec![cand(1, 1, None, 0, 0)];
+        protect_by_netgroup(&mut untouched, 0);
+        assert_eq!(untouched.len(), 1, "k = 0 protects nobody");
+        let mut empty = Vec::new();
+        protect_by_netgroup(&mut empty, 4);
+        assert!(empty.is_empty());
+
+        let group = |id, netgroup| InboundEvictCandidate {
+            netgroup,
+            ..cand(id, id, None, 0, 0)
+        };
+        // Group 10 has two peers. Group 1 has one. k = 1 protects the lowest
+        // id in the larger group and leaves the other two.
+        let mut cands = vec![group(1, 10), group(2, 10), group(3, 1)];
+        protect_by_netgroup(&mut cands, 1);
+        let ids: Vec<_> = cands.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![2, 3]);
+
+        let mut capped = vec![group(1, 10), group(3, 1)];
+        protect_by_netgroup(&mut capped, 1);
+        assert_eq!(capped.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1]);
+
+        let mut mismatched = vec![group(8, 4), group(9, 5)];
+        protect_by_netgroup(&mut mismatched, 1);
+        assert_eq!(mismatched.iter().map(|c| c.id).collect::<Vec<_>>(), vec![9]);
     }
 
     #[test]
