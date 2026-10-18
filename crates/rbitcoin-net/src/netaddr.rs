@@ -186,6 +186,22 @@ pub(crate) fn netaddr_unroutable_gossip(addr: NetAddr) -> bool {
     }
 }
 
+/// Rows the addrv2 relay loop must not forward.
+///
+/// Port 0 is not a dialable endpoint except I2P, which Core advertises with
+/// port 0. Tor v2 and CJDNS outside `fc00::/8` never become a [`NetAddr`],
+/// so the unroutable check would not see them. Unknown BIP155 network ids
+/// are still forwarded.
+pub(crate) fn addrv2_skip_relay(msg: &AddrV2Message) -> bool {
+    match &msg.addr {
+        AddrV2::I2p(_) => false,
+        AddrV2::TorV2(_) => true,
+        AddrV2::Cjdns(ip) if !is_cjdns_ip(*ip) => true,
+        _ if msg.port == 0 => true,
+        _ => NetAddr::from_addrv2(msg).is_some_and(netaddr_unroutable_gossip),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NetAddr {
     Ip(SocketAddr),

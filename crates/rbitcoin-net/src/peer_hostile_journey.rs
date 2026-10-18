@@ -3,7 +3,7 @@ use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::ScriptBuf;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 fn hostile_ver(addr: SocketAddr) -> VersionMessage {
     VersionMessage {
@@ -80,11 +80,45 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
         addr: AddrV2::I2p([0x11; 32]),
         port: 0,
     };
+    let tor_v2 = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::TorV2([0xab; 10]),
+        port: 8333,
+    };
+    let cjdns_bad = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Cjdns(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+        port: 8333,
+    };
+    let cjdns = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Cjdns(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)),
+        port: 8333,
+    };
+    let unknown = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Unknown(0x99, vec![1, 2, 3, 4]),
+        port: 8333,
+    };
     let mut follow = PeerFollowState::new();
     on_addrv2(
         &mut follow,
         Some(peer.as_ref()),
-        &[lan, public.clone(), cgnat, zero_port, i2p.clone()],
+        &[
+            lan,
+            public.clone(),
+            cgnat,
+            zero_port,
+            i2p.clone(),
+            tor_v2,
+            cjdns_bad,
+            cjdns.clone(),
+            unknown.clone(),
+        ],
     )
     .unwrap();
 
@@ -95,10 +129,10 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
     let NetworkMessage::AddrV2(sent) = got else {
         panic!("expected addrv2, got {got:?}");
     };
-    assert_eq!(sent, vec![public, i2p]);
+    assert_eq!(sent, vec![public, i2p, cjdns, unknown]);
     assert!(
         dst_rx.try_recv().is_err(),
-        "unroutable rows and port-0 clearnet are not relayed"
+        "unroutable rows, port-0 clearnet, Tor v2, and non-CJDNS are not relayed"
     );
     let book = book.lock().unwrap_or_else(|e| e.into_inner());
     let public_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 8333);
