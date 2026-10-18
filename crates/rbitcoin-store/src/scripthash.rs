@@ -720,6 +720,7 @@ fn collect_linked_pages(
     first_page: u64,
     out: &mut Vec<Fk>,
     prev_last: &mut Option<u64>,
+    page_cap: u32,
 ) -> Result<(), StoreError> {
     if first_page == 0 {
         return Ok(());
@@ -730,7 +731,7 @@ fn collect_linked_pages(
     let mut guard = 0u32;
     loop {
         guard = guard.saturating_add(1);
-        if guard > SH_PAGE_CHAIN_MAX {
+        if guard > page_cap {
             return Err(StoreError::Corrupt("scripthash page chain cycle"));
         }
         let at = out.len();
@@ -748,7 +749,13 @@ fn collect_linked_pages(
 fn collect_page_chain_linked(body: &TableFile, first_page: u64) -> Result<Vec<Fk>, StoreError> {
     let mut out = Vec::new();
     let mut prev_last = None;
-    collect_linked_pages(body, first_page, &mut out, &mut prev_last)?;
+    collect_linked_pages(
+        body,
+        first_page,
+        &mut out,
+        &mut prev_last,
+        SH_PAGE_CHAIN_MAX,
+    )?;
     Ok(out)
 }
 
@@ -786,7 +793,7 @@ fn collect_extent_then_tail(body: &TableFile, last_page: u64) -> Result<Vec<Fk>,
         ));
     }
     let mut prev_last = out.last().map(|fk| fk.0);
-    collect_linked_pages(body, tail_off, &mut out, &mut prev_last)?;
+    collect_linked_pages(body, tail_off, &mut out, &mut prev_last, SH_PAGE_CHAIN_MAX)?;
     Ok(out)
 }
 

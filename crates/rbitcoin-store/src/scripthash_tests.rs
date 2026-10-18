@@ -3654,8 +3654,11 @@ fn pack_one_shard_unlinks_only_its_postings() {
     }
 }
 
+/// A two-page cycle stops at the walk cap. The walk uses 4, not the production
+/// million, so llvm-cov finishes. `SH_PAGE_CHAIN_MAX` stays one million.
 #[test]
 fn scripthash_page_cycle_is_corrupt() {
+    assert_eq!(super::SH_PAGE_CHAIN_MAX, 1_000_000);
     let dir = tmp();
     let path = dir.join("cycle.body");
     let body =
@@ -3672,10 +3675,12 @@ fn scripthash_page_cycle_is_corrupt() {
     body.write_at(page_b, &b).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let res = super::collect_page_chain_linked(&body, page_a);
+        let mut out = Vec::new();
+        let mut prev_last = None;
+        let res = super::collect_linked_pages(&body, page_a, &mut out, &mut prev_last, 4);
         let _ = tx.send(res.map(|_| ()));
     });
-    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
         Ok(Ok(())) => panic!("cycle returned entries"),
         Ok(Err(StoreError::Corrupt(msg))) => assert!(msg.contains("cycle"), "{msg}"),
         Ok(Err(other)) => panic!("{other}"),
