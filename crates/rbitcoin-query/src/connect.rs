@@ -44,6 +44,15 @@ pub struct ConfirmPrepared {
     pub hash: [u8; 32],
 }
 
+/// IBD tip barrier. At most one runs; the next `tip_commit` taker joins it.
+#[derive(Default)]
+pub(crate) enum TipFlush {
+    #[default]
+    Idle,
+    Running(std::thread::JoinHandle<Result<(), StoreError>>),
+    Failed,
+}
+
 impl Query {
     /// Tip hash from the last confirm or disconnect, if it still matches `height`.
     pub fn published_tip(&self) -> Option<PublishedTip> {
@@ -96,19 +105,72 @@ impl Query {
         self.published_tip.store(None);
     }
 
-    /// Block until the in-flight tip flush or disconnect releases the commit.
-    pub fn lock_tip_commit(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.tip_commit.lock().unwrap_or_else(|e| e.into_inner())
+    /// Block until the in-flight tip flush or disconnect releases the commit,
+    /// then join an IBD tip flush that is still running.
+    pub fn lock_tip_commit(&self) -> Result<std::sync::MutexGuard<'_, ()>, QueryError> {
+        let commit = self.tip_commit.lock().unwrap_or_else(|e| e.into_inner());
+        self.join_tip_flush()?;
+        Ok(commit)
     }
 
-    /// `None` while a confirm flush or disconnect holds the commit.
+    /// `None` while a confirm flush or disconnect holds the commit, while an
+    /// IBD tip flush is still running, or after one failed.
     /// Rewind uses this so the orchestration task does not wait on that disk.
     pub fn try_lock_tip_commit(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
-        match self.tip_commit.try_lock() {
-            Ok(g) => Some(g),
-            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
+        let commit = match self.tip_commit.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let running = matches!(
+            &*self.tip_flush.lock().unwrap_or_else(|e| e.into_inner()),
+            TipFlush::Running(h) if !h.is_finished()
+        );
+        if running || self.join_tip_flush().is_err() {
+            return None;
         }
+        Some(commit)
+    }
+
+    /// Wait for the IBD tip barrier. Its failure sticks: a failed `fsync` is
+    /// not retried, so every later commit fails until restart.
+    pub(crate) fn join_tip_flush(&self) -> Result<(), QueryError> {
+        let mut state = self.tip_flush.lock().unwrap_or_else(|e| e.into_inner());
+        let joined = match std::mem::take(&mut *state) {
+            TipFlush::Idle => return Ok(()),
+            TipFlush::Failed => Err(StoreError::io(
+                self.store.path(),
+                std::io::Error::other("an earlier IBD tip flush failed; restart the node"),
+            )),
+            TipFlush::Running(flush) => {
+                let t = std::time::Instant::now();
+                let r = flush
+                    .join()
+                    .unwrap_or(Err(StoreError::Corrupt("IBD tip flush thread panicked")));
+                crate::note_confirm(
+                    &self.confirm_stats().write_tip_flush_wait_ns,
+                    t.elapsed().as_nanos() as u64,
+                );
+                r
+            }
+        };
+        if joined.is_err() {
+            *state = TipFlush::Failed;
+        }
+        joined
+    }
+
+    /// IBD: the next batch's archive and checks run while this batch's
+    /// barrier syncs. That batch's commit joins it first, so the disk order
+    /// stays the same.
+    fn spawn_tip_flush(&self) -> Result<(), QueryError> {
+        let store = Arc::clone(&self.store);
+        let flush = std::thread::Builder::new()
+            .name("rbtc-tip-flush".into())
+            .spawn(move || store.flush_class_c_tip())
+            .map_err(|e| StoreError::io(self.store.path(), e))?;
+        *self.tip_flush.lock().unwrap_or_else(|e| e.into_inner()) = TipFlush::Running(flush);
+        Ok(())
     }
 
     /// One header read at open, so the first orchestration pass does not
@@ -251,7 +313,7 @@ impl Query {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        let commit = self.lock_tip_commit();
+        let commit = self.lock_tip_commit()?;
         for w in items.windows(2) {
             if w[1].height.0 != w[0].height.0.saturating_add(1) {
                 return Err(StoreError::Corrupt("confirm run not contiguous heights"));
@@ -333,10 +395,14 @@ impl Query {
         }
         // Do not forget pending here: drain may still be inserting tx.head
         // (67438). Write forgets after drain.join() *and* this extend.
-        // L2 write-behind barrier: complete-or-fail Class C image to disk **before**
-        // callers dequeue the body queue. Kill after this returns → tip durable;
-        // kill before → BQ still holds blocks for re-drive.
-        self.store.flush_class_c_tip()?;
+        // L2 write-behind barrier: complete-or-fail Class C image to disk. Tip
+        // mode returns after it. IBD returns before it and may dequeue the RAM
+        // body queue: a kill then loses at most one more batch to re-download.
+        if self.index_mode()?.is_tip() {
+            self.store.flush_class_c_tip()?;
+        } else {
+            self.spawn_tip_flush()?;
+        }
         drop(commit);
         crate::note_confirm(
             &self.confirm_stats().tip_ns,
@@ -857,7 +923,7 @@ impl Query {
     /// Logs [`format_disconnect_tip_line`] at **warn** before the scripthash
     /// unlink and again after the tip shrink commits.
     pub fn disconnect_tip(&self) -> Result<(), QueryError> {
-        let _commit = self.lock_tip_commit();
+        let _commit = self.lock_tip_commit()?;
         self.disconnect_tip_body(true)
     }
 
@@ -869,7 +935,7 @@ impl Query {
 
     /// Class C disconnect without dropping RAM SH pending (reorg reaccept first).
     pub fn disconnect_tip_keep_pending(&self) -> Result<(), QueryError> {
-        let _commit = self.lock_tip_commit();
+        let _commit = self.lock_tip_commit()?;
         self.disconnect_tip_body(false)
     }
 

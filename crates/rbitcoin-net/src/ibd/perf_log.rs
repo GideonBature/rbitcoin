@@ -99,6 +99,9 @@ pub(crate) struct WriteStageSample {
     /// `class_c_commit` join/flush minus tables (`class_c_join=`)
     pub class_c_join_ms: u64,
     pub class_c_join_ns: u64,
+    /// Commit wait for the previous batch's background tip flush (`tip_flush_wait=`)
+    pub tip_flush_wait_ms: u64,
+    pub tip_flush_wait_ns: u64,
     /// Residual `head_insert_queued` join after Class C (`drain_join=`).
     /// Includes seal-sidecar collect of `txid.body` keys plus fuse/MPHF build.
     pub drain_join_ms: u64,
@@ -137,6 +140,11 @@ impl WriteStageSample {
         ("pins", |s| s.pins_ms, |s| s.pins_ns),
         ("head_sub", |s| s.head_sub_ms, |s| s.head_sub_ns),
         ("class_c_join", |s| s.class_c_join_ms, |s| s.class_c_join_ns),
+        (
+            "tip_flush_wait",
+            |s| s.tip_flush_wait_ms,
+            |s| s.tip_flush_wait_ns,
+        ),
         ("drain_join", |s| s.drain_join_ms, |s| s.drain_join_ns),
         ("dequeue", |s| s.dequeue_ms, |s| s.dequeue_ns),
         ("idx_put", |s| s.idx_put_ms, |s| s.idx_put_ns),
@@ -872,6 +880,7 @@ pub(crate) fn sample(
     let class_a_ns = w.class_a_ns;
     let ensure_ns = w.ensure_layout_ns;
     let drain_join_ns = w.write_drain_join_ns;
+    let tip_flush_wait_ns = w.write_tip_flush_wait_ns;
     let dequeue_ns = w.write_dequeue_ns;
     let pins_take_ns = w.write_plan_take_ns;
     let pins_map_ns = w.write_create_map_ns;
@@ -966,6 +975,8 @@ pub(crate) fn sample(
             head_sub_ns,
             class_c_join_ms: ns_ms(class_c_join_ns),
             class_c_join_ns,
+            tip_flush_wait_ms: ns_ms(tip_flush_wait_ns),
+            tip_flush_wait_ns,
             drain_join_ms: ns_ms(drain_join_ns),
             drain_join_ns,
             dequeue_ms: ns_ms(dequeue_ns),

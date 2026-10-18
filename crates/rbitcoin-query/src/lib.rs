@@ -354,7 +354,7 @@ impl ShWriteBehind {
 
 /// Domain query facade used by higher layers (consensus, net, RPC).
 pub struct Query {
-    store: Store,
+    store: Arc<Store>,
     /// When false, confirm skips durable spend-annotation writes.
     spend_index: std::sync::atomic::AtomicBool,
     /// When false, archive skips durable `tx.head` inserts.
@@ -439,9 +439,13 @@ pub struct Query {
     sh_runs_published: AtomicUsize,
     /// Process-owned sizes last published by the confirm thread.
     owned_sizes_published: arc_swap::ArcSwap<ProcessOwnedSizes>,
-    /// Held from the tip-height check through `flush_class_c_tip` / disconnect
-    /// flush. Rewind tries it and retries; it does not disconnect mid-flush.
+    /// Held from the tip-height check through `flush_class_c_tip` (IBD: through
+    /// starting it) / disconnect flush. Rewind tries it and retries; it does not
+    /// disconnect mid-flush.
     tip_commit: Mutex<()>,
+    /// IBD tip barrier on `rbtc-tip-flush`, or the failure of one. The next
+    /// `tip_commit` taker joins it.
+    tip_flush: Mutex<connect::TipFlush>,
     /// Confirm / archive / load window meters (`ibd: perf`). One instance per Query.
     confirm_stats: Arc<ConfirmStats>,
     /// Tip height of last in-process io_uring recover (`u32::MAX` = none).
@@ -551,7 +555,7 @@ impl Query {
         // and nothing is queued: the drain starts there.
         let head_drained = store.txs.head_last_inserted_fk();
         let q = Self {
-            store,
+            store: Arc::new(store),
             spend_index: std::sync::atomic::AtomicBool::new(true),
             tx_index: std::sync::atomic::AtomicBool::new(true),
             sh: ShWriteBehind::new(),
@@ -591,6 +595,7 @@ impl Query {
             sh_runs_published: AtomicUsize::new(0),
             owned_sizes_published: arc_swap::ArcSwap::from_pointee(ProcessOwnedSizes::default()),
             tip_commit: Mutex::new(()),
+            tip_flush: Mutex::new(connect::TipFlush::Idle),
             confirm_stats: Arc::new(ConfirmStats::default()),
             uring_recover_tip: AtomicU32::new(u32::MAX),
             pruneheight: AtomicU32::new(ph),
@@ -1409,7 +1414,16 @@ impl Query {
     ///
     /// See [`rbitcoin_store::Store::flush_for_shutdown`].
     pub fn flush_for_shutdown(&self) -> Result<(), QueryError> {
+        let _commit = self.lock_tip_commit()?;
         self.store.flush_for_shutdown()
+    }
+}
+
+impl Drop for Query {
+    fn drop(&mut self) {
+        if let Err(e) = self.join_tip_flush() {
+            rbitcoin_log::warn!("store: IBD tip flush failed before close: {e}");
+        }
     }
 }
 
@@ -2631,6 +2645,7 @@ impl Query {
 
     /// Flush header rows + Class A body associations (IBD writer durability).
     pub fn flush_header_archive(&self) -> Result<(), QueryError> {
+        let _commit = self.lock_tip_commit()?;
         self.store.flush_header_archive()
     }
 
@@ -2654,6 +2669,7 @@ impl Query {
         if !self.store.path().exists() {
             return Err(StoreError::NotDirectory(self.store.path().to_path_buf()));
         }
+        let _commit = self.lock_tip_commit()?;
         self.store.flush()
     }
 }

@@ -309,6 +309,10 @@ fn write_phase(
             .first()
             .map(|first| query.store().note_spend_annotate_pending(first.height.0));
         let cc0 = query.confirm_stats().class_c_ns.load(Ordering::Relaxed);
+        let wait0 = query
+            .confirm_stats()
+            .write_tip_flush_wait_ns
+            .load(Ordering::Relaxed);
         let t_cc = Instant::now();
         let out = class_c_commit(query, &mut batch.prepared, &write_create_pins)?;
         super::phases::remember_connected_bip34(query, params, &batch.prepared);
@@ -318,7 +322,14 @@ fn write_phase(
             .class_c_ns
             .load(Ordering::Relaxed)
             .saturating_sub(cc0);
-        let class_c_join_ns = class_c_wall_ns.saturating_sub(class_c_ns);
+        let tip_flush_wait_ns = query
+            .confirm_stats()
+            .write_tip_flush_wait_ns
+            .load(Ordering::Relaxed)
+            .saturating_sub(wait0);
+        let class_c_join_ns = class_c_wall_ns
+            .saturating_sub(class_c_ns)
+            .saturating_sub(tip_flush_wait_ns);
         if class_c_join_ns > 0 {
             crate::note_confirm(
                 &query.confirm_stats().write_class_c_join_ns,
