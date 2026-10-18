@@ -1126,6 +1126,11 @@ fn cheap_submit_tx_reject(
     if let Some(reason) = submit_checkblock_reason(block, spend_height, params, milestone)? {
         return Ok(Some(reason));
     }
+    // A parent off the best chain can create the coins this block spends.
+    // Only the branch connect sees them (Core checks inputs in ConnectBlock).
+    if spend_height.is_none() {
+        return Ok(None);
+    }
     let mut spent = std::collections::HashSet::new();
     let mut created: std::collections::HashMap<OutPoint, TxOut> = std::collections::HashMap::new();
     for (i, (tx, &tid)) in block.txdata.iter().zip(&txids).enumerate() {

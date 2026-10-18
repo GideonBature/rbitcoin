@@ -2612,9 +2612,14 @@ impl ChainHub {
                 self.accept_branch_restore(fork_height, old_path, &e)?;
                 return Err(e);
             }
+            // `ConnectFailed` displays its own "consensus: " prefix.
+            let msg = match &e {
+                NetError::Consensus(m) | NetError::Mutated(m) => m.clone(),
+                other => other.to_string(),
+            };
             let failed = NetError::ConnectFailed {
                 hash: b.block_hash().to_byte_array(),
-                msg: e.to_string(),
+                msg,
             };
             let prefix = &blocks[..i];
             if !prefix.is_empty() && work_better(self.branch_header_work(prefix)?, old_work) {
