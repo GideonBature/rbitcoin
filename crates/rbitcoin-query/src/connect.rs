@@ -160,6 +160,20 @@ impl Query {
         joined
     }
 
+    /// L2 write-behind barrier: the complete-or-fail Class C image to disk.
+    /// Tip mode returns after it. IBD returns before it and may dequeue the
+    /// RAM body queue: a kill then loses at most one more batch to download
+    /// again. Returns the tip that is durable now (`before` while the IBD
+    /// flush runs), which seqsigwit prune keeps its window below.
+    fn flush_tip(&self, before: Option<Height>) -> Result<Option<Height>, QueryError> {
+        if self.index_mode()?.is_tip() {
+            self.store.flush_class_c_tip()?;
+            return Ok(self.tip_height());
+        }
+        self.spawn_tip_flush()?;
+        Ok(before)
+    }
+
     /// IBD: the next batch's archive and checks run while this batch's
     /// barrier syncs. That batch's commit joins it first, so the disk order
     /// stays the same.
@@ -446,15 +460,7 @@ impl Query {
         }
         // Do not forget pending here: drain may still be inserting tx.head
         // (67438). Write forgets after drain.join() *and* this extend.
-        // L2 write-behind barrier: complete-or-fail Class C image to disk. Tip
-        // mode returns after it. IBD returns before it and may dequeue the RAM
-        // body queue: a kill then loses at most one more batch to re-download.
-        let inline = self.index_mode()?.is_tip();
-        if inline {
-            self.store.flush_class_c_tip()?;
-        } else {
-            self.spawn_tip_flush()?;
-        }
+        let durable = self.flush_tip(durable_before)?;
         drop(commit);
         crate::note_confirm(
             &self.confirm_stats().tip_ns,
@@ -466,13 +472,6 @@ impl Query {
         if let Some(tip) = self.tip_height() {
             let _ = self.ensure_height_by_hash_index(tip);
         }
-        // Prune below a durable tip: this one after an inline flush, the one
-        // before it while this batch's flush still runs.
-        let durable = if inline {
-            self.tip_height()
-        } else {
-            durable_before
-        };
         self.record_confirmed_seqsigwit_window(items, durable)?;
 
         Ok(out)
