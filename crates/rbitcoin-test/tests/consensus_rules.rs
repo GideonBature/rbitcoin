@@ -844,7 +844,7 @@ fn connect_in_batches_bip34_at(
 /// already starts with the later height (Core's 490,897 / 1,983,702 case).
 /// With BIP34 at 100, Core 31.1 accepts: h1 creates X with scriptSig
 /// push(150), h149 spends X:0, h150 creates X again, h250 spends the new X:0.
-fn bip34_era_repeat_chain() -> Chain {
+fn bip34_era_repeat_chain(second_spend_sat: u64) -> Chain {
     let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
     let x =
         rbitcoin_consensus::regtest_coinbase(150, Amount::from_sat(25_0000_0000), op_true.clone());
@@ -864,7 +864,7 @@ fn bip34_era_repeat_chain() -> Chain {
             250 => vec![spend_anyone_can_spend(
                 x.compute_txid(),
                 0,
-                Amount::from_sat(23_0000_0000),
+                Amount::from_sat(second_spend_sat),
             )],
             _ => vec![],
         };
@@ -881,7 +881,7 @@ fn bip34_era_repeat_chain() -> Chain {
 
 #[test]
 fn bip34_era_repeat_connects_in_any_batch_split() {
-    let chain = bip34_era_repeat_chain();
+    let chain = bip34_era_repeat_chain(23_0000_0000);
     for cuts in [
         &[][..],
         &[148],
@@ -894,6 +894,27 @@ fn bip34_era_repeat_connects_in_any_batch_split() {
             connect_in_batches_bip34_at(&chain, cuts, 100),
             Ok(Some(Height(250))),
             "cuts {cuts:?}"
+        );
+    }
+}
+
+/// Core 31.1 rejects h250 with `bad-txns-BIP30` when it repeats h149's spend
+/// byte for byte: h149's output is still unspent.
+#[test]
+fn bip34_era_repeated_spend_rejects_bip30_in_any_batch_split() {
+    let chain = bip34_era_repeat_chain(24_0000_0000);
+    for cuts in [&[][..], &[148], &[149], &[149, 150], &[100, 200]] {
+        let got = connect_in_batches_bip34_at(&chain, cuts, 100);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "cuts {cuts:?}: got {got:?}"
+        );
+    }
+    for cuts in [&[149][..], &[100, 149, 200]] {
+        let got = connect_merged(&chain, cuts, 100);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "merged, cuts {cuts:?}: got {got:?}"
         );
     }
 }
@@ -984,7 +1005,7 @@ fn repeated_coinbase_connects_when_ibd_merges_load_batches() {
             "pre-BIP34, load cuts {cuts:?}"
         );
     }
-    let era = bip34_era_repeat_chain();
+    let era = bip34_era_repeat_chain(23_0000_0000);
     for cuts in [&[149][..], &[100, 149, 200], &[148, 150]] {
         assert_eq!(
             connect_merged(&era, cuts, 100),

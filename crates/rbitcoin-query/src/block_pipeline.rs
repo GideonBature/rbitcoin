@@ -1189,7 +1189,6 @@ fn reject_bip30_unspent_overwrite(
         .iter()
         .map(|tx| tx.compute_txid().to_byte_array())
         .collect();
-    let txids_can_repeat = !ctx.params.bip34_active_at(ctx.height.0);
     // An earlier block of this batch is not connected yet, so the store
     // lookup below cannot see its creates.
     for txid in &create_txids {
@@ -1247,9 +1246,6 @@ fn reject_bip30_unspent_overwrite(
                 true,
             )?;
         }
-    }
-    if !txids_can_repeat {
-        return Ok(());
     }
     for (i, (txid, tx)) in create_txids.into_iter().zip(&block.txdata).enumerate() {
         let fk = create_fks
