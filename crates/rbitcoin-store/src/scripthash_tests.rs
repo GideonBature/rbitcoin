@@ -3687,3 +3687,35 @@ fn scripthash_page_cycle_is_corrupt() {
         Err(_) => panic!("page cycle did not return"),
     }
 }
+
+/// Freeing a two-page cycle stops at the walk cap. The walk uses 4, not the
+/// production million, so llvm-cov finishes.
+#[test]
+fn scripthash_page_free_cycle_is_corrupt() {
+    assert_eq!(super::SH_PAGE_CHAIN_MAX, 1_000_000);
+    let dir = tmp();
+    let path = dir.join("free-cycle.body");
+    let body =
+        crate::file::TableFile::create(&path, rbitcoin_primitives::TableKind::ScriptHash).unwrap();
+    let page_a = 4096u64;
+    let page_b = 8192u64;
+    let mut a = [0u8; SH_PAGE_SIZE];
+    let mut b = [0u8; SH_PAGE_SIZE];
+    crate::scripthash_pages::sh_page_init_empty(&mut a);
+    crate::scripthash_pages::sh_page_init_empty(&mut b);
+    sh_page_set_next(&mut a, page_b).unwrap();
+    sh_page_set_next(&mut b, page_a).unwrap();
+    body.write_at(page_a, &a).unwrap();
+    body.write_at(page_b, &b).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = super::follow_page_chain(&body, page_a, 4, |_body, _off| Ok(()));
+        let _ = tx.send(res);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(())) => panic!("free walk returned"),
+        Ok(Err(StoreError::Corrupt(msg))) => assert!(msg.contains("cycle"), "{msg}"),
+        Ok(Err(other)) => panic!("{other}"),
+        Err(_) => panic!("page free cycle did not return"),
+    }
+}

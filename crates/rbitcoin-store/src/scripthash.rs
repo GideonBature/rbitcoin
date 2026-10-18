@@ -715,6 +715,28 @@ fn collect_page_chain_span(
 /// Same stop as `hashhead` multi-list walks. A two-page cycle never returns otherwise.
 const SH_PAGE_CHAIN_MAX: u32 = 1_000_000;
 
+/// Follow `next` and visit each page. `page_cap` stops a cycle.
+fn follow_page_chain(
+    body: &TableFile,
+    mut off: u64,
+    page_cap: u32,
+    mut visit: impl FnMut(&TableFile, u64) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    let mut guard = 0u32;
+    while off != 0 {
+        guard = guard.saturating_add(1);
+        if guard > page_cap {
+            return Err(StoreError::Corrupt("scripthash page chain cycle"));
+        }
+        let mut page = [0u8; SH_PAGE_SIZE];
+        body.read_at(off, &mut page)?;
+        let next = sh_page_next(&page)?;
+        visit(body, off)?;
+        off = next;
+    }
+    Ok(())
+}
+
 fn collect_linked_pages(
     body: &TableFile,
     first_page: u64,
@@ -2253,14 +2275,10 @@ impl ScriptHashTable {
     ) -> Result<(), StoreError> {
         match old {
             ShHeadValue::Extent { last_page } => {
-                let mut off = paged_first_from_last(body, *last_page)?;
-                while off != 0 {
-                    let mut page = [0u8; SH_PAGE_SIZE];
-                    body.read_at(off, &mut page)?;
-                    let next = sh_page_next(&page)?;
-                    self.free_slab(body, alloc, SH_PAGE_SLAB_CLASS, off)?;
-                    off = next;
-                }
+                let first = paged_first_from_last(body, *last_page)?;
+                follow_page_chain(body, first, SH_PAGE_CHAIN_MAX, |body, off| {
+                    self.free_slab(body, alloc, SH_PAGE_SLAB_CLASS, off)
+                })?;
             }
             ShHeadValue::Slab { class, off, .. } => {
                 self.free_slab(body, alloc, *class, *off)?;
