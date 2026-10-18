@@ -645,7 +645,8 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         rbitcoin_query::expected_next_bits(ctx.query.as_ref(), &params, Height(next_h), curtime)
             .map(|c| c.to_consensus())
             .unwrap_or(tip_bits);
-    // Core `GetMinimumTime`: the next block must be above the tip median.
+    // The next block must be above the tip median. Core's `GetMinimumTime`
+    // also raises this at retarget heights; that floor is not applied here.
     let mintime = if tip_h == 0 {
         tip_time
     } else {
