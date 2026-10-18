@@ -846,30 +846,32 @@ fn connect_in_batches_bip34_at(
 /// push(150), h149 spends X:0, h150 creates X again, h250 spends the new X:0.
 fn bip34_era_repeat_chain(second_spend_sat: u64) -> Chain {
     let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-    let x =
-        rbitcoin_consensus::regtest_coinbase(150, Amount::from_sat(25_0000_0000), op_true.clone());
+    let x = rbitcoin_consensus::regtest_coinbase(150, Amount::from_sat(25_0000_0000), op_true);
+    let spend = |sat: u64| spend_anyone_can_spend(x.compute_txid(), 0, Amount::from_sat(sat));
+    repeat_chain(250, &x, &[1, 150], |h| match h {
+        149 => vec![spend(24_0000_0000)],
+        250 => vec![spend(second_spend_sat)],
+        _ => vec![],
+    })
+}
+
+/// Chain to `tip` with coinbase `x` at each `x_at` height and `txs(h)` in block h.
+fn repeat_chain(
+    tip: u32,
+    x: &bitcoin::Transaction,
+    x_at: &[u32],
+    txs: impl Fn(u32) -> Vec<bitcoin::Transaction>,
+) -> Chain {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
     let g = regtest_genesis();
     let mut run: Chain = Vec::new();
-    for h in 1..=250u32 {
+    for h in 1..=tip {
         let (prev, time) = run
             .last()
             .map(|(_, b)| (b.block_hash(), b.header.time + 600))
             .unwrap_or((g.block_hash(), g.header.time + 600));
-        let txs = match h {
-            149 => vec![spend_anyone_can_spend(
-                x.compute_txid(),
-                0,
-                Amount::from_sat(24_0000_0000),
-            )],
-            250 => vec![spend_anyone_can_spend(
-                x.compute_txid(),
-                0,
-                Amount::from_sat(second_spend_sat),
-            )],
-            _ => vec![],
-        };
-        let mut b = rbitcoin_consensus::mine_regtest_paying(prev, time, h, op_true.clone(), txs);
-        if h == 1 || h == 150 {
+        let mut b = rbitcoin_consensus::mine_regtest_paying(prev, time, h, op_true.clone(), txs(h));
+        if x_at.contains(&h) {
             b.txdata[0] = x.clone();
             b.header.merkle_root = b.compute_merkle_root().unwrap();
             rbitcoin_consensus::grind_regtest_pow(&mut b.header);
@@ -877,6 +879,123 @@ fn bip34_era_repeat_chain(second_spend_sat: u64) -> Chain {
         run.push((Height(h), b));
     }
     run
+}
+
+/// Pre-BIP34 (BIP34 at 1000) coinbase X paying 25 BTC, and `spend(prev, sat)`.
+fn pre_bip34_x() -> bitcoin::Transaction {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    rbitcoin_consensus::regtest_coinbase(1, Amount::from_sat(25_0000_0000), op_true)
+}
+
+fn spend_of(prev: &bitcoin::Transaction, sat: u64) -> bitcoin::Transaction {
+    spend_anyone_can_spend(prev.compute_txid(), 0, Amount::from_sat(sat))
+}
+
+/// h102 creates P and spends P:0 in the same block; h103 spends P:0 again.
+/// Core 31.1 rejects h103 (`bad-txns-inputs-missingorspent`), including when
+/// IBD merges the two load batches into one write.
+#[test]
+fn respend_of_a_same_block_spend_rejects_in_any_split() {
+    let x = pre_bip34_x();
+    let p = spend_of(&x, 24_0000_0000);
+    let chain = repeat_chain(103, &x, &[1], |h| match h {
+        102 => vec![p.clone(), spend_of(&p, 23_0000_0000)],
+        103 => vec![spend_of(&p, 22_0000_0000)],
+        _ => vec![],
+    });
+    let spent = |got: &Result<Option<Height>, String>| matches!(got, Err(e) if ["PrevoutSpent", "double spend"].iter().any(|w| e.contains(w)));
+    for cuts in [&[][..], &[102], &[54]] {
+        let got = connect_in_batches(&chain, cuts);
+        assert!(spent(&got), "cuts {cuts:?}: got {got:?}");
+    }
+    for cuts in [&[102][..], &[54, 102]] {
+        let got = connect_merged(&chain, cuts, 1000);
+        assert!(spent(&got), "merged, cuts {cuts:?}: got {got:?}");
+    }
+}
+
+/// h102 spends X:0 by T and T:0 by U in the same block, h103 mines X again,
+/// h204 repeats T, h205 spends the new T:0. Core 31.1 accepts to 205: the
+/// first T was spent inside its own block.
+#[test]
+fn repeated_tx_spent_in_its_own_block_connects_in_any_split() {
+    let x = pre_bip34_x();
+    let t = spend_of(&x, 24_0000_0000);
+    let chain = repeat_chain(205, &x, &[1, 103], |h| match h {
+        102 => vec![t.clone(), spend_of(&t, 23_0000_0000)],
+        204 => vec![t.clone()],
+        205 => vec![spend_of(&t, 22_0000_0000)],
+        _ => vec![],
+    });
+    for cuts in [&[][..], &[101], &[102], &[103], &[150], &[203]] {
+        assert_eq!(
+            connect_in_batches(&chain, cuts),
+            Ok(Some(Height(205))),
+            "cuts {cuts:?}"
+        );
+    }
+    for cuts in [&[102][..], &[101, 103], &[150]] {
+        assert_eq!(
+            connect_merged(&chain, cuts, 1000),
+            Ok(Some(Height(205))),
+            "merged, cuts {cuts:?}"
+        );
+    }
+}
+
+/// X three times: h1, h103, h204, each copy spent before the next (h102,
+/// h203) and the last at h304. Core 31.1 accepts to 304. With h1 connected
+/// and the rest in one batch, the BIP30 check of h204 must count h102's spend
+/// of the connected copy.
+#[test]
+fn third_copy_of_a_coinbase_connects_in_any_split() {
+    let x = pre_bip34_x();
+    let chain = repeat_chain(304, &x, &[1, 103, 204], |h| match h {
+        102 => vec![spend_of(&x, 24_0000_0000)],
+        203 => vec![spend_of(&x, 23_0000_0000)],
+        304 => vec![spend_of(&x, 22_0000_0000)],
+        _ => vec![],
+    });
+    for cuts in [&[][..], &[101], &[101, 204], &[102], &[203]] {
+        assert_eq!(
+            connect_in_batches(&chain, cuts),
+            Ok(Some(Height(304))),
+            "cuts {cuts:?}"
+        );
+    }
+    for cuts in [&[101][..], &[150, 250]] {
+        assert_eq!(
+            connect_merged(&chain, cuts, 1000),
+            Ok(Some(Height(304))),
+            "merged, cuts {cuts:?}"
+        );
+    }
+}
+
+/// Same, but h204 mines X while h103's copy is still unspent. Core 31.1:
+/// h204 `bad-txns-BIP30`. h102's spend of the connected copy does not count
+/// as a spend of h103's copy.
+#[test]
+fn third_copy_over_an_unspent_copy_rejects_bip30_in_any_split() {
+    let x = pre_bip34_x();
+    let chain = repeat_chain(204, &x, &[1, 103, 204], |h| match h {
+        102 => vec![spend_of(&x, 24_0000_0000)],
+        _ => vec![],
+    });
+    for cuts in [&[][..], &[101], &[102], &[103]] {
+        let got = connect_in_batches(&chain, cuts);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "cuts {cuts:?}: got {got:?}"
+        );
+    }
+    for cuts in [&[101][..], &[150]] {
+        let got = connect_merged(&chain, cuts, 1000);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "merged, cuts {cuts:?}: got {got:?}"
+        );
+    }
 }
 
 #[test]
