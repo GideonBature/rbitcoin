@@ -1676,10 +1676,8 @@ fn judge_refill(st: &mut IbdWorkState, hub: &ChainHub, start_h: u32, headers: &[
 fn unproved_anchor(st: &IbdWorkState, hub: &ChainHub) -> Option<(BlockHash, u32)> {
     let front = st.ordered.front().copied()?;
     let front_h = st.hash_height.get(&front).copied()?;
-    // One comparison: a checkpoint at or above the queue front is the proof
-    // when some stored hash has reached it. Anything lower is the anchor a
-    // replacement batch has to build on. `c.height < front_h` is that same
-    // split, so it is not a second check.
+    // The highest checkpoint under the queue front is the anchor. A covered
+    // checkpoint at or above the front means the queue is already proved.
     let mut reached = false;
     let mut below: Option<&Checkpoint> = None;
     for c in &st.header_walk.checkpoints {
