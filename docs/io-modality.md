@@ -126,7 +126,7 @@ If a change seems to require collapsing a machine, **stop and ask**.
 |------|----------------------|------|
 | **L0** | Kernel page cache via pread/pwrite; process holds staging only | Payload then HWM publish; `sync_data` on flush barriers |
 | **L1** | 4 KiB head pages / 3–4 KiB SH chunks (working-set caches) | Write-back dirty page/chunk with one pwrite |
-| **L2** | Compact Class C (`confirmed`, `header_txs_*`, `strong_tx`) full `Vec` in process | **Write-behind:** RAM mutate during commit; complete-or-fail body image on `flush_class_c_tip` **before** body-queue dequeue |
+| **L2** | Compact Class C (`confirmed`, `header_txs_*`, `strong_tx`) full `Vec` in process | **Write-behind:** RAM mutate during commit; complete-or-fail body image on `flush_class_c_tip` ([when](./crash-recovery.md#flush)) |
 
 **Never L2:** `txout` / `seqsigwit` / `spent`, full `tx.head` / `*.idx`.
 `RBITCOIN_CLASS_C_INRAM_MAX_MB` (default 256) caps **`confirmed`** and
@@ -242,8 +242,7 @@ removed; default graph is product + suite). Head-insert A/B is the live
 `RBITCOIN_TX_HEAD_ACCESS` hatch. Tables are fd pread/pwrite + fallocate.
 Sealed `.fuse8` sidecars and SH BDZ3 occupancy prefixes are the mmap
 exceptions (read-only, not `MmapMut`). Packed `g` stays FdOnly. Class C is
-L2 write-behind (`flush_class_c_tip`
-before BQ dequeue) — **not** mapped (`strong_tx` write-behind is tip-last).
+L2 write-behind (`flush_class_c_tip`) — **not** mapped (`strong_tx` write-behind is tip-last).
 Mempool schema 4 is InRam Vecs + `pwrite`.
 
 Live head insert is page-coalesced pread → mutate → pwrite (not per-slot uring).
