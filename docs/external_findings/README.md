@@ -99,6 +99,9 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [103](./103-fuse8-segment-multiple.md) | high | fuse8 segment count must divide the array | fixed | `fuse8_segment_count_must_be_a_multiple_of_segment_length` |
 | [104](./104-body-read-cap.md) | high | A body read is capped before it allocates | fixed | `body_read_above_the_cap_is_refused` |
 | [105](./105-scripthash-page-cycle.md) | high | Scripthash page walks stop on a cycle | fixed | `scripthash_page_cycle_is_corrupt` |
+| [106](./106-historical-bitrot.md) | medium | Historical body bit-rot is an accepted reindex | accepted | none |
+| [107](./107-torn-spend-page.md) | medium | A torn spend page below the durable marker stays | accepted | none |
+| [108](./108-bobberb-store-index.md) | — | Bobberb store-integrity index | accepted | — |
 
 **012–021:** fuzzamoto differential report (`rbitcoin-report.tar.gz`, baseline
 `8f3990f`). Report-local 001–010 are **renumbered** here. Identity/BIP30
