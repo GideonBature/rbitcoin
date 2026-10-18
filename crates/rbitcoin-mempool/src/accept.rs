@@ -452,6 +452,15 @@ enum EvictUntil {
     WeightBudget,
 }
 
+/// What to do with orphans of a conflict that was just put back.
+#[derive(Clone, Copy)]
+enum RestoreOrphans {
+    /// No walk is running. Start one for each restored tx.
+    Promote,
+    /// A walk is already running. Hand the restored txids back to it.
+    Defer,
+}
+
 struct IngestedLive {
     graph: TxGraph,
     bodies: std::collections::HashMap<Txid, Arc<Transaction>>,
@@ -1389,6 +1398,9 @@ impl ActiveMempool {
     ///
     /// A worklist, so a parked chain does not keep one frame per descendant.
     /// The first child is admitted, then its descendants, then the next sibling.
+    ///
+    /// A child that still misses another parent goes back to the orphanage.
+    /// Conflicts put back by that failure join this same list.
     pub fn promote_orphans_of(
         &mut self,
         parent: Txid,
@@ -1396,17 +1408,26 @@ impl ActiveMempool {
         tip: ChainTipCtx,
     ) {
         let mut queue = VecDeque::new();
+        self.push_orphan_children(parent, &mut queue);
+        while let Some(child) = queue.pop_front() {
+            match self.accept_tx_with(&child, utxos, tip, 0, true, None) {
+                Ok(r) => self.push_orphan_children(r.txid, &mut queue),
+                Err(e) => {
+                    if let AcceptError::Orphaned { missing, .. } = e {
+                        let _ = self.park_orphan(&child, missing);
+                    }
+                    for id in self.restore_conflicts(utxos, tip, RestoreOrphans::Defer) {
+                        self.push_orphan_children(id, &mut queue);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Orphans of `parent`, earlier children still ahead of later ones.
+    fn push_orphan_children(&mut self, parent: Txid, queue: &mut VecDeque<Transaction>) {
         for child in self.orphanage.take_children_of(&parent).into_iter().rev() {
             queue.push_front(child);
-        }
-        while let Some(child) = queue.pop_front() {
-            if let Ok(r) = self.accept_tx_with(&child, utxos, tip, 0, true, None) {
-                for grandchild in self.orphanage.take_children_of(&r.txid).into_iter().rev() {
-                    queue.push_front(grandchild);
-                }
-            } else {
-                self.restore_undone(utxos, tip);
-            }
         }
     }
 
@@ -1671,7 +1692,7 @@ impl ActiveMempool {
             let _ = self.unlink_tree(&r.txid);
         }
         let _ = self.store.sync_deaths();
-        self.restore_victims(&victims, &accept_secs, utxos, tip);
+        let _ = self.restore_victims(&victims, &accept_secs, utxos, tip, RestoreOrphans::Promote);
     }
 
     /// Parents before children, so a restored descendant can see its in-set parent.
@@ -1741,25 +1762,42 @@ impl ActiveMempool {
         accept_secs: &std::collections::HashMap<Txid, u64>,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
-    ) {
+        orphans: RestoreOrphans,
+    ) -> Vec<Txid> {
+        let mut noted = Vec::new();
         for i in Self::ancestor_first_order(victims) {
             let at = accept_secs.get(&victims[i].compute_txid()).copied();
             match self.reaccept_already_admitted(&victims[i], at, utxos, tip) {
-                Ok(r) => self.promote_orphans_of(r.txid, utxos, tip),
+                Ok(r) => match orphans {
+                    RestoreOrphans::Promote => self.promote_orphans_of(r.txid, utxos, tip),
+                    RestoreOrphans::Defer => noted.push(r.txid),
+                },
                 Err(_) => {
                     if !self.undone_replacements.is_empty() {
-                        self.restore_undone(utxos, tip);
+                        noted.extend(self.restore_conflicts(utxos, tip, orphans));
                     }
                 }
             }
         }
+        noted
     }
 
     /// Re-accept conflicts a failed commit already removed.
     fn restore_undone(&mut self, utxos: &impl UtxoProvider, tip: ChainTipCtx) {
+        let _ = self.restore_conflicts(utxos, tip, RestoreOrphans::Promote);
+    }
+
+    /// Like [`Self::restore_undone`]. `Defer` returns the restored txids
+    /// instead of starting another orphan walk.
+    fn restore_conflicts(
+        &mut self,
+        utxos: &impl UtxoProvider,
+        tip: ChainTipCtx,
+        orphans: RestoreOrphans,
+    ) -> Vec<Txid> {
         let victims = std::mem::take(&mut self.undone_replacements);
         let accept_secs = std::mem::take(&mut self.undone_accept_secs);
-        self.restore_victims(&victims, &accept_secs, utxos, tip);
+        self.restore_victims(&victims, &accept_secs, utxos, tip, orphans)
     }
 
     /// Drop one live tx from the graph and `pwrite` its slot DEAD. No `fdatasync`.
@@ -3658,6 +3696,65 @@ mod tests {
         );
         child.output[0].value = Amount::from_sat(100_000 - 200 - 9);
         (parent, child)
+    }
+
+    /// One parent arriving must leave an orphan that still misses the other.
+    #[test]
+    fn promote_keeps_orphan_that_still_misses_a_parent() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent_a = spend_tx(ops[0], 99_000);
+        let parent_b = spend_tx(ops[1], 99_000);
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_a.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_b.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(197_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let child_id = child.compute_txid();
+        let err = mp.accept_tx(&child, &utxos, TIP_OK).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Orphaned { .. }),
+            "child waits on both parents, got {err}"
+        );
+        mp.accept_tx(&parent_a, &utxos, TIP_OK)
+            .expect("first parent");
+        assert!(
+            mp.orphanage.contains(&child_id),
+            "child still missing the second parent must stay parked"
+        );
+        assert!(!mp.graph.contains(&child_id));
+        mp.accept_tx(&parent_b, &utxos, TIP_OK)
+            .expect("second parent");
+        assert!(
+            mp.graph.contains(&child_id),
+            "both parents present must admit the parked child"
+        );
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Conflicts removed by a replacement come back after that replacement's
