@@ -90,6 +90,7 @@ impl RpcCookiePerms {
     }
 
     /// Unix permission bits no wider than this declaration.
+    #[cfg(unix)]
     fn allows_unix_mode(self, mode: u32) -> bool {
         let mode = mode & 0o777;
         match self {
@@ -108,6 +109,9 @@ impl RpcCookiePerms {
 /// clients disagree. Refusing it here turns mempool's endless 401 into a startup
 /// error.
 pub fn read_cookie_file(path: &Path, perms: RpcCookiePerms) -> Result<RpcCookie, String> {
+    // Mode bits exist only on Unix. The argument stays so every caller passes it.
+    #[cfg(not(unix))]
+    let _ = perms;
     let credentials =
         fs::read_to_string(path).map_err(|e| format!("read RPC cookie {}: {e}", path.display()))?;
     if credentials.ends_with(['\n', '\r']) {
