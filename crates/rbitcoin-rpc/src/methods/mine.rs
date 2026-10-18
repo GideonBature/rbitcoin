@@ -897,8 +897,29 @@ pub(crate) fn header_time(ctx: &RpcContext, h: u32) -> Option<u32> {
     Some(rec.timestamp)
 }
 
+/// Core `UpdateUncommittedBlockStructures`: a coinbase that commits to
+/// witnesses but carries no witness gets the 32 zero bytes, once segwit is
+/// active for this block. Mining software may leave it out.
+fn fill_witness_reserved_value(hub: &rbitcoin_net::ChainHub, block: &mut Block) {
+    let segwit = hub
+        .stored_header_height(&block.header.prev_blockhash)
+        .is_some_and(|h| hub.params.segwit_active_at(h.saturating_add(1)));
+    let Some(coinbase) = block.txdata.first_mut() else {
+        return;
+    };
+    if !segwit
+        || rbitcoin_consensus::witness_commitment_vout_index(coinbase).is_none()
+        || coinbase.input.iter().any(|i| !i.witness.is_empty())
+    {
+        return;
+    }
+    if let Some(input) = coinbase.input.first_mut() {
+        input.witness = bitcoin::Witness::from_slice(&[[0u8; 32]]);
+    }
+}
+
 /// Same receive path as P2P `block` (all networks).
-pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> SubmitBlockOutcome {
+pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> SubmitBlockOutcome {
     use bitcoin::Target;
     use rbitcoin_net::AcceptOutcome;
     let hash = block.block_hash();
@@ -922,6 +943,7 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, block: Block) -> Subm
     if !known {
         return SubmitBlockOutcome::Rejected("prev-blk-not-found".into());
     }
+    fill_witness_reserved_value(hub, &mut block);
     match cheap_submit_tx_reject(
         hub.query.as_ref(),
         &block,

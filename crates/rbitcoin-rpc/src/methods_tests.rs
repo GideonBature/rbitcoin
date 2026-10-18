@@ -4014,6 +4014,79 @@ fn submitblock_vout_past_n_out_is_missingorspent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `UpdateUncommittedBlockStructures`: a coinbase with a witness
+/// commitment and no witness gets the 32 zero bytes once segwit is active.
+/// Below segwit the commitment is plain data and the coinbase stays bare.
+/// A reserved value the miner already set is kept, a block with no
+/// commitment is left alone, and a parent known only as a header counts.
+#[test]
+fn submitblock_adds_the_witness_reserved_value_once_segwit_is_active() {
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.apply_test_activation_height("segwit", 2).unwrap();
+    let (ctx, dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    let mk = |prev: BlockHash, time: u32, height: u32, commit: Option<[u8; 32]>, own: bool| {
+        let mut b = rbitcoin_consensus::mine_regtest_paying(
+            prev,
+            time,
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![],
+        );
+        if let Some(reserved) = commit {
+            if own {
+                b.txdata[0].input[0].witness = bitcoin::Witness::from_slice(&[reserved]);
+            }
+            let commitment = rbitcoin_consensus::witness_commitment_script([], &reserved);
+            b.txdata[0].output.push(bitcoin::TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(commitment),
+            });
+            b.header.merkle_root = b.compute_merkle_root().unwrap();
+            regrind(&mut b);
+        }
+        b
+    };
+    let submit = |b: &Block| dispatch(&ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+    let mut prev = (hub.tip_hash().unwrap(), hub.tip_header().unwrap().time);
+    let zero = Some([0u8; 32]);
+    for (height, commit, own) in [
+        (1u32, zero, false),
+        (2, zero, false),
+        (3, Some([7u8; 32]), true),
+        (4, None, false),
+    ] {
+        let b = mk(prev.0, prev.1 + 1, height, commit, own);
+        let r = submit(&b);
+        assert!(r.is_null(), "height {height}: {r}");
+        assert_eq!(hub.tip_hash(), Some(b.block_hash()), "height {height}");
+        prev = (b.block_hash(), b.header.time);
+    }
+    // Headers first: once its child's header arrives, h5 is a stored header
+    // with no body and no longer a header tip.
+    let b5 = mk(prev.0, prev.1 + 1, 5, None, false);
+    let b6 = mk(b5.block_hash(), prev.1 + 2, 6, zero, false);
+    for b in [&b5, &b6] {
+        dispatch(&ctx, "submitheader", vec![json!(serialize_hex(&b.header))]).unwrap();
+    }
+    assert_eq!(submit(&b6), "inconclusive", "held until h5's body");
+    assert!(submit(&b5).is_null());
+    assert_eq!(hub.tip_hash(), Some(b6.block_hash()));
+
+    let coinbase_witness = |h: u32| {
+        let b = hub.query.reconstruct_block_at_height(Height(h)).unwrap();
+        b.txdata[0].input[0].witness.to_vec()
+    };
+    assert!(coinbase_witness(1).is_empty(), "no fill below segwit");
+    assert_eq!(coinbase_witness(2), vec![vec![0u8; 32]]);
+    assert_eq!(coinbase_witness(3), vec![vec![7u8; 32]]);
+    assert!(
+        coinbase_witness(4).is_empty(),
+        "no fill without a commitment"
+    );
+    assert_eq!(coinbase_witness(6), vec![vec![0u8; 32]]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A store fault reading the parent header is not `prev-blk-not-found`,
 /// and on the tip-extend path it is not a reject reason that gets cached.
 #[test]
