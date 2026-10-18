@@ -170,6 +170,7 @@ async fn start_rpc_listener(
         network: config.network,
         token_path: Some(config.rpc_token_path()),
         cookie_path: config.rpc_cookie_path(),
+        cookie_perms: config.rpc.cookie_perms,
         work_queue: config.rpc.work_queue,
         rest: config.rpc.rest,
         subversion: Some(

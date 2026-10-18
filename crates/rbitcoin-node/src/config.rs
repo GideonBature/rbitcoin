@@ -261,6 +261,8 @@ pub struct RpcOpts {
     pub token_file: Option<PathBuf>,
     /// Opt-in Core-format `username:password` cookie accepted as TCP HTTP Basic.
     pub cookie_file: Option<PathBuf>,
+    /// Widest mode `--rpc-cookie-perms` allows. Default owner (0600).
+    pub cookie_perms: rbitcoin_rpc::RpcCookiePerms,
     pub work_queue: Option<usize>,
     /// Core REST on the RPC listener. Off unless `--rest` / `rest=`.
     pub rest: bool,
@@ -275,6 +277,7 @@ impl Default for RpcOpts {
             socket_path: None,
             token_file: None,
             cookie_file: None,
+            cookie_perms: rbitcoin_rpc::RpcCookiePerms::Owner,
             work_queue: Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE),
             rest: false,
         }
@@ -679,7 +682,7 @@ impl NodeConfig {
                 "--rpc-cookie-file applies to TCP only; add --rpc-listen".into(),
             ));
         }
-        rbitcoin_rpc::read_cookie_file(path)
+        rbitcoin_rpc::read_cookie_file(path, self.rpc.cookie_perms)
             .map(drop)
             .map_err(NodeError::Config)
     }
@@ -1244,6 +1247,10 @@ impl NodeConfig {
                     ));
                 }
                 self.rpc.cookie_file = Some(PathBuf::from(val));
+            }
+            "rpc_cookie_perms" => {
+                self.rpc.cookie_perms =
+                    rbitcoin_rpc::RpcCookiePerms::parse(val).map_err(NodeError::Config)?;
             }
             "ua_comment" => self.uacomments.push(val.to_string()),
             "test_activation_height" => {
@@ -2302,6 +2309,25 @@ mod tests {
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("line ending"), "{err}");
         std::fs::write(&cookie, "__cookie__:secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("--rpc-cookie-perms owner"), "{err}");
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o640)).unwrap();
+            cfg.rpc.cookie_perms = rbitcoin_rpc::RpcCookiePerms::Group;
+            cfg.validate()
+                .expect("0640 is within --rpc-cookie-perms group");
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("--rpc-cookie-perms group"), "{err}");
+            cfg.rpc.cookie_perms = rbitcoin_rpc::RpcCookiePerms::All;
+            cfg.validate()
+                .expect("0644 is within --rpc-cookie-perms all");
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o600)).unwrap();
+            cfg.rpc.cookie_perms = rbitcoin_rpc::RpcCookiePerms::Owner;
+        }
         cfg.validate()
             .expect("Core-format cookie with --rpc-listen");
         cfg.rpc.listen_default = false;
