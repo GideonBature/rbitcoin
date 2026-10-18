@@ -4096,6 +4096,34 @@ fn overlay_misbehavior_discourages_that_net() {
     );
 }
 
+/// The refusal is the onion or I2P identity. Another port is the same peer.
+#[test]
+fn overlay_refusal_ignores_the_port() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_000);
+    let onion = |port| crate::NetAddr::Onion { pk: [9; 32], port };
+    let key = crate::peers::DiscourageKey::from_net(onion(8333)).unwrap();
+    peers.note_misbehavior_key(key);
+    assert!(peers.net_discouraged(onion(8333)));
+    assert!(
+        peers.net_discouraged(onion(9735)),
+        "the same onion on another port is still refused"
+    );
+    assert!(!peers.net_discouraged(crate::NetAddr::Onion {
+        pk: [8; 32],
+        port: 9735,
+    }));
+    let i2p = |port| crate::NetAddr::I2p {
+        dest: [7; 32],
+        port,
+    };
+    peers.note_misbehavior_key(crate::peers::DiscourageKey::from_net(i2p(0)).unwrap());
+    assert!(
+        peers.net_discouraged(i2p(8333)),
+        "the same I2P destination on another port is still refused"
+    );
+}
+
 #[test]
 fn threshold_exit_refuses_the_address_without_punish_disconnect() {
     let peers = crate::peers::PeerHub::new();

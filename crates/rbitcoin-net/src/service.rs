@@ -756,7 +756,11 @@ async fn run_outbound_session_with_abort(
                 return Err(NetError::Encode("feeler requires ip:port target".into()))
             }
         };
-        let stream = dialer.connect_net(crate::NetAddr::Ip(peer_addr)).await?;
+        let peer_net = crate::NetAddr::Ip(peer_addr);
+        if peers.net_discouraged(peer_net) {
+            return Err(NetError::Protocol("discouraged"));
+        }
+        let stream = dialer.connect_net(peer_net).await?;
         let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
         return crate::peer::run_feeler(stream, magic, local, peer_addr, height, &user_agent).await;
     }
@@ -817,6 +821,43 @@ mod tests {
         assert_eq!(
             magic_for_params(&params),
             Magic::from_bytes([0x54, 0xd2, 0x6f, 0xbd])
+        );
+    }
+
+    /// A feeler does not use `prepare_outbound_session`. It still must not
+    /// open a socket to an address that misbehaved.
+    #[tokio::test]
+    async fn feeler_does_not_dial_a_discouraged_address() {
+        let peers = crate::peers::PeerHub::new();
+        peers.set_mock_now(1_700_000_000);
+        let addr = std::net::SocketAddr::from(([1, 2, 3, 4], 8333));
+        peers.note_misbehavior_addr(addr.ip());
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("feeler-discouraged");
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            run_outbound_session_with_abort(
+                crate::peers::DialTarget::Socket(addr),
+                None,
+                Magic::REGTEST,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                std::sync::Arc::new(hub),
+                peers,
+                "/rbitcoin:test/".into(),
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                crate::peers::PeerConnType::Feeler,
+                rx,
+                crate::socks::Dialer::Direct,
+            ),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(dir.path());
+        let err = result
+            .expect("a refused feeler returns before the connect")
+            .unwrap_err();
+        assert!(
+            matches!(err, NetError::Protocol("discouraged")),
+            "feeler dialed a discouraged address, got {err:?}"
         );
     }
 

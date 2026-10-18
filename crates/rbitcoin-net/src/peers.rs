@@ -1382,18 +1382,20 @@ pub struct PeerInfo {
     pub best_known: Option<BlockHash>,
 }
 
-/// In-memory misbehavior key. Clearnet is the IP. Onion and I2P are the
-/// overlay identity, because their TCP socket is `0.0.0.0` or loopback.
+/// In-memory misbehavior key. Clearnet and CJDNS are the IP. Onion and I2P
+/// are the 32-byte identity. The port is not part of the key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DiscourageKey {
     Ip(IpAddr),
-    Overlay(crate::NetAddr),
+    Onion([u8; 32]),
+    I2p([u8; 32]),
 }
 
 impl DiscourageKey {
     pub(crate) fn from_net(net: crate::NetAddr) -> Option<Self> {
         match net {
-            crate::NetAddr::Onion { .. } | crate::NetAddr::I2p { .. } => Some(Self::Overlay(net)),
+            crate::NetAddr::Onion { pk, .. } => Some(Self::Onion(pk)),
+            crate::NetAddr::I2p { dest, .. } => Some(Self::I2p(dest)),
             crate::NetAddr::Cjdns { ip, .. } => Some(Self::Ip(IpAddr::V6(ip))),
             crate::NetAddr::Ip(sock) => {
                 let ip = sock.ip();
