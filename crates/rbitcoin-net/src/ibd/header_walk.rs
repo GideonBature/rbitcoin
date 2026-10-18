@@ -7299,6 +7299,19 @@ mod tests {
 
         st.header_walk.checkpoints.pop();
         assert_eq!(unproved_anchor(&st, &hub), Some((byte_hash(3), 3)));
+
+        st.header_walk.checkpoints.clear();
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(3), 3));
+        st.header_walk
+            .checkpoints
+            .push(mark_checkpoint(byte_hash(6), 3));
+        assert_eq!(
+            unproved_anchor(&st, &hub),
+            Some((byte_hash(3), 3)),
+            "two checkpoints at one height keep the earlier hash"
+        );
     }
 
     #[test]
