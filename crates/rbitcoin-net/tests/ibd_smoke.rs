@@ -134,24 +134,19 @@ async fn ibd_redials_immediately_and_does_not_invent_a_rehydrate() {
     let peer = start_node(&peer_dir).await;
     peer.hub.ensure_genesis().unwrap();
     let archived = peer.hub.query.archived_block_count().unwrap();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_c = Arc::clone(&cancel);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        cancel_c.store(true, Ordering::SeqCst);
-    });
     let mut cfg = IbdConfig::for_test();
     cfg.target_peers = 2;
     let take = logs_from_sync();
-    let _ = peer
-        .sync_cancellable(
-            &[rbitcoin_net::NetAddr::Ip(seed.local_addr)],
-            cfg,
-            Some(cancel),
-        )
-        .await;
+    // Cancel during the initial dial returns before rehydrate and before the
+    // redial line. This chain is two blocks, so catch-up exits on its own.
+    let finished = tokio::time::timeout(
+        Duration::from_secs(20),
+        peer.sync_cancellable(&[rbitcoin_net::NetAddr::Ip(seed.local_addr)], cfg, None),
+    )
+    .await;
     let logs = take();
     rbitcoin_log::capture_logs(false);
+    assert!(finished.is_ok(), "short-chain ibd did not finish: {logs:?}");
     assert!(
         logs.iter().any(|line| line.contains("ibd: redialing")),
         "a short peer set redials on the first loop: {logs:?}"
@@ -197,24 +192,19 @@ async fn ibd_notes_a_body_queue_row_above_the_tip() {
         .query
         .block_queue_enqueue(1, block.block_hash().to_byte_array(), fk.0, &raw)
         .unwrap();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_c = Arc::clone(&cancel);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        cancel_c.store(true, Ordering::SeqCst);
-    });
     let mut cfg = IbdConfig::for_test();
     cfg.target_peers = 1;
     let take = logs_from_sync();
-    let _ = peer
-        .sync_cancellable(
-            &[rbitcoin_net::NetAddr::Ip(seed.local_addr)],
-            cfg,
-            Some(cancel),
-        )
-        .await;
+    // Same dial-cancel hole as the redial journey: the noted line is written
+    // only after the handshake returns.
+    let finished = tokio::time::timeout(
+        Duration::from_secs(20),
+        peer.sync_cancellable(&[rbitcoin_net::NetAddr::Ip(seed.local_addr)], cfg, None),
+    )
+    .await;
     let logs = take();
     rbitcoin_log::capture_logs(false);
+    assert!(finished.is_ok(), "short-chain ibd did not finish: {logs:?}");
     assert!(
         logs.iter()
             .any(|line| line.contains("ibd: rehydrate: noted 1 in-RAM body queue entries")),
