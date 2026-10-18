@@ -2,7 +2,7 @@
 
 use crate::block_pipeline::{
     assemble_block_prevouts, resolve_prevout, structural_validate_spends, AsmPrevoutAcc,
-    ClassAWave, RunCreateHeight, StructuralScratch,
+    ClassAWave, RunCreateHeight, StructuralScratch, WriteHeaders,
 };
 use crate::ConfirmError;
 use bitcoin::absolute::LockTime;
@@ -392,6 +392,7 @@ fn rejects_unspent_overwrite(q: &crate::Query, first: &Transaction) {
             &ClassAWave::default(),
             &mut StructuralScratch::default(),
             &abs_jobs,
+            &WriteHeaders::empty(),
         )
         .expect_err("an unspent overwrite must trip BIP30");
         let msg = format!("{err}");
@@ -504,6 +505,7 @@ fn bip30_message_at_mainnet_above_bip34(
         &ClassAWave::default(),
         &mut StructuralScratch::default(),
         &abs_jobs,
+        &WriteHeaders::empty(),
     )
     .map(|_| ())
 }
@@ -2370,6 +2372,7 @@ fn bip30_ignores_unspendable_outputs() {
             &ClassAWave::default(),
             &mut StructuralScratch::default(),
             &abs_jobs,
+            &WriteHeaders::empty(),
         )
         .err()
         .map(|e| format!("{e}"))

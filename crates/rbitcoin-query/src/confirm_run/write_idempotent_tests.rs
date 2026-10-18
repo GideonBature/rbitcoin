@@ -1482,6 +1482,7 @@ fn structural_same_batch_overlay_skips_meta_pread() {
         &crate::block_pipeline::ClassAWave::new(fks.clone()),
         &mut scratch,
         &abs_jobs,
+        &crate::block_pipeline::WriteHeaders::empty(),
     )
     .expect("overlay spend is not durable-spent before tip");
     let meta_n = q
@@ -1637,6 +1638,7 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
             &crate::block_pipeline::ClassAWave::default(),
             &mut scratch,
             &abs_jobs,
+            &crate::block_pipeline::WriteHeaders::empty(),
         )
         .unwrap();
     }

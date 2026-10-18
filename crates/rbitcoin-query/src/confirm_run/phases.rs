@@ -315,6 +315,9 @@ pub(super) fn structural_run(
         }
     }
     let mut tot = StructuralPhaseNs::default();
+    let write_headers = crate::block_pipeline::WriteHeaders::from_heights(
+        prepared.iter().map(|p| (p.height.0, p.hash)),
+    );
     for (i, p) in prepared.iter().enumerate() {
         let ctx = ValidationContext::at(params, p.height, milestone);
         let ph = structural_validate_spends(
@@ -331,6 +334,7 @@ pub(super) fn structural_run(
             class_a_wave,
             &mut reuse.scratch,
             &abs_jobs[i],
+            &write_headers,
         )?;
         tot.spent_ns = tot.spent_ns.saturating_add(ph.spent_ns);
         tot.spent_abs_ns = tot.spent_abs_ns.saturating_add(ph.spent_abs_ns);
