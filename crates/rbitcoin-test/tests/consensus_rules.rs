@@ -753,6 +753,452 @@ fn bip30_duplicate_coinbase_in_one_batch() {
     assert_eq!(q.tip_height(), Some(Height(1)));
 }
 
+/// Below BIP34 a coinbase can repeat once its first copy is spent. Core 31.1
+/// accepts `repeated_coinbase_chain(203, 48 BTC, true)`: h1 creates X, h102
+/// spends X:0, h103 creates X again, h203 spends the recreated X:0.
+type Chain = Vec<(Height, bitcoin::Block)>;
+
+fn repeated_coinbase_chain(
+    second_spend_height: u32,
+    second_spend_sat: u64,
+    recreate: bool,
+) -> Chain {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    let g = regtest_genesis();
+    let mut run: Chain = Vec::new();
+    let mut x: Option<bitcoin::Transaction> = None;
+    for h in 1..=second_spend_height.max(103) {
+        let (prev, time) = run
+            .last()
+            .map(|(_, b)| (b.block_hash(), b.header.time + 600))
+            .unwrap_or((g.block_hash(), g.header.time + 600));
+        let spend = |sat: u64| {
+            let x = x.as_ref().expect("X before its spends");
+            spend_anyone_can_spend(x.compute_txid(), 0, Amount::from_sat(sat))
+        };
+        let txs = match h {
+            102 => vec![spend(49_0000_0000)],
+            h if h == second_spend_height => vec![spend(second_spend_sat)],
+            _ => vec![],
+        };
+        let mut b = rbitcoin_consensus::mine_regtest_paying(prev, time, h, op_true.clone(), txs);
+        match (h, &x) {
+            (1, _) => x = Some(b.txdata[0].clone()),
+            (103, Some(first)) if recreate => {
+                b.txdata[0] = first.clone();
+                b.header.merkle_root = b.compute_merkle_root().unwrap();
+                rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+            }
+            _ => {}
+        }
+        run.push((Height(h), b));
+    }
+    run
+}
+
+const BATCH_CUTS: [&[usize]; 9] = [
+    &[101, 102, 103, 149, 202],
+    &[],
+    &[101],
+    &[102],
+    &[54],
+    &[102, 150],
+    &[103],
+    &[101, 103],
+    &[54, 103],
+];
+
+/// Connect `chain` split into confirm batches at `cuts`; the first error ends it.
+fn connect_in_batches(
+    chain: &[(Height, bitcoin::Block)],
+    cuts: &[usize],
+) -> Result<Option<Height>, String> {
+    connect_in_batches_bip34_at(chain, cuts, 1_000)
+}
+
+fn connect_in_batches_bip34_at(
+    chain: &[(Height, bitcoin::Block)],
+    cuts: &[usize],
+    bip34_height: u32,
+) -> Result<Option<Height>, String> {
+    let (_td, q, mut params) = regtest_q();
+    params
+        .apply_test_activation_height("bip34", bip34_height)
+        .unwrap();
+    connect_genesis(&q, &params);
+    let mut lo = 0usize;
+    for hi in cuts
+        .iter()
+        .copied()
+        .filter(|&c| c < chain.len())
+        .chain([chain.len()])
+    {
+        confirm_wire_run(&q, &params, Milestone::NONE, &chain[lo..hi])
+            .map_err(|e| format!("heights {}..={}: {e:?}", lo + 1, hi))?;
+        lo = hi;
+    }
+    Ok(q.tip_height())
+}
+
+/// After BIP34 a coinbase can still repeat an older one whose scriptSig
+/// already starts with the later height (Core's 490,897 / 1,983,702 case).
+/// With BIP34 at 100, Core 31.1 accepts: h1 creates X with scriptSig
+/// push(150), h149 spends X:0, h150 creates X again, h250 spends the new X:0.
+fn bip34_era_repeat_chain(second_spend_sat: u64) -> Chain {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    let x = rbitcoin_consensus::regtest_coinbase(150, Amount::from_sat(25_0000_0000), op_true);
+    let spend = |sat: u64| spend_anyone_can_spend(x.compute_txid(), 0, Amount::from_sat(sat));
+    repeat_chain(250, &x, &[1, 150], |h| match h {
+        149 => vec![spend(24_0000_0000)],
+        250 => vec![spend(second_spend_sat)],
+        _ => vec![],
+    })
+}
+
+/// Chain to `tip` with coinbase `x` at each `x_at` height and `txs(h)` in block h.
+fn repeat_chain(
+    tip: u32,
+    x: &bitcoin::Transaction,
+    x_at: &[u32],
+    txs: impl Fn(u32) -> Vec<bitcoin::Transaction>,
+) -> Chain {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    let g = regtest_genesis();
+    let mut run: Chain = Vec::new();
+    for h in 1..=tip {
+        let (prev, time) = run
+            .last()
+            .map(|(_, b)| (b.block_hash(), b.header.time + 600))
+            .unwrap_or((g.block_hash(), g.header.time + 600));
+        let mut b = rbitcoin_consensus::mine_regtest_paying(prev, time, h, op_true.clone(), txs(h));
+        if x_at.contains(&h) {
+            b.txdata[0] = x.clone();
+            b.header.merkle_root = b.compute_merkle_root().unwrap();
+            rbitcoin_consensus::grind_regtest_pow(&mut b.header);
+        }
+        run.push((Height(h), b));
+    }
+    run
+}
+
+/// Pre-BIP34 (BIP34 at 1000) coinbase X paying 25 BTC, and `spend(prev, sat)`.
+fn pre_bip34_x() -> bitcoin::Transaction {
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    rbitcoin_consensus::regtest_coinbase(1, Amount::from_sat(25_0000_0000), op_true)
+}
+
+fn spend_of(prev: &bitcoin::Transaction, sat: u64) -> bitcoin::Transaction {
+    spend_anyone_can_spend(prev.compute_txid(), 0, Amount::from_sat(sat))
+}
+
+/// h102 creates P and spends P:0 in the same block; h103 spends P:0 again.
+/// Core 31.1 rejects h103 (`bad-txns-inputs-missingorspent`), including when
+/// IBD merges the two load batches into one write.
+#[test]
+fn respend_of_a_same_block_spend_rejects_in_any_split() {
+    let x = pre_bip34_x();
+    let p = spend_of(&x, 24_0000_0000);
+    let chain = repeat_chain(103, &x, &[1], |h| match h {
+        102 => vec![p.clone(), spend_of(&p, 23_0000_0000)],
+        103 => vec![spend_of(&p, 22_0000_0000)],
+        _ => vec![],
+    });
+    let spent = |got: &Result<Option<Height>, String>| matches!(got, Err(e) if ["PrevoutSpent", "double spend"].iter().any(|w| e.contains(w)));
+    for cuts in [&[][..], &[102], &[54]] {
+        let got = connect_in_batches(&chain, cuts);
+        assert!(spent(&got), "cuts {cuts:?}: got {got:?}");
+    }
+    for cuts in [&[102][..], &[54, 102]] {
+        let got = connect_merged(&chain, cuts, 1000);
+        assert!(spent(&got), "merged, cuts {cuts:?}: got {got:?}");
+    }
+}
+
+/// h102 spends X:0 by T and T:0 by U in the same block, h103 mines X again,
+/// h204 repeats T, h205 spends the new T:0. Core 31.1 accepts to 205: the
+/// first T was spent inside its own block.
+#[test]
+fn repeated_tx_spent_in_its_own_block_connects_in_any_split() {
+    let x = pre_bip34_x();
+    let t = spend_of(&x, 24_0000_0000);
+    let chain = repeat_chain(205, &x, &[1, 103], |h| match h {
+        102 => vec![t.clone(), spend_of(&t, 23_0000_0000)],
+        204 => vec![t.clone()],
+        205 => vec![spend_of(&t, 22_0000_0000)],
+        _ => vec![],
+    });
+    for cuts in [&[][..], &[101], &[102], &[103], &[150], &[203]] {
+        assert_eq!(
+            connect_in_batches(&chain, cuts),
+            Ok(Some(Height(205))),
+            "cuts {cuts:?}"
+        );
+    }
+    for cuts in [&[102][..], &[101, 103], &[150]] {
+        assert_eq!(
+            connect_merged(&chain, cuts, 1000),
+            Ok(Some(Height(205))),
+            "merged, cuts {cuts:?}"
+        );
+    }
+}
+
+/// X three times: h1, h103, h204, each copy spent before the next (h102,
+/// h203) and the last at h304. Core 31.1 accepts to 304. With h1 connected
+/// and the rest in one batch, the BIP30 check of h204 must count h102's spend
+/// of the connected copy.
+#[test]
+fn third_copy_of_a_coinbase_connects_in_any_split() {
+    let x = pre_bip34_x();
+    let chain = repeat_chain(304, &x, &[1, 103, 204], |h| match h {
+        102 => vec![spend_of(&x, 24_0000_0000)],
+        203 => vec![spend_of(&x, 23_0000_0000)],
+        304 => vec![spend_of(&x, 22_0000_0000)],
+        _ => vec![],
+    });
+    for cuts in [&[][..], &[101], &[101, 204], &[102], &[203]] {
+        assert_eq!(
+            connect_in_batches(&chain, cuts),
+            Ok(Some(Height(304))),
+            "cuts {cuts:?}"
+        );
+    }
+    for cuts in [&[101][..], &[150, 250]] {
+        assert_eq!(
+            connect_merged(&chain, cuts, 1000),
+            Ok(Some(Height(304))),
+            "merged, cuts {cuts:?}"
+        );
+    }
+}
+
+/// Same, but h204 mines X while h103's copy is still unspent. Core 31.1:
+/// h204 `bad-txns-BIP30`. h102's spend of the connected copy does not count
+/// as a spend of h103's copy.
+#[test]
+fn third_copy_over_an_unspent_copy_rejects_bip30_in_any_split() {
+    let x = pre_bip34_x();
+    let chain = repeat_chain(204, &x, &[1, 103, 204], |h| match h {
+        102 => vec![spend_of(&x, 24_0000_0000)],
+        _ => vec![],
+    });
+    for cuts in [&[][..], &[101], &[102], &[103]] {
+        let got = connect_in_batches(&chain, cuts);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "cuts {cuts:?}: got {got:?}"
+        );
+    }
+    for cuts in [&[101][..], &[150]] {
+        let got = connect_merged(&chain, cuts, 1000);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "merged, cuts {cuts:?}: got {got:?}"
+        );
+    }
+}
+
+#[test]
+fn bip34_era_repeat_connects_in_any_batch_split() {
+    let chain = bip34_era_repeat_chain(23_0000_0000);
+    for cuts in [
+        &[][..],
+        &[148],
+        &[149],
+        &[148, 150],
+        &[100, 200],
+        &[148, 149, 150, 249],
+    ] {
+        assert_eq!(
+            connect_in_batches_bip34_at(&chain, cuts, 100),
+            Ok(Some(Height(250))),
+            "cuts {cuts:?}"
+        );
+    }
+}
+
+/// Core 31.1 rejects h250 with `bad-txns-BIP30` when it repeats h149's spend
+/// byte for byte: h149's output is still unspent.
+#[test]
+fn bip34_era_repeated_spend_rejects_bip30_in_any_batch_split() {
+    let chain = bip34_era_repeat_chain(24_0000_0000);
+    for cuts in [&[][..], &[148], &[149], &[149, 150], &[100, 200]] {
+        let got = connect_in_batches_bip34_at(&chain, cuts, 100);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "cuts {cuts:?}: got {got:?}"
+        );
+    }
+    for cuts in [&[149][..], &[100, 149, 200]] {
+        let got = connect_merged(&chain, cuts, 100);
+        assert!(
+            matches!(&got, Err(e) if e.contains("BIP30")),
+            "merged, cuts {cuts:?}: got {got:?}"
+        );
+    }
+}
+
+/// IBD's write path: load each slice ahead of the write (in-flight parents,
+/// reserved fks), run scripts, merge the slices into one write batch, write once.
+fn connect_merged(
+    chain: &[(Height, bitcoin::Block)],
+    load_cuts: &[usize],
+    bip34_height: u32,
+) -> Result<Option<Height>, String> {
+    use rbitcoin_query::{
+        confirm_scripts_phase, confirm_wire_load_phase_pipelined, confirm_write_phase, InFlight,
+        ScriptPreverified, WireLoadPipeline,
+    };
+    let (_td, q, mut params) = regtest_q();
+    params
+        .apply_test_activation_height("bip34", bip34_height)
+        .unwrap();
+    connect_genesis(&q, &params);
+    q.enter_direct_index_mode().unwrap();
+    let none = ScriptPreverified::new();
+    let mut inflight = InFlight::new();
+    let mut next_tx_start = q.tx_body_count().saturating_add(1).max(1);
+    let mut merged: Option<rbitcoin_query::ScriptOkBatch> = None;
+    let mut lo = 0usize;
+    for hi in load_cuts
+        .iter()
+        .copied()
+        .filter(|&c| c < chain.len())
+        .chain([chain.len()])
+    {
+        let slice = &chain[lo..hi];
+        let pipe = WireLoadPipeline {
+            path_lo: slice[0].0 .0,
+            parent_hash: lo
+                .checked_sub(1)
+                .map(|i| chain[i].1.block_hash().to_byte_array()),
+            next_tx_start,
+            in_flight: &inflight,
+            skeleton: None,
+            carried_need: Vec::new(),
+            carried_header_fks: Vec::new(),
+            carried_header_hashes: Vec::new(),
+        };
+        let mat = confirm_wire_load_phase_pipelined(
+            &q,
+            &params,
+            Milestone::NONE,
+            slice,
+            &none,
+            Some(&pipe),
+        )
+        .map_err(|e| format!("load {}..={hi}: {e:?}", lo + 1))?;
+        let plan = mat.batch.archive_plan.as_ref().expect("wire plan");
+        inflight.note_pins(
+            plan.planned_fks.iter().copied().zip(plan.batch_pin.iter()),
+            Some(slice[slice.len() - 1].0 .0),
+        );
+        if let Some(last) = plan.planned_fks.last().and_then(|f| f.get()) {
+            next_tx_start = last + 1;
+        }
+        let ok = confirm_scripts_phase(mat.batch)
+            .map_err(|e| format!("scripts {}..={hi}: {e:?}", lo + 1))?;
+        merged = Some(match merged.take() {
+            None => ok.batch,
+            Some(mut m) => {
+                if m.append_contiguous(ok.batch).is_err() {
+                    return Err(format!("merge at {}", lo + 1));
+                }
+                m
+            }
+        });
+        lo = hi;
+    }
+    confirm_write_phase(&q, &params, Milestone::NONE, merged.expect("one slice"))
+        .map_err(|e| format!("write: {e:?}"))?;
+    Ok(q.tip_height())
+}
+
+#[test]
+fn repeated_coinbase_connects_when_ibd_merges_load_batches() {
+    let pre = repeated_coinbase_chain(203, 48_0000_0000, true);
+    for cuts in [&[102][..], &[101, 103], &[54, 103, 150]] {
+        assert_eq!(
+            connect_merged(&pre, cuts, 1_000),
+            Ok(Some(Height(203))),
+            "pre-BIP34, load cuts {cuts:?}"
+        );
+    }
+    let era = bip34_era_repeat_chain(23_0000_0000);
+    for cuts in [&[149][..], &[100, 149, 200], &[148, 150]] {
+        assert_eq!(
+            connect_merged(&era, cuts, 100),
+            Ok(Some(Height(250))),
+            "BIP34 era, load cuts {cuts:?}"
+        );
+    }
+}
+
+/// The Core-valid chain above connects however IBD splits it into batches.
+#[test]
+fn repeated_coinbase_chain_connects_in_any_batch_split() {
+    let chain = repeated_coinbase_chain(203, 48_0000_0000, true);
+    for cuts in BATCH_CUTS {
+        assert_eq!(
+            connect_in_batches(&chain, cuts),
+            Ok(Some(Height(203))),
+            "cuts {cuts:?}"
+        );
+    }
+}
+
+/// What Core rejects around a repeated coinbase stays rejected in any split.
+#[test]
+fn repeated_coinbase_chain_rejects_what_core_rejects() {
+    let cases: [(&str, Chain, &[&str]); 3] = [
+        (
+            "h203 repeats h102's spend while its output is unspent",
+            repeated_coinbase_chain(203, 49_0000_0000, true),
+            &["BIP30"],
+        ),
+        (
+            "h203 spends X:0 again without a new X",
+            repeated_coinbase_chain(203, 48_0000_0000, false),
+            // Only spent errors: MissingPrevout would also match a spend bound
+            // to a later copy, which is the bug this guards against.
+            &["PrevoutSpent", "double spend"],
+        ),
+        (
+            "h150 spends the new X before it matures",
+            repeated_coinbase_chain(150, 48_0000_0000, true),
+            &["immature"],
+        ),
+    ];
+    for (what, chain, want) in &cases {
+        for cuts in BATCH_CUTS {
+            let got = connect_in_batches(chain, cuts);
+            assert!(
+                matches!(&got, Err(e) if want.iter().any(|w| e.contains(w))),
+                "{what}, cuts {cuts:?}: got {got:?}, want one of {want:?}"
+            );
+        }
+    }
+}
+
+/// A failed batch archives every body before Class C. Retrying the valid
+/// prefix must bind through the archived stamp, not the fresh plan.
+#[test]
+fn repeated_coinbase_archived_retry_connects_the_valid_prefix() {
+    let chain = repeated_coinbase_chain(150, 48_0000_0000, true);
+    let (_td, q, mut params) = regtest_q();
+    params.apply_test_activation_height("bip34", 1_000).unwrap();
+    connect_genesis(&q, &params);
+    let err = confirm_wire_run(&q, &params, Milestone::NONE, &chain);
+    assert!(
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("immature")),
+        "immature spend of the recreated coinbase: {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height::GENESIS));
+    confirm_wire_run(&q, &params, Milestone::NONE, &chain[..103])
+        .expect("archived retry of h1..=h103");
+    assert_eq!(q.tip_height(), Some(Height(103)));
+}
+
 // ─── Script flags (Core `GetBlockScriptFlags`) ──────────────────────────────
 
 /// Core sets WITNESS on every block, not from the segwit height. Below the
