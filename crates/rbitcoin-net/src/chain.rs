@@ -1557,7 +1557,9 @@ impl ChainHub {
         self.stored_header_height(hash)
     }
 
-    fn stored_header_height(&self, hash: &BlockHash) -> Option<u32> {
+    /// Height of a stored header, connected or not. Walks back to a known
+    /// height (at most 10_000 headers).
+    pub fn stored_header_height(&self, hash: &BlockHash) -> Option<u32> {
         if let Some(h) = self.header_height(hash) {
             return Some(h);
         }

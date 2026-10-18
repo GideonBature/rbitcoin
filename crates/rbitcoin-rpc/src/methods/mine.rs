@@ -902,7 +902,7 @@ pub(crate) fn header_time(ctx: &RpcContext, h: u32) -> Option<u32> {
 /// active for this block. Mining software may leave it out.
 fn fill_witness_reserved_value(hub: &rbitcoin_net::ChainHub, block: &mut Block) {
     let segwit = hub
-        .header_height(&block.header.prev_blockhash)
+        .stored_header_height(&block.header.prev_blockhash)
         .is_some_and(|h| hub.params.segwit_active_at(h.saturating_add(1)));
     let Some(coinbase) = block.txdata.first_mut() else {
         return;
