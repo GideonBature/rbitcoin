@@ -1261,6 +1261,40 @@ impl ActiveMempool {
         })
     }
 
+    /// Unconfirmed inputs on a replacement must already be parents of the
+    /// direct conflicts, and there is only one direct conflict.
+    fn reject_new_unconfirmed(
+        &self,
+        tx: &Transaction,
+        direct: &BTreeSet<Txid>,
+    ) -> Result<(), AcceptError> {
+        let mut parents_of_conflicts = BTreeSet::new();
+        for id in direct {
+            let conflict = self
+                .bodies
+                .get(id)
+                .ok_or_else(|| AcceptError::Durable("conflict body missing".into()))?;
+            for inp in &conflict.input {
+                parents_of_conflicts.insert(inp.previous_output.txid);
+            }
+        }
+        for inp in &tx.input {
+            let parent = inp.previous_output.txid;
+            if !self.bodies.contains_key(&parent) {
+                continue;
+            }
+            if !parents_of_conflicts.contains(&parent) {
+                return Err(AcceptError::Policy("adds unconfirmed input"));
+            }
+            if direct.len() > 1 {
+                return Err(AcceptError::Policy(
+                    "unconfirmed input has multiple conflicts",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns (conflict set, fee, sigop-adjusted weight).
     fn plan_after_script(
         &self,
@@ -1296,6 +1330,9 @@ impl ActiveMempool {
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 
         let conflict_set = if !scan.direct_conflicts.is_empty() {
+            // Libre HasNoNewUnconfirmed: parents of the direct conflicts only,
+            // not their ancestor closure. One direct conflict may be CPFPed.
+            self.reject_new_unconfirmed(tx, &scan.direct_conflicts)?;
             let direct: Vec<Txid> = scan.direct_conflicts.into_iter().collect();
             let set = self.graph.conflict_set(&direct);
             let (old_fee, old_weight) = self.graph.set_fee_weight(&set);

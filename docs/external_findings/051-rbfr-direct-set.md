@@ -10,6 +10,9 @@ package. `pure_rbfr_pays` takes that direct fee and weight.
 `rbf_allows_replacement` still also allows a BIP125-style payment against
 the full conflict set. A high-feerate replacement with a lower absolute
 fee than a fat descendant package is admitted by the direct-set rule.
+An unconfirmed input must be a parent of the direct conflicts, and only
+one direct conflict is allowed. That input rule does not change
+direct-set pricing.
 
 **Regression:** `rbitcoin-mempool`
 `accept::tests::mempool_accept_life`,
