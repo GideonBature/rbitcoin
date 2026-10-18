@@ -68,12 +68,59 @@ fn promote_depth_max() -> u32 {
     PROMOTE_DEPTH_MAX.with(|d| d.get())
 }
 
-/// `Run` starts the descendant walk. `Caller` means that walk is already
-/// on this thread and must not start again.
-#[derive(Clone, Copy)]
-enum ChildPromote {
-    Run,
-    Caller,
+thread_local! {
+    /// Txids admitted while one promote walk is running on this thread.
+    /// `None` means no walk is active.
+    static PROMOTE_NOTES: std::cell::RefCell<Option<Vec<Txid>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record `txid` when a walk is already running. Returns false when this
+/// thread should start the walk.
+fn promote_note(txid: Txid) -> bool {
+    PROMOTE_NOTES.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(notes) = slot.as_mut() else {
+            return false;
+        };
+        notes.push(txid);
+        true
+    })
+}
+
+fn promote_take_notes() -> Vec<Txid> {
+    PROMOTE_NOTES.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    })
+}
+
+/// One promote walk on this thread. Drop ends it, including after a panic.
+struct PromoteWalk {
+    #[cfg(test)]
+    _depth: PromoteDepth,
+}
+
+impl PromoteWalk {
+    fn enter() -> Self {
+        PROMOTE_NOTES.with(|slot| {
+            *slot.borrow_mut() = Some(Vec::new());
+        });
+        Self {
+            #[cfg(test)]
+            _depth: PromoteDepth::enter(),
+        }
+    }
+}
+
+impl Drop for PromoteWalk {
+    fn drop(&mut self) {
+        PROMOTE_NOTES.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
 }
 
 #[path = "parent_req.rs"]
@@ -2068,17 +2115,6 @@ impl MempoolHub {
         from: Option<u64>,
         defer_trim: bool,
     ) -> Result<AcceptResult, AcceptError> {
-        self.accept_with_utxo_in(tx, utxo, from, defer_trim, ChildPromote::Run)
-    }
-
-    fn accept_with_utxo_in(
-        &self,
-        tx: &Transaction,
-        utxo: &impl rbitcoin_mempool::UtxoProvider,
-        from: Option<u64>,
-        defer_trim: bool,
-        children: ChildPromote,
-    ) -> Result<AcceptResult, AcceptError> {
         utxo.note_spender(tx);
         let t0 = Instant::now();
 
@@ -2120,7 +2156,7 @@ impl MempoolHub {
                         );
                     }
                     if from.is_none() {
-                        if let Some(r) = self.admit_1p1c(tx, utxo, missing, children) {
+                        if let Some(r) = self.admit_1p1c(tx, utxo, missing) {
                             let us = t0.elapsed().as_micros() as u64;
                             self.meter_accept_wall(us, true);
                             return Ok(r);
@@ -2156,7 +2192,7 @@ impl MempoolHub {
         match committed.result {
             Ok(r) => {
                 self.meter_accept_wall(us, true);
-                self.publish_admitted(tx, &r, &committed.prevouts, utxo, children);
+                self.publish_admitted(tx, &r, &committed.prevouts, utxo);
                 let _ = self.expire_stale();
                 self.publish_fee_floor();
                 Ok(r)
@@ -2177,7 +2213,6 @@ impl MempoolHub {
         child: &Transaction,
         utxo: &impl rbitcoin_mempool::UtxoProvider,
         missing: &std::collections::BTreeSet<Txid>,
-        children: ChildPromote,
     ) -> Option<AcceptResult> {
         let parent = {
             let g = self.lock_read();
@@ -2243,8 +2278,8 @@ impl MempoolHub {
                     self.publish_fee_floor();
                     return None;
                 }
-                self.publish_admitted(&parent, &parent_res, &prevouts_p, utxo, children);
-                self.publish_admitted(child, &r, &child_commit.prevouts, utxo, children);
+                self.publish_admitted(&parent, &parent_res, &prevouts_p, utxo);
+                self.publish_admitted(child, &r, &child_commit.prevouts, utxo);
                 let _ = self.expire_stale();
                 self.publish_fee_floor();
                 Some(r)
@@ -2306,7 +2341,7 @@ impl MempoolHub {
                             self.unindex_txid(old);
                         }
                     } else {
-                        self.publish_admitted(tx, &result, &prevouts, &utxo, ChildPromote::Run);
+                        self.publish_admitted(tx, &result, &prevouts, &utxo);
                     }
                 }
                 Err(_) => self.unindex_if_absent(tx),
@@ -2396,7 +2431,6 @@ impl MempoolHub {
         r: &AcceptResult,
         prevouts: &[TxOut],
         utxo: &impl rbitcoin_mempool::UtxoProvider,
-        children: ChildPromote,
     ) {
         for old in &r.replaced {
             self.unindex_txid(old);
@@ -2423,34 +2457,45 @@ impl MempoolHub {
             .unwrap_or_default();
         self.publish_announce(r, shs);
         self.note_template_update();
-        if matches!(children, ChildPromote::Run) {
-            self.promote_orphans_staged(r.txid, utxo);
+        self.promote_orphans_staged(r.txid, utxo);
+    }
+
+    /// One frame for every orphan of every tx admitted on this thread.
+    ///
+    /// A publish that happens while the walk is running, including a 1p1c
+    /// parent and a conflict put back after a failed admit, appends that
+    /// txid here. It does not start another walk.
+    fn promote_orphans_staged(&self, parent: Txid, utxo: &impl rbitcoin_mempool::UtxoProvider) {
+        if promote_note(parent) {
+            return;
+        }
+        let _walk = PromoteWalk::enter();
+        let mut queue = VecDeque::new();
+        promote_note(parent);
+        self.enqueue_noted_orphans(&mut queue);
+        while let Some(child) = queue.pop_front() {
+            let _ = self.accept_with_utxo(&child, utxo, None, false);
+            self.enqueue_noted_orphans(&mut queue);
         }
     }
 
-    /// One frame for the whole parked chain. A nested admit must pass
-    /// [`ChildPromote::Caller`] so this function does not call itself.
-    fn promote_orphans_staged(&self, parent: Txid, utxo: &impl rbitcoin_mempool::UtxoProvider) {
-        #[cfg(test)]
-        let _depth = PromoteDepth::enter();
-        let mut queue = VecDeque::new();
+    /// Move orphans of every tx noted since the last drain onto `queue`.
+    /// Earlier notes stay ahead of later ones. A second take of the same
+    /// txid is empty.
+    fn enqueue_noted_orphans(&self, queue: &mut VecDeque<Transaction>) {
+        let notes = promote_take_notes();
+        if notes.is_empty() {
+            return;
+        }
+        let mut kids = Vec::new();
         {
             let mut g = self.lock_write();
-            for child in g.take_orphan_children(parent).into_iter().rev() {
-                queue.push_front(child);
+            for txid in notes {
+                kids.extend(g.take_orphan_children(txid));
             }
         }
-        while let Some(child) = queue.pop_front() {
-            let txid = child.compute_txid();
-            if self
-                .accept_with_utxo_in(&child, utxo, None, false, ChildPromote::Caller)
-                .is_ok()
-            {
-                let mut g = self.lock_write();
-                for grandchild in g.take_orphan_children(txid).into_iter().rev() {
-                    queue.push_front(grandchild);
-                }
-            }
+        for child in kids.into_iter().rev() {
+            queue.push_front(child);
         }
     }
 
@@ -7522,6 +7567,125 @@ mod tests {
         assert!(hub.try_contains(&parent.compute_txid()));
         assert!(hub.try_contains(&child.compute_txid()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 1p1c admit inside the block-connect walk must also release orphans
+    /// that wait only on the packaged parent.
+    #[test]
+    fn package_inside_promote_admits_parent_orphans() {
+        use rbitcoin_consensus::{mine_regtest_paying, ChainParams, Milestone};
+        use rbitcoin_primitives::Height;
+        use rbitcoin_query::accept_and_connect_block;
+
+        let (store, q, cbs) = copy_maturity_pad(3);
+        let params = ChainParams::regtest();
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let half = (50_0000_0000 - 1) / 2;
+        let low_parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: cbs[0],
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(half),
+                    script_pubkey: spk.clone(),
+                },
+                TxOut {
+                    value: Amount::from_sat(50_0000_0000 - 1 - half),
+                    script_pubkey: spk.clone(),
+                },
+            ],
+        };
+        assert!(
+            hub.try_note_extra_compact(&low_parent),
+            "low parent is remembered for 1p1c and is not in the mempool"
+        );
+        assert!(!hub.try_contains(&low_parent.compute_txid()));
+        let sibling = spend_vout(
+            OutPoint {
+                txid: low_parent.compute_txid(),
+                vout: 1,
+            },
+            50_0000_0000 - 1 - half - 20_000,
+        );
+        let err = hub.accept_tx_from(&sibling, Some(1)).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Orphaned { .. }),
+            "sibling waits on the low parent, got {err:?}"
+        );
+        let conf = spend_true(cbs[1], 10_000, spk.clone());
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: conf.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: low_parent.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_0000_0000 - 10_000 + half - 40_000),
+                script_pubkey: spk.clone(),
+            }],
+        };
+        let err = hub.accept_tx_from(&child, Some(1)).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Orphaned { .. }),
+            "child waits on the confirmed parent and the low parent, got {err:?}"
+        );
+        let tip_h = q.tip_height().unwrap().0;
+        let fk = q.tip_header_fk().unwrap().unwrap();
+        let rec = q.get_header(fk).unwrap();
+        let prev = bitcoin::BlockHash::from_byte_array(rec.hash);
+        let block = mine_regtest_paying(
+            prev,
+            rec.timestamp + 600,
+            tip_h + 1,
+            spk,
+            vec![conf.clone()],
+        );
+        accept_and_connect_block(&q, &params, Height(tip_h + 1), &block, Milestone::NONE)
+            .expect("connect the chain parent");
+        super::reset_promote_depth();
+        hub.remove_for_block(&[conf.compute_txid()]);
+        assert!(
+            hub.contains(&low_parent.compute_txid()),
+            "1p1c inside the walk must admit the low parent"
+        );
+        assert!(hub.contains(&child.compute_txid()));
+        assert!(
+            hub.contains(&sibling.compute_txid()),
+            "orphans of the packaged parent must be admitted in the same walk"
+        );
+        assert_eq!(hub.orphan_count(), 0);
+        assert_eq!(super::promote_depth_max(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store);
     }
 
     /// A parked chain admits when the root does, on one promote frame.
