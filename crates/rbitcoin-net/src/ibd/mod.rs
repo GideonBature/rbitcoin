@@ -445,9 +445,9 @@ pub async fn ibd_cancellable(
             warn!("ibd: block_queue rehydrate failed (continuing; may re-getdata): {e}");
         }
     }
-    // The height map has only the confirmed tip at this point, so the walk
-    // stops at tip+1 and the count is zero. `rehydrate_class_a_into_body_queue`
-    // already logs a non-zero fill.
+    // A positive count is already logged inside `rehydrate_class_a_into_body_queue`
+    // (a body-queue row or an archived body above the tip). This match only
+    // speaks when that walk fills nothing.
     match rehydrate_class_a_into_body_queue(
         hub.as_ref(),
         &mut st,
