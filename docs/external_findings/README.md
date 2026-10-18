@@ -102,6 +102,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [096](./096-unconfirmed-rbf-input.md) | medium | Replacement may add an unconfirmed input | fixed | `replacement_unconfirmed_inputs_follow_libre_rule` |
 | [097](./097-recent-invalid-cap.md) | low | Invalid-txid set clears at 4096 | fixed | `recent_invalid_keeps_the_oldest` |
 | [098](./098-overlay-discourage.md) | medium | Overlay misbehavior is not remembered | fixed | `overlay_misbehavior_discourages_that_net` |
+| [099](./099-esplora-get-broadcast.md) | medium | GET /broadcast has no Origin check | fixed | `esplora_unix_internal` |
 | [102](./102-fuse8-body-length.md) | high | fuse8 body length cannot wrap the size check | fixed | `fuse8_wrapped_body_length_is_corrupt` |
 | [103](./103-fuse8-segment-multiple.md) | high | fuse8 segment count must divide the array | fixed | `fuse8_segment_count_must_be_a_multiple_of_segment_length` |
 | [104](./104-body-read-cap.md) | high | A body read is capped before it allocates | fixed | `body_read_above_the_cap_is_refused`, `index_read_above_the_cap_is_refused` |
