@@ -68,11 +68,23 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
         addr: AddrV2::Ipv4(Ipv4Addr::new(100, 64, 0, 1)),
         port: 8333,
     };
+    let zero_port = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Ipv4(Ipv4Addr::new(9, 9, 9, 8)),
+        port: 0,
+    };
+    let i2p = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::I2p([0x11; 32]),
+        port: 0,
+    };
     let mut follow = PeerFollowState::new();
     on_addrv2(
         &mut follow,
         Some(peer.as_ref()),
-        &[lan, public.clone(), cgnat],
+        &[lan, public.clone(), cgnat, zero_port, i2p.clone()],
     )
     .unwrap();
 
@@ -83,8 +95,11 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
     let NetworkMessage::AddrV2(sent) = got else {
         panic!("expected addrv2, got {got:?}");
     };
-    assert_eq!(sent, vec![public]);
-    assert!(dst_rx.try_recv().is_err(), "unroutable rows are not relayed");
+    assert_eq!(sent, vec![public, i2p]);
+    assert!(
+        dst_rx.try_recv().is_err(),
+        "unroutable rows and port-0 clearnet are not relayed"
+    );
     let book = book.lock().unwrap_or_else(|e| e.into_inner());
     let public_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 8333);
     let lan_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8333);

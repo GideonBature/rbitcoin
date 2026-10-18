@@ -3062,6 +3062,13 @@ fn on_addrv2(
             let mut batches: Vec<Vec<bitcoin::p2p::address::AddrV2Message>> =
                 vec![Vec::new(); neighbors.len()];
             for addr in list.iter().take(allow) {
+                // Port 0 is not a dialable endpoint. `from_addrv2` returns
+                // None for it (so it is not stored), except I2P, which Core
+                // advertises with port 0. That None skips the unroutable
+                // guard, so drop the row here before it is forwarded.
+                if addr.port == 0 && !matches!(addr.addr, bitcoin::p2p::address::AddrV2::I2p(_)) {
+                    continue;
+                }
                 if crate::NetAddr::from_addrv2(addr)
                     .is_some_and(crate::netaddr::netaddr_unroutable_gossip)
                 {
