@@ -95,6 +95,7 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [088](./088-tip-chain-selection.md) | high | Tip-follow chain selection: total-work ranking, failed-branch prefix, sibling header check, reorg depth | partial (F3 reorg depth open) | `held_branch_with_more_total_work_beats_an_earlier_local_tie`, `failed_branch_tip_keeps_the_heavier_valid_prefix`, `sibling_claiming_more_work_with_wrong_bits_keeps_the_tip` |
 | [089](./089-missing-parent-verdict.md) | high | IBD halted on a block that spends an unknown txid; no verdict | fixed | `ibd_spend_of_an_unknown_txid_is_invalid`, `spend_of_a_create_the_head_lost_is_not_invalid`, `spend_of_an_unknown_txid_after_restart_is_invalid` |
 | [090](./090-getdata-serve-pause.md) | medium | Served getdata past the writer queue was dropped | fixed | `getdata_past_serve_cap_waits_for_writer`, `paused_session_still_times_out_a_silent_peer`, `paused_getdata_tail_is_served_before_the_next_getdata`, `uncounted_bodies_do_not_open_serve_slots` |
+| [102](./102-fuse8-body-length.md) | high | fuse8 body length cannot wrap the size check | fixed | `fuse8_wrapped_body_length_is_corrupt` |
 
 **012–021:** fuzzamoto differential report (`rbitcoin-report.tar.gz`, baseline
 `8f3990f`). Report-local 001–010 are **renumbered** here. Identity/BIP30

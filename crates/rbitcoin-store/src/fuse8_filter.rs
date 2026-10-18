@@ -107,14 +107,20 @@ pub fn open_file(path: &Path) -> Result<SealedFuse8, StoreError> {
             return Err(StoreError::Corrupt("tx.head fuse magic"));
         }
         let ver = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-        if bytes.len() < 16 + len {
+        let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let Some(end) = 16u64.checked_add(len) else {
+            return Err(StoreError::Corrupt("fuse8 v2 body unreadable"));
+        };
+        let Ok(end) = usize::try_from(end) else {
+            return Err(StoreError::Corrupt("fuse8 v2 body unreadable"));
+        };
+        if bytes.len() < end {
             return Err(StoreError::Corrupt("fuse8 v2 body unreadable"));
         }
         match ver {
             VERSION_V1 => return Err(StoreError::Corrupt(INDEX_REFUSE_FUSE8_V1)),
             VERSION_V2 => {
-                let payload = &bytes[16..16 + len];
+                let payload = &bytes[16..end];
                 parse_v2_geometry(payload)
                     .map_err(|_| StoreError::Corrupt("fuse8 v2 body unreadable"))?
             }
@@ -354,6 +360,21 @@ mod tests {
         match open_file(&path) {
             Err(StoreError::Corrupt(m)) => assert!(m.contains("unreadable"), "{m}"),
             other => panic!("short v2 body must be Corrupt, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fuse8_wrapped_body_length_is_corrupt() {
+        let dir = tmp();
+        let path = dir.join("wrap.fuse8");
+        let mut raw = Vec::from(*MAGIC);
+        raw.extend_from_slice(&VERSION_V2.to_le_bytes());
+        raw.extend_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(&path, &raw).unwrap();
+        match open_file(&path) {
+            Err(StoreError::Corrupt(m)) => assert!(m.contains("unreadable"), "{m}"),
+            other => panic!("wrapped body length must be Corrupt, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
