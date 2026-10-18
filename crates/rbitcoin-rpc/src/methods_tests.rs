@@ -4068,7 +4068,7 @@ fn submitblock_adds_the_witness_reserved_value_once_segwit_is_active() {
     for b in [&b5, &b6] {
         dispatch(&ctx, "submitheader", vec![json!(serialize_hex(&b.header))]).unwrap();
     }
-    assert_ne!(submit(&b6), "bad-witness-nonce-size");
+    assert_eq!(submit(&b6), "inconclusive", "held until h5's body");
     assert!(submit(&b5).is_null());
     assert_eq!(hub.tip_hash(), Some(b6.block_hash()));
 
