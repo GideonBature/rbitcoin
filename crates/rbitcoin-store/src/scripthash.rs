@@ -30,7 +30,7 @@ use crate::scripthash_slabs::{
 use crate::scripthash_sorted_head::SortedHead;
 use bitcoin_hashes::{sha256, Hash};
 use rbitcoin_primitives::{uleb128_len, Fk, TableKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -722,8 +722,12 @@ fn follow_page_chain(
     page_cap: u32,
     mut visit: impl FnMut(&TableFile, u64) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
+    let mut seen = HashSet::new();
     let mut guard = 0u32;
     while off != 0 {
+        if !seen.insert(off) {
+            return Err(StoreError::Corrupt("scripthash page chain cycle"));
+        }
         guard = guard.saturating_add(1);
         if guard > page_cap {
             return Err(StoreError::Corrupt("scripthash page chain cycle"));

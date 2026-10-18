@@ -496,7 +496,7 @@ impl VarTable {
     }
 
     /// One read. A create-loc stride is a `u32` times 8 (~32 GiB). A block is a few mebibytes.
-    const BODY_READ_MAX: u64 = 64 * 1024 * 1024;
+    pub(crate) const BODY_READ_MAX: u64 = 64 * 1024 * 1024;
 
     /// Cap and published end before any buffer is grown.
     fn checked_body_read(published: u64, offset: u64, len: u64) -> Result<usize, StoreError> {
