@@ -1,13 +1,14 @@
 Fixed
 
-- **Orphan promotion walks a worklist.** A parked chain is admitted
-  child then descendants, without one stack frame per descendant.
+- **Orphan promotion walks a worklist.** The mempool walk and the relay
+  hub walk both admit a parked chain child then descendants, without one
+  stack frame per descendant.
 - **Electrum history refuses a window wider than 8,064 blocks.** A
   `from_height` of 1 or more still scans that window and does not use
   the scripthash create cap.
 - **An Electrum response write uses the idle deadline.** A client that
-  stops reading loses the connection instead of holding a slot inside
-  `write_all`.
+  stops reading loses the connection. A scripthash status push uses that
+  same deadline, and a timeout ends the connection.
 - **An SV2 session goes idle after setup.** The setup timeout also
   closes a client that sent one `CoinbaseOutputConstraints` and then
   stopped sending. Tip and fee pushes do not refresh it.

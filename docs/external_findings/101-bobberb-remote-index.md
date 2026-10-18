@@ -6,10 +6,10 @@ regression. No reproduction steps.
 
 | Id | Severity | Topic | Status | Regression |
 |----|----------|--------|--------|------------|
-| D1 | medium | Orphan promotion recurses down the parked chain | fixed | `orphan_chain_promotes_to_the_cluster_cap` ([092](./092-orphan-promote-stack.md)) |
+| D1 | medium | Orphan promotion recurses down the parked chain | fixed | `orphan_chain_promotes_to_the_cluster_cap`, `parked_chain_promotes_in_one_frame` ([092](./092-orphan-promote-stack.md)) |
 | D2 | — | Declared vector length preallocates | false | rust-bitcoin 0.32.102 caps `MAX_VEC_SIZE` at 4,000,000 |
 | D3 | high | History catch-up scans every block in the window | fixed | `history_window_wider_than_eight_weeks_is_refused` ([093](./093-history-window.md)) |
-| D4 | high | Electrum writes have no deadline | fixed | `stalled_electrum_write_is_closed` ([094](./094-electrum-write-deadline.md)) |
+| D4 | high | Electrum writes have no deadline | fixed | `stalled_electrum_write_is_closed`, `stalled_scripthash_push_ends_the_connection` ([094](./094-electrum-write-deadline.md)) |
 | D5 | high | SV2 session has no idle deadline after setup | fixed | `session_silent_after_constraints_is_dropped_at_the_idle_deadline` ([095](./095-sv2-idle-deadline.md)) |
 | D6 | — | Replacement feerate uses the full descendant set | won't-fix | Direct-set pricing stays. See [051](./051-rbfr-direct-set.md) |
 | D7 | medium | Replacement may add an unconfirmed input | fixed | `replacement_unconfirmed_inputs_follow_libre_rule` ([096](./096-unconfirmed-rbf-input.md)) |

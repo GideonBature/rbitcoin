@@ -552,7 +552,7 @@ where
                                 "method": "blockchain.scripthash.subscribe",
                                 "params": [hash_hex_rev(&sh), status_json(status)]
                             });
-                            let _ = write_line(&mut writer, &msg, idle).await;
+                            write_line(&mut writer, &msg, idle).await?;
                         }
                     }
                 }
