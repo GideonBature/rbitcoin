@@ -73,9 +73,9 @@ pub struct Sv2TpConfig {
     /// How long a template on a replaced prev hash still answers requests.
     pub stale_grace: Duration,
     /// Deadline from TCP accept through the Noise handshake,
-    /// `SetupConnection`, and the first `CoinbaseOutputConstraints` (without
-    /// which the session never writes). No read deadline after that: TDP has
-    /// no keepalive and a client may stay silent while the TP pushes.
+    /// `SetupConnection`, and the first `CoinbaseOutputConstraints`. After
+    /// that frame, the same duration is the idle deadline: it moves only
+    /// when another frame arrives. Tip and fee pushes do not refresh it.
     pub setup_timeout: Duration,
     /// A socket write that makes no progress this long closes the session,
     /// so a client that stops reading cannot hold a slot.

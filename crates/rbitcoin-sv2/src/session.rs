@@ -181,7 +181,7 @@ pub(crate) async fn serve(
         fee_check_at: None,
         seen_updates: 0,
     };
-    s.run(&mut frames, deadline).await
+    s.run(&mut frames, deadline, setup_timeout).await
 }
 
 fn micros(d: Duration) -> u64 {
@@ -218,15 +218,18 @@ struct Session {
 }
 
 impl Session {
-    /// `setup_deadline` also covers the first `CoinbaseOutputConstraints`:
-    /// until then the session can never get a template, so it never writes
-    /// and the write deadline cannot free its slot.
+    /// `setup_deadline` covers the handshake through the first
+    /// `CoinbaseOutputConstraints`. After that, `setup_timeout` is an idle
+    /// deadline refreshed only when a frame is handled, so tip and fee-check
+    /// wakes do not keep a silent client.
     async fn run(
         &mut self,
         frames: &mut mpsc::Receiver<io::Result<Frame>>,
         setup_deadline: Instant,
+        setup_timeout: Duration,
     ) -> io::Result<()> {
         let mut tips = self.chain.subscribe_tips();
+        let mut idle_at = setup_deadline;
         loop {
             let retire_at = self.templates.next_retire();
             tokio::select! {
@@ -235,6 +238,7 @@ impl Session {
                     if !self.on_frame(f?).await? {
                         return Ok(());
                     }
+                    idle_at = Instant::now() + setup_timeout;
                 }
                 tip = tips.recv() => match tip {
                     Ok(ev) if !self.templates.on_tip(ev.hash.to_byte_array()) => {}
@@ -262,6 +266,9 @@ impl Session {
                 }
                 _ = tokio::time::sleep_until(setup_deadline), if self.constraints.is_none() => {
                     return Err(missed_setup_deadline());
+                }
+                _ = tokio::time::sleep_until(idle_at), if self.constraints.is_some() => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "sv2: idle deadline"));
                 }
             }
         }
