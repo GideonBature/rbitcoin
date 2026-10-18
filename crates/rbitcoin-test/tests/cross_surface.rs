@@ -1800,6 +1800,44 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         "too-low RBF must leave the original: {mem}"
     );
 
+    // Core `bad-txns-spends-conflicting-tx`: a replacement cannot spend an
+    // output of the tx it evicts; that output leaves with it.
+    let mut spends_conflict = acs_spend(
+        rpc_cb,
+        50_0000_0000 + 50_0000_0000 - 1_000,
+        100_000,
+        ScriptBuf::from_bytes(vec![0x58]),
+    );
+    let mut conflict_out = spends_conflict.input[0].clone();
+    conflict_out.previous_output = OutPoint {
+        txid: rpc_spend.compute_txid(),
+        vout: 0,
+    };
+    spends_conflict.input.push(conflict_out);
+    let spends_conflict_hex = encode_tx(&spends_conflict);
+    let tma = jsonrpc(
+        rpc_addr,
+        "testmempoolaccept",
+        json!([[spends_conflict_hex.clone()]]),
+    )
+    .await;
+    assert_eq!(tma["result"][0]["allowed"], false, "{tma}");
+    assert_eq!(
+        tma["result"][0]["reject-reason"], "bad-txns-spends-conflicting-tx",
+        "{tma}"
+    );
+    let rejected = jsonrpc(rpc_addr, "sendrawtransaction", json!([spends_conflict_hex])).await;
+    assert_eq!(rejected["error"]["code"], -26, "{rejected}");
+    assert_eq!(
+        rejected["error"]["message"], "bad-txns-spends-conflicting-tx",
+        "{rejected}"
+    );
+    let mem = jsonrpc(rpc_addr, "getrawmempool", json!([])).await;
+    assert!(
+        mempool_has(&mem, &rpc_txid),
+        "a replacement spending its conflict must leave the original: {mem}"
+    );
+
     let high = acs_spend(
         rpc_cb,
         50_0000_0000,
