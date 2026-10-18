@@ -24,7 +24,7 @@ use crate::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_primitives::TableKind;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 /// Packed dirty generation: `0` is clean. `set` bumps; flush CASes back to `0`.
 pub(crate) fn dirty_epoch_bump(epoch: &AtomicU64) {
@@ -48,6 +48,14 @@ pub(crate) fn dirty_try_clean(epoch: &AtomicU64, lo: &AtomicU64, e0: u64, betwee
 }
 
 const ELEM: u64 = 8;
+
+/// Where a flush calls its test hook: after the snapshot, before the write;
+/// or inside the clean step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushStep {
+    Write,
+    Clean,
+}
 
 /// Default max body size for L2 InRam (256 MiB). Over → pure FdOnly L0.
 pub const DEFAULT_CLASS_C_INRAM_MAX_BYTES: u64 = 256 * 1024 * 1024;
@@ -76,6 +84,8 @@ pub struct ArrayTable {
     dirty_lo: AtomicU64,
     /// Element count last successfully flushed to disk (L2).
     disk_len: AtomicU64,
+    /// One flusher at a time: a second snapshot never lands under an older one.
+    flush_lock: Mutex<()>,
 }
 
 impl ArrayTable {
@@ -88,6 +98,7 @@ impl ArrayTable {
             dirty_epoch: AtomicU64::new(0),
             dirty_lo: AtomicU64::new(u64::MAX),
             disk_len: AtomicU64::new(0),
+            flush_lock: Mutex::new(()),
         })
     }
 
@@ -118,6 +129,7 @@ impl ArrayTable {
             dirty_epoch: AtomicU64::new(0),
             dirty_lo: AtomicU64::new(u64::MAX),
             disk_len: AtomicU64::new(n),
+            flush_lock: Mutex::new(()),
         })
     }
 
@@ -263,15 +275,21 @@ impl ArrayTable {
             .unwrap_or(0)
     }
 
-    fn note_flush_clean(&self, e0: u64, between: impl FnOnce(&Self)) {
-        dirty_try_clean(&self.dirty_epoch, &self.dirty_lo, e0, || between(self));
+    fn note_flush_clean(&self, e0: u64, between: &mut impl FnMut(&Self, FlushStep)) {
+        dirty_try_clean(&self.dirty_epoch, &self.dirty_lo, e0, || {
+            between(self, FlushStep::Clean)
+        });
     }
 
     pub fn flush_dirty(&self) -> Result<(), StoreError> {
-        self.flush_dirty_between(|_| {})
+        self.flush_dirty_between(|_, _| {})
     }
 
-    fn flush_dirty_between(&self, between: impl FnOnce(&Self)) -> Result<(), StoreError> {
+    fn flush_dirty_between(
+        &self,
+        mut between: impl FnMut(&Self, FlushStep),
+    ) -> Result<(), StoreError> {
+        let _one = self.flush_lock.lock().unwrap_or_else(|e| e.into_inner());
         let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
         let Some(ref v) = *guard else {
             return Ok(());
@@ -286,16 +304,18 @@ impl ArrayTable {
 
         if n < disk {
             drop(guard);
+            between(self, FlushStep::Write);
             let logical = FILE_HEADER_LEN as u64 + n * ELEM;
             self.file.set_logical_len(logical)?;
             self.disk_len.store(n, Ordering::Release);
-            self.note_flush_clean(e0, between);
+            self.note_flush_clean(e0, &mut between);
             return Ok(());
         }
 
         if n == disk && dirty_lo >= disk {
             drop(guard);
-            self.note_flush_clean(e0, between);
+            between(self, FlushStep::Write);
+            self.note_flush_clean(e0, &mut between);
             return Ok(());
         }
 
@@ -306,12 +326,13 @@ impl ArrayTable {
                 bytes[i * 8..(i + 1) * 8].copy_from_slice(&val.to_le_bytes());
             }
             drop(guard);
+            between(self, FlushStep::Write);
             self.file.write_at(Self::offset(disk), &bytes)?;
             let logical = FILE_HEADER_LEN as u64 + n * ELEM;
             debug_assert_eq!(self.file.logical_len(), logical);
             let _ = logical;
             self.disk_len.store(n, Ordering::Release);
-            self.note_flush_clean(e0, between);
+            self.note_flush_clean(e0, &mut between);
             return Ok(());
         }
 
@@ -321,6 +342,7 @@ impl ArrayTable {
             bytes[i * 8..(i + 1) * 8].copy_from_slice(&val.to_le_bytes());
         }
         drop(guard);
+        between(self, FlushStep::Write);
         if !bytes.is_empty() {
             self.file.write_at(Self::offset(from), &bytes)?;
         }
@@ -329,7 +351,7 @@ impl ArrayTable {
             self.file.set_logical_len(logical)?;
         }
         self.disk_len.store(n, Ordering::Release);
-        self.note_flush_clean(e0, between);
+        self.note_flush_clean(e0, &mut between);
         Ok(())
     }
 
@@ -405,11 +427,51 @@ mod tests {
         t.set_many(&[(0, 10), (1, 11), (2, 12), (3, 13)]).unwrap();
         t.flush().unwrap();
         t.set(3, 23).unwrap();
-        t.flush_dirty_between(|t| t.set(1, 21).unwrap()).unwrap();
+        t.flush_dirty_between(|t, step| {
+            if step == FlushStep::Clean {
+                t.set(1, 21).unwrap();
+            }
+        })
+        .unwrap();
         t.flush().unwrap();
         drop(t);
         let t = ArrayTable::open(&path, TableKind::ArrayLink).unwrap();
         assert_eq!((t.get(1).unwrap(), t.get(3).unwrap()), (21, 23));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two flushes of one table never leave the older image on disk. A body
+    /// repair flushes `header_txs` beside the IBD tip flush.
+    #[test]
+    fn concurrent_flushes_keep_the_newer_image() {
+        use std::sync::Arc;
+        let path = tmp_path();
+        let _ = std::fs::remove_file(&path);
+        let t = Arc::new(ArrayTable::create(&path, TableKind::ArrayLink).unwrap());
+        t.set_many(&[(0, 10), (1, 11)]).unwrap();
+        t.flush().unwrap();
+        t.set(0, 20).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let mut other = Some(Arc::clone(&t));
+        let mut second = None;
+        t.flush_dirty_between(|_, step| {
+            let Some(t2) = other.take().filter(|_| step == FlushStep::Write) else {
+                return;
+            };
+            let done = done.clone();
+            second = Some(std::thread::spawn(move || {
+                t2.set(1, 21).unwrap();
+                t2.flush().unwrap();
+                done.send(()).unwrap();
+            }));
+            let _ = finished.recv_timeout(std::time::Duration::from_millis(200));
+        })
+        .unwrap();
+        second.unwrap().join().unwrap();
+        t.flush().unwrap();
+        drop(t);
+        let t = ArrayTable::open(&path, TableKind::ArrayLink).unwrap();
+        assert_eq!((t.get(0).unwrap(), t.get(1).unwrap()), (20, 21));
         let _ = std::fs::remove_file(&path);
     }
 
