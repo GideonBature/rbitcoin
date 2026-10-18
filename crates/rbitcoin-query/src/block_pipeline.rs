@@ -625,7 +625,7 @@ pub fn structural_validate_spends(
     class_a_wave: &ClassAWave,
     scratch: &mut StructuralScratch,
     abs_jobs: &[StructuralAbsJob],
-    write_headers: &WriteHeaders,
+    bip34_in_write: Option<bitcoin::BlockHash>,
 ) -> Result<StructuralPhaseNs, ConfirmError> {
     use std::time::Instant;
 
@@ -640,7 +640,7 @@ pub fn structural_validate_spends(
         pending_spent,
         run_create_height,
         scratch,
-        write_headers,
+        bip34_in_write,
     )?;
     let t_abs = Instant::now();
     structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
@@ -1201,10 +1201,10 @@ fn reject_bip30_unspent_overwrite(
     pending_spent: &BatchSpent,
     run_create_height: &RunCreateHeight,
     scratch: &mut StructuralScratch,
-    write_headers: &WriteHeaders,
+    bip34_in_write: Option<bitcoin::BlockHash>,
 ) -> Result<(), ConfirmError> {
     if ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
-        || bip34_ancestry_skips_bip30(query, ctx, write_headers)
+        || bip34_ancestry_skips_bip30(query, ctx, bip34_in_write)
     {
         return Ok(());
     }
@@ -1330,42 +1330,10 @@ fn release_repeated_outputs(
     }
 }
 
-/// This write's prepared headers. A structural check that needs a header hash
-/// reads here, then the confirmed chain. Not `get_header_plan`: that plan can
-/// be a sibling fork this write is not extending.
-pub(crate) struct WriteHeaders {
-    by_height: Vec<(u32, bitcoin::BlockHash)>,
-}
-
-impl WriteHeaders {
-    #[cfg(test)]
-    pub(crate) fn empty() -> Self {
-        Self {
-            by_height: Vec::new(),
-        }
-    }
-
-    pub(crate) fn from_heights(headers: impl IntoIterator<Item = (u32, [u8; 32])>) -> Self {
-        Self {
-            by_height: headers
-                .into_iter()
-                .map(|(height, hash)| (height, bitcoin::BlockHash::from_byte_array(hash)))
-                .collect(),
-        }
-    }
-
-    fn hash_at(&self, height: u32) -> Option<bitcoin::BlockHash> {
-        self.by_height
-            .iter()
-            .find(|(h, _)| *h == height)
-            .map(|(_, hash)| *hash)
-    }
-}
-
 fn bip34_ancestry_skips_bip30(
     query: &Query,
     ctx: &rbitcoin_consensus::ValidationContext<'_>,
-    write_headers: &WriteHeaders,
+    bip34_in_write: Option<bitcoin::BlockHash>,
 ) -> bool {
     let height = ctx.height.0;
     if ctx.params.bip34_hash.is_none() {
@@ -1374,14 +1342,12 @@ fn bip34_ancestry_skips_bip30(
     if height <= ctx.params.btc.bip34_height {
         return false;
     }
+    // `bip34_in_write` is set only when this write contains that height, and
+    // it is not remembered: a failed write must not skip on the next chain.
+    // Otherwise the confirmed header is read once and kept until disconnect.
+    // Not `get_header_plan`: that plan can be a sibling fork.
     let bip34_height = ctx.params.btc.bip34_height;
-    let ancestor = write_headers.hash_at(bip34_height).or_else(|| {
-        query
-            .header_at_height(Height(bip34_height))
-            .ok()
-            .flatten()
-            .map(|(_, rec)| bitcoin::BlockHash::from_byte_array(rec.hash))
-    });
+    let ancestor = bip34_in_write.or_else(|| query.confirmed_bip34_ancestor(bip34_height));
     ctx.params
         .bip30_skipped_for_bip34_ancestry(height, ancestor)
 }

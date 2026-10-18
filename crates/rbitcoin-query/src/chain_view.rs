@@ -209,7 +209,37 @@ impl Query {
         }
         Err(StoreError::Stale("chain view moved"))
     }
+}
 
+/// Confirmed header hash at one height, remembered for this process.
+#[derive(Clone, Copy)]
+pub(crate) struct Bip34AncestorNote {
+    hash: Option<bitcoin::BlockHash>,
+}
+
+impl Query {
+    /// Header at `height` on the confirmed chain. The first call reads the
+    /// store; later calls reuse that hash until [`Self::clear_bip34_ancestor`].
+    /// A read error is not remembered.
+    pub(crate) fn confirmed_bip34_ancestor(&self, height: u32) -> Option<bitcoin::BlockHash> {
+        if let Some(note) = *self.bip34_ancestor.lock().expect("bip34 ancestor") {
+            return note.hash;
+        }
+        let found = match self.header_at_height(Height(height)) {
+            Ok(row) => row.map(|(_, rec)| bitcoin::BlockHash::from_byte_array(rec.hash)),
+            Err(_) => return None,
+        };
+        *self.bip34_ancestor.lock().expect("bip34 ancestor") =
+            Some(Bip34AncestorNote { hash: found });
+        found
+    }
+
+    pub(crate) fn clear_bip34_ancestor(&self) {
+        *self.bip34_ancestor.lock().expect("bip34 ancestor") = None;
+    }
+}
+
+impl Query {
     pub fn header_at_height(
         &self,
         height: Height,

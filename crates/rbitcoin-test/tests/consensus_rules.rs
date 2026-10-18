@@ -943,6 +943,54 @@ fn wrong_bip34_ancestor_keeps_bip30_on() {
     );
 }
 
+/// After the match is remembered, disconnecting the BIP34 block must not
+/// keep skipping on the replacement chain.
+#[test]
+fn bip34_ancestor_reorg_drops_the_match() {
+    let chain = future_height_coinbase_over_unspent();
+    let ancestor = chain[1].1.block_hash();
+    let (_td, q, mut params) = regtest_q();
+    params.btc.bip34_height = 2;
+    params.bip34_hash = Some(ancestor);
+    connect_genesis(&q, &params);
+    for i in 0..chain.len() {
+        confirm_wire_run(&q, &params, Milestone::NONE, &chain[i..i + 1])
+            .expect("one block at a time");
+    }
+    assert_eq!(q.tip_height(), Some(Height(3)));
+    q.disconnect_tip().unwrap();
+    q.disconnect_tip().unwrap();
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let b1 = &chain[0].1;
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    let b2 = rbitcoin_consensus::mine_regtest_paying(
+        b1.block_hash(),
+        b1.header.time + 1_200,
+        2,
+        op_true.clone(),
+        vec![],
+    );
+    assert_ne!(b2.block_hash(), ancestor);
+    let mut b3 = rbitcoin_consensus::mine_regtest_paying(
+        b2.block_hash(),
+        b2.header.time + 600,
+        3,
+        op_true,
+        vec![],
+    );
+    b3.txdata[0] = b1.txdata[0].clone();
+    b3.header.merkle_root = b3.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut b3.header);
+    confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(2), b2)]).unwrap();
+    let err = confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(3), b3)]);
+    assert!(
+        matches!(err, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("BIP30")),
+        "replacement ancestor must keep BIP30 on: {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(2)));
+}
+
 /// After BIP34 a coinbase can still repeat an older one whose scriptSig
 /// already starts with the later height (Core's 490,897 / 1,983,702 case).
 /// With BIP34 at 100, Core 31.1 accepts: h1 creates X with scriptSig

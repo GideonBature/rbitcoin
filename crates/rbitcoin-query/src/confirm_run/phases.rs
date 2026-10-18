@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::FkMap;
+use bitcoin::hashes::Hash;
 
 fn assemble_parent_mtp_and_bits(
     query: &Query,
@@ -276,6 +277,27 @@ pub(super) struct StructuralReuse {
     pub pending: crate::block_pipeline::BatchSpent,
 }
 
+/// Prepared header at BIP34 height when this write contains that block.
+/// A write that starts later does not allocate or scan a header list.
+fn bip34_header_in_write(
+    params: &ChainParams,
+    prepared: &[Prepared],
+) -> Option<bitcoin::BlockHash> {
+    params.bip34_hash?;
+    let (Some(first), Some(last)) = (prepared.first(), prepared.last()) else {
+        return None;
+    };
+    let h = params.btc.bip34_height;
+    if h < first.height.0 || h > last.height.0 {
+        return None;
+    }
+    let block = &prepared[(h - first.height.0) as usize];
+    if block.height.0 != h {
+        return None;
+    }
+    Some(bitcoin::BlockHash::from_byte_array(block.hash))
+}
+
 /// Durable spentness + maturity + subsidy after scripts (height order).
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub(super) fn structural_run(
@@ -315,9 +337,7 @@ pub(super) fn structural_run(
         }
     }
     let mut tot = StructuralPhaseNs::default();
-    let write_headers = crate::block_pipeline::WriteHeaders::from_heights(
-        prepared.iter().map(|p| (p.height.0, p.hash)),
-    );
+    let bip34_in_write = bip34_header_in_write(params, prepared);
     for (i, p) in prepared.iter().enumerate() {
         let ctx = ValidationContext::at(params, p.height, milestone);
         let ph = structural_validate_spends(
@@ -334,7 +354,7 @@ pub(super) fn structural_run(
             class_a_wave,
             &mut reuse.scratch,
             &abs_jobs[i],
-            &write_headers,
+            bip34_in_write,
         )?;
         tot.spent_ns = tot.spent_ns.saturating_add(ph.spent_ns);
         tot.spent_abs_ns = tot.spent_abs_ns.saturating_add(ph.spent_abs_ns);
