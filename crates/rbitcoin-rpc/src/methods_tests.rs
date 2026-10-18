@@ -4014,6 +4014,48 @@ fn submitblock_vout_past_n_out_is_missingorspent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Core `UpdateUncommittedBlockStructures`: a coinbase with a witness
+/// commitment and no witness gets the 32 zero bytes once segwit is active.
+/// Below segwit the commitment is plain data and the coinbase stays bare.
+/// A reserved value the miner already set is kept.
+#[test]
+fn submitblock_adds_the_witness_reserved_value_once_segwit_is_active() {
+    let mut params = rbitcoin_consensus::ChainParams::regtest();
+    params.apply_test_activation_height("segwit", 2).unwrap();
+    let (ctx, dir, hub) = ctx_regtest_hub_on(params, 300_000_000);
+    for (height, reserved) in [(1u32, None), (2, None), (3, Some([7u8; 32]))] {
+        let mut b = rbitcoin_consensus::mine_regtest_paying(
+            hub.tip_hash().unwrap(),
+            hub.tip_header().unwrap().time + 1,
+            height,
+            ScriptBuf::from_bytes(vec![0x51]),
+            vec![],
+        );
+        if let Some(r) = reserved {
+            b.txdata[0].input[0].witness = bitcoin::Witness::from_slice(&[r]);
+        }
+        let commitment =
+            rbitcoin_consensus::witness_commitment_script([], &reserved.unwrap_or([0u8; 32]));
+        b.txdata[0].output.push(bitcoin::TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(commitment),
+        });
+        b.header.merkle_root = b.compute_merkle_root().unwrap();
+        regrind(&mut b);
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b))]).unwrap();
+        assert!(r.is_null(), "height {height}: {r}");
+        assert_eq!(hub.tip_hash(), Some(b.block_hash()), "height {height}");
+    }
+    let coinbase_witness = |h: u32| {
+        let b = hub.query.reconstruct_block_at_height(Height(h)).unwrap();
+        b.txdata[0].input[0].witness.to_vec()
+    };
+    assert!(coinbase_witness(1).is_empty(), "no fill below segwit");
+    assert_eq!(coinbase_witness(2), vec![vec![0u8; 32]]);
+    assert_eq!(coinbase_witness(3), vec![vec![7u8; 32]]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A store fault reading the parent header is not `prev-blk-not-found`,
 /// and on the tip-extend path it is not a reject reason that gets cached.
 #[test]
