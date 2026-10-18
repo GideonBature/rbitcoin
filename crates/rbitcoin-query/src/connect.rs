@@ -362,23 +362,10 @@ impl Query {
         self.confirm_blocks_run_with_create_pins(items, None)
     }
 
-    /// Like [`Self::confirm_blocks_run`], with optional write-batch create pins.
-    ///
-    /// `create_pins` is `create_fk → CreatePin` for creates committed on this write
-    /// path. Collect runs after tip (cheap); records sit on the job so queries
-    /// join them before durable seed. Enqueue is after the tip commit: a collect
-    /// failure can surface after `confirmed[]` advanced; retry is the heal
-    /// (re-confirm at the same height is idempotent).
-    pub fn confirm_blocks_run_with_create_pins(
-        &self,
-        items: &[ConfirmPrepared],
-        create_pins: Option<&crate::FkMap<CreatePin>>,
-    ) -> Result<Vec<Fk>, QueryError> {
-        if items.is_empty() {
-            return Ok(Vec::new());
-        }
-        let commit = self.lock_tip_commit()?;
-        let durable_before = self.tip_height();
+    /// The run must be contiguous, start at tip+1 (genesis on an empty
+    /// chain), and name real headers. `Some(fk)` is a one-block retry of the
+    /// block already confirmed at that height.
+    fn check_run_extends_tip(&self, items: &[ConfirmPrepared]) -> Result<Option<Fk>, QueryError> {
         for w in items.windows(2) {
             if w[1].height.0 != w[0].height.0.saturating_add(1) {
                 return Err(StoreError::Corrupt("confirm run not contiguous heights"));
@@ -397,7 +384,7 @@ impl Query {
                     if items.len() == 1 {
                         if let Some(fk) = self.store.confirmed.get(items[0].height)? {
                             if fk == items[0].header_fk {
-                                return Ok(vec![fk]);
+                                return Ok(Some(fk));
                             }
                         }
                     }
@@ -410,6 +397,29 @@ impl Query {
             if item.header_fk.is_null() {
                 return Err(StoreError::InvalidFk);
             }
+        }
+        Ok(None)
+    }
+
+    /// Like [`Self::confirm_blocks_run`], with optional write-batch create pins.
+    ///
+    /// `create_pins` is `create_fk → CreatePin` for creates committed on this write
+    /// path. Collect runs after tip (cheap); records sit on the job so queries
+    /// join them before durable seed. Enqueue is after the tip commit: a collect
+    /// failure can surface after `confirmed[]` advanced; retry is the heal
+    /// (re-confirm at the same height is idempotent).
+    pub fn confirm_blocks_run_with_create_pins(
+        &self,
+        items: &[ConfirmPrepared],
+        create_pins: Option<&crate::FkMap<CreatePin>>,
+    ) -> Result<Vec<Fk>, QueryError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let commit = self.lock_tip_commit()?;
+        let durable_before = self.tip_height();
+        if let Some(fk) = self.check_run_extends_tip(items)? {
+            return Ok(vec![fk]);
         }
 
         let t_strong = std::time::Instant::now();
