@@ -407,8 +407,8 @@ fn reorg_readmits_and_evicts_nonfinal(life: &mut Life) {
 /// With -minrelaytxfee at 50 sat/vB a parent below it goes to the extra
 /// pool. A one-sat child does not carry it; a paying child with a confirmed
 /// second input does. An unrelated low-fee tx does not ride a package's
-/// waiver. A child that fails after its waived parent promoted a parked
-/// spender takes the spender down with the parent.
+/// waiver. A child that fails after its parent was admitted leaves a
+/// parked spender of that parent in the orphanage.
 fn raised_min_relay_one_parent_one_child(life: &mut Life) {
     life.mp.set_min_relay_sat_kvb(50_000);
     let lp = fan_out(life.chain.fund(100_000), &[49_900, 49_900]);
@@ -447,7 +447,8 @@ fn raised_min_relay_one_parent_one_child(life: &mut Life) {
     let bad = with_annex(spend_tx(out(two.compute_txid(), 1), 1_000));
     let err = life.package(&[two, bad]).unwrap_err();
     assert!(matches!(err, AcceptError::Policy("libre annex")), "{err}");
-    assert_eq!((life.mp.live_count(), life.mp.orphan_count()), (0, 0));
+    assert_eq!((life.mp.live_count(), life.mp.orphan_count()), (0, 1));
+    assert!(life.mp.orphanage.contains(&spender.compute_txid()));
 }
 
 /// Room for three 61 vB txs. Over budget with the new tx as the worst

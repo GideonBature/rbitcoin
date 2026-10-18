@@ -3,7 +3,10 @@ Fixed
 - **Orphan promotion walks one worklist.** The mempool walk and the relay
   hub walk both admit a parked chain child then descendants, without one
   stack frame per descendant. A parent published inside that walk, including
-  a one-parent package, releases its parked spends on the same list.
+  a one-parent package, releases its parked spends on the same list. A child
+  that still misses another parent stays parked. A package admits its own
+  members before that walk, so a parked child included in the package is
+  not rolled out of the mempool.
 - **Electrum history refuses a window wider than 8,064 blocks.** A
   `from_height` of 1 or more still scans that window and does not use
   the scripthash create cap.

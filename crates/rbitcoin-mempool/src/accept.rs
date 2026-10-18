@@ -1657,21 +1657,44 @@ impl ActiveMempool {
             None
         };
         let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
+        // Members already parked are lifted so the short-circuit for a
+        // re-announced orphan does not reject them. Promote waits until
+        // every member is committed, so this walk cannot admit a later
+        // member and then roll it back as a duplicate.
+        let mut lifted: Vec<(Transaction, BTreeSet<Txid>)> = Vec::new();
         for tx in txs {
-            // accept_tx_with + promote (not top-level accept_tx) so stages are not reset per member.
-            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min) {
-                Ok(r) => {
-                    self.promote_orphans_of(r.txid, utxos, tip);
-                    accepted.push(r);
+            let id = tx.compute_txid();
+            if let Some(missing) = self.orphanage.missing_of(&id).cloned() {
+                if let Some(parked) = self.orphanage.take_txid(&id) {
+                    lifted.push((parked, missing));
                 }
+            }
+            // accept_tx_with (not top-level accept_tx) so stages are not reset per member.
+            match self.accept_tx_with(tx, utxos, tip, 0, true, member_min) {
+                Ok(r) => accepted.push(r),
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
+                    self.repark_lifted(&lifted);
                     return Err(e);
                 }
             }
         }
+        let ids: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
+        for id in ids {
+            self.promote_orphans_of(id, utxos, tip);
+        }
         Ok(accepted)
+    }
+
+    /// Put package members back in the orphanage when the package rolls back.
+    fn repark_lifted(&mut self, lifted: &[(Transaction, BTreeSet<Txid>)]) {
+        for (tx, missing) in lifted {
+            if self.graph.contains(&tx.compute_txid()) {
+                continue;
+            }
+            let _ = self.park_orphan(tx, missing.clone());
+        }
     }
 
     fn rollback_accepted_package(
@@ -3696,6 +3719,99 @@ mod tests {
         );
         child.output[0].value = Amount::from_sat(100_000 - 200 - 9);
         (parent, child)
+    }
+
+    /// A parent-then-child package must admit a child that was already parked
+    /// on that parent, and a failed package must leave that child parked.
+    #[test]
+    fn package_admits_its_parked_child() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: ops[0],
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(40_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+                TxOut {
+                    value: Amount::from_sat(40_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+            ],
+        };
+        let parent_id = parent.compute_txid();
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            39_000,
+        );
+        let sibling = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 1,
+            },
+            39_000,
+        );
+        let child_id = child.compute_txid();
+        let sibling_id = sibling.compute_txid();
+        for tx in [&child, &sibling] {
+            let err = mp.accept_tx(tx, &utxos, TIP_OK).unwrap_err();
+            assert!(
+                matches!(err, AcceptError::Orphaned { .. }),
+                "spend of the missing parent must park, got {err}"
+            );
+        }
+        let accepted = mp
+            .accept_package(&[parent.clone(), child.clone()], &utxos, TIP_OK)
+            .expect("package contains the parked child");
+        assert_eq!(accepted.len(), 2);
+        assert!(mp.graph.contains(&parent_id));
+        assert!(mp.graph.contains(&child_id));
+        assert!(
+            mp.graph.contains(&sibling_id),
+            "a parked sibling that is not in the package must still be admitted"
+        );
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = spend_tx(ops[1], 99_000);
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            98_000,
+        );
+        let child_id = child.compute_txid();
+        let err = mp.accept_tx(&child, &utxos, TIP_OK).unwrap_err();
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
+        let bad = spend_tx(ops[1], 100_000);
+        let err = mp
+            .accept_package(&[parent, bad], &utxos, TIP_OK)
+            .expect_err("second member overspends");
+        assert!(
+            !matches!(err, AcceptError::Duplicate(id) if id == child_id),
+            "a failed package must not report the parked child as a duplicate, got {err}"
+        );
+        assert!(
+            mp.orphanage.contains(&child_id),
+            "a failed package must leave the parked child in the orphanage"
+        );
+        assert!(!mp.graph.contains(&child_id));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// One parent arriving must leave an orphan that still misses the other.

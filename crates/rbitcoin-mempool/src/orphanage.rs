@@ -317,10 +317,8 @@ impl Orphanage {
         false
     }
 
-    fn remove_txid(&mut self, txid: &Txid) {
-        let Some(e) = self.by_txid.remove(txid) else {
-            return;
-        };
+    fn remove_txid(&mut self, txid: &Txid) -> Option<Transaction> {
+        let e = self.by_txid.remove(txid)?;
         self.by_wtxid.remove(&e.wtxid);
         self.unaccount(&e);
         for p in &e.missing {
@@ -332,6 +330,12 @@ impl Orphanage {
             }
         }
         // fifo may still hold txid if removed mid-list; leave stale ids (skipped on pop)
+        Some(e.tx)
+    }
+
+    /// Remove one parked tx and return it. `None` when it is not parked.
+    pub fn take_txid(&mut self, txid: &Txid) -> Option<Transaction> {
+        self.remove_txid(txid)
     }
 
     /// Take all orphans that listed `parent` as missing (for re-accept).
