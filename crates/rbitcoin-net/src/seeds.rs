@@ -1029,22 +1029,45 @@ mod tests {
             "[100::1]:8333".parse().unwrap(),
             "0.1.2.3:8333".parse().unwrap(),
             "[2002:0a00:1::]:8333".parse().unwrap(),
+            "[2002:0102:0304::1]:8333".parse().unwrap(),
             "[64:ff9b::a00:1]:8333".parse().unwrap(),
+            "[::a00:1]:8333".parse().unwrap(),
+            "[::ffff:0:a00:1]:8333".parse().unwrap(),
+            "[::ffff:a00:1]:8333".parse().unwrap(),
+            "[64:ff9b:1::a00:1]:8333".parse().unwrap(),
+            "[64:ff9b:1:1::102:304]:8333".parse().unwrap(),
+            "[2001:0:102:304::f5ff:fffe]:8333".parse().unwrap(),
+            "[3fff::1]:8333".parse().unwrap(),
             public,
         ]);
         assert_eq!(book.len(), 1);
         assert!(book.entry(&public).is_some());
         let sixto4_public: SocketAddr = "[2002:0102:0304::]:8333".parse().unwrap();
         let nat64_public: SocketAddr = "[64:ff9b::102:304]:8333".parse().unwrap();
-        book.inject([sixto4_public, nat64_public]);
+        let compatible_public: SocketAddr = "[::102:304]:8333".parse().unwrap();
+        let siit_public: SocketAddr = "[::ffff:0:102:304]:8333".parse().unwrap();
+        let nat64_local_public: SocketAddr = "[64:ff9b:1::102:304]:8333".parse().unwrap();
+        let mapped_public: SocketAddr = "[::ffff:102:304]:8333".parse().unwrap();
+        book.inject([
+            sixto4_public,
+            nat64_public,
+            compatible_public,
+            siit_public,
+            nat64_local_public,
+            mapped_public,
+        ]);
         assert!(
             book.entry(&sixto4_public).is_some(),
-            "6to4 of a public IPv4 stays"
+            "6to4 of a public IPv4 stays when the suffix is zero"
         );
         assert!(
             book.entry(&nat64_public).is_some(),
             "NAT64 of a public IPv4 stays"
         );
+        assert!(book.entry(&compatible_public).is_some());
+        assert!(book.entry(&siit_public).is_some());
+        assert!(book.entry(&nat64_local_public).is_some());
+        assert!(book.entry(&mapped_public).is_some());
         let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
         assert!(book.add_learned(lan, 64));
         assert!(book.entry(&lan).is_some());

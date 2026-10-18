@@ -52,11 +52,16 @@ pub(crate) fn addr_allowed(addr: NetAddr, only: &[OnlyNet]) -> bool {
 
 /// Prefixes `Ipv6Addr` does not classify on 1.95.
 ///
-/// `2001:db8::/32` documentation, `2001:10::/28` ORCHID, `2001:20::/28`
-/// ORCHIDv2, and `100::/64` discard. `is_documentation` is still unstable.
+/// `2001:db8::/32` and `3fff::/20` documentation, `2001:10::/28` ORCHID,
+/// `2001:20::/28` ORCHIDv2, and `100::/64` discard. `is_documentation` is
+/// still unstable.
 fn ipv6_special_unroutable(v: Ipv6Addr) -> bool {
     let o = v.octets();
     if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8 {
+        return true;
+    }
+    // RFC 9637 documentation. Core `IsRFC9637` rejects this in `IsValid`.
+    if o[0] == 0x3f && o[1] == 0xff && (o[2] & 0xf0) == 0 {
         return true;
     }
     if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && (o[3] & 0xf0) == 0x10 {
@@ -68,19 +73,46 @@ fn ipv6_special_unroutable(v: Ipv6Addr) -> bool {
     o[0] == 0x01 && o[1] == 0x00 && o[2..8].iter().all(|&b| b == 0)
 }
 
-/// 6to4 `2002::/16` and well-known NAT64 `64:ff9b::/96` when the embedded
-/// IPv4 is itself unroutable. A public embedded address stays.
+/// Tunnel and translation prefixes.
+///
+/// A public embedded IPv4 stays only in its canonical form: 6to4 and local
+/// NAT64 with the non-IPv4 bits zero, well-known NAT64, IPv4-compatible
+/// `::/96`, and SIIT `::ffff:0:0:0/96`. Any other suffix is a distinct map
+/// key and would fill the flat 8192 book. Teredo `2001::/32` is dropped
+/// entirely: the server address is 32 free bits, so a canonical suffix
+/// still fills the book. IPv4-mapped `::ffff:0:0/96` is unwrapped earlier.
 fn ipv6_embedded_bogon(v: Ipv6Addr) -> bool {
     let o = v.octets();
-    if o[0] == 0x20 && o[1] == 0x02 {
-        return ipv4_unroutable(Ipv4Addr::new(o[2], o[3], o[4], o[5]));
+    // Teredo. Client IPv4 is bit-flipped; server, flags, and port are free.
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && o[3] == 0x00 {
+        return true;
     }
+    // 6to4. Bytes 2–5 are the IPv4. Bytes 6–15 must be zero.
+    if o[0] == 0x20 && o[1] == 0x02 {
+        return ipv4_unroutable(Ipv4Addr::new(o[2], o[3], o[4], o[5]))
+            || o[6..].iter().any(|&b| b != 0);
+    }
+    // Well-known NAT64 `64:ff9b::/96`.
     if o[0] == 0x00
         && o[1] == 0x64
         && o[2] == 0xff
         && o[3] == 0x9b
         && o[4..12].iter().all(|&b| b == 0)
     {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    // Local NAT64 `64:ff9b:1::/48`. Bytes 6–11 must be zero.
+    if o[0] == 0x00 && o[1] == 0x64 && o[2] == 0xff && o[3] == 0x9b && o[4] == 0x00 && o[5] == 0x01
+    {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]))
+            || o[6..12].iter().any(|&b| b != 0);
+    }
+    // SIIT `::ffff:0:0:0/96`. Not IPv4-mapped `::ffff:0:0/96`.
+    if o[..8].iter().all(|&b| b == 0) && o[8] == 0xff && o[9] == 0xff && o[10] == 0 && o[11] == 0 {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    // Deprecated IPv4-compatible `::/96`.
+    if o[..12].iter().all(|&b| b == 0) {
         return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
     }
     false
