@@ -3653,3 +3653,118 @@ fn pack_one_shard_unlinks_only_its_postings() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// A two-page cycle stops at the walk cap. The walk uses 4, not the production
+/// million, so llvm-cov finishes. `SH_PAGE_CHAIN_MAX` stays one million.
+#[test]
+fn scripthash_page_cycle_is_corrupt() {
+    assert_eq!(super::SH_PAGE_CHAIN_MAX, 1_000_000);
+    let dir = tmp();
+    let path = dir.join("cycle.body");
+    let body =
+        crate::file::TableFile::create(&path, rbitcoin_primitives::TableKind::ScriptHash).unwrap();
+    let page_a = 4096u64;
+    let page_b = 8192u64;
+    let mut a = [0u8; SH_PAGE_SIZE];
+    let mut b = [0u8; SH_PAGE_SIZE];
+    crate::scripthash_pages::sh_page_init_empty(&mut a);
+    crate::scripthash_pages::sh_page_init_empty(&mut b);
+    sh_page_set_next(&mut a, page_b).unwrap();
+    sh_page_set_next(&mut b, page_a).unwrap();
+    body.write_at(page_a, &a).unwrap();
+    body.write_at(page_b, &b).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut prev_last = None;
+        let res = super::collect_linked_pages(&body, page_a, &mut out, &mut prev_last, 4);
+        let _ = tx.send(res.map(|_| ()));
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(())) => panic!("cycle returned entries"),
+        Ok(Err(StoreError::Corrupt(msg))) => assert!(msg.contains("cycle"), "{msg}"),
+        Ok(Err(other)) => panic!("{other}"),
+        Err(_) => panic!("page cycle did not return"),
+    }
+}
+
+/// Freeing a two-page cycle stops at the walk cap. The walk uses 4, not the
+/// production million, so llvm-cov finishes.
+#[test]
+fn scripthash_page_free_cycle_is_corrupt() {
+    assert_eq!(super::SH_PAGE_CHAIN_MAX, 1_000_000);
+    let dir = tmp();
+    let path = dir.join("free-cycle.body");
+    let body =
+        crate::file::TableFile::create(&path, rbitcoin_primitives::TableKind::ScriptHash).unwrap();
+    let page_a = 4096u64;
+    let page_b = 8192u64;
+    let mut a = [0u8; SH_PAGE_SIZE];
+    let mut b = [0u8; SH_PAGE_SIZE];
+    crate::scripthash_pages::sh_page_init_empty(&mut a);
+    crate::scripthash_pages::sh_page_init_empty(&mut b);
+    sh_page_set_next(&mut a, page_b).unwrap();
+    sh_page_set_next(&mut b, page_a).unwrap();
+    body.write_at(page_a, &a).unwrap();
+    body.write_at(page_b, &b).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = super::follow_page_chain(&body, page_a, 4, |_body, _off| Ok(()));
+        let _ = tx.send(res);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(())) => panic!("free walk returned"),
+        Ok(Err(StoreError::Corrupt(msg))) => assert!(msg.contains("cycle"), "{msg}"),
+        Ok(Err(other)) => panic!("{other}"),
+        Err(_) => panic!("page free cycle did not return"),
+    }
+}
+
+/// Freeing a cycle must not treat the overwritten page header as `next`.
+/// A freelist head at 32 MiB makes that word look like a real link.
+#[test]
+fn scripthash_page_free_revisit_is_corrupt() {
+    let dir = tmp();
+    let table = ScriptHashTable::create_tiny(&dir).unwrap();
+    let path = dir.join("free-revisit.body");
+    let body =
+        crate::file::TableFile::create(&path, rbitcoin_primitives::TableKind::ScriptHash).unwrap();
+    let page_a = 4096u64;
+    let page_b = 8192u64;
+    let page_l = 12288u64;
+    let mut a = [0u8; SH_PAGE_SIZE];
+    let mut b = [0u8; SH_PAGE_SIZE];
+    let mut last = [0u8; SH_PAGE_SIZE];
+    crate::scripthash_pages::sh_page_init_empty(&mut a);
+    crate::scripthash_pages::sh_page_init_empty(&mut b);
+    crate::scripthash_pages::sh_page_init_empty(&mut last);
+    sh_page_set_next(&mut a, page_b).unwrap();
+    sh_page_set_next(&mut b, page_a).unwrap();
+    crate::scripthash_pages::sh_page_set_extent(&mut last, page_a, 1).unwrap();
+    crate::scripthash_pages::sh_page_set_last(&mut last, page_a).unwrap();
+    body.write_at(page_a, &a).unwrap();
+    body.write_at(page_b, &b).unwrap();
+    body.write_at(page_l, &last).unwrap();
+    let mut free_head = [0u64; SH_MAX_CLASS as usize + 1];
+    free_head[SH_PAGE_SLAB_CLASS as usize] = 32 * 1024 * 1024;
+    let mut alloc = AllocState {
+        live_count: 0,
+        bump: page_l + SH_PAGE_SIZE as u64,
+        free_head,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = table.free_if_paged(&body, &mut alloc, &ShHeadValue::extent(page_l));
+        let head = alloc.free_head[SH_PAGE_SLAB_CLASS as usize];
+        let _ = tx.send((res, head));
+    });
+    let (res, head) = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(v) => v,
+        Err(_) => panic!("page free revisit did not return"),
+    };
+    match res {
+        Err(StoreError::Corrupt(msg)) => assert!(msg.contains("cycle"), "{msg}"),
+        other => panic!("cycle must be corrupt, got {other:?}"),
+    }
+    assert_eq!(head, page_b, "each page is freed once");
+}

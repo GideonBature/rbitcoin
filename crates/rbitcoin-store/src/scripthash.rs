@@ -30,7 +30,7 @@ use crate::scripthash_slabs::{
 use crate::scripthash_sorted_head::SortedHead;
 use bitcoin_hashes::{sha256, Hash};
 use rbitcoin_primitives::{uleb128_len, Fk, TableKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -712,25 +712,76 @@ fn collect_page_chain_span(
     Ok(Some((out, last_next)))
 }
 
-fn collect_page_chain_linked(body: &TableFile, first_page: u64) -> Result<Vec<Fk>, StoreError> {
-    let mut out = Vec::new();
-    let mut prev_last: Option<u64> = None;
+/// Same stop as `hashhead` multi-list walks. A two-page cycle never returns otherwise.
+const SH_PAGE_CHAIN_MAX: u32 = 1_000_000;
+
+/// Follow `next` and visit each page. `page_cap` stops a cycle.
+fn follow_page_chain(
+    body: &TableFile,
+    mut off: u64,
+    page_cap: u32,
+    mut visit: impl FnMut(&TableFile, u64) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    let mut seen = HashSet::new();
+    let mut guard = 0u32;
+    while off != 0 {
+        if !seen.insert(off) {
+            return Err(StoreError::Corrupt("scripthash page chain cycle"));
+        }
+        guard = guard.saturating_add(1);
+        if guard > page_cap {
+            return Err(StoreError::Corrupt("scripthash page chain cycle"));
+        }
+        let mut page = [0u8; SH_PAGE_SIZE];
+        body.read_at(off, &mut page)?;
+        let next = sh_page_next(&page)?;
+        visit(body, off)?;
+        off = next;
+    }
+    Ok(())
+}
+
+fn collect_linked_pages(
+    body: &TableFile,
+    first_page: u64,
+    out: &mut Vec<Fk>,
+    prev_last: &mut Option<u64>,
+    page_cap: u32,
+) -> Result<(), StoreError> {
+    if first_page == 0 {
+        return Ok(());
+    }
     let mut cur = [0u8; SH_PAGE_SIZE];
     let mut nxt = [0u8; SH_PAGE_SIZE];
-    if first_page == 0 {
-        return Ok(out);
-    }
     read_sh_page_bytes(body, first_page, &mut cur)?;
+    let mut guard = 0u32;
     loop {
+        guard = guard.saturating_add(1);
+        if guard > page_cap {
+            return Err(StoreError::Corrupt("scripthash page chain cycle"));
+        }
         let at = out.len();
-        let next = sh_page_decode_slice_into(&cur, &mut out)?;
-        extend_page_entries(&out, &mut prev_last, at)?;
+        let next = sh_page_decode_slice_into(&cur, out)?;
+        extend_page_entries(out, prev_last, at)?;
         if next == 0 {
             break;
         }
         read_sh_page_bytes(body, next, &mut nxt)?;
         cur = nxt;
     }
+    Ok(())
+}
+
+fn collect_page_chain_linked(body: &TableFile, first_page: u64) -> Result<Vec<Fk>, StoreError> {
+    let mut out = Vec::new();
+    let mut prev_last = None;
+    collect_linked_pages(
+        body,
+        first_page,
+        &mut out,
+        &mut prev_last,
+        SH_PAGE_CHAIN_MAX,
+    )?;
     Ok(out)
 }
 
@@ -768,19 +819,7 @@ fn collect_extent_then_tail(body: &TableFile, last_page: u64) -> Result<Vec<Fk>,
         ));
     }
     let mut prev_last = out.last().map(|fk| fk.0);
-    let mut cur = [0u8; SH_PAGE_SIZE];
-    let mut nxt = [0u8; SH_PAGE_SIZE];
-    read_sh_page_bytes(body, tail_off, &mut cur)?;
-    loop {
-        let at = out.len();
-        let next = sh_page_decode_slice_into(&cur, &mut out)?;
-        extend_page_entries(&out, &mut prev_last, at)?;
-        if next == 0 {
-            break;
-        }
-        read_sh_page_bytes(body, next, &mut nxt)?;
-        cur = nxt;
-    }
+    collect_linked_pages(body, tail_off, &mut out, &mut prev_last, SH_PAGE_CHAIN_MAX)?;
     Ok(out)
 }
 
@@ -2240,14 +2279,10 @@ impl ScriptHashTable {
     ) -> Result<(), StoreError> {
         match old {
             ShHeadValue::Extent { last_page } => {
-                let mut off = paged_first_from_last(body, *last_page)?;
-                while off != 0 {
-                    let mut page = [0u8; SH_PAGE_SIZE];
-                    body.read_at(off, &mut page)?;
-                    let next = sh_page_next(&page)?;
-                    self.free_slab(body, alloc, SH_PAGE_SLAB_CLASS, off)?;
-                    off = next;
-                }
+                let first = paged_first_from_last(body, *last_page)?;
+                follow_page_chain(body, first, SH_PAGE_CHAIN_MAX, |body, off| {
+                    self.free_slab(body, alloc, SH_PAGE_SLAB_CLASS, off)
+                })?;
             }
             ShHeadValue::Slab { class, off, .. } => {
                 self.free_slab(body, alloc, *class, *off)?;

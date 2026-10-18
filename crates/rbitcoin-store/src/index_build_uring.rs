@@ -102,13 +102,17 @@ struct ReadJob<'p> {
 }
 
 impl<'p> ReadJob<'p> {
-    fn new((fd, path): (IoHandle, &'p Path), off: u64, len: u64) -> Self {
-        Self {
+    fn new((fd, path): (IoHandle, &'p Path), off: u64, len: u64) -> Result<Self, StoreError> {
+        if len > crate::var_table::VarTable::BODY_READ_MAX {
+            return Err(StoreError::Rejected("body read too large"));
+        }
+        let n = usize::try_from(len).map_err(|_| StoreError::Corrupt("body span too large"))?;
+        Ok(Self {
             fd,
             path,
             off,
-            buf: vec![0u8; len as usize],
-        }
+            buf: vec![0u8; n],
+        })
     }
 }
 
@@ -376,24 +380,33 @@ fn read_blocks(
             .collect::<Result<Vec<_>, _>>()?;
         at += h.n as usize;
         let lo = pairs.iter().map(|p| p.txout.0).min().unwrap_or(0);
-        let hi = pairs
-            .iter()
-            .map(|p| p.txout.0 + p.txout.1)
-            .max()
-            .unwrap_or(0);
+        let mut hi = 0u64;
+        for p in &pairs {
+            let end = p
+                .txout
+                .0
+                .checked_add(p.txout.1)
+                .ok_or(StoreError::Corrupt("body span too large"))?;
+            if end > hi {
+                hi = end;
+            }
+        }
+        let span = hi
+            .checked_sub(lo)
+            .ok_or(StoreError::Corrupt("body span too large"))?;
         spans.push((jobs.len(), lo, pairs));
         // One compare against the body HWM. Not a fresh `published_meta` pair.
         require_body_hwm(table.body.body_logical_len(), hi)?;
-        jobs.push(ReadJob::new(files.body, lo, hi - lo));
+        jobs.push(ReadJob::new(files.body, lo, span)?);
         let (abs, len) = table.input.edges_body_read(plan)?;
-        jobs.push(ReadJob::new(files.input_body, abs, len));
+        jobs.push(ReadJob::new(files.input_body, abs, len)?);
         if want_txids {
             let off = TxidBody::entry_offset(h.first.0)?;
             jobs.push(ReadJob::new(
                 files.txid,
                 off,
                 u64::from(h.n) * TXID_ENTRY_LEN,
-            ));
+            )?);
         }
     }
     reader.run(&mut jobs)?;
@@ -512,7 +525,7 @@ fn read_witnesses_and_parent_locs(
             // One compare against the seqsigwit HWM. Not a fresh `published_meta` pair.
             require_body_hwm(sws_hwm, off.saturating_add(len))?;
             sws_jobs.push((bi, ti, jobs.len()));
-            jobs.push(ReadJob::new(files.seqsigwit, off, len));
+            jobs.push(ReadJob::new(files.seqsigwit, off, len)?);
         }
     }
     let txid_j = jobs.len();
@@ -522,7 +535,7 @@ fn read_witnesses_and_parent_locs(
                 files.txid,
                 TxidBody::entry_offset(fk)?,
                 TXID_ENTRY_LEN,
-            ));
+            )?);
         }
     }
     reader.run(&mut jobs)?;
@@ -560,10 +573,10 @@ fn read_parents(
         // One compare against the body HWM. Not a fresh `published_meta` pair.
         require_body_hwm(hwm, p.txout.0.saturating_add(p.txout.1))?;
     }
-    let mut jobs: Vec<ReadJob<'_>> = pairs
-        .iter()
-        .map(|p| ReadJob::new(files.body, p.txout.0, p.txout.1))
-        .collect();
+    let mut jobs = Vec::with_capacity(pairs.len());
+    for p in &pairs {
+        jobs.push(ReadJob::new(files.body, p.txout.0, p.txout.1)?);
+    }
     reader.run(&mut jobs)?;
     let mut parents = U64Map::default();
     for (((fk, txid), job), p) in parent_fks.iter().zip(txids).zip(&jobs).zip(&pairs) {
@@ -576,7 +589,7 @@ fn read_parents(
 
 #[cfg(test)]
 mod tests {
-    use super::{read_index_window, require_body_hwm, IndexHeight, IndexWindow};
+    use super::{read_index_window, require_body_hwm, IndexHeight, IndexWindow, ReadJob};
     use crate::error::StoreError;
     use crate::tx_table::{InputRecord, OutputRecord, TxRecord, TxTable};
     use rbitcoin_primitives::{Fk, Height};
@@ -592,6 +605,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn index_read_above_the_cap_is_refused() {
+        let dir = tmp("read-cap");
+        let file = std::fs::File::create(dir.join("body")).unwrap();
+        let handle = crate::io_handle::IoHandle::from_file(&file);
+        let len = crate::var_table::VarTable::BODY_READ_MAX + 1;
+        match ReadJob::new((handle, dir.as_path()), 0, len) {
+            Err(StoreError::Rejected(msg)) => assert!(msg.contains("too large"), "{msg}"),
+            Err(other) => panic!("{other}"),
+            Ok(_) => panic!("above the body read cap allocated"),
+        }
     }
 
     fn tx(mark: u8) -> TxRecord {

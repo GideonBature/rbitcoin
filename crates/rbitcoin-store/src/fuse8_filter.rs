@@ -107,14 +107,20 @@ pub fn open_file(path: &Path) -> Result<SealedFuse8, StoreError> {
             return Err(StoreError::Corrupt("tx.head fuse magic"));
         }
         let ver = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-        if bytes.len() < 16 + len {
+        let len = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let Some(end) = 16u64.checked_add(len) else {
+            return Err(StoreError::Corrupt("fuse8 v2 body unreadable"));
+        };
+        let Ok(end) = usize::try_from(end) else {
+            return Err(StoreError::Corrupt("fuse8 v2 body unreadable"));
+        };
+        if bytes.len() < end {
             return Err(StoreError::Corrupt("fuse8 v2 body unreadable"));
         }
         match ver {
             VERSION_V1 => return Err(StoreError::Corrupt(INDEX_REFUSE_FUSE8_V1)),
             VERSION_V2 => {
-                let payload = &bytes[16..16 + len];
+                let payload = &bytes[16..end];
                 parse_v2_geometry(payload)
                     .map_err(|_| StoreError::Corrupt("fuse8 v2 body unreadable"))?
             }
@@ -172,6 +178,12 @@ fn parse_v2_geometry(payload: &[u8]) -> Result<V2Geometry, StoreError> {
             "fuse8 segment length must be a power of two",
         ));
     }
+    if segment_count_length < segment_length || !segment_count_length.is_multiple_of(segment_length)
+    {
+        return Err(StoreError::Corrupt(
+            "fuse8 segment count length must be a multiple of the segment length",
+        ));
+    }
     let min_fp = (segment_count_length as u64).saturating_add(2 * u64::from(segment_length));
     if (fp_len as u64) < min_fp {
         return Err(StoreError::Corrupt(
@@ -222,6 +234,42 @@ mod tests {
         let p = std::env::temp_dir().join(format!("rbitcoin-fuse8-{n}"));
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+
+    #[test]
+    fn fuse8_segment_count_must_be_a_multiple_of_segment_length() {
+        let segment_length = 4u32;
+        let mut payload = vec![0u8; 28 + 14];
+        payload[8..12].copy_from_slice(&segment_length.to_le_bytes());
+        payload[12..16].copy_from_slice(&3u32.to_le_bytes());
+        payload[16..20].copy_from_slice(&6u32.to_le_bytes());
+        payload[20..28].copy_from_slice(&14u64.to_le_bytes());
+        match parse_v2_geometry(&payload) {
+            Err(StoreError::Corrupt(msg)) => assert!(msg.contains("multiple"), "{msg}"),
+            Ok(_) => panic!("segment count 6 with length 4 was accepted"),
+            Err(other) => panic!("{other}"),
+        }
+        let mut zero = vec![0u8; 28 + 8];
+        zero[8..12].copy_from_slice(&segment_length.to_le_bytes());
+        zero[12..16].copy_from_slice(&3u32.to_le_bytes());
+        zero[20..28].copy_from_slice(&8u64.to_le_bytes());
+        match parse_v2_geometry(&zero) {
+            Err(StoreError::Corrupt(msg)) => assert!(msg.contains("multiple"), "{msg}"),
+            Ok(_) => panic!("segment count 0 was accepted"),
+            Err(other) => panic!("{other}"),
+        }
+        let dir = tmp();
+        let path = dir.join("geom.fuse8");
+        let mut raw = Vec::from(*MAGIC);
+        raw.extend_from_slice(&VERSION_V2.to_le_bytes());
+        raw.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        raw.extend_from_slice(&payload);
+        std::fs::write(&path, &raw).unwrap();
+        match open_file(&path) {
+            Err(StoreError::Corrupt(_)) => {}
+            other => panic!("non-multiple geometry opened: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -359,6 +407,21 @@ mod tests {
     }
 
     #[test]
+    fn fuse8_wrapped_body_length_is_corrupt() {
+        let dir = tmp();
+        let path = dir.join("wrap.fuse8");
+        let mut raw = Vec::from(*MAGIC);
+        raw.extend_from_slice(&VERSION_V2.to_le_bytes());
+        raw.extend_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(&path, &raw).unwrap();
+        match open_file(&path) {
+            Err(StoreError::Corrupt(m)) => assert!(m.contains("unreadable"), "{m}"),
+            other => panic!("wrapped body length must be Corrupt, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn decode_body_rejects_absurd_fingerprint_len() {
         let mut body = Vec::new();
         body.extend_from_slice(&1u64.to_le_bytes()); // seed
@@ -407,7 +470,7 @@ mod tests {
         body.extend_from_slice(&1u64.to_le_bytes());
         body.extend_from_slice(&64u32.to_le_bytes());
         body.extend_from_slice(&63u32.to_le_bytes());
-        body.extend_from_slice(&10_000u32.to_le_bytes());
+        body.extend_from_slice(&(64u32 * 156).to_le_bytes());
         body.extend_from_slice(&8u64.to_le_bytes());
         body.extend_from_slice(&[0u8; 8]);
         match decode_body(&body) {

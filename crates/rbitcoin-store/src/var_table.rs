@@ -127,7 +127,7 @@ impl VarTable {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let n = usize::try_from(len).map_err(|_| StoreError::Corrupt("body span too large"))?;
+        let n = Self::checked_body_read(self.body.logical_len(), offset, len)?;
         let mut buf = vec![0u8; n];
         self.read_body_pread(self.body.logical_len(), offset, &mut buf)?;
         Ok(buf)
@@ -198,7 +198,7 @@ impl VarTable {
             buf.clear();
             return f(&[]);
         }
-        let n = usize::try_from(len).map_err(|_| StoreError::Corrupt("body span too large"))?;
+        let n = Self::checked_body_read(published, offset, len)?;
         buf.clear();
         buf.reserve(n);
         let dst = {
@@ -227,7 +227,8 @@ impl VarTable {
         if len == 0 {
             return f(&[]);
         }
-        let mut buf = vec![0u8; len as usize];
+        let n = Self::checked_body_read(self.body.logical_len(), offset, len)?;
+        let mut buf = vec![0u8; n];
         self.read_body_pread(self.body.logical_len(), offset, &mut buf)?;
         f(&buf)
     }
@@ -494,6 +495,18 @@ impl VarTable {
         Ok(n)
     }
 
+    /// One read. A create-loc stride is a `u32` times 8 (~32 GiB). A block is a few mebibytes.
+    pub(crate) const BODY_READ_MAX: u64 = 64 * 1024 * 1024;
+
+    /// Cap and published end before any buffer is grown.
+    fn checked_body_read(published: u64, offset: u64, len: u64) -> Result<usize, StoreError> {
+        if len > Self::BODY_READ_MAX {
+            return Err(StoreError::Rejected("body read too large"));
+        }
+        Self::require_published_body(published, offset, len)?;
+        usize::try_from(len).map_err(|_| StoreError::Corrupt("body span too large"))
+    }
+
     /// Compare `offset + len` to the caller's published-end integer.
     /// No atomic load: a fresh `published_body_end` can disagree with that snapshot.
     fn require_published_body(published: u64, offset: u64, len: u64) -> Result<(), StoreError> {
@@ -660,6 +673,32 @@ mod tests {
             .expect_err("past published end");
         match err {
             StoreError::Corrupt(msg) => assert!(msg.contains("published"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn body_read_above_the_cap_is_refused() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, AtomicOrdering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("rbitcoin-var-cap-{id}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = VarTable::create(&dir, "tx", TableKind::TxOut).unwrap();
+        let len = 64 * 1024 * 1024 + 8;
+        let err = t
+            .with_bytes_at(FILE_HEADER_LEN as u64, len, |_| Ok(()))
+            .expect_err("above the body read cap");
+        match err {
+            StoreError::Rejected(msg) => assert!(msg.contains("too large"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+        let err = t
+            .pread_span(FILE_HEADER_LEN as u64, len)
+            .expect_err("span above the body read cap");
+        match err {
+            StoreError::Rejected(msg) => assert!(msg.contains("too large"), "{msg}"),
             other => panic!("{other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
