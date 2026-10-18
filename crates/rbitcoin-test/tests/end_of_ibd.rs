@@ -524,8 +524,25 @@ async fn partial_with_miner_down(miner_dir: &Path, synced: &Synced) {
 
     let miner = start_miner(miner_dir).await;
     finish_partial(partial_dir.path().as_path(), miner.local_addr, synced).await;
+    archive_above_tip(&held_dir.store_path(), &miner, held_tip, synced.height);
     finish_partial(held_dir.path().as_path(), miner.local_addr, synced).await;
     miner.shutdown().await;
+}
+
+/// A crash between the Class A write and the tip advance leaves bodies above
+/// the tip with no connect. The next start must fetch them again.
+fn archive_above_tip(store: &Path, miner: &P2PNode, tip: u32, top: u32) {
+    use rbitcoin_query::testutil::FixtureChain;
+    let query = Query::open_or_create_tiny(store).unwrap();
+    let params = ChainParams::regtest();
+    for h in tip + 1..=(tip + 4).min(top) {
+        let block = miner.query.reconstruct_block_at_height(Height(h)).unwrap();
+        let (rec, txs) =
+            rbitcoin_query::prepare_block_for_archive(&query, &params, &block).unwrap();
+        query.commit_class_a_only(&rec, &txs).unwrap();
+    }
+    query.flush().unwrap();
+    assert_eq!(query.tip_height(), Some(Height(tip)));
 }
 
 async fn follow_journey() {

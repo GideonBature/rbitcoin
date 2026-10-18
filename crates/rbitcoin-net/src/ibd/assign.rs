@@ -294,6 +294,15 @@ pub(crate) fn assign_work_ordered(
         );
     if race_tip {
         issued += cover_tip_batch_holes(st, hub, cfg, &alive, &tip_holes);
+    } else {
+        // Densify skips a Class A seed (`need_hash_at`). Without a race,
+        // only this cover gets an archived tip hole back into the queue.
+        let archived: Vec<BlockHash> = tip_holes
+            .iter()
+            .copied()
+            .filter(|h| st.body.is_known_archived(h))
+            .collect();
+        issued += cover_tip_holes(st, hub, cfg, &alive, &archived, 1);
     }
     if tip_holes.is_empty() {
         issued += cover_first_pre_hole(st, hub, cfg, &alive);
