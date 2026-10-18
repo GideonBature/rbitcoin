@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "script-oracle"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Bitcoin Core v31.1 VerifyScript oracle for the script corpus. Not a workspace member."
+
+[dependencies]
+bitcoin = "=0.32.102"
+serde_json = "1"
+
+[dev-dependencies]
+rbitcoin-consensus = { path = "../crates/rbitcoin-consensus", features = ["corpus"] }
+
+[build-dependencies]
+cc = "1"

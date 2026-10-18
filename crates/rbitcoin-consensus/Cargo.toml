@@ -7,11 +7,17 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Block and transaction validation / confirmability"
 
+[features]
+# Lets script-oracle call the Core script assembler. Off for the node.
+corpus = ["dep:serde_json"]
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 arc-swap = { workspace = true }
 bitcoin = { workspace = true }
 bitcoin_hashes = { workspace = true }
+# Corpus rows are JSON. The node build leaves this feature off.
+serde_json = { workspace = true, optional = true }
 # Attribute only. cargo-mutants reads it; it does not change compiled code.
 mutants = "0.0.4"
 # Parallel script checks use in-crate `script_pool` (std threads) — no rayon.

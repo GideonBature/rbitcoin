@@ -2,7 +2,7 @@
 
 Every consensus rule **we implement** (not delegated wholesale to rust-bitcoin) has an automated test that would fail if the check were removed or inverted.
 
-**Out of scope:** full secp256k1 / script-interpreter opcode parity vs Core; every historical mainnet retarget. One boundary is pinned: height 32256 compact `0x1d00d86a`, plus the quarter, 4×, and pow-limit clamp literals (`mainnet_retarget_32256_matches_core_compact`, `retarget_clamps_timespan_and_caps_at_pow_limit`).
+**Out of scope:** secp256k1, which stays the shared library. Script opcode parity against Bitcoin Core is this corpus (`crates/rbitcoin-consensus/tests/fixtures/script_corpus/`) plus Core's JSON (`script_tests.json`, `tx_valid.json`, `tx_invalid.json`, `sighash.json`), both checked against Core v31.1 `VerifyScript`. Not every historical mainnet retarget. One boundary is pinned: height 32256 compact `0x1d00d86a`, plus the quarter, 4×, and pow-limit clamp literals (`mainnet_retarget_32256_matches_core_compact`, `retarget_clamps_timespan_and_caps_at_pow_limit`).
 
 ## Running
 
@@ -17,6 +17,8 @@ cargo test -p rbitcoin-consensus --lib core_script_tests_all_rows -- --nocapture
 cargo test -p rbitcoin-consensus --lib core_tx_ -- --nocapture
 cargo test -p rbitcoin-consensus --lib core_sighash -- --nocapture
 cargo test -p rbitcoin-consensus --lib core_bip341 -- --nocapture
+cargo test -p rbitcoin-consensus --lib script_corpus_rows_match_our_interpreter -- --quiet
+cargo test --manifest-path script-oracle/Cargo.toml --quiet
 cargo test -p rbitcoin-consensus --lib block_866342 -- --nocapture
 cargo test -p rbitcoin-consensus --test script_edge_fixtures
 # broader integration still covers connect success paths:
@@ -37,6 +39,7 @@ refreshing; do not check copies into `tests/fixtures/`.
 | `tx_invalid.json` | same | `script::core_tx_vectors::core_tx_invalid_all_rows` | every data row reject |
 | `sighash.json` | same | `script::core_sighash::core_sighash_all_rows` | every data row digest matches Core |
 | `bip341_wallet_vectors.json` | same | `script::core_bip341::core_bip341_wallet_vectors_all_rows` | key-path fully-signed + per-input spends accept; unknown-leaf script-path accepts |
+| `script_corpus/script_tests.json` | `tests/fixtures/script_corpus/` (ours, Core row form) | `script::core_vectors::script_corpus_rows_match_our_interpreter` and `script-oracle` | every row accept/reject matches the file; the oracle is Core v31.1 `VerifyScript` |
 | mainnet 866342 + prevouts | `tests/fixtures/block_866342/` (Floresta zstd) | `block::block_866342::block_866342_structure_scripts_and_overweight` | structure at height + every non-coinbase `verify_job_all_inputs`; extra-NOP clone is 4_000_001 WU |
 
 ### How the harness works

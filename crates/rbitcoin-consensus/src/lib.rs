@@ -10,6 +10,8 @@ mod params;
 pub mod policy;
 mod regtest_pad;
 mod script;
+#[cfg(feature = "corpus")]
+pub use script::core_script;
 pub mod script_pool;
 mod signet;
 pub mod silent_payments;

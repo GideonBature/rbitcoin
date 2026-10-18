@@ -1,11 +1,11 @@
 //! Shared Core script-language assembler and hex decode (unit-test only).
 
-pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+pub fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     rbitcoin_primitives::hex_decode(s.trim()).map_err(|e| e.to_string())
 }
 
 /// Assemble Core script string ("1 2 ADD", "0x4c 0x01 0x07", "'Az'") to bytes.
-pub(crate) fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
+pub fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut i = 0;
     let b = src.as_bytes();
@@ -329,9 +329,191 @@ fn opcode_byte(name: &str) -> Option<u8> {
     None
 }
 
+/// `scriptPubKey` cell, including Core's `#TAPROOTOUTPUT#` placeholder.
+pub fn assemble_script_pubkey(src: &str, tap_out: Option<[u8; 32]>) -> Result<Vec<u8>, String> {
+    if src.trim() == "0x51 0x20 #TAPROOTOUTPUT#" {
+        let out = tap_out.ok_or_else(|| "#TAPROOTOUTPUT# without control block".to_string())?;
+        let mut b = vec![0x51, 0x20];
+        b.extend_from_slice(&out);
+        return Ok(b);
+    }
+    assemble_script(src)
+}
+
+/// Control block and tweaked output key for one tapscript leaf.
+///
+/// Internal key is Core `script_tests.cpp` `vchKey0`: 31 zero bytes, then `0x01`.
+pub fn taproot_leaf_control(leaf: &[u8]) -> Result<(Vec<u8>, [u8; 32]), String> {
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+    use bitcoin::taproot::{LeafVersion, TaprootBuilder};
+
+    let secp = Secp256k1::new();
+    let mut sk_bytes = [0u8; 32];
+    sk_bytes[31] = 1;
+    let sk = SecretKey::from_slice(&sk_bytes).map_err(|e| format!("taproot internal sk: {e}"))?;
+    let kp = Keypair::from_secret_key(&secp, &sk);
+    let (internal_xonly, _) = kp.x_only_public_key();
+    let leaf_script = bitcoin::script::ScriptBuf::from_bytes(leaf.to_vec());
+    let builder = TaprootBuilder::new()
+        .add_leaf(0, leaf_script.clone())
+        .map_err(|e| format!("taproot add_leaf: {e:?}"))?;
+    let spend_info = builder
+        .finalize(&secp, internal_xonly)
+        .map_err(|e| format!("taproot finalize: {e:?}"))?;
+    let control = spend_info
+        .control_block(&(leaf_script, LeafVersion::TapScript))
+        .ok_or_else(|| "taproot control_block missing".to_string())?;
+    let output = spend_info.output_key().to_x_only_public_key().serialize();
+    Ok((control.serialize(), output))
+}
+
+/// Spend-transaction fields both corpus runners share.
+///
+/// Defaults match Core `script_tests.cpp`: version 1, locktime 0, sequence
+/// `0xffffffff`, one empty output. `version` is the consensus `i32` bit
+/// pattern (`4294967295` and `-1` are the same bits).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpendShape {
+    pub version: i32,
+    pub lock_time: u32,
+    pub sequence: u32,
+    pub n_outputs: usize,
+}
+
+impl Default for SpendShape {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            lock_time: 0,
+            sequence: u32::MAX,
+            n_outputs: 1,
+        }
+    }
+}
+
+/// Optional `"spend"` object on a corpus row. Missing object keeps [`SpendShape::default`].
+pub fn spend_shape_from_json(v: Option<&serde_json::Value>) -> Result<SpendShape, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return Ok(SpendShape::default());
+    };
+    let obj = v.as_object().ok_or("spend must be an object")?;
+    let mut shape = SpendShape::default();
+    if let Some(n) = obj.get("version") {
+        let bits = n.as_i64().ok_or("spend.version")?;
+        shape.version = bits as i32;
+    }
+    if let Some(n) = obj.get("locktime") {
+        shape.lock_time = u32_field(n, "spend.locktime")?;
+    }
+    if let Some(n) = obj.get("sequence") {
+        shape.sequence = u32_field(n, "spend.sequence")?;
+    }
+    if let Some(n) = obj.get("n_outputs") {
+        let u = n.as_u64().ok_or("spend.n_outputs")?;
+        shape.n_outputs = usize::try_from(u).map_err(|_| "spend.n_outputs")?;
+    }
+    Ok(shape)
+}
+
+fn u32_field(n: &serde_json::Value, name: &str) -> Result<u32, String> {
+    let u = n.as_u64().ok_or(name)?;
+    u32::try_from(u).map_err(|_| name.to_string())
+}
+
+/// Core `script_tests.cpp` credit transaction plus the spend under test.
+///
+/// Credit stays version 1, locktime 0, two `OP_0` pushes, sequence max, one
+/// output. `shape` applies to the spend only (script locktime and sequence
+/// read that transaction).
+pub fn credit_and_spend(
+    script_pubkey: bitcoin::ScriptBuf,
+    script_sig: bitcoin::ScriptBuf,
+    witness: bitcoin::Witness,
+    amount: bitcoin::Amount,
+    shape: SpendShape,
+) -> (bitcoin::Transaction, bitcoin::Transaction) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version;
+    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut};
+
+    let credit = Transaction {
+        version: Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x00, 0x00]),
+            sequence: Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: amount,
+            script_pubkey: script_pubkey.clone(),
+        }],
+    };
+    let spend = Transaction {
+        version: Version(shape.version),
+        lock_time: LockTime::from_consensus(shape.lock_time),
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: credit.compute_txid(),
+                vout: 0,
+            },
+            script_sig,
+            sequence: Sequence::from_consensus(shape.sequence),
+            witness,
+        }],
+        output: std::iter::repeat_with(|| TxOut {
+            value: amount,
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        })
+        .take(shape.n_outputs)
+        .collect(),
+    };
+    (credit, spend)
+}
+
+/// One Core `script_tests` witness string (`#SCRIPT#`, `#CONTROLBLOCK#`, or hex).
+pub fn push_core_witness_token(
+    stack: &mut Vec<Vec<u8>>,
+    tap_out: &mut Option<[u8; 32]>,
+    token: &str,
+) -> Result<(), String> {
+    if token.is_empty() {
+        stack.push(vec![]);
+        return Ok(());
+    }
+    if let Some(rest) = token.strip_prefix("#SCRIPT#") {
+        stack.push(assemble_script(rest.trim())?);
+        return Ok(());
+    }
+    if token == "#CONTROLBLOCK#" {
+        let leaf = stack
+            .last()
+            .ok_or_else(|| "#CONTROLBLOCK# without leaf script".to_string())?
+            .clone();
+        let (control, output) = taproot_leaf_control(&leaf)?;
+        stack.push(control);
+        *tap_out = Some(output);
+        return Ok(());
+    }
+    let hex = token.trim_start_matches("0x").trim_start_matches("0X");
+    if !hex.len().is_multiple_of(2) {
+        return Err(format!("odd witness hex: {token}"));
+    }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("witness is not hex: {token}"));
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for j in (0..hex.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&hex[j..j + 2], 16).map_err(|e| e.to_string())?);
+    }
+    stack.push(bytes);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::decode_hex;
+    use super::{decode_hex, spend_shape_from_json, SpendShape};
 
     #[test]
     fn decode_hex_strips_0x_and_names_odd_length() {
@@ -339,5 +521,21 @@ mod tests {
         assert_eq!(decode_hex("0Xff").unwrap(), vec![0xff]);
         assert_eq!(decode_hex("abc").unwrap_err(), "odd hex length");
         assert_eq!(decode_hex("zz").unwrap_err(), "invalid hex digit");
+    }
+
+    #[test]
+    fn spend_shape_defaults_and_unsigned_version_bits() {
+        assert_eq!(spend_shape_from_json(None).unwrap(), SpendShape::default());
+        let row = serde_json::json!({
+            "version": 4294967295u32,
+            "locktime": 500_000_000,
+            "sequence": 0,
+            "n_outputs": 0
+        });
+        let shape = spend_shape_from_json(Some(&row)).unwrap();
+        assert_eq!(shape.version, -1);
+        assert_eq!(shape.lock_time, 500_000_000);
+        assert_eq!(shape.sequence, 0);
+        assert_eq!(shape.n_outputs, 0);
     }
 }

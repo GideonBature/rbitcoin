@@ -16,8 +16,8 @@ mod p2wsh;
 mod core_bip341;
 #[cfg(test)]
 mod core_fixture;
-#[cfg(test)]
-pub(crate) mod core_script;
+#[cfg(any(test, feature = "corpus"))]
+pub mod core_script;
 #[cfg(test)]
 mod core_sighash;
 #[cfg(test)]
@@ -275,12 +275,13 @@ fn verify_bare(
         spk,
         interpreter::SigVersion::Base,
     )?;
-    if interpreter::eval_script(spk, &mut stack, &ctx)? {
-        if job.cleanstack {
-            interpreter::require_clean_true(&stack)?;
-        } else {
-            interpreter::require_true_top(&stack)?;
-        }
+    // Base `eval_script` returns `Ok(true)` or `Err`. `Ok(false)` is tapscript
+    // OP_SUCCESS, which this sigversion does not produce, so the top check always runs.
+    interpreter::eval_script(spk, &mut stack, &ctx)?;
+    if job.cleanstack {
+        interpreter::require_clean_true(&stack)?;
+    } else {
+        interpreter::require_true_top(&stack)?;
     }
     Ok(())
 }
@@ -580,11 +581,11 @@ pub(crate) mod crypto {
                     None
                 }
             });
-            if let Some(e) = failed {
-                return Err(e);
-            }
             if !ok {
-                return Err(ConsensusError::Script("tapscript sighash prevouts".into()));
+                // `failed` is set whenever the callback returns `None`.
+                return Err(
+                    failed.unwrap_or(ConsensusError::Script("tapscript sighash prevouts".into()))
+                );
             }
             let hashes = [
                 sighash_midstate(spent.sha_amounts)?,
@@ -894,6 +895,42 @@ pub(crate) mod crypto {
             // non-BIP66 but lax may still fail parse — just exercise strict reject
             let bad = vec![0x30, 0x01, 0x00];
             assert!(parse_der_sig(&bad, true).is_err());
+        }
+
+        #[test]
+        fn spent_hashes_report_a_missing_wire_prevout() {
+            use bitcoin::absolute::LockTime;
+            use bitcoin::script::ScriptBuf;
+            use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+
+            let tx = Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            };
+            let job = crate::block::ScriptCheckJob::from_parts(
+                [0u8; 32],
+                crate::block::JobPrevouts::Shared(vec![crate::block::SharedPrevout::Wire {
+                    tx_index: 0,
+                    vout: 0,
+                }]),
+                crate::block::JobTx::owned(tx),
+                crate::block::ScriptVerifyFlags::buried(false, false, false, true, true),
+            );
+            let err = TapSpentHashes::default().get(&job).unwrap_err();
+            assert!(
+                format!("{err}").contains("invariant") || format!("{err}").contains("Corrupt"),
+                "{err}"
+            );
         }
     }
 }
@@ -1575,5 +1612,55 @@ mod verify_routing_tests {
         let job = ScriptCheckJob::new(vec![prevout], bad, flags);
         assert!(verify_job_all_inputs(&job).is_err());
         assert!(verify_bare(&job, 0, &job.tx).is_err());
+    }
+
+    #[test]
+    fn tap_sighash_rejects_a_bad_index_and_a_prevout_count_mismatch() {
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let prevout = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        };
+        let flags = crate::block::ScriptVerifyFlags::buried(false, false, false, true, true);
+        let job = ScriptCheckJob::new(vec![prevout.clone()], tx.clone(), flags);
+        let spent = crypto::TapSpentHashes::default();
+        let single = std::cell::OnceCell::new();
+        let err = crypto::tap_signature_hash(
+            &job,
+            3,
+            bitcoin::sighash::TapSighashType::Default,
+            &spent,
+            None,
+            None,
+            &single,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("sighash input"), "{err}");
+
+        let mismatch = ScriptCheckJob::new(vec![prevout.clone(), prevout], tx, flags);
+        let err = crypto::tap_signature_hash(
+            &mismatch,
+            0,
+            bitcoin::sighash::TapSighashType::Default,
+            &spent,
+            None,
+            None,
+            &single,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("sighash prevouts"), "{err}");
     }
 }

@@ -7,14 +7,13 @@
 
 #![cfg(test)]
 
-use super::core_script::assemble_script as assemble;
+use super::core_script::{assemble_script as assemble, credit_and_spend, SpendShape};
 use super::interpreter::{self, EvalContext, SigVersion};
 use super::verify_job_all_inputs;
 use crate::block::{JobTx, ScriptCheckJob};
-use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::script::Script;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+use bitcoin::{Amount, ScriptBuf, Transaction, Witness};
 use serde_json::Value;
 
 fn load_json() -> Value {
@@ -166,47 +165,6 @@ fn apply_eval_flags(ctx: &mut EvalContext<'_>, flags: &CoreFlags) {
     }
 }
 
-// ── Credit / spend template (matches Core script_tests.cpp) ─────────────────
-
-fn build_credit(script_pubkey: ScriptBuf, value: Amount) -> Transaction {
-    // CScript() << CScriptNum(0) << CScriptNum(0) → two OP_0 pushes.
-    Transaction {
-        version: bitcoin::transaction::Version::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(vec![0x00, 0x00]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value,
-            script_pubkey,
-        }],
-    }
-}
-
-fn build_spend(credit: &Transaction, script_sig: ScriptBuf, witness: Witness) -> Transaction {
-    let credit_txid = credit.compute_txid();
-    Transaction {
-        version: bitcoin::transaction::Version::ONE,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: credit_txid,
-                vout: 0,
-            },
-            script_sig,
-            sequence: Sequence::MAX,
-            witness,
-        }],
-        output: vec![TxOut {
-            value: credit.output[0].value,
-            script_pubkey: ScriptBuf::new(),
-        }],
-    }
-}
-
 /// Core script_tests witness cell: hex items + optional `#SCRIPT#` / `#CONTROLBLOCK#`,
 /// ending with nValue (BTC). Returns optional Taproot output key for `#TAPROOTOUTPUT#`.
 fn parse_witness_and_amount(first: &Value) -> Result<(Witness, Amount, Option<[u8; 32]>), String> {
@@ -220,14 +178,6 @@ fn parse_witness_and_amount(first: &Value) -> Result<(Witness, Amount, Option<[u
     let mut amount = Amount::ZERO;
     let mut stack: Vec<Vec<u8>> = Vec::new();
     let mut taproot_output: Option<[u8; 32]> = None;
-    // Core KeyData::key0 secret: 31 zero bytes + 0x01 (script_tests.cpp vchKey0).
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let mut sk_bytes = [0u8; 32];
-    sk_bytes[31] = 1;
-    let sk = bitcoin::secp256k1::SecretKey::from_slice(&sk_bytes)
-        .map_err(|e| format!("taproot internal sk: {e}"))?;
-    let kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk);
-    let (internal_xonly, _) = kp.x_only_public_key();
 
     for (i, cell) in arr.iter().enumerate() {
         if let Some(n) = cell.as_f64() {
@@ -239,49 +189,7 @@ fn parse_witness_and_amount(first: &Value) -> Result<(Witness, Amount, Option<[u
             }
         }
         if let Some(s) = cell.as_str() {
-            if s.is_empty() {
-                stack.push(vec![]);
-                continue;
-            }
-            // Core: `#SCRIPT# <asm>` → assemble leaf, push as witness element.
-            if let Some(rest) = s.strip_prefix("#SCRIPT#") {
-                let script_bytes = assemble(rest.trim())?;
-                stack.push(script_bytes);
-                continue;
-            }
-            // Core: `#CONTROLBLOCK#` — single-leaf tree with key0 internal key.
-            if s == "#CONTROLBLOCK#" {
-                let leaf = stack
-                    .last()
-                    .ok_or_else(|| "#CONTROLBLOCK# without leaf script".to_string())?
-                    .clone();
-                let leaf_script = ScriptBuf::from_bytes(leaf);
-                let builder = bitcoin::taproot::TaprootBuilder::new()
-                    .add_leaf(0, leaf_script.clone())
-                    .map_err(|e| format!("taproot add_leaf: {e:?}"))?;
-                let spend_info = builder
-                    .finalize(&secp, internal_xonly)
-                    .map_err(|e| format!("taproot finalize: {e:?}"))?;
-                let control = spend_info
-                    .control_block(&(leaf_script, bitcoin::taproot::LeafVersion::TapScript))
-                    .ok_or_else(|| "taproot control_block missing".to_string())?;
-                stack.push(control.serialize());
-                taproot_output = Some(spend_info.output_key().to_x_only_public_key().serialize());
-                continue;
-            }
-            let hex = s.trim_start_matches("0x").trim_start_matches("0X");
-            if !hex.len().is_multiple_of(2) {
-                return Err(format!("odd witness hex: {s}"));
-            }
-            // Non-hex tokens (that are not special flags) are hard errors in Core.
-            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("witness is not hex: {s}"));
-            }
-            let mut bytes = Vec::with_capacity(hex.len() / 2);
-            for j in (0..hex.len()).step_by(2) {
-                bytes.push(u8::from_str_radix(&hex[j..j + 2], 16).map_err(|e| e.to_string())?);
-            }
-            stack.push(bytes);
+            super::core_script::push_core_witness_token(&mut stack, &mut taproot_output, s)?;
         } else if let Some(n) = cell.as_f64() {
             let sats = (n * 100_000_000.0).round() as i64;
             amount = Amount::from_sat(sats.max(0) as u64);
@@ -348,6 +256,7 @@ fn run_script_row(
     witness: Witness,
     amount: Amount,
     flags: &CoreFlags,
+    shape: SpendShape,
 ) -> Result<(), String> {
     // DISCOURAGE: NOP1/4–10 outside IF regions (see has_discouraged_nop_outside_if).
     if flags.discourage_upgradable_nops
@@ -363,21 +272,16 @@ fn run_script_row(
             .map_err(|_| "SIG_PUSHONLY".to_string())?;
     }
 
-    let spk = ScriptBuf::from_bytes(script_pubkey.to_vec());
-    let credit = build_credit(spk.clone(), amount);
-    let mut spend = build_spend(&credit, ScriptBuf::from_bytes(script_sig.to_vec()), witness);
-    let prev = TxOut {
-        value: amount,
-        script_pubkey: credit.output[0].script_pubkey.clone(),
-    };
-    spend.input[0].previous_output = OutPoint {
-        txid: credit.compute_txid(),
-        vout: 0,
-    };
-
     // Without SCRIPT_VERIFY_WITNESS, Core treats v0/v1 programs as bare scripts.
     // Production always enables witness post-segwit; flag-off is Core-vector only.
     if !flags.witness {
+        let (_credit, spend) = credit_and_spend(
+            ScriptBuf::from_bytes(script_pubkey.to_vec()),
+            ScriptBuf::from_bytes(script_sig.to_vec()),
+            witness,
+            amount,
+            shape,
+        );
         return eval_bare_pair(
             &spend,
             script_sig,
@@ -388,7 +292,30 @@ fn run_script_row(
         );
     }
 
-    let job = ScriptCheckJob {
+    let job = script_row_job(script_sig, script_pubkey, witness, amount, flags, shape);
+    verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
+}
+
+/// Credit/spend job the witness branch of `run_script_row` feeds to
+/// [`verify_job_all_inputs`]. The fast-path test calls the typed verifiers
+/// on this same builder. Flag-off rows use [`eval_bare_pair`] instead.
+fn script_row_job(
+    script_sig: &[u8],
+    script_pubkey: &[u8],
+    witness: Witness,
+    amount: Amount,
+    flags: &CoreFlags,
+    shape: SpendShape,
+) -> ScriptCheckJob {
+    let (credit, spend) = credit_and_spend(
+        ScriptBuf::from_bytes(script_pubkey.to_vec()),
+        ScriptBuf::from_bytes(script_sig.to_vec()),
+        witness,
+        amount,
+        shape,
+    );
+    let prev = credit.output[0].clone();
+    ScriptCheckJob {
         txid: spend.compute_txid().to_byte_array(),
         prevouts: crate::block::JobPrevouts::owned(vec![prev]),
         tx: JobTx::owned(spend),
@@ -414,8 +341,7 @@ fn run_script_row(
             cleanstack: flags.cleanstack,
         },
         pre: std::sync::OnceLock::new(),
-    };
-    verify_job_all_inputs(&job).map_err(|e| format!("{e}"))
+    }
 }
 
 /// Core EvalScript(scriptSig)+EvalScript(scriptPubKey) with optional P2SH redeem.
@@ -620,37 +546,28 @@ fn run_all_script_rows() -> RowStats {
                 continue;
             }
         };
-        // Core: `0x51 0x20 #TAPROOTOUTPUT#` → OP_1 + 32-byte tweaked output key.
-        let pk_bytes = if pk_s.trim() == "0x51 0x20 #TAPROOTOUTPUT#" {
-            let Some(out) = tap_out else {
+        let pk_bytes = match super::core_script::assemble_script_pubkey(pk_s, tap_out) {
+            Ok(b) => b,
+            Err(e) => {
                 st.ran += 1;
                 st.fail += 1;
                 if st.failures.len() < 40 {
                     st.failures
-                        .push(format!("#{idx} #TAPROOTOUTPUT# without control block"));
+                        .push(format!("#{idx} assemble scriptPubKey: {e} pk={pk_s:?}"));
                 }
                 continue;
-            };
-            let mut b = vec![0x51, 0x20];
-            b.extend_from_slice(&out);
-            b
-        } else {
-            match assemble(pk_s) {
-                Ok(b) => b,
-                Err(e) => {
-                    st.ran += 1;
-                    st.fail += 1;
-                    if st.failures.len() < 40 {
-                        st.failures
-                            .push(format!("#{idx} assemble scriptPubKey: {e} pk={pk_s:?}"));
-                    }
-                    continue;
-                }
             }
         };
 
         st.ran += 1;
-        let got = run_script_row(&sig_bytes, &pk_bytes, witness, amount, &flags);
+        let got = run_script_row(
+            &sig_bytes,
+            &pk_bytes,
+            witness,
+            amount,
+            &flags,
+            SpendShape::default(),
+        );
         let ok = outcome_matches(expect_s, &got);
 
         if ok {
@@ -697,4 +614,275 @@ fn core_script_tests_all_rows() {
         "every ran row must pass (pass={} ran={})",
         st.pass, st.ran
     );
+}
+
+/// Our script corpus, in addition to Core's JSON. Each `row` is Core
+/// `script_tests.json` form. The v31.1 oracle in `script-oracle/` runs the
+/// same file.
+#[test]
+fn script_corpus_rows_match_our_interpreter() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/script_corpus/script_tests.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let rows: Vec<Value> = serde_json::from_str(&text).expect("script corpus json");
+    assert!(!rows.is_empty(), "script corpus is empty");
+    for row in &rows {
+        let id = row["id"].as_str().unwrap_or("?").to_string();
+        let cells = row["row"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: missing row"));
+        let (witness, amount, sig_s, pk_s, flags_s, expect, tap_out) = if cells[0].is_array() {
+            assert!(
+                cells.len() >= 5,
+                "{id}: witness row needs witness, scriptSig, scriptPubKey, flags, result"
+            );
+            let (witness, amount, tap_out) =
+                parse_witness_and_amount(&cells[0]).unwrap_or_else(|e| panic!("{id} witness: {e}"));
+            (
+                witness,
+                amount,
+                cells[1].as_str().unwrap_or(""),
+                cells[2].as_str().unwrap_or(""),
+                cells[3].as_str().unwrap_or(""),
+                cells[4].as_str().unwrap_or(""),
+                tap_out,
+            )
+        } else {
+            assert!(
+                cells.len() >= 4,
+                "{id}: row needs scriptSig, scriptPubKey, flags, result"
+            );
+            (
+                Witness::new(),
+                Amount::ZERO,
+                cells[0].as_str().unwrap_or(""),
+                cells[1].as_str().unwrap_or(""),
+                cells[2].as_str().unwrap_or(""),
+                cells[3].as_str().unwrap_or(""),
+                None,
+            )
+        };
+        let sig = assemble(sig_s).unwrap_or_else(|e| panic!("{id} scriptSig: {e}"));
+        let pk = super::core_script::assemble_script_pubkey(pk_s, tap_out)
+            .unwrap_or_else(|e| panic!("{id} scriptPubKey: {e}"));
+        let flags = parse_flags(flags_s);
+        let shape = super::core_script::spend_shape_from_json(row.get("spend"))
+            .unwrap_or_else(|e| panic!("{id} spend: {e}"));
+        let got = run_script_row(&sig, &pk, witness, amount, &flags, shape);
+        assert!(
+            outcome_matches(expect, &got),
+            "{id}: expect {expect} got {got:?}"
+        );
+    }
+}
+
+struct CorpusSpend {
+    sig: Vec<u8>,
+    pk: Vec<u8>,
+    witness: Witness,
+    amount: Amount,
+    flags: CoreFlags,
+}
+
+fn corpus_spend(rows: &[Value], id: &str) -> CorpusSpend {
+    let row = rows
+        .iter()
+        .find(|row| row["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("missing corpus id {id}"));
+    let cells = row["row"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{id}: missing row"));
+    let (witness, amount, sig_s, pk_s, flags_s, tap_out) = if cells[0].is_array() {
+        let (witness, amount, tap_out) =
+            parse_witness_and_amount(&cells[0]).unwrap_or_else(|e| panic!("{id} witness: {e}"));
+        (
+            witness,
+            amount,
+            cells[1].as_str().unwrap_or(""),
+            cells[2].as_str().unwrap_or(""),
+            cells[3].as_str().unwrap_or(""),
+            tap_out,
+        )
+    } else {
+        (
+            Witness::new(),
+            Amount::ZERO,
+            cells[0].as_str().unwrap_or(""),
+            cells[1].as_str().unwrap_or(""),
+            cells[2].as_str().unwrap_or(""),
+            None,
+        )
+    };
+    CorpusSpend {
+        sig: assemble(sig_s).unwrap_or_else(|e| panic!("{id} scriptSig: {e}")),
+        pk: super::core_script::assemble_script_pubkey(pk_s, tap_out)
+            .unwrap_or_else(|e| panic!("{id} scriptPubKey: {e}")),
+        witness,
+        amount,
+        flags: parse_flags(flags_s),
+    }
+}
+
+fn load_corpus_rows() -> Vec<Value> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/script_corpus/script_tests.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    serde_json::from_str(&text).expect("script corpus json")
+}
+
+/// Typed P2PKH, P2WPKH, and key-path P2TR accept the corpus spends.
+///
+/// Accept or reject from `run_script_row` does not name the function that ran.
+/// These calls use the credit/spend job that function builds, and the classify
+/// / `needs_interpreted_ecdsa` checks are the arms `verify_input` matches on.
+#[test]
+fn corpus_fast_paths_call_typed_verifiers() {
+    use bitcoin::sighash::SighashCache;
+
+    use super::classify::{classify, witness_program, ScriptKind};
+    use super::crypto::TapSpentHashes;
+    use super::{needs_interpreted_ecdsa, p2pkh, p2tr, p2wpkh, verify_input};
+
+    let rows = load_corpus_rows();
+    let tap = TapSpentHashes::default();
+
+    let spend = corpus_spend(&rows, "p2pkh-fast-ok");
+    let job = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        spend.witness,
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    assert_eq!(classify(spk), ScriptKind::P2pkh);
+    assert!(!needs_interpreted_ecdsa(&job));
+    let owned = Transaction::clone(&job.tx);
+    let mut cache = SighashCache::new(&owned);
+    p2pkh::verify(&job, 0, &owned, &mut cache).expect("p2pkh typed accept");
+    let tx: &Transaction = &job.tx;
+    let mut dispatch_cache = None;
+    verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).expect("p2pkh dispatch");
+    let mut policy = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        Witness::new(),
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    policy.low_s = true;
+    assert!(needs_interpreted_ecdsa(&policy));
+
+    let spend = corpus_spend(&rows, "p2pkh-fast-mutated");
+    let job = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        spend.witness,
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    assert_ne!(classify(spk), ScriptKind::P2pkh);
+    let tx: &Transaction = &job.tx;
+    let mut dispatch_cache = None;
+    assert!(verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).is_err());
+
+    let spend = corpus_spend(&rows, "p2pkh-fad-collision");
+    let job = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        spend.witness,
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    assert_eq!(classify(spk), ScriptKind::P2pkh);
+    let owned = Transaction::clone(&job.tx);
+    let mut cache = SighashCache::new(&owned);
+    let err = p2pkh::verify(&job, 0, &owned, &mut cache).expect_err("collision");
+    assert!(!super::p2pkh_scriptsig_shape_error(&err), "{err}");
+    let tx: &Transaction = &job.tx;
+    let mut dispatch_cache = None;
+    assert!(verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).is_err());
+
+    let spend = corpus_spend(&rows, "p2wpkh-fast-ok");
+    let job = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        spend.witness,
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    let (version, program) = witness_program(spk).expect("v0 program");
+    assert_eq!((version, program.len()), (0, 20));
+    assert!(!needs_interpreted_ecdsa(&job));
+    let tx: &Transaction = &job.tx;
+    p2wpkh::verify(&job, 0, tx, job.pre()).expect("p2wpkh typed accept");
+    let mut dispatch_cache = None;
+    verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).expect("p2wpkh dispatch");
+
+    let spend = corpus_spend(&rows, "p2wpkh-fast-mutated");
+    let job = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        spend.witness,
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let spk = Script::from_bytes(job.prevout_script(0).expect("prevout"));
+    let (version, program) = witness_program(spk).expect("still a v0 program");
+    assert_eq!((version, program.len()), (0, 20));
+    let tx: &Transaction = &job.tx;
+    assert!(p2wpkh::verify(&job, 0, tx, job.pre()).is_err());
+
+    let spend = corpus_spend(&rows, "p2tr-keypath-ok");
+    let job = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        spend.witness,
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let tx: &Transaction = &job.tx;
+    p2tr::verify(&job, 0, tx, &tap).expect("key path typed accept");
+    let mut dispatch_cache = None;
+    verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).expect("p2tr dispatch");
+
+    let spend = corpus_spend(&rows, "p2tr-keypath-mutated");
+    let job = script_row_job(
+        &spend.sig,
+        &spend.pk,
+        spend.witness,
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let tx: &Transaction = &job.tx;
+    assert!(p2tr::verify(&job, 0, tx, &tap).is_err());
+
+    let spend = corpus_spend(&rows, "p2pkh-fast-ok");
+    let mut sig = spend.sig;
+    // Last byte of the 0x47-byte signature push is the hashtype. Flipping it
+    // keeps the DER encoding and fails the typed ECDSA check.
+    sig[0x47] = 0x03;
+    let job = script_row_job(
+        &sig,
+        &spend.pk,
+        Witness::new(),
+        spend.amount,
+        &spend.flags,
+        SpendShape::default(),
+    );
+    let owned = Transaction::clone(&job.tx);
+    let mut cache = SighashCache::new(&owned);
+    let err = p2pkh::verify(&job, 0, &owned, &mut cache).expect_err("bad hashtype");
+    assert!(format!("{err}").contains("ecdsa"), "{err}");
 }
