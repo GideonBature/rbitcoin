@@ -10,8 +10,7 @@ impl NetPermissionFlags {
     pub const NONE: Self = Self(0);
     pub const BLOOM: Self = Self(1 << 1);
     pub const RELAY: Self = Self(1 << 3);
-    /// Bits 2 and 3. ForceRelay implies Relay. A bitwise or of those two bits
-    /// is the same value as xor, so the mask is the literal.
+    /// Bits 2 and 3. ForceRelay implies Relay.
     pub const FORCE_RELAY: Self = Self(0b1100);
     pub const DOWNLOAD: Self = Self(1 << 6);
     /// Bits 4 and 6. NoBan implies Download.
@@ -19,8 +18,7 @@ impl NetPermissionFlags {
     pub const MEMPOOL: Self = Self(1 << 5);
     pub const ADDR: Self = Self(1 << 7);
     pub const IMPLICIT: Self = Self(1 << 31);
-    /// Bits 1 through 7. Relay is already inside ForceRelay, and Download is
-    /// already inside NoBan, so this is the union as a mask.
+    /// Bits 1 through 7. Relay sits inside ForceRelay, and Download sits inside NoBan.
     pub const ALL: Self = Self(0b1111_1110);
 
     pub const fn has(self, f: Self) -> bool {
