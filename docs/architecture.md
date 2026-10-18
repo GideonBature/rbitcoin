@@ -36,9 +36,11 @@ appender. Roles: [`concurrency.md`](./concurrency.md). Stage IO:
 
 **Invariant — Class A never leads tip:** there is no dual-track “archive Class A
 far ahead of confirmed tip.” Wire plan + Class A append + Class C tip advance
-are one confirm-write era. Do not reintroduce plan-time “archive lead” heuristics
-(e.g. body `posix_fadvise(DONTNEED)` when body count ≫ tip) — under this path
-just-written body pages stay tip-hot. **No** ContigPark / archive-job fallback
+are one confirm-write era on a clean run. A crash inside that era is the
+exception ([crash-recovery.md](./crash-recovery.md#class-a-archive)). Do not
+reintroduce plan-time “archive lead” heuristics (e.g. body
+`posix_fadvise(DONTNEED)` when body count ≫ tip) — under this path just-written
+body pages stay tip-hot. **No** ContigPark / archive-job fallback
 for unknown-height bodies (mark missing → re-getdata).
 
 - **Storage center** is a **transaction-relational archive** on **map-free

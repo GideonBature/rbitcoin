@@ -1,6 +1,7 @@
 //! End of IBD: tip follow, scripthash history, and restart on a live miner.
 
 use bitcoin::absolute::LockTime;
+use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{
@@ -500,7 +501,7 @@ async fn finish_partial(dir: &Path, miner: SocketAddr, synced: &Synced) {
     stop_run_p2p(rpc, node).await;
 }
 
-async fn partial_with_miner_down(miner_dir: &Path, synced: &Synced) {
+async fn partial_with_miner_down(miner_dir: &Path, synced: &mut Synced) {
     let miner = start_miner(miner_dir).await;
     let miner_addr = miner.local_addr;
     assert_eq!(miner.tip_height().unwrap(), synced.height);
@@ -524,25 +525,96 @@ async fn partial_with_miner_down(miner_dir: &Path, synced: &Synced) {
 
     let miner = start_miner(miner_dir).await;
     finish_partial(partial_dir.path().as_path(), miner.local_addr, synced).await;
-    archive_above_tip(&held_dir.store_path(), &miner, held_tip, synced.height);
     finish_partial(held_dir.path().as_path(), miner.local_addr, synced).await;
+    crash_with_class_a_above_tip(&miner, synced).await;
     miner.shutdown().await;
 }
 
 /// A crash between the Class A write and the tip advance leaves bodies above
-/// the tip with no connect. The next start must fetch them again.
-fn archive_above_tip(store: &Path, miner: &P2PNode, tip: u32, top: u32) {
-    use rbitcoin_query::testutil::FixtureChain;
-    let query = Query::open_or_create_tiny(store).unwrap();
-    let params = ChainParams::regtest();
-    for h in tip + 1..=(tip + 4).min(top) {
-        let block = miner.query.reconstruct_block_at_height(Height(h)).unwrap();
-        let (rec, txs) =
-            rbitcoin_query::prepare_block_for_archive(&query, &params, &block).unwrap();
-        query.commit_class_a_only(&rec, &txs).unwrap();
+/// the tip with no connect. The second block spends a create of the first and
+/// one of its own, so the next start must fetch both and pin those parents
+/// from the archive. The store holds catch-up indexes, as a crash in IBD does,
+/// so a halted IBD has no tip-follow to fall back on.
+async fn crash_with_class_a_above_tip(miner: &P2PNode, synced: &mut Synced) {
+    let dir = TestDatadir::new().unwrap();
+    let query = Query::open_or_create_tiny(dir.store_path()).unwrap();
+    let node = P2PNode::start(any_port(), query, ChainParams::regtest(), Milestone::NONE)
+        .await
+        .expect("crash syncer");
+    let peers = [NetAddr::Ip(miner.local_addr)];
+    node.sync(&peers, IbdConfig::for_test())
+        .await
+        .expect("crash syncer ibd");
+    node.shutdown().await;
+
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let matured = miner
+        .query
+        .reconstruct_block_at_height(Height(2))
+        .unwrap()
+        .txdata[0]
+        .compute_txid();
+    let parent = spend_to(matured, Amount::from_sat(49_0000_0000), vec![0x51]);
+    let child = spend_to(
+        parent.compute_txid(),
+        Amount::from_sat(48_0000_0000),
+        vec![0x51],
+    );
+    let grandchild = spend_to(
+        child.compute_txid(),
+        Amount::from_sat(47_0000_0000),
+        vec![0x51],
+    );
+    let mut blocks = Vec::new();
+    for txs in [vec![parent], vec![child, grandchild]] {
+        miner
+            .hub
+            .generate_to_script(1, op_true.clone(), txs)
+            .unwrap();
+        let block = miner
+            .query
+            .reconstruct_block_at_height(Height(miner.tip_height().unwrap()));
+        blocks.push(Arc::new(block.unwrap()));
     }
+
+    let query = Query::open_or_create_tiny(dir.store_path()).unwrap();
+    let tip = query.tip_height();
+    assert_eq!(tip, Some(Height(synced.height)));
+    let mut prev_fk = query
+        .get_header_by_hash(blocks[0].header.prev_blockhash.as_byte_array())
+        .unwrap()
+        .unwrap()
+        .0;
+    let mut fks = Vec::new();
+    let mut txids = Vec::new();
+    for block in &blocks {
+        let hash = block.block_hash().to_byte_array();
+        let rec = rbitcoin_query::header_to_record(prev_fk, &block.header, hash);
+        prev_fk = query.ensure_header(&rec).unwrap();
+        fks.push(prev_fk);
+        let ids: Vec<[u8; 32]> = block
+            .txdata
+            .iter()
+            .map(|t| t.compute_txid().to_byte_array())
+            .collect();
+        synced
+            .script_a
+            .extend(block.txdata.iter().map(|t| t.compute_txid().to_string()));
+        txids.push(ids);
+    }
+    let items: Vec<_> = blocks
+        .iter()
+        .zip(&fks)
+        .zip(&txids)
+        .map(|((b, fk), ids)| (*fk, b, ids.as_slice()))
+        .collect();
+    query.archive_class_a_from_wire(&items).unwrap();
     query.flush().unwrap();
-    assert_eq!(query.tip_height(), Some(Height(tip)));
+    assert_eq!(query.tip_height(), tip);
+    synced.height = miner.tip_height().unwrap();
+    synced.hash = miner.hub.tip_hash().unwrap().to_string();
+    drop(query);
+    finish_partial(dir.path().as_path(), miner.local_addr, synced).await;
 }
 
 async fn follow_journey() {
@@ -560,7 +632,7 @@ async fn follow_journey() {
     assert_eq!(synced.height as usize, blocks.len() - 1);
 
     ibd_then_restart(miner, miner_addr, &mut synced).await;
-    partial_with_miner_down(miner_dir.path().as_path(), &synced).await;
+    partial_with_miner_down(miner_dir.path().as_path(), &mut synced).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
