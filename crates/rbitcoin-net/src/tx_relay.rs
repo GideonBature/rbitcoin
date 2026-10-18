@@ -2304,12 +2304,35 @@ impl MempoolHub {
     }
 
     /// Roll the package back, then return members that were parked before it.
-    fn abandon_package(&self, accepted: &[AcceptResult], lifted: &[(Transaction, BTreeSet<Txid>)]) {
+    ///
+    /// A child whose parents are already in the mempool is admitted. One that
+    /// still misses a parent is parked under those parents, with the peers
+    /// who announced it.
+    fn abandon_package(
+        &self,
+        accepted: &[AcceptResult],
+        lifted: &[rbitcoin_mempool::LiftedOrphan],
+    ) {
         if !accepted.is_empty() {
             self.rollback_package_accepted(accepted);
         }
-        let mut g = self.lock_write();
-        g.repark_lifted(lifted);
+        let utxo = self.utxo_provider();
+        let tip = self.chain_tip_ctx();
+        let ready = {
+            let mut g = self.lock_write();
+            g.repark_lifted(lifted, &utxo, tip)
+        };
+        for item in ready {
+            let from = item.announcers.first().copied();
+            if let Err(AcceptError::Orphaned { .. }) =
+                self.accept_with_utxo(&item.tx, &utxo, from, false)
+            {
+                let id = item.tx.compute_txid();
+                for peer in item.announcers.iter().skip(1) {
+                    self.add_orphan_announcer(&id, *peer);
+                }
+            }
+        }
     }
 
     fn rollback_package_accepted(&self, accepted: &[AcceptResult]) {
@@ -2836,7 +2859,7 @@ impl MempoolHub {
         // A member that is already parked has to leave the orphanage before
         // prepare. Otherwise the parent just committed in this package is
         // rolled back and the child stays parked.
-        let mut lifted: Vec<(Transaction, BTreeSet<Txid>)> = Vec::new();
+        let mut lifted: Vec<rbitcoin_mempool::LiftedOrphan> = Vec::new();
         for tx in txs {
             if let Some(parked) = {
                 let mut g = self.lock_write();
@@ -7044,6 +7067,132 @@ mod tests {
             hub.orphan_count(),
             1,
             "a failed package must put the parked child back, got {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A parent can land while its child is lifted. Putting the child back
+    /// under that parent leaves it parked with nobody left to wake it.
+    #[test]
+    fn failed_package_does_not_park_child_under_a_live_parent() {
+        let (_store, q, cbs) = pad_cbs(3);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = spend_true(cbs[0], 10_000, spk);
+        let parent_id = parent.compute_txid();
+        hub.accept_tx(&parent).expect("parent pays for itself");
+        let child = spend_vout(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            49_0000_0000,
+        );
+        let child_id = child.compute_txid();
+        {
+            let mut missing = BTreeSet::new();
+            missing.insert(parent_id);
+            let mut g = hub.lock_write();
+            g.park_orphan_from(&child, missing, Some(4));
+        }
+        hub.add_orphan_announcer(&child_id, 8);
+        let dummy = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x44; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let err = hub
+            .accept_package(&[child.clone(), dummy])
+            .expect_err("the second member has no parent");
+        assert!(
+            !matches!(err, AcceptError::Duplicate(id) if id == child_id),
+            "the live parent must not make the lifted child a duplicate, got {err:?}"
+        );
+        assert!(
+            hub.contains(&child_id),
+            "a child whose parents are already in the mempool must be admitted, not parked, got {err:?}"
+        );
+        assert_eq!(hub.orphan_count(), 0);
+        assert!(hub.contains(&parent_id));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = spend_true(cbs[1], 10_000, ScriptBuf::from_bytes(vec![0x51]));
+        let parent_id = parent.compute_txid();
+        hub.accept_tx(&parent).expect("parent");
+        let absent = Txid::from_byte_array([0xab; 32]);
+        let mut child = spend_vout(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            49_0000_0000,
+        );
+        child.input.push(TxIn {
+            previous_output: OutPoint {
+                txid: absent,
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        });
+        let child_id = child.compute_txid();
+        {
+            let mut missing = BTreeSet::new();
+            missing.insert(parent_id);
+            missing.insert(absent);
+            let mut g = hub.lock_write();
+            g.park_orphan_from(&child, missing, Some(4));
+        }
+        hub.add_orphan_announcer(&child_id, 8);
+        let dummy = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x45; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let err = hub
+            .accept_package(&[child, dummy])
+            .expect_err("the child still misses a parent");
+        assert!(
+            matches!(err, AcceptError::Orphaned { .. }),
+            "the child still misses a parent, got {err:?}"
+        );
+        assert!(!hub.contains(&child_id));
+        let parked = hub.orphan_snapshot();
+        assert_eq!(parked.len(), 1);
+        assert_eq!(
+            parked[0].announcers,
+            vec![4, 8],
+            "putting the child back must keep the peers who announced it"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

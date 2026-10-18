@@ -7,7 +7,9 @@ Fixed
   that still misses another parent stays parked. A package admits its own
   members before that walk, including on the hub path used by
   `submitpackage` and Electrum, so a parked child included in the package
-  is not rolled out of the mempool. A failed package puts that child back.
+  is not rolled out of the mempool. A failed package puts that child back
+  under the parents it still does not have, keeps the peers who announced
+  it, and admits it when those parents are already in the mempool.
 - **Electrum history refuses a window wider than 8,064 blocks.** A
   `from_height` of 1 or more still scans that window and does not use
   the scripthash create cap.

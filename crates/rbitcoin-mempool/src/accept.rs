@@ -512,6 +512,15 @@ pub struct ActiveMempool {
     loaded_accept: Vec<(Txid, Wtxid, u64)>,
 }
 
+/// A parked package member, taken out before admit.
+///
+/// `announcers` are the peers who announced it. The missing-parent set is
+/// not kept: it is resolved again if the package puts the tx back.
+pub struct LiftedOrphan {
+    pub tx: Transaction,
+    pub announcers: Vec<u64>,
+}
+
 impl ActiveMempool {
     /// Share the hub's mock clock so stamped accept times follow `setmocktime`.
     pub fn set_node_clock(&mut self, clock: Arc<AtomicU64>) {
@@ -1661,7 +1670,7 @@ impl ActiveMempool {
         // re-announced orphan does not reject them. Promote waits until
         // every member is committed, so this walk cannot admit a later
         // member and then roll it back as a duplicate.
-        let mut lifted: Vec<(Transaction, BTreeSet<Txid>)> = Vec::new();
+        let mut lifted: Vec<LiftedOrphan> = Vec::new();
         for tx in txs {
             if let Some(parked) = self.lift_parked_member(tx) {
                 lifted.push(parked);
@@ -1672,7 +1681,15 @@ impl ActiveMempool {
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
-                    self.repark_lifted(&lifted);
+                    for item in self.repark_lifted(&lifted, utxos, tip) {
+                        match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None) {
+                            Ok(r) => self.promote_orphans_of(r.txid, utxos, tip),
+                            Err(AcceptError::Orphaned { missing, .. }) => {
+                                self.park_announced(&item.tx, missing, &item.announcers);
+                            }
+                            Err(_) => self.restore_undone(utxos, tip),
+                        }
+                    }
                     return Err(e);
                 }
             }
@@ -1688,23 +1705,59 @@ impl ActiveMempool {
     ///
     /// `prepare_admit` and `plan_after_script` both refuse a tx that is
     /// still parked, even when its parents are already in the mempool.
-    pub fn lift_parked_member(
-        &mut self,
-        tx: &Transaction,
-    ) -> Option<(Transaction, BTreeSet<Txid>)> {
+    /// The announcing peers come along so a failed package can put them back.
+    pub fn lift_parked_member(&mut self, tx: &Transaction) -> Option<LiftedOrphan> {
         let id = tx.compute_txid();
-        let missing = self.orphanage.missing_of(&id).cloned()?;
+        self.orphanage.missing_of(&id)?;
+        let announcers = self.orphanage.announcers_of(&id);
         let parked = self.orphanage.take_txid(&id)?;
-        Some((parked, missing))
+        Some(LiftedOrphan {
+            tx: parked,
+            announcers,
+        })
     }
 
-    /// Put package members back in the orphanage when the package rolls back.
-    pub fn repark_lifted(&mut self, lifted: &[(Transaction, BTreeSet<Txid>)]) {
-        for (tx, missing) in lifted {
-            if self.graph.contains(&tx.compute_txid()) {
+    /// Put lifted members back, or hand back the ones that can be admitted.
+    ///
+    /// The missing set saved at the lift is not used. A parent can arrive
+    /// while the child is out of the orphanage, and parking under that parent
+    /// leaves the child with nobody left to wake it. Parents still absent are
+    /// resolved again here. A child whose parents are all present is returned
+    /// so the caller can admit it. Announcers are kept on either path.
+    pub fn repark_lifted(
+        &mut self,
+        lifted: &[LiftedOrphan],
+        utxos: &impl UtxoProvider,
+        tip: ChainTipCtx,
+    ) -> Vec<LiftedOrphan> {
+        let mut ready = Vec::new();
+        for item in lifted {
+            let txid = item.tx.compute_txid();
+            if self.graph.contains(&txid) {
                 continue;
             }
-            let _ = self.park_orphan(tx, missing.clone());
+            match self.prepare_admit(&item.tx, utxos, tip, 0, true, None) {
+                Err(AcceptError::Orphaned { missing, .. }) => {
+                    self.park_announced(&item.tx, missing, &item.announcers);
+                }
+                Err(AcceptError::Duplicate(_)) => {}
+                Ok(_) => ready.push(LiftedOrphan {
+                    tx: item.tx.clone(),
+                    announcers: item.announcers.clone(),
+                }),
+                Err(_) => {}
+            }
+        }
+        ready
+    }
+
+    /// Park `tx` under `missing` and restore every announcing peer.
+    fn park_announced(&mut self, tx: &Transaction, missing: BTreeSet<Txid>, announcers: &[u64]) {
+        let txid = tx.compute_txid();
+        let first = announcers.first().copied();
+        let _ = self.park_orphan_from(tx, missing, first);
+        for peer in announcers.iter().skip(1) {
+            self.orphanage.add_announcer(&txid, *peer);
         }
     }
 
