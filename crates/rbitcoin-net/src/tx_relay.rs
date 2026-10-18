@@ -2303,6 +2303,15 @@ impl MempoolHub {
         self.unindex_evicted(&gone);
     }
 
+    /// Roll the package back, then return members that were parked before it.
+    fn abandon_package(&self, accepted: &[AcceptResult], lifted: &[(Transaction, BTreeSet<Txid>)]) {
+        if !accepted.is_empty() {
+            self.rollback_package_accepted(accepted);
+        }
+        let mut g = self.lock_write();
+        g.repark_lifted(lifted);
+    }
+
     fn rollback_package_accepted(&self, accepted: &[AcceptResult]) {
         let victims: Vec<Transaction> = accepted
             .iter()
@@ -2824,7 +2833,17 @@ impl MempoolHub {
         let mut lock_us = 0u64;
         let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
         let mut prevouts: Vec<Vec<TxOut>> = Vec::with_capacity(txs.len());
+        // A member that is already parked has to leave the orphanage before
+        // prepare. Otherwise the parent just committed in this package is
+        // rolled back and the child stays parked.
+        let mut lifted: Vec<(Transaction, BTreeSet<Txid>)> = Vec::new();
         for tx in txs {
+            if let Some(parked) = {
+                let mut g = self.lock_write();
+                g.lift_parked_member(tx)
+            } {
+                lifted.push(parked);
+            }
             utxo.note_spender(tx);
             let delta = self.fee_delta(&tx.compute_txid());
             let spec = AdmitSpec {
@@ -2836,9 +2855,7 @@ impl MempoolHub {
             let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
                 Ok(p) => p,
                 Err(e) => {
-                    if !accepted.is_empty() {
-                        self.rollback_package_accepted(&accepted);
-                    }
+                    self.abandon_package(&accepted, &lifted);
                     let us = t0.elapsed().as_micros() as u64;
                     self.meter_accept_stages(lock_us, stages);
                     return Err(self.finish_accept_err(us, e).unwrap_err());
@@ -2862,7 +2879,7 @@ impl MempoolHub {
                 Err(e) => {
                     self.unindex_evicted(&committed.failed_evict);
                     self.restore_replaced(&committed.undone);
-                    self.rollback_package_accepted(&accepted);
+                    self.abandon_package(&accepted, &lifted);
                     // The first member can evict and fail with nothing to roll
                     // back, so the rollback publish does not run.
                     self.publish_fee_floor();
@@ -2876,7 +2893,7 @@ impl MempoolHub {
         if accepted.iter().any(|r| !self.try_contains(&r.txid)) {
             // Trim dropped a member that had already replaced its conflicts.
             // Put those conflicts back; the package itself does not stay.
-            self.rollback_package_accepted(&accepted);
+            self.abandon_package(&accepted, &lifted);
             self.publish_fee_floor();
             let us = t0.elapsed().as_micros() as u64;
             self.meter_accept_stages(lock_us, stages);
@@ -6915,6 +6932,120 @@ mod tests {
         assert_eq!(hub.orphan_count(), 0, "accept_package must not park");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
+    /// A child already in the orphan pool is still a package member.
+    /// `submitpackage` and Electrum use this hub path.
+    #[test]
+    fn hub_package_admits_its_parked_child() {
+        let (_store, q, cbs) = pad_cbs(3);
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: cbs[0],
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(20_0000_0000),
+                    script_pubkey: spk.clone(),
+                },
+                TxOut {
+                    value: Amount::from_sat(20_0000_0000),
+                    script_pubkey: spk.clone(),
+                },
+            ],
+        };
+        let parent_id = parent.compute_txid();
+        let child = spend_vout(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            19_0000_0000,
+        );
+        let sibling = spend_vout(
+            OutPoint {
+                txid: parent_id,
+                vout: 1,
+            },
+            19_0000_0000,
+        );
+        let child_id = child.compute_txid();
+        let sibling_id = sibling.compute_txid();
+        for tx in [&child, &sibling] {
+            let err = hub.accept_tx(tx).unwrap_err();
+            assert!(
+                matches!(err, AcceptError::Orphaned { .. }),
+                "spend of the missing parent must park, got {err:?}"
+            );
+        }
+        let accepted = hub
+            .accept_package(&[parent.clone(), child.clone()])
+            .expect("hub package contains the parked child");
+        assert_eq!(accepted.len(), 2);
+        assert!(hub.try_contains(&parent_id));
+        assert!(hub.try_contains(&child_id));
+        assert!(
+            hub.try_contains(&sibling_id),
+            "a parked sibling outside the package must still be admitted"
+        );
+        assert_eq!(hub.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let parent = spend_true(cbs[1], 10_000, spk);
+        let parent_id = parent.compute_txid();
+        let child = spend_vout(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            49_0000_0000,
+        );
+        let child_id = child.compute_txid();
+        let err = hub.accept_tx(&child).unwrap_err();
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err:?}");
+        let bad = spend_vout(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            50_0000_0000,
+        );
+        let err = hub
+            .accept_package(&[parent, child, bad])
+            .expect_err("last member overspends the parent output");
+        assert!(
+            !matches!(err, AcceptError::Duplicate(id) if id == child_id),
+            "a failed hub package must not report the parked child as a duplicate, got {err:?}"
+        );
+        assert!(
+            !hub.contains(&parent_id),
+            "a failed package must not leave the parent"
+        );
+        assert!(
+            !hub.contains(&child_id),
+            "a failed package must not leave the child in the mempool"
+        );
+        assert_eq!(
+            hub.orphan_count(),
+            1,
+            "a failed package must put the parked child back, got {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Coinbases at heights `1..=n`, each with 100 confirmations.

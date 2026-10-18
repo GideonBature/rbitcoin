@@ -1663,11 +1663,8 @@ impl ActiveMempool {
         // member and then roll it back as a duplicate.
         let mut lifted: Vec<(Transaction, BTreeSet<Txid>)> = Vec::new();
         for tx in txs {
-            let id = tx.compute_txid();
-            if let Some(missing) = self.orphanage.missing_of(&id).cloned() {
-                if let Some(parked) = self.orphanage.take_txid(&id) {
-                    lifted.push((parked, missing));
-                }
+            if let Some(parked) = self.lift_parked_member(tx) {
+                lifted.push(parked);
             }
             // accept_tx_with (not top-level accept_tx) so stages are not reset per member.
             match self.accept_tx_with(tx, utxos, tip, 0, true, member_min) {
@@ -1687,8 +1684,22 @@ impl ActiveMempool {
         Ok(accepted)
     }
 
+    /// Take `tx` out of the orphanage so a package can admit it.
+    ///
+    /// `prepare_admit` and `plan_after_script` both refuse a tx that is
+    /// still parked, even when its parents are already in the mempool.
+    pub fn lift_parked_member(
+        &mut self,
+        tx: &Transaction,
+    ) -> Option<(Transaction, BTreeSet<Txid>)> {
+        let id = tx.compute_txid();
+        let missing = self.orphanage.missing_of(&id).cloned()?;
+        let parked = self.orphanage.take_txid(&id)?;
+        Some((parked, missing))
+    }
+
     /// Put package members back in the orphanage when the package rolls back.
-    fn repark_lifted(&mut self, lifted: &[(Transaction, BTreeSet<Txid>)]) {
+    pub fn repark_lifted(&mut self, lifted: &[(Transaction, BTreeSet<Txid>)]) {
         for (tx, missing) in lifted {
             if self.graph.contains(&tx.compute_txid()) {
                 continue;
