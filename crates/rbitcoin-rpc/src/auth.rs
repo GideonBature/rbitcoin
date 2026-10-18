@@ -1,7 +1,7 @@
 //! RPC authentication: Bearer token plus optional Core cookie credentials.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Bearer token accepted by the RPC server.
@@ -60,7 +60,8 @@ pub fn default_socket_path(datadir: &Path) -> PathBuf {
 /// Widest mode an operator declared for `--rpc-cookie-file`.
 ///
 /// The node never creates or chmods the cookie. `owner` is mode 0600.
-/// `group` also allows group bits (0640). `all` allows any mode.
+/// `group` is at most 0640 (group read). `all` is at most 0644 (world read).
+/// The check is Unix mode bits. Windows ignores the flag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RpcCookiePerms {
     #[default]
@@ -95,8 +96,10 @@ impl RpcCookiePerms {
         let mode = mode & 0o777;
         match self {
             Self::Owner => mode & 0o077 == 0,
-            Self::Group => mode & 0o007 == 0,
-            Self::All => true,
+            // Group write/exec and every world bit. 0640 stays.
+            Self::Group => mode & 0o037 == 0,
+            // Group and world write/exec. 0644 stays.
+            Self::All => mode & 0o033 == 0,
         }
     }
 }
@@ -112,8 +115,29 @@ pub fn read_cookie_file(path: &Path, perms: RpcCookiePerms) -> Result<RpcCookie,
     // Mode bits exist only on Unix. The argument stays so every caller passes it.
     #[cfg(not(unix))]
     let _ = perms;
-    let credentials =
-        fs::read_to_string(path).map_err(|e| format!("read RPC cookie {}: {e}", path.display()))?;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("read RPC cookie {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file
+            .metadata()
+            .map_err(|e| format!("stat RPC cookie {}: {e}", path.display()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if !perms.allows_unix_mode(mode) {
+            return Err(format!(
+                "RPC cookie {}: mode {mode:o} is wider than --rpc-cookie-perms {} \
+                 (owner is 0600, group is at most 0640, all is at most 0644)",
+                path.display(),
+                perms.as_str()
+            ));
+        }
+    }
+    let mut credentials = String::new();
+    file.read_to_string(&mut credentials)
+        .map_err(|e| format!("read RPC cookie {}: {e}", path.display()))?;
     if credentials.ends_with(['\n', '\r']) {
         return Err(format!(
             "RPC cookie {}: ends with a line ending; write it without one (Core format, e.g. printf not echo)",
@@ -128,21 +152,6 @@ pub fn read_cookie_file(path: &Path, perms: RpcCookiePerms) -> Result<RpcCookie,
             "RPC cookie {}: expected username:password",
             path.display()
         ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            let mode = meta.permissions().mode() & 0o777;
-            if !perms.allows_unix_mode(mode) {
-                return Err(format!(
-                    "RPC cookie {}: mode {mode:o} is wider than --rpc-cookie-perms {} \
-                     (owner is 0600, group allows group bits, all allows any mode)",
-                    path.display(),
-                    perms.as_str()
-                ));
-            }
-        }
     }
     Ok(RpcCookie { credentials })
 }
@@ -415,6 +424,17 @@ mod tests {
             .err()
             .expect("0644 is wider than group");
         assert!(err.contains("--rpc-cookie-perms group"), "{err}");
+        chmod(0o660);
+        let err = read_cookie_file(&path, RpcCookiePerms::Group)
+            .err()
+            .expect("0660 is group-writable");
+        assert!(err.contains("--rpc-cookie-perms group"), "{err}");
+        chmod(0o666);
+        let err = read_cookie_file(&path, RpcCookiePerms::All)
+            .err()
+            .expect("0666 is wider than world-read");
+        assert!(err.contains("--rpc-cookie-perms all"), "{err}");
+        chmod(0o644);
         assert!(read_cookie_file(&path, RpcCookiePerms::All).is_ok());
         assert_eq!(
             RpcCookiePerms::parse("owner").unwrap(),

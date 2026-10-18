@@ -2071,7 +2071,13 @@ mod tests {
         assert!(err.contains("TCP only"), "{err}");
 
         // mempool would send the newline as part of the password: refuse to start.
+        // Mode is owner-only so the line-ending error is the one under test.
         std::fs::write(&cookie_path, "mempool:secret\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cookie_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let err = match run_rpc(
             with_cookie(),
             Arc::clone(&query),

@@ -75,8 +75,9 @@ printf '__cookie__:%s' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" |
 ```
 
 `--rpc-cookie-perms` defaults to `owner` (mode 0600). `group` is what makes
-the 0640 file above acceptable. `all` allows any mode. The node never
-chmods the file. NixOS: `services.rbitcoin.rpc.cookiePerms`.
+the 0640 file above acceptable, and it still refuses group write. `all` is
+at most 0644. The check is Unix mode bits; Windows ignores the flag. The
+node never chmods the file. NixOS: `services.rbitcoin.rpc.cookiePerms`.
 
 The mempool.space group ownership and unix-socket variant are in
 [`operator/interfaces.md`](./operator/interfaces.md#mempoolspace-core_rpc).

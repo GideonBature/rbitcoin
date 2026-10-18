@@ -446,8 +446,9 @@ in
         description = ''
           Pass `--rpc-cookie-perms`. The node never creates or chmods the cookie.
           `null` leaves the node default (`owner`): group or world bits refuse startup.
-          `group` allows group bits, such as a 0640 file shared with mempool.
-          `all` allows any mode. Requires `cookieFile`. Omitted from the unit
+          `group` allows a 0640 file (group read) shared with mempool and refuses
+          group write. `all` allows world read (0644) and refuses group or world
+          write. The check is Unix mode bits. Requires `cookieFile`. Omitted from the unit
           argv when null, so the default service command does not grow a flag.
         '';
       };

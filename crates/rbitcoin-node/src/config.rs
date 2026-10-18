@@ -261,7 +261,8 @@ pub struct RpcOpts {
     pub token_file: Option<PathBuf>,
     /// Opt-in Core-format `username:password` cookie accepted as TCP HTTP Basic.
     pub cookie_file: Option<PathBuf>,
-    /// Widest mode `--rpc-cookie-perms` allows. Default owner (0600).
+    /// Widest Unix mode `--rpc-cookie-perms` allows. Default owner (0600).
+    /// `group` is at most 0640. `all` is at most 0644.
     pub cookie_perms: rbitcoin_rpc::RpcCookiePerms,
     pub work_queue: Option<usize>,
     /// Core REST on the RPC listener. Off unless `--rest` / `rest=`.
@@ -2306,6 +2307,11 @@ mod tests {
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("read RPC cookie"), "missing file: {err}");
         std::fs::write(&cookie, "__cookie__:secret\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("line ending"), "{err}");
         std::fs::write(&cookie, "__cookie__:secret").unwrap();
@@ -2322,7 +2328,14 @@ mod tests {
             std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o644)).unwrap();
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains("--rpc-cookie-perms group"), "{err}");
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o660)).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("--rpc-cookie-perms group"), "{err}");
             cfg.rpc.cookie_perms = rbitcoin_rpc::RpcCookiePerms::All;
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o666)).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("--rpc-cookie-perms all"), "{err}");
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o644)).unwrap();
             cfg.validate()
                 .expect("0644 is within --rpc-cookie-perms all");
             std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o600)).unwrap();

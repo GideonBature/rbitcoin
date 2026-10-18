@@ -1780,7 +1780,10 @@ rbitcoin-peers-v2
         .unwrap();
         let loaded = AddrMan::load(&path).unwrap();
         let public: SocketAddr = "1.2.3.4:8333".parse().unwrap();
-        assert!(loaded.entry(&public).is_some(), "a public address still loads");
+        assert!(
+            loaded.entry(&public).is_some(),
+            "a public address still loads"
+        );
         assert!(loaded.flags(&public).has_connected());
         let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
         assert!(
