@@ -541,6 +541,10 @@ pub(crate) struct StructuralScratch {
     durable_spent: DurableSpentSet,
     height_list: Vec<u32>,
     create_height_by_fk: FkMap<u32>,
+    /// BIP30 inside one batch: each txid already created here, with its height
+    /// and the span of `batch_vouts` holding its spendable outputs.
+    batch_creates: TxidMap<(u32, u32, u32)>,
+    batch_vouts: Vec<u32>,
     pub slots: AnnotateSlots,
 }
 
@@ -560,6 +564,8 @@ impl Default for StructuralScratch {
             durable_spent: DurableSpentSet::with_hasher(Default::default()),
             height_list: Vec::new(),
             create_height_by_fk: FkMap::default(),
+            batch_creates: TxidMap::default(),
+            batch_vouts: Vec::new(),
             slots: AnnotateSlots::default(),
         }
     }
@@ -571,6 +577,8 @@ impl StructuralScratch {
     pub(crate) fn begin_batch(&mut self) {
         self.slots.abs_edges.clear();
         self.slots.known.clear();
+        self.batch_creates.clear();
+        self.batch_vouts.clear();
     }
 
     fn begin_block(&mut self) {
@@ -623,7 +631,7 @@ pub fn structural_validate_spends(
     let maturity = ctx.params.coinbase_maturity();
     // BIP30's txid batch is inside `spent_ns` (signet runs it on every block).
     let t_spent = Instant::now();
-    reject_bip30_unspent_overwrite(query, block, ctx)?;
+    reject_bip30_unspent_overwrite(query, block, ctx, pending_spent, scratch)?;
     let t_abs = Instant::now();
     structural_abs_heights(query, run_create_height, scratch, abs_jobs)?;
     let tip = query.tip_height().map(|h| h.0);
@@ -1164,6 +1172,8 @@ fn reject_bip30_unspent_overwrite(
     query: &Query,
     block: &Block,
     ctx: &rbitcoin_consensus::ValidationContext<'_>,
+    pending_spent: &rbitcoin_consensus::OutPointSet,
+    scratch: &mut StructuralScratch,
 ) -> Result<(), ConfirmError> {
     if ctx.params.is_bip30_repeat(ctx.height.0, block.block_hash())
         || bip34_ancestry_skips_bip30(query, ctx)
@@ -1175,6 +1185,17 @@ fn reject_bip30_unspent_overwrite(
         .iter()
         .map(|tx| tx.compute_txid().to_byte_array())
         .collect();
+    // An earlier block of this batch is not connected yet, so the store
+    // lookup below cannot see its creates.
+    for txid in &create_txids {
+        let Some(&(prior_height, lo, hi)) = scratch.batch_creates.get(txid) else {
+            continue;
+        };
+        let unspent = scratch.batch_vouts[lo as usize..hi as usize]
+            .iter()
+            .any(|&v| !pending_spent.contains(&(*txid, v)));
+        rbitcoin_consensus::block::reject_bip30_unspent_prior(ctx.height.0, prior_height, unspent)?;
+    }
     let hits = query
         .store()
         .get_fk_by_txid_batch(&create_txids)
@@ -1219,6 +1240,19 @@ fn reject_bip30_unspent_overwrite(
                 true,
             )?;
         }
+    }
+    for (txid, tx) in create_txids.into_iter().zip(&block.txdata) {
+        let lo = scratch.batch_vouts.len() as u32;
+        scratch.batch_vouts.extend(
+            (0u32..)
+                .zip(&tx.output)
+                .filter(|(_, out)| {
+                    !rbitcoin_consensus::policy::is_unspendable(out.script_pubkey.as_bytes())
+                })
+                .map(|(v, _)| v),
+        );
+        let hi = scratch.batch_vouts.len() as u32;
+        scratch.batch_creates.insert(txid, (ctx.height.0, lo, hi));
     }
     Ok(())
 }

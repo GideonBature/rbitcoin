@@ -717,6 +717,42 @@ fn header_and_spending_boundaries() {
     pin_subsidy_interval_two_overlay();
 }
 
+/// Below BIP34 two coinbases can share a txid. Core rejects the second while
+/// the first is unspent, including when both blocks arrive in one run.
+#[test]
+fn bip30_duplicate_coinbase_in_one_batch() {
+    let (_td, q, mut params) = regtest_q();
+    params.apply_test_activation_height("bip34", 1_000).unwrap();
+    connect_genesis(&q, &params);
+    let g = regtest_genesis();
+    let b1 = mine_regtest_block(g.block_hash(), g.header.time + 600, 1, vec![]);
+    let mut b2 = mine_regtest_block(b1.block_hash(), b1.header.time + 600, 2, vec![]);
+    b2.txdata[0] = b1.txdata[0].clone();
+    b2.header.merkle_root = b2.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut b2.header);
+    let bip30 = |r: &Result<_, ConfirmError>| matches!(r, Err(ConfirmError::Rules(ConsensusError::BadTx(s))) if s.contains("BIP30"));
+
+    let one_batch = confirm_wire_run(
+        &q,
+        &params,
+        Milestone::NONE,
+        &[(Height(1), b1.clone()), (Height(2), b2.clone())],
+    );
+    assert!(
+        bip30(&one_batch),
+        "duplicate coinbase one block later in the same batch: {one_batch:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height::GENESIS));
+
+    confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(1), b1)]).unwrap();
+    let next_batch = confirm_wire_run(&q, &params, Milestone::NONE, &[(Height(2), b2)]);
+    assert!(
+        bip30(&next_batch),
+        "duplicate coinbase in the next batch: {next_batch:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
+}
+
 // ─── Script flags (Core `GetBlockScriptFlags`) ──────────────────────────────
 
 /// Core sets WITNESS on every block, not from the segwit height. Below the
