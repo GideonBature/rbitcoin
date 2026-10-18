@@ -1345,20 +1345,28 @@ impl ActiveMempool {
         *sha256::Hash::hash(script).as_byte_array()
     }
 
-    /// Re-try orphans that listed `parent` as missing (recursive via accept_tx_with).
+    /// Re-try orphans that listed `parent` as missing.
     ///
     /// Uses `accept_tx_with` (not top-level accept_tx) so stage timers accumulate
     /// on the parent admit that unlocked the orphan chain. Public for hub staged commit.
+    ///
+    /// A worklist, so a parked chain does not keep one frame per descendant.
+    /// The first child is admitted, then its descendants, then the next sibling.
     pub fn promote_orphans_of(
         &mut self,
         parent: Txid,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) {
-        let children = self.orphanage.take_children_of(&parent);
-        for child in children {
+        let mut queue = VecDeque::new();
+        for child in self.orphanage.take_children_of(&parent).into_iter().rev() {
+            queue.push_front(child);
+        }
+        while let Some(child) = queue.pop_front() {
             if let Ok(r) = self.accept_tx_with(&child, utxos, tip, 0, true, None) {
-                self.promote_orphans_of(r.txid, utxos, tip);
+                for grandchild in self.orphanage.take_children_of(&r.txid).into_iter().rev() {
+                    queue.push_front(grandchild);
+                }
             } else {
                 self.restore_undone(utxos, tip);
             }

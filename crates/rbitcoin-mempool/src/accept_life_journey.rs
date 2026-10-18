@@ -728,6 +728,46 @@ fn sigop_adjusted_size_budget_and_reopen() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A parked chain that fills the cluster cap promotes when the root is
+/// admitted. Every descendant is live, in one cluster.
+#[test]
+fn orphan_chain_promotes_to_the_cluster_cap() {
+    let dir = tmp_dir();
+    let mut life = Life {
+        mp: ActiveMempool::open_or_create(&dir).unwrap(),
+        chain: LifeChain::default(),
+        tip: ChainTipCtx {
+            height: 200,
+            mtp: u32::MAX,
+        },
+    };
+    let descendants = MAX_CLUSTER_COUNT - 1;
+    let mut value = 100_000 + (descendants as u64) * 1_000;
+    let root = spend_tx(life.chain.fund(value + 1_000), value);
+    let mut parent = root.compute_txid();
+    let mut parked = Vec::with_capacity(descendants);
+    for _ in 0..descendants {
+        value -= 1_000;
+        let child = spend_tx(out(parent, 0), value);
+        parent = child.compute_txid();
+        parked.push(child);
+    }
+    for child in parked.iter().rev() {
+        let err = life.accept(child).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Orphaned { fresh: true, .. }),
+            "{err}"
+        );
+    }
+    assert_eq!(life.mp.orphan_count(), descendants);
+    life.accept(&root).expect("root promotes the chain");
+    assert_eq!(life.mp.orphan_count(), 0);
+    assert_eq!(life.mp.live_count(), MAX_CLUSTER_COUNT);
+    assert_eq!(life.cluster_len(&root), MAX_CLUSTER_COUNT);
+    assert!(life.live(parked.last().unwrap()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One mempool from the first orphan to a full pool: relay order, RBF,
 /// cluster caps, packages, a block, a reorg, a raised `-minrelaytxfee`, and
 /// eviction, against one chain view.
