@@ -137,8 +137,7 @@ async fn ibd_redials_immediately_and_does_not_invent_a_rehydrate() {
     let mut cfg = IbdConfig::for_test();
     cfg.target_peers = 2;
     let take = logs_from_sync();
-    // Cancel during the initial dial returns before rehydrate and before the
-    // redial line. This chain is two blocks, so catch-up exits on its own.
+    // This chain is two blocks, so catch-up exits on its own.
     let finished = tokio::time::timeout(
         Duration::from_secs(20),
         peer.sync_cancellable(&[rbitcoin_net::NetAddr::Ip(seed.local_addr)], cfg, None),
@@ -195,8 +194,6 @@ async fn ibd_notes_a_body_queue_row_above_the_tip() {
     let mut cfg = IbdConfig::for_test();
     cfg.target_peers = 1;
     let take = logs_from_sync();
-    // Same dial-cancel hole as the redial journey: the noted line is written
-    // only after the handshake returns.
     let finished = tokio::time::timeout(
         Duration::from_secs(20),
         peer.sync_cancellable(&[rbitcoin_net::NetAddr::Ip(seed.local_addr)], cfg, None),

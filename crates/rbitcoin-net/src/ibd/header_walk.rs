@@ -7405,14 +7405,11 @@ mod tests {
         st.header_walk.origin = true;
         st.header_walk.tip.hash = Some(gen);
         st.header_walk.tip.height = 0;
-        // The header links and its proof is valid, so only the dead-end
-        // clause returns. `&&` would extend the tip and push a checkpoint.
         st.header_walk.dead_ends.insert(gen);
         note_stored_candidate(&mut st, &hub, &[mine(gen, 30)]);
         assert_eq!(st.header_walk.tip_hash(), Some(gen));
         assert!(st.header_walk.checkpoints.is_empty());
 
-        // Bad proof returns at `pow_linked` before the dead-end clause.
         st.header_walk.dead_ends.clear();
         let mut broken = mine(gen, 31);
         broken.bits = CompactTarget::from_consensus(0x1d00ffff);
