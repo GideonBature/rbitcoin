@@ -1744,8 +1744,8 @@ impl PeerHub {
 
     /// Learn IPv4/IPv6/Tor v3/I2P/CJDNS rows from BIP155 `addrv2`.
     ///
-    /// Rows for a net this process cannot dial are not stored. Relaying the
-    /// message is separate and does not consult the book.
+    /// Rows for a net this process cannot dial are not stored. Unroutable
+    /// clearnet is not stored. Relaying is separate and drops the same rows.
     pub fn learn_addrv2(&self, list: &[bitcoin::p2p::address::AddrV2Message]) {
         let g = self.addrman.lock().unwrap_or_else(|e| e.into_inner());
         let Some(am) = g.as_ref() else {
@@ -1754,6 +1754,9 @@ impl PeerHub {
         let mut book = am.lock().unwrap_or_else(|e| e.into_inner());
         for a in list {
             if let Some(addr) = crate::NetAddr::from_addrv2(a) {
+                if crate::netaddr::netaddr_unroutable_gossip(addr) {
+                    continue;
+                }
                 book.add_learned_addr(addr, crate::seeds::MAX_ADDR_MAN);
             }
         }
@@ -1794,6 +1797,7 @@ impl PeerHub {
             .iter()
             .map(|e| e.addr)
             .filter(|a| v2 || matches!(a, crate::NetAddr::Ip(_)))
+            .filter(|a| !crate::netaddr::netaddr_unroutable_gossip(*a))
             .collect();
         let n = addrs.len();
         let pct_cap = (n * crate::peer::MAX_PCT_ADDR_TO_SEND / 100).max(1);
@@ -4000,6 +4004,22 @@ mod tests {
             addr_ips(&hub.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 18444))));
         assert_eq!(expired.len(), 1000);
         assert_ne!(a, expired);
+    }
+
+    #[test]
+    fn getaddr_omits_unroutable_clearnet() {
+        let hub = PeerHub::new();
+        hub.set_mock_now(1_700_000_000);
+        let mut am = crate::seeds::AddrMan::new();
+        for addr in ["10.0.0.1:8333", "100.64.0.1:8333", "127.0.0.1:8333"] {
+            assert!(am.add_learned(addr.parse().unwrap(), 64));
+        }
+        hub.set_addrman(Arc::new(Mutex::new(am)));
+        let got = hub.addr_response_for_bind(SocketAddr::from(([127, 0, 0, 1], 18444)));
+        assert!(
+            got.is_empty(),
+            "getaddr must not advertise unroutable clearnet: {got:?}"
+        );
     }
 
     include!("overlay_addrman_journey.rs");

@@ -964,6 +964,9 @@ impl AddrMan {
                     )
                 })?
             };
+            if crate::netaddr::netaddr_unroutable_gossip(addr) {
+                continue;
+            }
             am.remember(addr, PeerFlags(flags_u));
         }
         if !saw_magic && am.is_empty() {
@@ -1046,7 +1049,7 @@ mod tests {
     fn addr_n(i: u32) -> SocketAddr {
         SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(
-                10,
+                11,
                 ((i >> 16) & 0xff) as u8,
                 ((i >> 8) & 0xff) as u8,
                 (i & 0xff) as u8,
@@ -1749,6 +1752,50 @@ mod tests {
         let loaded = AddrMan::load(&path).unwrap();
         assert!(loaded.entry(&addr(4)).is_some());
         assert!(loaded.flags(&addr(4)).has_connected());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_drops_unroutable_clearnet_and_keeps_cjdns() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-peers-bogon-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("peers");
+        std::fs::write(
+            &path,
+            "\
+rbitcoin-peers-v2
+1.2.3.4:8333 0x01
+10.0.0.1:8333 0x01
+100.64.0.1:8333 0x00
+[fc00::1]:8333 0x00
+",
+        )
+        .unwrap();
+        let loaded = AddrMan::load(&path).unwrap();
+        let public: SocketAddr = "1.2.3.4:8333".parse().unwrap();
+        assert!(loaded.entry(&public).is_some(), "a public address still loads");
+        assert!(loaded.flags(&public).has_connected());
+        let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
+        assert!(
+            loaded.entry(&lan).is_none(),
+            "a remembered RFC1918 address is not dialed again"
+        );
+        let cgnat: SocketAddr = "100.64.0.1:8333".parse().unwrap();
+        assert!(loaded.entry(&cgnat).is_none());
+        assert!(
+            loaded
+                .entries()
+                .iter()
+                .any(|e| matches!(e.addr, NetAddr::Cjdns { .. })),
+            "fc00::/8 stays a CJDNS row"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

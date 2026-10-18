@@ -119,7 +119,9 @@ pub(crate) fn clearnet_unroutable(ip: IpAddr) -> bool {
     }
 }
 
-/// Seed inject and peer addr gossip. Onion, I2P, and CJDNS are not IP bogons.
+/// Seed inject, IBD and steady-state addr gossip, getaddr, and peers-file
+/// load. Onion, I2P, and CJDNS are not IP bogons. `add_learned` stays open
+/// for `addpeeraddress` and `--connect`.
 pub(crate) fn netaddr_unroutable_gossip(addr: NetAddr) -> bool {
     match addr {
         NetAddr::Ip(s) => clearnet_unroutable(s.ip()),

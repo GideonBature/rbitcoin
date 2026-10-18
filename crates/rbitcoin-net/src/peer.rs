@@ -3062,6 +3062,11 @@ fn on_addrv2(
             let mut batches: Vec<Vec<bitcoin::p2p::address::AddrV2Message>> =
                 vec![Vec::new(); neighbors.len()];
             for addr in list.iter().take(allow) {
+                if crate::NetAddr::from_addrv2(addr)
+                    .is_some_and(crate::netaddr::netaddr_unroutable_gossip)
+                {
+                    continue;
+                }
                 let key = addr_relay_key(addr);
                 let n_dest = if neighbors.len() <= 1 {
                     neighbors.len()
