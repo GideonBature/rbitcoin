@@ -7396,17 +7396,26 @@ mod tests {
     }
 
     #[test]
-    fn note_stored_candidate_ignores_a_batch_that_does_not_link() {
+    fn note_stored_candidate_ignores_a_dead_end_tip() {
         let (_dir, hub) = crate::chain::tiny_regtest_hub_labeled("hdr-stored-pin");
         hub.ensure_genesis().unwrap();
         let gen = hub.tip_hash().unwrap();
-        let mut broken = mine(gen, 30);
-        broken.bits = CompactTarget::from_consensus(0x1d00ffff);
         let (peer, _rx) = slot(0);
         let mut st = IbdWorkState::new(vec![peer], Some(gen), Some(0));
         st.header_walk.origin = true;
         st.header_walk.tip.hash = Some(gen);
         st.header_walk.tip.height = 0;
+        // The header links and its proof is valid, so only the dead-end
+        // clause returns. `&&` would extend the tip and push a checkpoint.
+        st.header_walk.dead_ends.insert(gen);
+        note_stored_candidate(&mut st, &hub, &[mine(gen, 30)]);
+        assert_eq!(st.header_walk.tip_hash(), Some(gen));
+        assert!(st.header_walk.checkpoints.is_empty());
+
+        // Bad proof returns at `pow_linked` before the dead-end clause.
+        st.header_walk.dead_ends.clear();
+        let mut broken = mine(gen, 31);
+        broken.bits = CompactTarget::from_consensus(0x1d00ffff);
         note_stored_candidate(&mut st, &hub, &[broken]);
         assert_eq!(st.header_walk.tip_hash(), Some(gen));
         assert!(st.header_walk.checkpoints.is_empty());
