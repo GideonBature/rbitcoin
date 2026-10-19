@@ -2134,7 +2134,8 @@ impl ChainHub {
     /// first-seen held tip.
     fn try_apply_after_invalidate(&self) -> Result<Option<AcceptOutcome>, NetError> {
         let none = HashSet::new();
-        let Some(branch) = self.most_work_branch(self.side_branches(&[], &none, &none))? else {
+        let Some(branch) = self.most_work_branch(self.side_branches(&[], &none, &none), &mut None)
+        else {
             return Ok(None);
         };
         match self.accept_branch_inner(&branch) {
@@ -2225,9 +2226,10 @@ impl ChainHub {
         // A failed tip may stay a candidate (a time reject is not a mark), so
         // each tip is tried once.
         let mut tried = HashSet::new();
+        let mut fault = None;
         loop {
             let untried = self.side_branches(leaves, restored, &tried);
-            let Some(branch) = self.most_work_branch(untried)? else {
+            let Some(branch) = self.most_work_branch(untried, &mut fault) else {
                 break;
             };
             let branch_tip = branch[branch.len() - 1].block_hash();
@@ -2239,13 +2241,18 @@ impl ChainHub {
             match attempt {
                 Ok((AcceptOutcome::Accepted { .. }, Some(_))) => {}
                 Ok(_) => break,
-                Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => break,
-                Err(e) if e.is_local_fault() => return Err(e),
+                Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
+                Err(e) if e.is_local_fault() => {
+                    fault.get_or_insert(e);
+                    break;
+                }
                 Err(e) => self.remember_failed_accept(branch_tip, &e),
             }
         }
+        // The paths that named these leaves are gone, so park before a fault
+        // is returned.
         self.park_restored_leaves(leaves, restored, validated);
-        Ok(())
+        fault.map_or(Ok(()), Err)
     }
 
     /// Keep each restored leaf that is still a side tip as a fork tip, so a
@@ -2310,18 +2317,24 @@ impl ChainHub {
 
     /// The branch with the most total chain work, as in Core's
     /// `CBlockIndexWorkComparator`. Equal work prefers the precious tip, then
-    /// the first-seen held tip. A store fault while summing work is returned.
+    /// the first-seen held tip. A branch whose work cannot be summed is
+    /// skipped. The first store fault among those is kept in `fault`.
     fn most_work_branch(
         &self,
         branches: impl Iterator<Item = Vec<Block>>,
-    ) -> Result<Option<Vec<Block>>, NetError> {
+        fault: &mut Option<NetError>,
+    ) -> Option<Vec<Block>> {
         let precious = *self.precious.read().unwrap();
         let mut best: Option<(Work, bool, u64, Vec<Block>)> = None;
         for branch in branches {
             let w = match self.branch_chain_work(&branch) {
                 Ok(w) => w,
-                Err(e) if e.is_local_fault() => return Err(e),
-                Err(_) => continue,
+                Err(e) => {
+                    if e.is_local_fault() && fault.is_none() {
+                        *fault = Some(e);
+                    }
+                    continue;
+                }
             };
             let tip = branch[branch.len() - 1].block_hash();
             let is_p = Some(tip) == precious;
@@ -2334,7 +2347,7 @@ impl ChainHub {
                 best = Some((w, is_p, seq, branch));
             }
         }
-        Ok(best.map(|(_, _, _, branch)| branch))
+        best.map(|(_, _, _, branch)| branch)
     }
 
     fn take_related_invalidated_paths(
@@ -4495,15 +4508,14 @@ mod tests {
         hub.accept_block(a6).unwrap();
         hub.invalidate_block(bad5_hash).unwrap();
         hub.reconsider_block(bad5_hash).unwrap();
-        let bad5_status = hub
-            .chaintips()
-            .into_iter()
-            .find(|t| t.hash == bad5_hash)
-            .map(|t| t.status);
-        assert_ne!(bad5_status, Some("valid-fork"));
+        assert!(
+            !hub.fork_tips.read().unwrap().iter().any(|h| h == bad5_hash),
+            "a block that never connected is not kept as a fork tip"
+        );
 
         // Last, because it truncates the store: a fault reading chain work
-        // while ranking is an error, not a skipped branch.
+        // while ranking is an error. Its invalidate path is gone, so the
+        // restored tip is still kept as a fork tip to return to.
         let tip = hub.tip_hash().unwrap();
         let tip_body = hub
             .block_at_height(hub.tip_height().unwrap())
@@ -4521,6 +4533,7 @@ mod tests {
             .unwrap();
         let err = hub.reconsider_block(tip).unwrap_err();
         assert!(err.is_local_fault(), "{err}");
+        assert!(hub.fork_tips.read().unwrap().iter().any(|h| h == tip));
         let _ = std::fs::remove_dir_all(dir);
     }
 

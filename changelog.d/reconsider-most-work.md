@@ -5,4 +5,6 @@ Fixed
   outweighed the tip as a whole stayed inactive. A branch that fails to
   connect no longer stops the next one. A restored leaf that loses, and
   was connected before, now stays a valid fork, so a later
-  `invalidateblock` can return to it.
+  `invalidateblock` can return to it. That later walk keeps the usual
+  10,000-block side-branch limit; only the reconsider itself walks
+  restored blocks past it.
