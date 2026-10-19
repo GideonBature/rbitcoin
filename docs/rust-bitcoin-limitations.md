@@ -364,8 +364,7 @@ the helper after the bugs above are in.
   targets.** Both compute `(0xffff / mantissa) * 256^(29 - exponent)`.
   Their constant `TARGET_MAX_F64` is the expanded genesis target
   `0x1d00ffff`. A compact target's 24-bit mantissa is exact in `f64`.
-  `difficulty_from_bits` is a local convenience over a stored `u32`. It
-  is not a workaround.
+  RPC difficulty calls this helper. It is not a workaround.
 - **`TapSighashType::from_consensus_u8(0x00) → Default`.** Correct name
   for the type. The consensus reject is "65-byte signature whose last
   byte is `0x00`", which is the caller's length check (RB-019).

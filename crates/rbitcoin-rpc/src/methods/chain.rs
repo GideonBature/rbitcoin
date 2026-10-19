@@ -155,7 +155,10 @@ pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
     w
 }
 
-pub(crate) use rbitcoin_consensus::difficulty_from_bits;
+/// Compact `nBits` as Core `GetDifficulty` (`Target::difficulty_float`).
+pub(crate) fn difficulty_from_bits(bits: u32) -> f64 {
+    bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).difficulty_float()
+}
 
 /// Compact-target bytes as Core `target` (64 hex chars).
 pub(crate) fn target_hex(bits: u32) -> String {

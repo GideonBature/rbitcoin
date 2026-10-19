@@ -215,30 +215,25 @@ fn min_diff_bits(
     Some(bits)
 }
 
-/// Compact `nBits` as a difficulty relative to the max target (Core `GetDifficulty`).
-pub fn difficulty_from_bits(bits: u32) -> f64 {
-    let n_shift = ((bits >> 24) & 0xff) as i32;
-    let mut ddiff = (0x0000_ffff_u64 as f64) / ((bits & 0x00ff_ffff) as f64);
-    let mut shift = n_shift - 29;
-    while shift < 0 {
-        ddiff *= 256.0;
-        shift += 1;
-    }
-    while shift > 0 {
-        ddiff /= 256.0;
-        shift -= 1;
-    }
-    ddiff
-}
-
 #[cfg(test)]
 mod median_time_past_tests {
     use super::*;
     use bitcoin::block::Version;
 
+    fn difficulty_float(bits: u32) -> f64 {
+        Target::from_compact(CompactTarget::from_consensus(bits)).difficulty_float()
+    }
+
     #[test]
     fn max_target_bits_are_difficulty_one() {
-        assert_eq!(difficulty_from_bits(0x1d00_ffff), 1.0);
+        assert_eq!(difficulty_float(0x1d00_ffff), 1.0);
+    }
+
+    /// Block 32256 `nBits` (`0x1d00d86a`), the compact pinned by
+    /// `mainnet_retarget_32256_matches_core_compact`.
+    #[test]
+    fn mainnet_32256_difficulty_is_frozen() {
+        assert_eq!(difficulty_float(0x1d00_d86a), 1.1828995343128408);
     }
 
     #[test]
