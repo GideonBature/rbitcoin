@@ -2516,7 +2516,10 @@ impl MempoolHub {
         promote_note(parent);
         self.enqueue_noted_orphans(&mut queue);
         while let Some(child) = queue.pop_front() {
+            let txid = child.tx.compute_txid();
             let _ = self.accept_with_utxo(&child.tx, utxo, None, false, &child.announcers);
+            // Admitted, rejected, or dropped. A repark already consumed the record.
+            self.forget_taken_orphan(txid);
             self.enqueue_noted_orphans(&mut queue);
         }
     }
@@ -3088,6 +3091,10 @@ impl MempoolHub {
         let _g = crate::reactor::BlockingRegion::enter();
         self.orphan_write(|g| g.orphanage.add_announcer_wtxid(wtxid, peer))
             .unwrap_or(false)
+    }
+
+    fn forget_taken_orphan(&self, txid: Txid) {
+        let _ = self.orphan_write(|g| g.orphanage.forget_taken(&txid));
     }
 
     pub fn erase_orphans_for_peer(&self, peer: u64) {

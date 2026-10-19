@@ -24,6 +24,7 @@ thread_local! {
     static WATCH_READABLE: Cell<bool> = const { Cell::new(false) };
     static READABLE_BROKE: Cell<bool> = const { Cell::new(false) };
     static FAIL_CLEAR_UNDO: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NEXT_DEFERRED_FREE: Cell<bool> = const { Cell::new(false) };
 }
 
 const UNDO_AT: usize = 256;
@@ -71,6 +72,13 @@ pub(super) struct PendingEmpty {
     home: LocatedHome,
     old: ShHeadValue,
     removed: u64,
+    /// Empty head is durable. A retry must not write it again, and a second
+    /// defer of this key must not replace the page list.
+    head_synced: bool,
+    /// Pages still to free. `None` means they have not been read yet.
+    pages_left: Option<Vec<(u8, u64)>>,
+    /// `live_count` already dropped `removed`. A header retry must not do it again.
+    live_applied: bool,
 }
 
 enum SuffixPlan {
@@ -339,11 +347,26 @@ impl ScriptHashTable {
         old: ShHeadValue,
         removed: u64,
     ) {
-        self.pending_empty.lock().unwrap().push(PendingEmpty {
+        let mut q = self.pending_empty.lock().unwrap();
+        if let Some(job) = q.iter_mut().find(|job| &job.scripthash == scripthash) {
+            // The tip did not shrink, so this is the same chain again.
+            // Replacing a job whose head is already empty would free twice.
+            if !job.head_synced {
+                job.home = home;
+                job.old = old;
+                job.removed = removed;
+                job.pages_left = None;
+            }
+            return;
+        }
+        q.push(PendingEmpty {
             scripthash: *scripthash,
             home,
             old,
             removed,
+            head_synced: false,
+            pages_left: None,
+            live_applied: false,
         });
     }
 
@@ -361,26 +384,91 @@ impl ScriptHashTable {
 
     /// Sync empty heads and free their pages. Disconnect calls this after
     /// `flush_confirmed_only` has returned.
+    ///
+    /// A free that fails after the head sync stays queued. The retry frees
+    /// only the pages that are still on the list.
     pub fn commit_deferred_empty_heads(&self) -> Result<(), StoreError> {
         loop {
-            let Some(job) = self.pending_empty.lock().unwrap().pop() else {
+            let Some(mut job) = self.pending_empty.lock().unwrap().pop() else {
                 return Ok(());
             };
-            if let Err(e) = self.unlink_write_home(&job.scripthash, job.home, &ShHeadValue::Empty) {
+            if let Err(e) = self.commit_one_empty(&mut job) {
                 self.pending_empty.lock().unwrap().push(job);
                 return Err(e);
             }
-            if let Err(e) = self.sync_home(job.home, &job.scripthash) {
-                self.pending_empty.lock().unwrap().push(job);
-                return Err(e);
-            }
-            let body = self.body_for(&job.scripthash, super::KeyHome::from(job.home));
-            let alloc_mu = self.alloc_for(&job.scripthash, super::KeyHome::from(job.home));
-            let mut alloc = alloc_mu.lock().unwrap();
-            self.free_if_paged(body, &mut alloc, &job.old)?;
-            alloc.live_count = alloc.live_count.saturating_sub(job.removed);
-            write_alloc_header(body, &alloc)?;
         }
+    }
+
+    fn commit_one_empty(&self, job: &mut PendingEmpty) -> Result<(), StoreError> {
+        if !job.head_synced {
+            self.unlink_write_home(&job.scripthash, job.home, &ShHeadValue::Empty)?;
+            self.sync_home(job.home, &job.scripthash)?;
+            job.head_synced = true;
+        }
+        if job.pages_left.is_none() {
+            job.pages_left = Some(self.deferred_page_list(job)?);
+        }
+        let mut pages = job.pages_left.take().unwrap_or_default();
+        let body = self.body_for(&job.scripthash, super::KeyHome::from(job.home));
+        let alloc_mu = self.alloc_for(&job.scripthash, super::KeyHome::from(job.home));
+        let mut alloc = alloc_mu.lock().unwrap();
+        let mut next = 0;
+        while next < pages.len() {
+            let (class, off) = pages[next];
+            if let Err(e) = self.free_deferred_page(body, &mut alloc, class, off) {
+                job.pages_left = Some(pages.split_off(next));
+                return Err(e);
+            }
+            next = next.saturating_add(1);
+        }
+        if !job.live_applied {
+            alloc.live_count = alloc.live_count.saturating_sub(job.removed);
+            job.live_applied = true;
+        }
+        if let Err(e) = write_alloc_header(body, &alloc) {
+            job.pages_left = Some(Vec::new());
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Page offsets, read before any freelist write. A later free error
+    /// retries this list instead of walking a page that is already a freelist link.
+    fn deferred_page_list(&self, job: &PendingEmpty) -> Result<Vec<(u8, u64)>, StoreError> {
+        let body = self.body_for(&job.scripthash, super::KeyHome::from(job.home));
+        match &job.old {
+            ShHeadValue::Extent { last_page } => {
+                let first = super::paged_first_from_last(body, *last_page)?;
+                let mut pages = Vec::new();
+                super::follow_page_chain(body, first, super::SH_PAGE_CHAIN_MAX, |_body, off| {
+                    pages.push((SH_PAGE_SLAB_CLASS, off));
+                    Ok(())
+                })?;
+                Ok(pages)
+            }
+            ShHeadValue::Slab { class, off, .. } => Ok(vec![(*class, *off)]),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn free_deferred_page(
+        &self,
+        body: &TableFile,
+        alloc: &mut AllocState,
+        class: u8,
+        off: u64,
+    ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if FAIL_NEXT_DEFERRED_FREE.with(|c| c.replace(false)) {
+            return Err(StoreError::Corrupt("scripthash deferred free failed"));
+        }
+        self.free_slab(body, alloc, class, off)
+    }
+
+    /// The next deferred page free fails once, before the freelist changes.
+    #[cfg(test)]
+    pub fn fail_next_deferred_free() {
+        FAIL_NEXT_DEFERRED_FREE.with(|c| c.set(true));
     }
 
     fn apply_suffix_plan(

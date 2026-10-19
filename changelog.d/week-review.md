@@ -1,7 +1,8 @@
 Fixed
 
 - **A legacy `addr` in `fc00::/8` is CJDNS, and self-announce drops bogons.**
-  The address book stores that prefix as clearnet only when CJDNS is reachable.
+  The address book stores that prefix as CJDNS when CJDNS is reachable, and
+  leaves it out when CJDNS is off.
   `--external-ip` no longer announces CGNAT, documentation, benchmarking,
   class E, Teredo, or `fd00::/8` while discover is on.
 - **A newest address page no longer walks the chain.** A page whose creates

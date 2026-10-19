@@ -1134,10 +1134,10 @@ fn apply_soft_wire_reject(
         // its own block, so it does not count toward the cascade halt. This
         // also clears a count for another hash: the tip+1 retry got a
         // verdict, so the pipeline is not stuck repeating that cascade.
-        // A tip-child BadPrev is the exception: the same hash is fetched
-        // again, so it uses the cascade counter and stops on the third try.
+        // A tip-child BadPrev is fetched again as the same hash. It has its
+        // own counter: this clear must not restart those three strikes.
         if retry_tip_child {
-            apply_cascade_reject(st, height, hash, err, hub);
+            apply_tip_child_bad_prev(st, height, hash, err, hub);
             if st.halt.is_some() {
                 st.body.stop_reget(hash);
                 return;
@@ -1207,6 +1207,36 @@ fn punish_mutated_sender(st: &mut IbdWorkState, peer: usize, hash: BlockHash) {
     }
     warn!("ibd: peer[{peer}] sent mutated block {hash}; dropping peer");
     disconnect_peer(st, peer);
+}
+
+fn apply_tip_child_bad_prev(
+    st: &mut IbdWorkState,
+    height: u32,
+    hash: BlockHash,
+    err: &str,
+    hub: Option<&crate::chain::ChainHub>,
+) {
+    clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+    const TIP_CHILD_HALT_AFTER: u8 = 3;
+    let tip = hub
+        .and_then(|h| h.tip_hash())
+        .map(|t| t.to_byte_array())
+        .unwrap_or([0u8; 32]);
+    let n = match st.tip_child_bad_prev {
+        Some((h, t, c)) if h == hash && t == tip => c.saturating_add(1),
+        _ => 1u8,
+    };
+    st.tip_child_bad_prev = Some((hash, tip, n));
+    if n >= TIP_CHILD_HALT_AFTER {
+        st.halt = Some(format!(
+            "cascade repeated {n}× @{height} {hash} (tip unchanged): {err}"
+        ));
+        warn!(
+            "ibd: confirm reject BadPrev halt @{height} {hash}: {err} ({n} at same tip, not blacklisted)"
+        );
+        return;
+    }
+    note_confirm_stuck(st);
 }
 
 fn apply_cascade_reject(

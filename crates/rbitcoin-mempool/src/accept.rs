@@ -1428,10 +1428,15 @@ impl ActiveMempool {
         self.push_orphan_children(parent, &mut queue);
         while let Some(child) = queue.pop_front() {
             match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None) {
-                Ok(r) => self.push_orphan_children(r.txid, &mut queue),
+                Ok(r) => {
+                    self.orphanage.forget_taken(&child.tx.compute_txid());
+                    self.push_orphan_children(r.txid, &mut queue);
+                }
                 Err(e) => {
                     if let AcceptError::Orphaned { missing, .. } = e {
                         let _ = self.park_announced(&child.tx, missing, &child.announcers);
+                    } else {
+                        self.orphanage.forget_taken(&child.tx.compute_txid());
                     }
                     for id in self.restore_conflicts(utxos, tip, RestoreOrphans::Defer) {
                         self.push_orphan_children(id, &mut queue);
@@ -1772,9 +1777,22 @@ impl ActiveMempool {
         announcers: &[u64],
     ) -> AcceptError {
         let txid = tx.compute_txid();
-        let first = announcers.first().copied();
+        // A disconnect while this orphan was out of `by_txid` edited the
+        // in-flight record. The slice from the take is already stale.
+        let live = match self.orphanage.claim_taken(&txid) {
+            Some(crate::orphanage::TakenClaim::Drop) => {
+                return AcceptError::Orphaned {
+                    txid,
+                    missing,
+                    fresh: false,
+                };
+            }
+            Some(crate::orphanage::TakenClaim::Keep(peers)) => peers,
+            None => announcers.to_vec(),
+        };
+        let first = live.first().copied();
         let err = self.park_orphan_from(tx, missing, first);
-        for peer in announcers.iter().skip(1) {
+        for peer in live.iter().skip(1) {
             self.orphanage.add_announcer(&txid, *peer);
         }
         err
@@ -4010,6 +4028,69 @@ mod tests {
             !mp.orphanage.contains(&child_id),
             "a disconnect of the only announcer must drop the orphan"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hub takes the orphan out, checks scripts, then parks. A disconnect
+    /// in that gap must stick: putting the child back under the dead peer
+    /// would pin it in that peer's reserve.
+    #[test]
+    fn disconnect_while_the_orphan_is_out_is_not_reparked() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent_a = spend_tx(ops[0], 99_000);
+        let parent_b = spend_tx(ops[1], 99_000);
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_a.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_b.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(197_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let child_id = child.compute_txid();
+        let mut missing = BTreeSet::new();
+        missing.insert(parent_a.compute_txid());
+        missing.insert(parent_b.compute_txid());
+        mp.park_orphan_from(&child, missing.clone(), Some(4));
+        mp.orphanage.add_announcer(&child_id, 8);
+        let _taken = mp.orphanage.take_children_of(&parent_a.compute_txid());
+        mp.orphanage.erase_for_peer(4);
+        let _ = mp.park_announced(&child, missing.clone(), &[4, 8]);
+        assert_eq!(
+            mp.orphanage.announcers_of(&child_id),
+            vec![8],
+            "only the peer that is still connected is restored"
+        );
+        let _taken = mp.orphanage.take_children_of(&parent_b.compute_txid());
+        mp.orphanage.erase_for_peer(8);
+        let _ = mp.park_announced(&child, missing, &[8]);
+        assert!(
+            !mp.orphanage.contains(&child_id),
+            "the last live announcer disconnecting while the orphan is out drops it on repark"
+        );
+        let _ = utxos;
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -53,6 +53,26 @@ pub struct Orphanage {
     peer_weight: HashMap<u64, u64>,
     max_weight: u64,
     max_count: usize,
+    /// Orphans `take_children_of` removed and that are not parked or admitted yet.
+    ///
+    /// A disconnect in that gap cannot see `by_txid`. It edits this map, and
+    /// the repark uses the result instead of the announcer list from the take.
+    taken: HashMap<Txid, TakenOrphan>,
+}
+
+/// Announcers copied at take time. `drop` means a disconnect removed the last one.
+#[derive(Debug, Default)]
+struct TakenOrphan {
+    announcers: BTreeSet<u64>,
+    drop: bool,
+}
+
+/// What the repark should do with an orphan that was taken.
+pub(crate) enum TakenClaim {
+    /// Park under these peers. Empty means the orphan never had an announcer.
+    Keep(Vec<u64>),
+    /// The last announcer disconnected while the orphan was out. Do not park.
+    Drop,
 }
 
 impl Orphanage {
@@ -70,6 +90,7 @@ impl Orphanage {
             peer_weight: HashMap::new(),
             max_weight: max_weight.max(MAX_ORPHAN_TX_WEIGHT),
             max_count: max_count.max(1),
+            taken: HashMap::new(),
         }
     }
 
@@ -362,13 +383,36 @@ impl Orphanage {
                         }
                     }
                 }
+                let announcers = e.announcers;
+                self.taken.insert(
+                    cid,
+                    TakenOrphan {
+                        announcers: announcers.clone(),
+                        drop: false,
+                    },
+                );
                 out.push(OrphanSnapshot {
                     tx: e.tx,
-                    announcers: e.announcers.into_iter().collect(),
+                    announcers: announcers.into_iter().collect(),
                 });
             }
         }
         out
+    }
+
+    /// Consume the in-flight record. `None` when this tx was not taken.
+    pub(crate) fn claim_taken(&mut self, txid: &Txid) -> Option<TakenClaim> {
+        let taken = self.taken.remove(txid)?;
+        if taken.drop {
+            Some(TakenClaim::Drop)
+        } else {
+            Some(TakenClaim::Keep(taken.announcers.into_iter().collect()))
+        }
+    }
+
+    /// The orphan was admitted, or it will not be parked. Drop the in-flight record.
+    pub fn forget_taken(&mut self, txid: &Txid) {
+        self.taken.remove(txid);
     }
 
     pub fn announcers_of(&self, txid: &Txid) -> Vec<u64> {
@@ -380,6 +424,7 @@ impl Orphanage {
 
     pub fn has_announcer(&self, peer: u64) -> bool {
         self.by_txid.values().any(|e| e.announcers.contains(&peer))
+            || self.taken.values().any(|t| t.announcers.contains(&peer))
     }
 
     pub fn add_announcer(&mut self, txid: &Txid, peer: u64) -> bool {
@@ -404,6 +449,8 @@ impl Orphanage {
     }
 
     /// Drop `peer` as announcer; erase orphans with no remaining announcers.
+    ///
+    /// Also edits orphans that are out for a promote. The repark reads that.
     pub fn erase_for_peer(&mut self, peer: u64) {
         let hit: Vec<(Txid, u64, bool)> = self
             .by_txid
@@ -429,6 +476,11 @@ impl Orphanage {
             self.remove_txid(&t);
         }
         self.fifo.retain(|t| self.by_txid.contains_key(t));
+        for taken in self.taken.values_mut() {
+            if taken.announcers.remove(&peer) && taken.announcers.is_empty() {
+                taken.drop = true;
+            }
+        }
     }
 
     pub fn snapshot(&self) -> Vec<OrphanSnapshot> {
