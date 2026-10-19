@@ -248,8 +248,8 @@ fn full_rbf_and_staged_commit(life: &mut Life) -> (OutPoint, Txid) {
 }
 
 /// Pure RBFR: fee 1,500 loses BIP125's absolute fee to the 2,000 parent and
-/// child, but pays 1.25x the direct conflict and unpins both. A merger that
-/// spends two unconfirmed parents is rejected: more than one direct conflict.
+/// child, but pays 1.25x the direct conflict and unpins both. One conflict
+/// may be replaced by spending that conflict's parent.
 fn replacements_unpin_and_leave_the_cluster_count(life: &mut Life) {
     let f = life.chain.fund(1_000_000);
     let pinned = spend_tx(f, 999_000);
@@ -269,19 +269,6 @@ fn replacements_unpin_and_leave_the_cluster_count(life: &mut Life) {
         life.accept(&k).unwrap();
         pairs.push((coin, p, k));
     }
-    let parent_outs: Vec<OutPoint> = pairs
-        .iter()
-        .map(|(_, p, _)| out(p.compute_txid(), 0))
-        .collect();
-    let merger = spend_all(&parent_outs, 10_000);
-    let err = life.accept(&merger).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            AcceptError::Policy("unconfirmed input has multiple conflicts")
-        ),
-        "{err}"
-    );
     for (coin, p, k) in &pairs {
         assert!(life.live(k));
         let bump = spend_tx(out(p.compute_txid(), 0), 10_000);
@@ -786,9 +773,9 @@ fn orphan_chain_promotes_to_the_cluster_cap() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Libre `HasNoNewUnconfirmed`: an unconfirmed input must already be a parent
-/// of the direct conflicts, and there is only one direct conflict. A
-/// single-conflict CPFP of that parent stays allowed.
+/// An unconfirmed input must already be a parent of the direct conflicts.
+/// Several of those conflicts may be replaced together. A single-conflict
+/// CPFP of that parent stays allowed.
 #[test]
 fn replacement_unconfirmed_inputs_follow_libre_rule() {
     let dir = tmp_dir();
@@ -849,15 +836,38 @@ fn replacement_unconfirmed_inputs_follow_libre_rule() {
         &[out(wide.compute_txid(), 0), out(wide.compute_txid(), 1)],
         50_000,
     );
-    let err = life.accept(&merger).unwrap_err();
+    life.accept(&merger)
+        .expect("several conflicts may be replaced by spending their parent outputs");
+    assert!(!life.live(&k0) && !life.live(&k1));
+    assert!(life.live(&wide));
+    assert!(life.live(&merger));
+    assert_eq!(life.cluster_len(&merger), 2);
+
+    // A full chain plus a separate conflict. Spending the chain tip and the
+    // conflict's confirmed input would join the full cluster. Core reports
+    // the cap. The conflict stays.
+    let mut value = 100_000 + (MAX_CLUSTER_COUNT as u64) * 1_000;
+    let mut tip = spend_tx(life.chain.fund(value + 1_000), value);
+    life.accept(&tip).unwrap();
+    for _ in 1..MAX_CLUSTER_COUNT {
+        value -= 1_000;
+        let next = spend_tx(out(tip.compute_txid(), 0), value);
+        life.accept(&next).unwrap();
+        tip = next;
+    }
+    assert_eq!(life.cluster_len(&tip), MAX_CLUSTER_COUNT);
+    let capped = life.chain.fund(100_000);
+    let capped_victim = spend_tx(capped, 90_000);
+    life.accept(&capped_victim).unwrap();
+    let over = spend_all(&[out(tip.compute_txid(), 0), capped], 1_000);
+    let err = life.accept(&over).unwrap_err();
     assert!(
-        matches!(
-            err,
-            AcceptError::Policy("unconfirmed input has multiple conflicts")
-        ),
+        matches!(err, AcceptError::ClusterTooLarge { .. }),
         "{err}"
     );
-    assert!(life.live(&k0) && life.live(&k1));
+    assert!(life.live(&capped_victim));
+    assert!(life.live(&tip));
+    assert!(!life.live(&over));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
