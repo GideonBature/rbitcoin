@@ -158,7 +158,12 @@ pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
     w
 }
 
-/// Compact `nBits` as Core `GetDifficulty` (`Target::difficulty_float`).
+/// Difficulty relative to the max target.
+///
+/// Canonical compacts match Core `GetDifficulty`: a positive 24-bit
+/// mantissa is exact in `f64`. A mantissa above `0x7fffff` makes
+/// `Target::from_compact` zero, so this is `+inf`. The old loop returned
+/// a finite ratio for that non-canonical encoding.
 pub(crate) fn difficulty_from_bits(bits: u32) -> f64 {
     bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).difficulty_float()
 }

@@ -2426,8 +2426,12 @@ fn param_txid(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     parse_id32(s, "txid must be 32 bytes hex")
 }
 
-/// Display-order 32-byte id. `FromHex` does not strip `0x`, and a short
-/// string is a length error rather than the old odd-length text.
+/// Display-order 32-byte id.
+///
+/// `FromHex` for `[u8; 32]` reports a wrong length whenever the string is
+/// not 64 characters, before it looks at the digits. A short non-hex id
+/// (`zz`) is the length sentence, not `invalid hex digit`. Odd length is
+/// still reported first. `0x` / `0X` is stripped here.
 fn parse_id32(s: &str, wrong_len: &str) -> Result<[u8; 32], String> {
     let s = s
         .strip_prefix("0x")

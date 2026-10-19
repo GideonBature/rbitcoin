@@ -1864,6 +1864,7 @@ fn decode_tx_hex_str(hex: &str) -> Result<bitcoin::Transaction, Response> {
     }) {
         Ok(r) => r,
         Err(e) => {
+            // hex-conservative's sentence, not Electrum's `invalid hex digit`.
             return Err((StatusCode::BAD_REQUEST, format!("invalid hex: {e}")).into_response());
         }
     };
@@ -2081,6 +2082,7 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
+                    // Same library sentence as the single-tx broadcast error.
                     format!("package[{i}] invalid hex: {e}"),
                 )
                     .into_response();

@@ -397,6 +397,22 @@ the helper after the bugs above are in.
   `FromHex`). Display-order 32-byte ids use `Txid` or `BlockHash`
   `Display` / `FromStr`. `FromHex` does not strip a `0x` prefix; callers
   that accept one strip it themselves.
+- **Short id hex.** `FromHex` for a fixed 32 bytes returns a length error
+  whenever the string is not 64 characters, and it does not look at the
+  digits. A short non-hex id (`zz`) is therefore the length sentence
+  (`hash/txid must be 32 bytes hex` on RPC, `scripthash must be 32 bytes
+  hex` / `txid must be 32 bytes hex` on Electrum), not `invalid hex
+  digit`. Odd length is still reported first. A full 64 characters of
+  non-hex is still `invalid hex digit`.
+- **Negative compact difficulty.** `Target::from_compact` is zero when
+  the mantissa is greater than `0x7fffff`. `difficulty_float` is then
+  `+inf`. The previous `GetDifficulty` loop returned a finite ratio for
+  that encoding. Canonical headers do not set the sign bit.
+- **Esplora hex errors.** Transaction and package broadcast return
+  hex-conservative's own sentence after the `invalid hex:` prefix
+  (`invalid char, failed to create bytes from hex`, `odd length, failed
+  to create bytes from hex`). Electrum and `decodescript` still say
+  `invalid hex digit` / `odd hex length`.
 - **RB-008 as an upstream port.** Do not send the interpreter.
 
 ## Related

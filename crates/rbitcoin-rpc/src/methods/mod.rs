@@ -44,8 +44,10 @@ pub(crate) fn hash_hex_display(h: &[u8; 32]) -> String {
 
 /// Parse Core display-order 32-byte hex → internal byte order.
 ///
-/// `FromHex` does not strip `0x`. Odd length stays distinct from a wrong
-/// even length so the RPC text matches the previous decoder.
+/// `FromHex` for `[u8; 32]` reports a wrong length whenever the string is
+/// not 64 characters, before it looks at the digits. A short non-hex id
+/// (`zz`) is `hash/txid must be 32 bytes hex`, not `invalid hex digit`.
+/// Odd length is still reported first. `0x` / `0X` is stripped here.
 pub(crate) fn parse_hash32_display(hex: &str) -> Result<[u8; 32], Value> {
     let hex = hex
         .strip_prefix("0x")
