@@ -169,6 +169,7 @@ intentional:
 | Retain | Approx at 1.42 B creates | Notes |
 |--------|-------------------------:|-------|
 | **Sealed `tx.head` fuse8** | **0 heap**; ~1.5–1.6 GiB `file=` | Read-only mmap of every sealed `.fuse8` (~9 bits/key). Kernel may drop hot fuse under pressure; next `contains` faults the file. |
+| **Open `tx.head` image** | **128 MiB** per unsealed segment (one; two while a seal is in flight) | `Box<[AtomicU32]>` of every slot, `rel` plus a 7-bit fingerprint of the mixed key. Probes and inserts never read the OA file. Loaded from the file at open; fingerprints refilled from `txid.body` (one mix per row, `rebuild_workers` threads). `head_mirror_bytes` in the sizes line only: a fixed block per segment, so it does not steer the in-flight retain window (that budget would shrink the pin window by 128 MiB and slow IBD). |
 | **Sealed BDZ `g`** | **0 heap** | Header only; 4 KiB `g` pages via uring stream (`KIND_MPHF_G`). Hot pages are kernel `RssFile`. FdOnly because a mapped miss serializes one fault per lookup thread; the ring keeps 128 pages in flight. Do not mmap packed `g`. |
 | **SH BDZ3 occupancy** | **supers heap** (`mphf_occ=`); ~150 MiB `file=` at ~1 B SH keys | Read-only map of the `NN.mphf` prefix through occ (not tags). Rank popcounts mapped bytes. |
 | **Class C L2 `strong_tx`** | **~177 MiB** | 1 bit/create, under the 256 MiB in-RAM cap. Stays process `Vec`: `MAP_SHARED` would write before the tip barrier; `MAP_PRIVATE` COWs `set_bit` back into anon. |
