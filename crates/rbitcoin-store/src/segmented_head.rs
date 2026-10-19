@@ -28,15 +28,20 @@ use crate::fuse8_filter::{fuse_key_from_mixed, open_file, SealedFuse8};
 use crate::tx_head_mphf::TxHeadMphf;
 use rbitcoin_primitives::{Fk, SCHEMA_VERSION, STORE_MAGIC};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-const META_VERSION: u32 = 1;
+/// v2 adds [`FLAG_TAGGED`]. A v1 meta still opens: its unsealed OAs predate
+/// slot fingerprints and get them written on that open.
+const META_VERSION: u32 = 2;
+const META_V1_UNTAGGED: u32 = 1;
 const META_HEADER_LEN: usize = 24;
 const SEG_DESC_LEN: usize = 32;
 const FLAG_SEALED: u32 = 1;
+/// Every slot of this unsealed OA carries its key's fingerprint.
+const FLAG_TAGGED: u32 = 2;
 
 /// Collect `(fuse_key, rel)` for a sealed range (`first_fk`, `count`).
 ///
@@ -53,6 +58,9 @@ struct Segment {
     count: AtomicU64,
     file_id: u32,
     sealed: bool,
+    /// Unsealed OA whose slots all carry fingerprints (false only for a
+    /// meta v1 head until `TxTable` writes them).
+    tagged: AtomicBool,
     head: Option<Arc<AddressHead>>,
     pack: Option<Arc<TxHeadMphf>>,
     fuse: Option<SealedFuse8>,
@@ -78,11 +86,6 @@ pub struct SegmentedTxHead {
 
 impl SegmentedTxHead {
     pub fn create(dir: &Path, layout: HeadLayout) -> Result<Self, StoreError> {
-        if layout.entry_bytes != 4 {
-            return Err(StoreError::Corrupt(
-                "segmented tx.head requires 4 B relative entries",
-            ));
-        }
         let dir = dir.to_path_buf();
         refuse_legacy_mono_head(&dir)?;
         write_meta(&dir, layout.bits, &[])?;
@@ -101,13 +104,14 @@ impl SegmentedTxHead {
         let dir = dir.to_path_buf();
         refuse_legacy_mono_head(&dir)?;
         let (bits, descs) = read_meta(&dir)?;
-        let layout = HeadLayout::with_entry_bytes(bits, 4)?;
+        let layout = HeadLayout::new(bits)?;
         let max_keys = max_keys_for_layout(layout);
         let mut segs = Vec::with_capacity(descs.len());
         let mut max_id = 0u32;
         for d in descs {
             let path = segment_head_path(&dir, d.file_id);
             let sealed = d.flags & FLAG_SEALED != 0;
+            let tagged = sealed || d.flags & FLAG_TAGGED != 0;
             let (head, pack) = if sealed {
                 if !TxHeadMphf::exists(&path) {
                     return Err(StoreError::Corrupt("tx.head sealed segment missing mphf"));
@@ -123,7 +127,7 @@ impl SegmentedTxHead {
                 (None, Some(Arc::new(TxHeadMphf::open(&path)?)))
             } else {
                 let head = AddressHead::open(&path)?;
-                if head.bits() != bits || head.entry_bytes() != 4 {
+                if head.bits() != bits {
                     return Err(StoreError::Corrupt("tx.head segment layout mismatch"));
                 }
                 (Some(Arc::new(head)), None)
@@ -143,6 +147,7 @@ impl SegmentedTxHead {
                 count: AtomicU64::new(d.count),
                 file_id: d.file_id,
                 sealed,
+                tagged: AtomicBool::new(tagged),
                 head,
                 pack,
                 fuse,
@@ -203,10 +208,6 @@ impl SegmentedTxHead {
 
     pub fn slots(&self) -> u64 {
         self.layout.slots()
-    }
-
-    pub fn entry_bytes(&self) -> u8 {
-        4
     }
 
     pub fn segment_count(&self) -> usize {
@@ -273,6 +274,63 @@ impl SegmentedTxHead {
             .sum()
     }
 
+    /// Mapped slot arrays of the unsealed segments (file-backed, not heap).
+    pub fn open_map_bytes(&self) -> u64 {
+        self.segments_snapshot()
+            .iter()
+            .map(|s| s.head.as_ref().map(|h| h.map_bytes()).unwrap_or(0))
+            .sum()
+    }
+
+    /// Unsealed segments whose slots still lack fingerprints (meta v1 heads):
+    /// `(file_id, first_fk, count)`.
+    pub fn untagged_open_ranges(&self) -> Vec<(u32, u64, u64)> {
+        self.segments_snapshot()
+            .iter()
+            .filter(|s| !s.sealed && !s.tagged.load(Ordering::Relaxed))
+            .map(|s| (s.file_id, s.first_fk, s.count.load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    /// Record that every slot of unsealed segment `file_id` carries its
+    /// fingerprint (after [`Self::fill_fingerprints`] and a flush).
+    pub fn mark_tagged(&self, file_id: u32) -> Result<(), StoreError> {
+        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let segs = self.segments_snapshot();
+        let seg = segs
+            .iter()
+            .find(|s| s.file_id == file_id)
+            .ok_or(StoreError::Corrupt("tx.head mark tagged: file_id missing"))?;
+        seg.tagged.store(true, Ordering::Relaxed);
+        self.persist_meta_locked()
+    }
+
+    /// Write fingerprints into unsealed segment `file_id` for rows that
+    /// predate tags. `keys` are `(mixed, absolute fk)`; fks before the segment
+    /// are skipped.
+    pub fn fill_fingerprints(
+        &self,
+        file_id: u32,
+        keys: &[([u8; 32], Fk)],
+    ) -> Result<(), StoreError> {
+        let segs = self.segments_snapshot();
+        let seg = segs
+            .iter()
+            .find(|s| s.file_id == file_id)
+            .ok_or(StoreError::Corrupt(
+                "tx.head fill fingerprints: file_id missing",
+            ))?;
+        let Some(head) = seg.head.as_ref() else {
+            return Ok(());
+        };
+        let rels: Vec<([u8; 32], Fk)> = keys
+            .iter()
+            .filter(|(_, fk)| fk.0 >= seg.first_fk)
+            .map(|(m, fk)| (*m, Fk(fk.0 - seg.first_fk + 1)))
+            .collect();
+        head.fill_fingerprints(&rels)
+    }
+
     /// Heap-owned sealed fuse8 fingerprints (**0** when mapped from `.fuse8`).
     pub fn sealed_fuse_resident_bytes(&self) -> u64 {
         self.segments_snapshot()
@@ -303,7 +361,6 @@ impl SegmentedTxHead {
                         depth_end: 0,
                         empty_local: 0,
                     },
-                    hop_equal_second: true,
                     occupied: 0,
                 },
             ));
@@ -311,7 +368,7 @@ impl SegmentedTxHead {
         let Some(head) = last.head.as_ref() else {
             return Err(StoreError::Corrupt("tx.head leftover hop: tail sealed"));
         };
-        let dump = head.dump_page_hop(mixed)?;
+        let dump = head.dump_page_hop(mixed);
         Ok((last.file_id, last.first_fk, dump))
     }
 
@@ -471,7 +528,7 @@ impl SegmentedTxHead {
         if segs.is_empty() {
             return Ok(out);
         }
-        self.probe_unsealed_wave(mixed, active, ctx, &mut out)?;
+        self.probe_unsealed_wave(mixed, active, &mut out);
         if matches!(wave, HeadProbeWave::All) {
             self.probe_sealed_wave(mixed, active, ctx, &mut out)?;
         }
@@ -504,9 +561,8 @@ impl SegmentedTxHead {
         &self,
         mixed: &[[u8; 32]],
         active: Option<&[bool]>,
-        ctx: &mut crate::IoCtx<'_>,
         out: &mut [Vec<Fk>],
-    ) -> Result<(), StoreError> {
+    ) {
         let segs = self.segments_snapshot();
         let key_on = |i: usize| active.map(|a| a[i]).unwrap_or(true);
         for seg in segs.iter().rev() {
@@ -528,7 +584,7 @@ impl SegmentedTxHead {
             if pass_keys.is_empty() {
                 continue;
             }
-            let rel_lists = head.probe_fks_batch_ctx(&pass_keys, ctx)?;
+            let rel_lists = head.probe_fks_batch(&pass_keys);
             for (orig_i, rels) in pass_i.into_iter().zip(rel_lists) {
                 for r in rels.into_iter().rev() {
                     if let Some(fk) = rel_to_abs(seg.first_fk, r.0) {
@@ -537,7 +593,6 @@ impl SegmentedTxHead {
                 }
             }
         }
-        Ok(())
     }
 
     fn probe_sealed_wave(
@@ -608,7 +663,7 @@ impl SegmentedTxHead {
                 .head
                 .as_ref()
                 .ok_or(StoreError::Corrupt("tx.head sealed probe: missing pack"))?
-                .probe_fks_batch_ctx(&pass_keys, ctx)?;
+                .probe_fks_batch(&pass_keys);
             for (orig_i, rels) in pass_i.into_iter().zip(rel_lists) {
                 for r in rels.into_iter().rev() {
                     if let Some(fk) = rel_to_abs(seg.first_fk, r.0) {
@@ -618,6 +673,26 @@ impl SegmentedTxHead {
             }
         }
         Ok(())
+    }
+
+    /// Rewrite this head as a meta v1 head: untagged slots, no `FLAG_TAGGED`.
+    #[cfg(test)]
+    pub(crate) fn downgrade_to_v1_for_test(&self) -> Result<(), StoreError> {
+        let segs = self.segments_snapshot();
+        let mut descs = Vec::new();
+        for s in segs.iter() {
+            if let Some(head) = s.head.as_ref() {
+                head.strip_tags_for_test()?;
+            }
+            let flags = if s.sealed { FLAG_SEALED } else { 0 };
+            descs.push((
+                s.first_fk,
+                s.count.load(Ordering::Relaxed),
+                s.file_id,
+                flags,
+            ));
+        }
+        write_meta_versioned(&self.dir, META_V1_UNTAGGED, self.layout.bits, &descs)
     }
 
     pub fn flush(&self) -> Result<(), StoreError> {
@@ -668,6 +743,7 @@ impl SegmentedTxHead {
             count: AtomicU64::new(0),
             file_id,
             sealed: false,
+            tagged: AtomicBool::new(true),
             head: Some(Arc::new(head)),
             pack: None,
             fuse: None,
@@ -753,6 +829,7 @@ impl SegmentedTxHead {
                 count: AtomicU64::new(count),
                 file_id,
                 sealed: true,
+                tagged: AtomicBool::new(true),
                 head: None,
                 pack: Some(Arc::new(p.pack)),
                 fuse: Some(map_segment_fuse(&self.dir, file_id)?),
@@ -767,7 +844,8 @@ impl SegmentedTxHead {
         drop(guard);
         // Sealed meta must be durable before the OA is unlinked: a crash after
         // unlink with meta still "open" would force a full head rebuild. A
-        // leftover OA after persist is discarded on open.
+        // leftover OA after persist is discarded on open (Windows also lands
+        // here when a lookup still holds the OA map).
         self.persist_meta_locked()?;
         let base = segment_head_path(&self.dir, p.file_id);
         let _ = std::fs::remove_file(&base);
@@ -892,6 +970,7 @@ impl SegmentedTxHead {
                 count: AtomicU64::new(count),
                 file_id: p.file_id,
                 sealed: true,
+                tagged: AtomicBool::new(true),
                 head: None,
                 pack: Some(Arc::new(p.pack)),
                 fuse: Some(fuse),
@@ -912,7 +991,10 @@ impl SegmentedTxHead {
         let descs: Vec<(u64, u64, u32, u32)> = segs
             .iter()
             .map(|s| {
-                let flags = if s.sealed { FLAG_SEALED } else { 0 };
+                let mut flags = if s.sealed { FLAG_SEALED } else { 0 };
+                if s.tagged.load(Ordering::Relaxed) {
+                    flags |= FLAG_TAGGED;
+                }
                 (
                     s.first_fk,
                     s.count.load(Ordering::Relaxed),
@@ -1108,6 +1190,15 @@ pub fn wipe_segmented_head_files(dir: &Path) {
 }
 
 fn write_meta(dir: &Path, bits: u32, segs: &[(u64, u64, u32, u32)]) -> Result<(), StoreError> {
+    write_meta_versioned(dir, META_VERSION, bits, segs)
+}
+
+fn write_meta_versioned(
+    dir: &Path,
+    version: u32,
+    bits: u32,
+    segs: &[(u64, u64, u32, u32)],
+) -> Result<(), StoreError> {
     let path = meta_path(dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
@@ -1116,7 +1207,7 @@ fn write_meta(dir: &Path, bits: u32, segs: &[(u64, u64, u32, u32)]) -> Result<()
     buf.extend_from_slice(&STORE_MAGIC);
     buf.extend_from_slice(&SCHEMA_VERSION.to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&META_VERSION.to_le_bytes());
+    buf.extend_from_slice(&version.to_le_bytes());
     buf.extend_from_slice(&(segs.len() as u32).to_le_bytes());
     buf.extend_from_slice(&bits.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes());
@@ -1155,7 +1246,7 @@ fn read_meta_buf(buf: &[u8]) -> Result<(u32, Vec<SegDesc>), StoreError> {
         return Err(StoreError::Corrupt("tx.head.meta magic"));
     }
     let meta_ver = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-    if meta_ver != META_VERSION {
+    if meta_ver != META_VERSION && meta_ver != META_V1_UNTAGGED {
         return Err(StoreError::Corrupt("tx.head.meta version"));
     }
     let seg_count = u32::from_le_bytes(buf[12..16].try_into().unwrap()) as usize;
@@ -1203,7 +1294,7 @@ mod tests {
     #[test]
     fn probe_candidates_batch_empty_is_empty() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout = HeadLayout::new(10).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         assert!(h.probe_candidates_batch(&[]).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1212,7 +1303,7 @@ mod tests {
     #[test]
     fn refuses_flat_head_layout_on_open() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout = HeadLayout::new(10).unwrap();
         {
             let h = SegmentedTxHead::create(&dir, layout).unwrap();
             let mut entries = Vec::new();
@@ -1259,7 +1350,7 @@ mod tests {
     fn fk_gap_before_roll_keeps_entries_findable_after_seal() {
         let dir = tmp();
         // 8-bit head: 256 slots, max_keys = floor(0.8*256) = 204.
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         // Production collect reads txids for the fk range from txid.body,
         // which also holds the orphan bodies the head never saw.
@@ -1302,7 +1393,7 @@ mod tests {
     #[test]
     fn fk_gap_at_segment_end_rolls_and_reopens() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let collect: SealCollect = std::sync::Arc::new(|first_fk, count| {
             Ok((0..count)
                 .map(|i| (fuse_key_from_mixed(&mixed(first_fk + i)), (i as u32) + 1))
@@ -1340,7 +1431,7 @@ mod tests {
     #[test]
     fn fk_gap_longer_than_a_segment_rolls_empty_spans() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let collect: SealCollect = std::sync::Arc::new(|first_fk, count| {
             Ok((0..count)
                 .map(|i| (fuse_key_from_mixed(&mixed(first_fk + i)), (i as u32) + 1))
@@ -1374,7 +1465,7 @@ mod tests {
     #[test]
     fn fk_behind_open_segment_is_corrupt() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         let collect: SealCollect = std::sync::Arc::new(|first_fk, count| {
             Ok((0..count)
@@ -1394,7 +1485,7 @@ mod tests {
     #[test]
     fn seal_collect_runs_on_sidecar_not_insert_thread() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         let caller = std::thread::current().id();
         let collect_tid = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1423,7 +1514,7 @@ mod tests {
     fn insert_roll_seal_lookup_roundtrip() {
         let dir = tmp();
         // 10-bit head: 1024 slots, max_keys = floor(0.8*1024)=819
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout = HeadLayout::new(10).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         assert_eq!(h.max_keys, 819);
 
@@ -1471,7 +1562,7 @@ mod tests {
     #[test]
     fn seal_mphf_one_candidate_bip30_unlinks_oa() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout = HeadLayout::new(10).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         let n = 820u64;
         let mut entries: Vec<_> = (0..n).map(|i| (mixed(i + 1), Fk(i + 1))).collect();
@@ -1532,7 +1623,7 @@ mod tests {
     #[test]
     fn seal_publish_keeps_oa_when_meta_persist_fails() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout = HeadLayout::new(10).unwrap();
         {
             let h = SegmentedTxHead::create(&dir, layout).unwrap();
             let n = 820u64; // max_keys=819 → roll + background seal of file 000000
@@ -1564,7 +1655,7 @@ mod tests {
     #[test]
     fn open_discards_leftover_oa_for_sealed_segment() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout = HeadLayout::new(10).unwrap();
         {
             let h = SegmentedTxHead::create(&dir, layout).unwrap();
             let n = 820u64;
@@ -1598,7 +1689,7 @@ mod tests {
     #[test]
     fn v1_fuse_and_mono_head_refuse_open() {
         let dir = tmp();
-        let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout = HeadLayout::new(10).unwrap();
         // 0.8 * 1024 = 819 → seal at 820.
         let n = 820u64;
         {
@@ -1631,7 +1722,7 @@ mod tests {
 
         // Same suite budget: count-only roll + mono refuse without extra full pads.
         let dir_roll = tmp();
-        let layout_roll = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout_roll = HeadLayout::new(8).unwrap();
         let h_roll = SegmentedTxHead::create(&dir_roll, layout_roll).unwrap();
         let mut fill: Vec<_> = (0..254u64).map(|i| (mixed(i + 1), Fk(i + 1))).collect();
         h_roll.insert_many(&mut fill).unwrap();
@@ -1651,7 +1742,7 @@ mod tests {
 
         let dir_mono = tmp();
         std::fs::write(dir_mono.join("tx.head"), b"legacy").unwrap();
-        let layout_mono = HeadLayout::with_entry_bytes(10, 4).unwrap();
+        let layout_mono = HeadLayout::new(10).unwrap();
         let err = SegmentedTxHead::create(&dir_mono, layout_mono)
             .err()
             .expect("must refuse mono head");
@@ -1669,7 +1760,7 @@ mod tests {
     fn roll_does_not_join_seal_open_probes_sealing_oa() {
         let dir = tmp();
         // 8-bit: 256 slots, max_keys = floor(0.8*256)=204.
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let h = SegmentedTxHead::create(&dir, layout).unwrap();
         let n = 205u64;
         let mut entries: Vec<_> = (0..n).map(|i| (mixed(i + 1), Fk(i + 1))).collect();

@@ -1,8 +1,12 @@
-//! Keyless addressable `tx.head`: `2^BITS` slots × 4 B or 8 B create_fk entries.
+//! Keyless addressable `tx.head`: `2^BITS` slots × 4 B create_fk entries.
 //!
-//! **Layout:** each entry is LE create_fk (`0` = empty). No key material and
+//! **Layout:** each file entry is LE create_fk (`0` = empty). No key material and
 //! **no HAS_NEXT** — probe continues until an empty slot (no Class A deletes).
-//! Callers verify identity via Class A body txid on **lookup**.
+//! Callers verify identity via Class A body txid on **lookup**. The spare high
+//! bits of each slot hold a fingerprint of the mixed key, so a probe skips most
+//! foreign occupants before identity. Probes read the slots through a read-only
+//! `MAP_SHARED` map ([`AddressHead::slots`]); the page cache keeps it coherent
+//! with the sole writer's `pwrite`s.
 //!
 //! **Insert (sole writer):** probe until the **same fk** is already present
 //! (idempotent) or an **empty** slot — `pwrite` the slot (`0 → fk`; no CAS, no
@@ -12,8 +16,8 @@
 //!
 //! **Insert batching:** stable-sort by probe **page** then original index
 //! (preserves call order within a page for rare same-batch duplicate txids). One
-//! page load + multi-insert in RAM + one `pwrite` per dirty page. Visibility is
-//! the syscall plus `published_len` Release — not a CPU fence.
+//! page copy from the map + multi-insert + one `pwrite` per dirty page. Readers
+//! see the new slots through the map once the `pwrite` lands.
 //!
 //! **Concurrency:** at most **one** thread may insert into a given head segment
 //! (archive writer in IBD; single tip accept path after). Multi-writer races are
@@ -26,9 +30,9 @@
 //! **Probe (page-local open address):** high bits of the txid select a **page** of
 //! [`PAGE_SLOTS`] (2¹⁰) slots; within the page, **double hashing** with the next
 //! key bits (`h1` / odd `h2`). Depth is capped at [`MAX_PROBE`] (= page size).
-//! Lookup/insert load **one page** (4 KiB @ 4 B entries) then hop in RAM — one IO
-//! for all candidates. Foreign occupants: body mismatch ⇒ continue. Keyless slots
-//! cannot Robin-Hood. First insert at depth > [`PROBE_DEPTH_WARN`] requests online
+//! Lookup and insert hop the mapped slots; insert then writes **one page** (4 KiB)
+//! per dirty page. Foreign occupants with the same fingerprint (or none yet):
+//! body mismatch ⇒ continue. Keyless slots cannot Robin-Hood. First insert at depth > [`PROBE_DEPTH_WARN`] requests online
 //!
 //! **Segment default:** BITS=**25** → **128 MiB** @ 4 B relative create ids per
 //! segment (`2^15` pages × 4 KiB). Capacity ends at [`HEAD_LOAD_START`] (0.80);
@@ -38,9 +42,10 @@
 use crate::error::StoreError;
 use crate::file::{TableFile, TRAILING_FOOTER_LEN};
 use crate::hashhead::HeadScale;
+use crate::readonly_map::ReadonlyMap;
 use rbitcoin_primitives::{Fk, TableKind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// In-page slot index width (1024 slots / page @ any entry width).
 pub const PAGE_SLOT_BITS: u32 = 10;
@@ -52,12 +57,10 @@ pub const MAX_PROBE: u32 = 1024;
 /// Occupied `(depth, fk)` stored inline in [`ProbeCands`] before a spill `Vec`.
 pub const PROBE_CANDS_INLINE: usize = 8;
 
-/// Max bytes of one head page load (1024 × 8 B). 4 B entries use half.
-pub const PROBE_REGION_BYTES: usize = (PAGE_SLOTS as usize) * 8;
-
-/// Concurrent probe page preads on a held plan TLS session (matches ring depth).
-/// One buffer per in-flight slot — hop keys on CQE, then reuse.
-const PROBE_PAGES_IN_FLIGHT: usize = crate::uring_session::DEFAULT_ENTRIES as usize;
+/// Bytes of one slot in the file (`rel` as LE u32).
+pub const ENTRY_BYTES: u64 = 4;
+/// Bytes of one head page (1024 × 4 B).
+pub const PROBE_REGION_BYTES: usize = (PAGE_SLOTS as usize) * (ENTRY_BYTES as usize);
 
 /// Inserts that needed probe depth **> [`PROBE_DEPTH_WARN`]** (warning band).
 /// Cumulative counter for lagging/retry logs; WARN only once at first event.
@@ -75,8 +78,8 @@ pub const PROBE_DEPTH_WARN: u32 = 128;
 pub const MAINNET_BITS: u32 = 25;
 /// Tiny / unit-test width.
 pub const TINY_BITS: u32 = 16;
-/// Maximum supported address width (probe + create).
-pub const MAX_BITS: u32 = 34;
+/// Maximum supported address width: `rel` must fit a 4 B slot.
+pub const MAX_BITS: u32 = 32;
 /// Minimum supported address width.
 pub const MIN_BITS: u32 = 8;
 
@@ -128,12 +131,10 @@ const META_MAGIC: &[u8; 4] = b"THM1";
 /// offset 0 remain page-aligned. Older versions refused → open recreates + rebuilds.
 const META_VERSION: u16 = 5;
 
-/// On-disk / in-memory address-head geometry.
+/// On-disk / in-memory address-head geometry (4 B slots).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeadLayout {
     pub bits: u32,
-    /// 4 (create_fk as u32) or 8 (create_fk as u64).
-    pub entry_bytes: u8,
 }
 
 impl HeadLayout {
@@ -141,51 +142,39 @@ impl HeadLayout {
         if !(MIN_BITS..=MAX_BITS).contains(&bits) {
             return Err(StoreError::Corrupt("address head bits out of range"));
         }
-        Ok(Self {
-            bits,
-            entry_bytes: entry_bytes_for_bits(bits),
-        })
-    }
-
-    pub fn with_entry_bytes(bits: u32, entry_bytes: u8) -> Result<Self, StoreError> {
-        if !(MIN_BITS..=MAX_BITS).contains(&bits) {
-            return Err(StoreError::Corrupt("address head bits out of range"));
-        }
-        if entry_bytes != 4 && entry_bytes != 8 {
-            return Err(StoreError::Corrupt(
-                "address head entry_bytes must be 4 or 8",
-            ));
-        }
-        // BITS ≥ 33 requires 8 B (u32 fk space insufficient at 0.80 load).
-        if bits >= 33 && entry_bytes != 8 {
-            return Err(StoreError::Corrupt(
-                "address head bits>=33 requires 8-byte entries",
-            ));
-        }
-        Ok(Self { bits, entry_bytes })
+        Ok(Self { bits })
     }
 
     pub fn slots(&self) -> u64 {
         1u64 << self.bits
     }
 
-    pub fn entry_size(&self) -> u64 {
-        u64::from(self.entry_bytes)
-    }
-
     pub fn body_bytes(&self) -> u64 {
-        self.slots() * self.entry_size()
+        self.slots() * ENTRY_BYTES
     }
 }
 
-/// Entry width policy: 8 B starting at BITS 33 (capacity exceeds u32 create_fk).
+/// Fingerprint of a mixed key for the spare high bits above `rel < 2^bits`:
+/// `1..=mask` from bytes no page / h1 / h2 field uses. `0` means unknown (a
+/// row written before tags) and matches every key. No spare bits at 32.
 #[inline]
-pub fn entry_bytes_for_bits(bits: u32) -> u8 {
-    if bits >= 33 {
-        8
-    } else {
-        4
+pub fn fingerprint(mixed: &[u8; 32], bits: u32) -> u32 {
+    if bits >= 32 {
+        return 0;
     }
+    let mask = (1u32 << (32 - bits)) - 1;
+    let w = u64::from_le_bytes(mixed[16..24].try_into().unwrap());
+    (w % u64::from(mask)) as u32 + 1
+}
+
+/// Slot word `rel | fp << bits`, or `None` when `rel` does not fit in `bits`:
+/// a wider rel would fold into the fingerprint and its own probe would skip it.
+#[inline]
+fn tag_entry(rel: u64, fp: u32, bits: u32) -> Option<u32> {
+    if rel >> bits != 0 {
+        return None;
+    }
+    Some((rel | (u64::from(fp) << bits)) as u32)
 }
 
 /// First 8 bytes of txid as big-endian u64 (bit stream for page / h1).
@@ -261,29 +250,21 @@ pub fn page_slot_count(bits: u32) -> u64 {
 
 /// Slot file offset: data starts at **0** (trailing magic); page-aligned probes.
 #[inline]
-pub fn entry_file_off(slot: u64, entry_bytes: u8) -> u64 {
-    slot * u64::from(entry_bytes)
+pub fn entry_file_off(slot: u64) -> u64 {
+    slot * ENTRY_BYTES
 }
 
 /// Decode one LE create_fk from a page buffer at local slot index.
 #[inline]
-pub fn entry_from_page_buf(buf: &[u8], local: u64, entry_bytes: u8) -> Option<u64> {
-    let es = entry_bytes as usize;
-    let off = (local as usize).checked_mul(es)?;
-    if off + es > buf.len() {
-        return None;
-    }
-    Some(match entry_bytes {
-        4 => u64::from(u32::from_le_bytes(buf[off..off + 4].try_into().ok()?)),
-        8 => u64::from_le_bytes(buf[off..off + 8].try_into().ok()?),
-        _ => return None,
-    })
+pub fn entry_from_page_buf(buf: &[u8], local: u64) -> Option<u64> {
+    let off = (local as usize).checked_mul(ENTRY_BYTES as usize)?;
+    let bytes = buf.get(off..off + ENTRY_BYTES as usize)?;
+    Some(u64::from(u32::from_le_bytes(bytes.try_into().ok()?)))
 }
 
-/// Two loads + hop of one probe page (leftover-miss dump).
+/// One key's hop plus its page's occupancy (leftover-miss dump).
 pub(crate) struct PageHopDump {
     pub scan: ProbeRegionScan,
-    pub hop_equal_second: bool,
     pub occupied: u32,
 }
 
@@ -354,7 +335,6 @@ pub struct ProbeRegionScan {
 #[inline]
 pub fn hop_scan_page(
     page_buf: &[u8],
-    entry_bytes: u8,
     h1: u64,
     h2: u64,
     page_slots: u64,
@@ -365,7 +345,7 @@ pub fn hop_scan_page(
     let mut cands = ProbeCands::default();
     for d in 0..max_d {
         let local = h1.wrapping_add(u64::from(d).wrapping_mul(h2)) & mask;
-        let Some(e) = entry_from_page_buf(page_buf, local, entry_bytes) else {
+        let Some(e) = entry_from_page_buf(page_buf, local) else {
             break;
         };
         if e == 0 {
@@ -405,33 +385,31 @@ pub struct InsertPageOutcome {
     pub depth: u32,
 }
 
-/// Insert `new_fk` into a **loaded** probe page buffer (online resize RMW path).
+/// Insert `new_fk` into a **loaded** probe page buffer; the new slot carries
+/// the key's fingerprint.
 ///
 /// Idempotent if `new_fk` is already present. Does not touch the file or
-/// occupied count — caller applies the buffer via pwrite / store.
+/// occupied count — caller applies the buffer via pwrite.
 pub fn insert_fk_into_page_buf(
     page_buf: &mut [u8],
-    page_base: u64,
     bits: u32,
-    entry_bytes: u8,
     txid: &[u8; 32],
     new_fk: Fk,
 ) -> Result<InsertPageOutcome, StoreError> {
-    let _ = page_base;
     if new_fk.is_null() {
         return Err(StoreError::InvalidFk);
     }
-    if entry_bytes == 4 && new_fk.0 > u64::from(u32::MAX) {
-        return Err(StoreError::InvalidFk);
-    }
     let new_u = new_fk.0;
-    let es = entry_bytes as usize;
-    let nslots = (page_buf.len() / es) as u64;
+    let Some(tagged) = tag_entry(new_u, fingerprint(txid, bits), bits) else {
+        return Err(StoreError::InvalidFk);
+    };
+    let rel_mask = (1u64 << bits) - 1;
+    let nslots = (page_buf.len() / ENTRY_BYTES as usize) as u64;
     let h1 = h1_in_page(txid, bits);
     let h2 = h2_in_page(txid, bits);
-    let scan = hop_scan_page(page_buf, entry_bytes, h1, h2, nslots, MAX_PROBE);
+    let scan = hop_scan_page(page_buf, h1, h2, nslots, MAX_PROBE);
     for &(_d, e) in scan.cands.iter() {
-        if e == new_u {
+        if e & rel_mask == new_u {
             return Ok(InsertPageOutcome {
                 wrote_new: false,
                 depth: 0,
@@ -444,7 +422,7 @@ pub fn insert_fk_into_page_buf(
             "address head probe exhausted on insert",
         ));
     }
-    store_entry_in_page_buf(page_buf, scan.empty_local, entry_bytes, new_u)?;
+    store_entry_in_page_buf(page_buf, scan.empty_local, tagged)?;
     Ok(InsertPageOutcome {
         wrote_new: true,
         depth: scan.depth_end,
@@ -453,36 +431,18 @@ pub fn insert_fk_into_page_buf(
 
 /// Write LE create_fk into a page buffer at local slot index.
 #[inline]
-fn store_entry_in_page_buf(
-    page_buf: &mut [u8],
-    local: u64,
-    entry_bytes: u8,
-    new: u64,
-) -> Result<(), StoreError> {
-    let es = entry_bytes as usize;
+fn store_entry_in_page_buf(page_buf: &mut [u8], local: u64, new: u32) -> Result<(), StoreError> {
+    let es = ENTRY_BYTES as usize;
     let off = (local as usize)
         .checked_mul(es)
         .ok_or(StoreError::Corrupt("page buf slot overflow"))?;
-    if off + es > page_buf.len() {
-        return Err(StoreError::Corrupt("page buf slot out of range"));
-    }
-    match entry_bytes {
-        4 => {
-            if new > u64::from(u32::MAX) {
-                return Err(StoreError::InvalidFk);
-            }
-            page_buf[off..off + 4].copy_from_slice(&(new as u32).to_le_bytes());
-        }
-        8 => {
-            page_buf[off..off + 8].copy_from_slice(&new.to_le_bytes());
-        }
-        _ => return Err(StoreError::Corrupt("address head entry_bytes")),
-    }
+    let slot = page_buf
+        .get_mut(off..off + es)
+        .ok_or(StoreError::Corrupt("page buf slot out of range"))?;
+    slot.copy_from_slice(&new.to_le_bytes());
     Ok(())
 }
 
-/// Bytes to pread for the full probe page of `txid`.
-///
 /// Resolve address width for new creates (`scale`, then `RBITCOIN_TX_HEAD_BITS`).
 pub fn bits_for_scale(scale: HeadScale) -> u32 {
     if let Ok(s) = std::env::var("RBITCOIN_TX_HEAD_BITS") {
@@ -524,7 +484,7 @@ pub fn encode_layout_ext(layout: HeadLayout, generation: u64) -> [u8; 16] {
     buf[0..4].copy_from_slice(META_MAGIC);
     buf[4..6].copy_from_slice(&META_VERSION.to_le_bytes());
     buf[6] = layout.bits as u8;
-    buf[7] = layout.entry_bytes;
+    buf[7] = ENTRY_BYTES as u8;
     buf[8..16].copy_from_slice(&generation.to_le_bytes());
     buf
 }
@@ -542,17 +502,24 @@ pub fn decode_layout_ext(ext: &[u8; 16]) -> Result<(HeadLayout, u64), StoreError
             "tx.head footer layout version (footer-embedded meta; rebuild tx.head)",
         ));
     }
+    if u64::from(ext[7]) != ENTRY_BYTES {
+        return Err(StoreError::Corrupt(
+            "tx.head footer entry width (rebuild tx.head)",
+        ));
+    }
     let bits = u32::from(ext[6]);
-    let entry_bytes = ext[7];
     let generation = u64::from_le_bytes(ext[8..16].try_into().unwrap());
-    let layout = HeadLayout::with_entry_bytes(bits, entry_bytes)?;
-    Ok((layout, generation))
+    Ok((HeadLayout::new(bits)?, generation))
 }
 
 /// Fixed-width keyless txid → dense create_fk table.
 pub struct AddressHead {
     file: TableFile,
     layout: HeadLayout,
+    /// Read-only `MAP_SHARED` view of the slot array. Probes and inserts hop
+    /// it; the sole writer `pwrite`s pages through `file` and the page cache
+    /// keeps the view coherent. A slot is `rel | fp << bits`.
+    map: ReadonlyMap,
 }
 
 impl AddressHead {
@@ -578,7 +545,7 @@ impl AddressHead {
         file.set_logical_len(need)?;
         file.zero_range(0, body_bytes)?;
         remove_legacy_meta_sidecar(&path);
-        Ok(Self { file, layout })
+        Self::with_map(file, layout, &path)
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -603,136 +570,148 @@ impl AddressHead {
             ));
         }
         remove_legacy_meta_sidecar(&path);
-        Ok(Self { file, layout })
+        Self::with_map(file, layout, &path)
+    }
+
+    fn with_map(file: TableFile, layout: HeadLayout, path: &Path) -> Result<Self, StoreError> {
+        let map = ReadonlyMap::map_prefix(path, layout.body_bytes() as usize)?;
+        Ok(Self { file, layout, map })
+    }
+
+    /// The mapped slot array. The bytes are not frozen: the sole writer
+    /// publishes slots by `pwrite` through `file`, and the page cache changes
+    /// them under this view. So every read is an atomic load, and no `&[u8]`
+    /// of the map is ever formed (`as_file_bytes` is for sealed files).
+    #[inline]
+    fn slots(&self) -> &[AtomicU32] {
+        // SAFETY: a page-aligned live `MAP_SHARED` mapping of `body_bytes()`
+        // bytes (a multiple of 4), held for `self`'s lifetime. Nothing in this
+        // process writes through the mapping; concurrent file writes are
+        // observed only by atomic loads, never by a plain reference.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.map.as_ptr() as *const AtomicU32,
+                self.map.map_len() / 4,
+            )
+        }
     }
 
     pub fn bits(&self) -> u32 {
         self.layout.bits
     }
 
-    pub fn entry_bytes(&self) -> u8 {
-        self.layout.entry_bytes
+    /// Bytes of the mapped slot array (file-backed, reclaimable; not heap).
+    pub fn map_bytes(&self) -> u64 {
+        self.map.map_len() as u64
     }
 
+    /// Global slot at probe depth `d` of `mixed`.
     #[inline]
-    pub(crate) fn entry_off(&self, slot: u64) -> u64 {
-        entry_file_off(slot, self.layout.entry_bytes)
+    fn slot_at(&self, mixed: &[u8; 32], d: u32) -> usize {
+        probe_index(mixed, d, self.layout.bits) as usize
     }
 
-    /// Load a full probe page starting at global `page_base` into `buf`.
-    ///
-    /// **One** bulk pread of up to `n_slots × entry_bytes` (4 KiB @ 4 B / 1024
-    /// slots). Caps to the slot data region (excludes trailing footer).
-    ///
-    /// Returns bytes filled (multiple of entry size). Callers must pass the
-    /// corresponding slot count into [`hop_scan_page`] (`bytes / entry_bytes`).
-    fn load_page_slots(
-        &self,
-        page_base: u64,
-        n_slots: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, StoreError> {
-        let es = self.layout.entry_bytes as usize;
-        if es != 4 && es != 8 {
-            return Err(StoreError::Corrupt("address head entry_bytes"));
-        }
-        let n = n_slots as usize;
-        let mut need = n.saturating_mul(es);
-        if need > buf.len() {
-            return Err(StoreError::Corrupt("probe page buffer short"));
-        }
-        let off = self.entry_off(page_base);
-        // Never read into the trailing footer — only the create_fk slot array.
-        let data_end = self.file.data_len();
-        let avail = data_end.saturating_sub(off) as usize;
-        need = need.min(avail);
-        need = (need / es) * es;
-        if need == 0 {
-            return Ok(0);
-        }
-        {
-            use crate::bulk_io::{self, ReadOp};
-            let fd = self.file.read_fd();
-            let slice = &mut buf[..need];
-            let mut ops = [ReadOp {
-                fd,
-                offset: off,
-                buf: slice,
-                result: i32::MIN,
-            }];
-            bulk_io::pread_batch(&mut ops);
-            if ops[0].result < 0 {
-                return Err(StoreError::io(
-                    self.file.path(),
-                    std::io::Error::from_raw_os_error(-ops[0].result),
-                ));
-            }
-            if (ops[0].result as usize) < need {
-                self.file.read_at(off, &mut buf[..need])?;
-            }
-        }
-        Ok(need)
-    }
-
-    fn load_page_slots_read_at(
-        &self,
-        page_base: u64,
-        n_slots: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, StoreError> {
-        let es = self.layout.entry_bytes as usize;
-        if es != 4 && es != 8 {
-            return Err(StoreError::Corrupt("address head entry_bytes"));
-        }
-        let mut need = (n_slots as usize).saturating_mul(es);
-        if need > buf.len() {
-            return Err(StoreError::Corrupt("probe page buffer short"));
-        }
-        let off = self.entry_off(page_base);
-        let avail = self.file.data_len().saturating_sub(off) as usize;
-        need = (need.min(avail) / es) * es;
-        if need == 0 {
-            return Ok(0);
-        }
-        self.file.read_at(off, &mut buf[..need])?;
-        Ok(need)
-    }
-
-    /// Load the probe page twice and hop. Leftover-miss dump only.
-    pub(crate) fn dump_page_hop(&self, mixed: &[u8; 32]) -> Result<PageHopDump, StoreError> {
+    /// Hop one key's chain through the map. `fp != 0` drops slots whose known
+    /// fingerprint differs; `fp == 0` keeps every occupied slot. Cands carry
+    /// the plain `rel`.
+    fn hop(&self, mixed: &[u8; 32], fp: u32) -> ProbeRegionScan {
         let bits = self.layout.bits;
-        let page_base = page_base_for_txid(mixed, bits);
         let page_slots = page_slot_count(bits);
-        let es = self.layout.entry_bytes;
-        let mut buf = [0u8; PROBE_REGION_BYTES];
-        let n = self.load_page_slots_read_at(page_base, page_slots, &mut buf)?;
-        let es_u = es as usize;
-        if n < es_u {
-            return Ok(PageHopDump {
-                scan: hop_scan_page(&[], es, 0, 1, 0, MAX_PROBE),
-                hop_equal_second: true,
-                occupied: 0,
-            });
-        }
-        let nslots = (n / es_u) as u64;
+        let mask = page_slots - 1;
+        let base = page_base_for_txid(mixed, bits) as usize;
         let h1 = h1_in_page(mixed, bits);
         let h2 = h2_in_page(mixed, bits);
-        let scan = hop_scan_page(&buf[..n], es, h1, h2, nslots, MAX_PROBE);
-        let mut occupied = 0u32;
-        for i in 0..nslots {
-            if entry_from_page_buf(&buf[..n], i, es).unwrap_or(0) != 0 {
-                occupied = occupied.saturating_add(1);
+        let max_d = MAX_PROBE.min(page_slots as u32);
+        let rel_mask = (1u64 << bits) - 1;
+        let mut cands = ProbeCands::default();
+        for d in 0..max_d {
+            let local = h1.wrapping_add(u64::from(d).wrapping_mul(h2)) & mask;
+            let e = u64::from(self.slots()[base + local as usize].load(Ordering::Acquire));
+            if e == 0 {
+                return ProbeRegionScan {
+                    cands,
+                    hit_empty: true,
+                    depth_end: d,
+                    empty_local: local,
+                };
+            }
+            let efp = (e >> bits) as u32;
+            if fp != 0 && efp != 0 && efp != fp {
+                continue;
+            }
+            cands.push(d, e & rel_mask);
+        }
+        ProbeRegionScan {
+            cands,
+            hit_empty: false,
+            depth_end: max_d,
+            empty_local: 0,
+        }
+    }
+
+    /// Candidates per mixed key through the map, in probe order (callers
+    /// reverse for deepest-first). No syscall.
+    pub(crate) fn probe_fks_batch(&self, mixed: &[[u8; 32]]) -> Vec<Vec<Fk>> {
+        let bits = self.layout.bits;
+        mixed
+            .iter()
+            .map(|m| {
+                let scan = self.hop(m, fingerprint(m, bits));
+                scan.cands.iter().map(|&(_, rel)| Fk(rel)).collect()
+            })
+            .collect()
+    }
+
+    /// Write the fingerprint of rows that predate tags: `(mixed, rel)` whose
+    /// rel sits on the key's chain. One 4-byte `pwrite` per row; a rel not on
+    /// its chain is left alone. Callers running in parallel must pass
+    /// disjoint rels.
+    pub(crate) fn fill_fingerprints(&self, keys: &[([u8; 32], Fk)]) -> Result<(), StoreError> {
+        let bits = self.layout.bits;
+        for (mixed, rel) in keys {
+            let scan = self.hop(mixed, 0);
+            let depth = scan
+                .cands
+                .iter()
+                .find(|&&(_, r)| r == rel.0)
+                .map(|&(d, _)| d);
+            if let Some(d) = depth {
+                let v = tag_entry(rel.0, fingerprint(mixed, bits), bits)
+                    .ok_or(StoreError::Corrupt("tx.head rel wider than bits"))?;
+                let off = entry_file_off(self.slot_at(mixed, d) as u64);
+                self.file.write_at(off, &v.to_le_bytes())?;
             }
         }
-        let mut buf2 = [0u8; PROBE_REGION_BYTES];
-        let n2 = self.load_page_slots_read_at(page_base, page_slots, &mut buf2)?;
-        let nslots2 = (n2 / es_u) as u64;
-        let scan2 = hop_scan_page(&buf2[..n2.min(buf2.len())], es, h1, h2, nslots2, MAX_PROBE);
-        Ok(PageHopDump {
-            hop_equal_second: scan.cands == scan2.cands && scan.hit_empty == scan2.hit_empty,
-            scan,
+        Ok(())
+    }
+
+    /// Rewrite every occupied slot without its tag, as a meta v1 head wrote it.
+    #[cfg(test)]
+    pub(crate) fn strip_tags_for_test(&self) -> Result<(), StoreError> {
+        let rel_mask = (1u32 << self.layout.bits) - 1;
+        for (i, s) in self.slots().iter().enumerate() {
+            let raw = s.load(Ordering::Relaxed);
+            if raw != 0 {
+                self.file
+                    .write_at(entry_file_off(i as u64), &(raw & rel_mask).to_le_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hop one key and count its page's occupied slots. Leftover-miss dump only.
+    pub(crate) fn dump_page_hop(&self, mixed: &[u8; 32]) -> PageHopDump {
+        let bits = self.layout.bits;
+        let page_slots = page_slot_count(bits) as usize;
+        let base = page_base_for_txid(mixed, bits) as usize;
+        let occupied = self.slots()[base..base + page_slots]
+            .iter()
+            .filter(|s| s.load(Ordering::Relaxed) != 0)
+            .count() as u32;
+        PageHopDump {
+            scan: self.hop(mixed, 0),
             occupied,
-        })
+        }
     }
 
     /// Sort `entries` in place by probe page and insert. No extra pair copy.
@@ -744,9 +723,8 @@ impl AddressHead {
             return Ok(());
         }
         let bits = self.layout.bits;
-        let es = self.layout.entry_bytes;
-        let page_slots = page_slot_count(bits);
-        let es_u = es as usize;
+        let page_slots = page_slot_count(bits) as usize;
+        let n = page_slots * ENTRY_BYTES as usize;
 
         entries.sort_by_key(|a| page_base_for_txid(&a.0, bits));
 
@@ -759,253 +737,28 @@ impl AddressHead {
                 j += 1;
             }
 
-            let n = self.load_page_slots(page_base, page_slots, &mut buf)?;
-            if n < es_u {
-                note_probe_exhausted();
-                return Err(StoreError::Corrupt("address head probe page empty"));
+            // The page (tagged slots) comes from the map, not a pread.
+            let slots = self.slots();
+            for s in 0..page_slots {
+                let e = slots[page_base as usize + s].load(Ordering::Relaxed);
+                buf[s * 4..s * 4 + 4].copy_from_slice(&e.to_le_bytes());
             }
 
             let mut dirty = false;
             for &(ref txid, fk) in &entries[i..j] {
-                let outcome =
-                    insert_fk_into_page_buf(&mut buf[..n], page_base, bits, es, txid, fk)?;
+                let outcome = insert_fk_into_page_buf(&mut buf[..n], bits, txid, fk)?;
                 if outcome.wrote_new {
                     note_probe_depth_on_insert(outcome.depth);
                     dirty = true;
                 }
             }
             if dirty {
-                let off = self.entry_off(page_base);
-                self.file.write_at(off, &buf[..n])?;
+                self.file.write_at(entry_file_off(page_base), &buf[..n])?;
             }
             i = j;
         }
 
         Ok(())
-    }
-
-    /// Probe with a shared [`crate::IoCtx`] (held session or standalone).
-    pub(crate) fn probe_fks_batch_ctx(
-        &self,
-        txids: &[[u8; 32]],
-        ctx: &mut crate::IoCtx<'_>,
-    ) -> Result<Vec<Vec<Fk>>, StoreError> {
-        self.probe_fks_batch_inner(txids, ctx)
-    }
-
-    fn probe_fks_batch_inner(
-        &self,
-        txids: &[[u8; 32]],
-        ctx: &mut crate::IoCtx<'_>,
-    ) -> Result<Vec<Vec<Fk>>, StoreError> {
-        let n_keys = txids.len();
-        if n_keys == 0 {
-            return Ok(Vec::new());
-        }
-        let bits = self.layout.bits;
-        let es = self.layout.entry_bytes;
-        let page_slots = page_slot_count(bits);
-        let es_u = es as usize;
-
-        let mut order: Vec<(u64, usize)> = txids
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (page_base_for_txid(t, bits), i))
-            .collect();
-        order.sort_unstable_by_key(|&(p, i)| (p, i));
-
-        let mut page_bases: Vec<u64> = Vec::new();
-        let mut page_ranges: Vec<(usize, usize)> = Vec::new();
-        let mut i = 0;
-        while i < order.len() {
-            let page_base = order[i].0;
-            let mut j = i + 1;
-            while j < order.len() && order[j].0 == page_base {
-                j += 1;
-            }
-            page_bases.push(page_base);
-            page_ranges.push((i, j));
-            i = j;
-        }
-
-        let mut out = vec![Vec::new(); n_keys];
-
-        match ctx.session() {
-            Some(session) => self.probe_pages_streaming_on_session(
-                session,
-                txids,
-                bits,
-                es,
-                es_u,
-                page_slots,
-                &order,
-                &page_bases,
-                &page_ranges,
-                &mut out,
-            )?,
-            None => {
-                let mut buf = [0u8; PROBE_REGION_BYTES];
-                for (pi, &page_base) in page_bases.iter().enumerate() {
-                    let n = self.load_page_slots(page_base, page_slots, &mut buf)?;
-                    if n < es_u {
-                        continue;
-                    }
-                    let nslots = (n / es_u) as u64;
-                    let (lo, hi) = page_ranges[pi];
-                    for &(_, orig) in &order[lo..hi] {
-                        let txid = &txids[orig];
-                        let h1p = h1_in_page(txid, bits);
-                        let h2p = h2_in_page(txid, bits);
-                        let scan = hop_scan_page(&buf[..n], es, h1p, h2p, nslots, MAX_PROBE);
-                        out[orig] = scan.cands.iter().map(|&(_, e)| Fk(e)).collect();
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    #[allow(clippy::too_many_arguments)] // IO/session args stay unbundled
-    /// Stream unique probe pages on a held session: ≤[`PROBE_PAGES_IN_FLIGHT`]
-    /// page buffers, fill ring, hop keys on CQE, reuse slot.
-    fn probe_pages_streaming_on_session(
-        &self,
-        session: &mut crate::uring_session::UringSession,
-        txids: &[[u8; 32]],
-        bits: u32,
-        es: u8,
-        es_u: usize,
-        page_slots: u64,
-        order: &[(u64, usize)],
-        page_bases: &[u64],
-        page_ranges: &[(usize, usize)],
-        out: &mut [Vec<Fk>],
-    ) -> Result<(), StoreError> {
-        let n_pages = page_bases.len();
-        if n_pages == 0 {
-            return Ok(());
-        }
-
-        let fd = self.file.read_fd();
-        let path = self.file.path();
-
-        // Fixed pool — never one buffer per unique page in the stamp.
-        let pool_n = PROBE_PAGES_IN_FLIGHT.min(n_pages).max(1);
-        let mut bufs: Vec<Vec<u8>> = (0..pool_n).map(|_| vec![0u8; PROBE_REGION_BYTES]).collect();
-        let mut slot_page: Vec<Option<usize>> = vec![None; pool_n];
-        let mut free_slots: Vec<usize> = (0..pool_n).collect();
-        let mut next_page = 0usize;
-        let mut in_flight = 0usize;
-        session.begin_batch()?;
-        let epoch = session.epoch();
-
-        // On error, drain while bufs still live (SQE destinations).
-        let run = (|| -> Result<(), StoreError> {
-            loop {
-                while next_page < n_pages
-                    && !free_slots.is_empty()
-                    && session.free_sq() > 0
-                    && in_flight < pool_n
-                {
-                    let slot = free_slots.pop().unwrap();
-                    let pi = next_page;
-                    next_page += 1;
-                    let page_base = page_bases[pi];
-                    let need = self.probe_page_need(page_base, page_slots);
-                    if need == 0 {
-                        free_slots.push(slot);
-                        continue;
-                    }
-                    let off = self.entry_off(page_base);
-                    let buf = &mut bufs[slot][..need];
-                    buf.fill(0);
-                    let ud = crate::uring_session::pack_ud(
-                        crate::uring_session::KIND_PROBE,
-                        epoch,
-                        slot as u32,
-                    );
-                    // SAFETY: `bufs[slot]` lives until this probe wave drains.
-                    unsafe { session.push_pread(fd, off, buf, ud) }?;
-                    slot_page[slot] = Some(pi);
-                    in_flight += 1;
-                }
-                session.sync_submission();
-                let _ = session.submit();
-
-                if in_flight == 0 {
-                    break;
-                }
-
-                let cqes = session.harvest_ready()?;
-                if cqes.is_empty() {
-                    session.submit_and_wait_one()?;
-                    continue;
-                }
-
-                for (ud, res) in cqes {
-                    let (kind, ep, slot) = crate::uring_session::unpack_ud(ud);
-                    let slot = slot as usize;
-                    if kind != crate::uring_session::KIND_PROBE
-                        || ep != epoch
-                        || slot >= pool_n
-                        || slot_page[slot].is_none()
-                    {
-                        session.poison();
-                        return Err(StoreError::Corrupt("invariant: io_uring leftover cqe"));
-                    }
-                    in_flight = in_flight.saturating_sub(1);
-                    let pi = slot_page[slot].take().unwrap();
-                    let page_base = page_bases[pi];
-                    let need = self.probe_page_need(page_base, page_slots);
-
-                    if res < 0 {
-                        return Err(StoreError::io(
-                            path,
-                            std::io::Error::from_raw_os_error(-res),
-                        ));
-                    }
-
-                    let mut n = res as usize;
-                    if n < need {
-                        // Short — complete via libc pread (no nested TLS).
-                        self.file
-                            .read_at(self.entry_off(page_base), &mut bufs[slot][..need])?;
-                        n = need;
-                    }
-                    n = n.min(need);
-
-                    if n >= es_u {
-                        let nslots = (n / es_u) as u64;
-                        let (lo, hi) = page_ranges[pi];
-                        let page = &bufs[slot][..n];
-                        for &(_, orig) in &order[lo..hi] {
-                            let txid = &txids[orig];
-                            let h1p = h1_in_page(txid, bits);
-                            let h2p = h2_in_page(txid, bits);
-                            let scan = hop_scan_page(page, es, h1p, h2p, nslots, MAX_PROBE);
-                            out[orig] = scan.cands.iter().map(|&(_, e)| Fk(e)).collect();
-                        }
-                    }
-                    free_slots.push(slot);
-                }
-            }
-            Ok(())
-        })();
-
-        session.drain_all()?;
-        run
-    }
-
-    /// Byte length of a probe page load (slot array only, not footer).
-    fn probe_page_need(&self, page_base: u64, n_slots: u64) -> usize {
-        let es = self.layout.entry_bytes as usize;
-        let mut need = (n_slots as usize).saturating_mul(es);
-        need = need.min(PROBE_REGION_BYTES);
-        let off = self.entry_off(page_base);
-        let data_end = self.file.data_len();
-        let avail = data_end.saturating_sub(off) as usize;
-        need = need.min(avail);
-        (need / es) * es
     }
 
     pub fn flush(&self) -> Result<(), StoreError> {
@@ -1042,35 +795,55 @@ mod tests {
     }
 
     fn probe_one(h: &AddressHead, txid: &[u8; 32]) -> Result<Vec<Fk>, StoreError> {
-        let mut out =
-            h.probe_fks_batch_ctx(std::slice::from_ref(txid), &mut crate::IoCtx::none())?;
-        Ok(out.pop().unwrap_or_default())
+        Ok(h.probe_fks_batch(std::slice::from_ref(txid))
+            .pop()
+            .unwrap_or_default())
     }
 
     fn probe_batch(h: &AddressHead, txids: &[[u8; 32]]) -> Result<Vec<Vec<Fk>>, StoreError> {
-        h.probe_fks_batch_ctx(txids, &mut crate::IoCtx::none())
+        Ok(h.probe_fks_batch(txids))
     }
 
+    /// Raw slot word in the **file** (`rel | fp << bits`).
+    fn read_slot_raw(h: &AddressHead, slot: u64) -> u32 {
+        let mut buf = [0u8; 4];
+        h.file.read_at(entry_file_off(slot), &mut buf).unwrap();
+        u32::from_le_bytes(buf)
+    }
+
+    /// Plain rel in the **file** at `slot`.
     fn read_slot(h: &AddressHead, slot: u64) -> u64 {
-        let off = h.entry_off(slot);
-        match h.entry_bytes() {
-            4 => {
-                let mut buf = [0u8; 4];
-                h.file.read_at(off, &mut buf).unwrap();
-                u64::from(u32::from_le_bytes(buf))
+        u64::from(read_slot_raw(h, slot)) & ((1u64 << h.bits()) - 1)
+    }
+
+    /// Two keys on one chain (same page and h1) with different fingerprints.
+    fn colliding_pair() -> ([u8; 32], [u8; 32]) {
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        a[0] = 0x10;
+        b[0] = 0x10;
+        b[4] = 0x02;
+        b[16] = 0x01;
+        (a, b)
+    }
+
+    /// Rewrite every occupied slot without its tag, as a meta v1 head wrote it.
+    fn strip_tags(h: &AddressHead) {
+        for slot in 0..h.layout.slots() {
+            let rel = read_slot(h, slot) as u32;
+            if rel != 0 {
+                h.file
+                    .write_at(entry_file_off(slot), &rel.to_le_bytes())
+                    .unwrap();
             }
-            8 => {
-                let mut buf = [0u8; 8];
-                h.file.read_at(off, &mut buf).unwrap();
-                u64::from_le_bytes(buf)
-            }
-            _ => panic!("entry_bytes"),
         }
     }
 
-    fn page_has_fk(buf: &[u8], es: u8, fk: u64) -> bool {
-        let n = buf.len() / es as usize;
-        (0..n).any(|i| entry_from_page_buf(buf, i as u64, es).unwrap_or(0) == fk)
+    /// Some slot of the page holds `fk` (tag bits above `bits` ignored).
+    fn page_has_fk(buf: &[u8], bits: u32, fk: u64) -> bool {
+        let n = buf.len() / ENTRY_BYTES as usize;
+        let rel_mask = (1u64 << bits) - 1;
+        (0..n).any(|i| entry_from_page_buf(buf, i as u64).unwrap_or(0) & rel_mask == fk)
     }
 
     #[test]
@@ -1078,10 +851,10 @@ mod tests {
         assert_eq!(MAX_PROBE, 1024);
         assert_eq!(PAGE_SLOTS, 1024);
         assert_eq!(PAGE_SLOT_BITS, 10);
-        assert_eq!(PROBE_REGION_BYTES, 8192);
+        assert_eq!(PROBE_REGION_BYTES, 4096);
         assert_eq!(PROBE_DEPTH_WARN, 128);
         assert_eq!(MAINNET_BITS, 25);
-        assert!(PROBE_REGION_BYTES as u64 >= PAGE_SLOTS * 8);
+        assert_eq!(PROBE_REGION_BYTES as u64, PAGE_SLOTS * ENTRY_BYTES);
     }
 
     #[test]
@@ -1100,7 +873,7 @@ mod tests {
         buf[0..4].copy_from_slice(&1u32.to_le_bytes());
         buf[4..8].copy_from_slice(&2u32.to_le_bytes());
         // slot 2 empty
-        let s = hop_scan_page(&buf, 4, 0, 1, 4, MAX_PROBE);
+        let s = hop_scan_page(&buf, 0, 1, 4, MAX_PROBE);
         assert!(s.hit_empty);
         assert_eq!(
             s.cands.iter().copied().collect::<Vec<_>>(),
@@ -1119,7 +892,7 @@ mod tests {
             let fk = (i as u32) + 1;
             buf[i * 4..i * 4 + 4].copy_from_slice(&fk.to_le_bytes());
         }
-        let s = hop_scan_page(&buf, 4, 0, 1, page_slots as u64, MAX_PROBE);
+        let s = hop_scan_page(&buf, 0, 1, page_slots as u64, MAX_PROBE);
         assert_eq!(s.cands.len(), n);
         assert_eq!(
             s.cands.iter().last().copied(),
@@ -1133,20 +906,18 @@ mod tests {
     #[test]
     fn insert_fk_into_page_buf_empty_idempotent_and_second() {
         let bits = 16u32;
-        let es = 4u8;
         let mut txid = [0u8; 32];
         txid[0] = 0x42;
-        let page_base = page_base_for_txid(&txid, bits);
         let page_slots = page_slot_count(bits);
-        let mut buf = vec![0u8; (page_slots as usize) * es as usize];
-        let o1 = insert_fk_into_page_buf(&mut buf, page_base, bits, es, &txid, Fk(7)).unwrap();
+        let mut buf = vec![0u8; (page_slots as usize) * ENTRY_BYTES as usize];
+        let o1 = insert_fk_into_page_buf(&mut buf, bits, &txid, Fk(7)).unwrap();
         assert!(o1.wrote_new);
-        assert!(page_has_fk(&buf, es, 7));
-        let o2 = insert_fk_into_page_buf(&mut buf, page_base, bits, es, &txid, Fk(7)).unwrap();
+        assert!(page_has_fk(&buf, bits, 7));
+        let o2 = insert_fk_into_page_buf(&mut buf, bits, &txid, Fk(7)).unwrap();
         assert!(!o2.wrote_new, "idempotent same fk");
-        let o3 = insert_fk_into_page_buf(&mut buf, page_base, bits, es, &txid, Fk(8)).unwrap();
+        let o3 = insert_fk_into_page_buf(&mut buf, bits, &txid, Fk(8)).unwrap();
         assert!(o3.wrote_new, "second create deeper on chain");
-        assert!(page_has_fk(&buf, es, 7) && page_has_fk(&buf, es, 8));
+        assert!(page_has_fk(&buf, bits, 7) && page_has_fk(&buf, bits, 8));
     }
 
     #[test]
@@ -1164,9 +935,9 @@ mod tests {
     }
 
     #[test]
-    fn probe_bits_26_to_34_in_range() {
+    fn probe_bits_26_to_32_in_range() {
         let k = [0x11u8; 32];
-        for bits in [26u32, 28, 31, 32, 33, 34] {
+        for bits in [26u32, 28, 31, 32] {
             let idx = probe_index(&k, 0, bits);
             assert!(idx < (1u64 << bits), "bits={bits} idx={idx}");
             let idx2 = probe_index(&k, 7, bits);
@@ -1198,8 +969,7 @@ mod tests {
     #[test]
     fn fd_only_insert_many_probe_and_reopen() {
         let path = tmp("fd_only_head");
-        let layout = HeadLayout::with_entry_bytes(14, 4).unwrap();
-        let h = AddressHead::create_with_layout(&path, layout).unwrap();
+        let h = head_bits(&path, 14).unwrap();
         let mut batch = Vec::new();
         for i in 1..=500u64 {
             let mut txid = [0u8; 32];
@@ -1245,11 +1015,79 @@ mod tests {
     }
 
     #[test]
-    fn entry_bytes_policy() {
-        assert_eq!(entry_bytes_for_bits(28), 4);
-        assert_eq!(entry_bytes_for_bits(32), 4);
-        assert_eq!(entry_bytes_for_bits(33), 8);
-        assert_eq!(entry_bytes_for_bits(34), 8);
+    fn eight_byte_footer_is_refused_not_read_as_pairs() {
+        let path = tmp("footer8");
+        let h = head_bits(&path, 12).unwrap();
+        drop(h);
+        let mut raw = std::fs::read(&path).unwrap();
+        let n = raw.len();
+        // Footer layout ext at [n-16..n): entry width at byte 7 of ext.
+        raw[n - 16 + 7] = 8;
+        std::fs::write(&path, &raw).unwrap();
+        match AddressHead::open(&path) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, "tx.head footer entry width (rebuild tx.head)")
+            }
+            Err(e) => panic!("expected footer entry width error, got {e}"),
+            Ok(_) => panic!("an 8-byte footer must not open as 4-byte slots"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A probe that races the sole writer's page `pwrite` sees the page
+    /// before or after that write, never a miss of a key inserted earlier.
+    #[test]
+    fn probe_during_page_pwrite_keeps_every_published_key() {
+        use std::sync::atomic::AtomicBool;
+        let path = tmp("race");
+        let h = head_bits(&path, 14).unwrap();
+        let n = 4000u64;
+        let key = |i: u64| {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&i.to_le_bytes());
+            txid[16..24].copy_from_slice(&(i * 11).to_le_bytes());
+            txid
+        };
+        let published = AtomicU64::new(0);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let h = &h;
+            let published = &published;
+            let done = &done;
+            s.spawn(move || {
+                let mut i = 1u64;
+                while i <= n {
+                    let end = (i + 7).min(n);
+                    let mut batch: Vec<_> = (i..=end).map(|k| (key(k), Fk(k))).collect();
+                    h.insert_many_in_place(&mut batch).unwrap();
+                    published.store(end, AtomicOrdering::Release);
+                    i = end + 1;
+                }
+                done.store(true, AtomicOrdering::Release);
+            });
+            let mut probes = 0u64;
+            loop {
+                let finished = done.load(AtomicOrdering::Acquire);
+                let p = published.load(AtomicOrdering::Acquire);
+                if p > 0 {
+                    let lo = p.saturating_sub(64).max(1);
+                    for k in lo..=p {
+                        let cands = probe_one(h, &key(k)).unwrap();
+                        assert!(cands.contains(&Fk(k)), "key {k} missing at published={p}");
+                        probes += 1;
+                    }
+                }
+                if finished {
+                    break;
+                }
+            }
+            assert!(probes > 0);
+        });
+        for k in 1..=n {
+            assert_eq!(probe_one(&h, &key(k)).unwrap(), vec![Fk(k)]);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(meta_path(&path));
     }
 
     #[test]
@@ -1300,20 +1138,6 @@ mod tests {
     }
 
     #[test]
-    fn eight_byte_entries_accept_fk_above_u32() {
-        let path = tmp("u64fk");
-        let layout = HeadLayout::with_entry_bytes(12, 8).unwrap();
-        let h = AddressHead::create_with_layout(&path, layout).unwrap();
-        assert_eq!(h.entry_bytes(), 8);
-        let txid = [2u8; 32];
-        let big = Fk(u64::from(u32::MAX) + 99);
-        insert_one(&h, &txid, big).unwrap();
-        assert_eq!(probe_one(&h, &txid).unwrap(), vec![big]);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(meta_path(&path));
-    }
-
-    #[test]
     fn foreigner_collision_both_found() {
         let path = tmp("foreigner");
         let h = head_bits(&path, 8).unwrap();
@@ -1327,6 +1151,96 @@ mod tests {
         assert!(probe_one(&h, &a).unwrap().contains(&Fk(1)));
         assert!(probe_one(&h, &b).unwrap().contains(&Fk(2)));
         assert_eq!(probe_one(&h, &a).unwrap()[0], Fk(1));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(meta_path(&path));
+    }
+
+    /// Two keys share a probe chain but differ in the fingerprint bytes: the
+    /// foreigner is not a candidate, so identity never reads its txid.
+    #[test]
+    fn probe_skips_foreigner_with_other_fingerprint() {
+        let path = tmp("fp-skip");
+        let h = head_bits(&path, 8).unwrap();
+        let (a, b) = colliding_pair();
+        insert_one(&h, &a, Fk(1)).unwrap();
+        insert_one(&h, &b, Fk(2)).unwrap();
+        assert_eq!(probe_one(&h, &a).unwrap(), vec![Fk(1)]);
+        assert_eq!(probe_one(&h, &b).unwrap(), vec![Fk(2)]);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(meta_path(&path));
+    }
+
+    /// Rows written before tags (meta v1) have a zero fingerprint, so they stay
+    /// candidates for every key on their chain. `fill_fingerprints` writes the
+    /// tag into the file, and a reopen keeps the skip.
+    #[test]
+    fn untagged_rows_match_any_key_until_filled() {
+        let path = tmp("fp-untagged");
+        let (a, b) = colliding_pair();
+        {
+            let h = head_bits(&path, 8).unwrap();
+            insert_one(&h, &a, Fk(1)).unwrap();
+            insert_one(&h, &b, Fk(2)).unwrap();
+            strip_tags(&h);
+        }
+        let h = AddressHead::open(&path).unwrap();
+        assert_eq!(probe_one(&h, &a).unwrap(), vec![Fk(1), Fk(2)]);
+        assert_eq!(probe_one(&h, &b).unwrap(), vec![Fk(1), Fk(2)]);
+
+        h.fill_fingerprints(&[(a, Fk(1)), (b, Fk(2)), ([7u8; 32], Fk(9))])
+            .unwrap();
+        assert_eq!(probe_one(&h, &a).unwrap(), vec![Fk(1)]);
+        assert_eq!(probe_one(&h, &b).unwrap(), vec![Fk(2)]);
+        drop(h);
+        let h = AddressHead::open(&path).unwrap();
+        assert_eq!(
+            probe_one(&h, &b).unwrap(),
+            vec![Fk(2)],
+            "tags live in the file"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(meta_path(&path));
+    }
+
+    /// Every occupied slot in the file carries its key's fingerprint, and the
+    /// map sees each insert.
+    #[test]
+    fn insert_writes_the_fingerprint_into_the_file() {
+        let path = tmp("fp-file");
+        let h = head_bits(&path, 10).unwrap();
+        let mut entries = Vec::new();
+        for i in 1..=300u64 {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&i.to_le_bytes());
+            txid[16..24].copy_from_slice(&(i * 7).to_le_bytes());
+            entries.push((txid, Fk(i)));
+        }
+        let by_rel = entries.clone();
+        h.insert_many_in_place(&mut entries).unwrap();
+        let mut occupied = 0;
+        for slot in 0..h.layout.slots() {
+            let rel = read_slot(&h, slot);
+            if rel == 0 {
+                continue;
+            }
+            occupied += 1;
+            let (txid, _) = by_rel[rel as usize - 1];
+            assert_eq!(
+                read_slot_raw(&h, slot) >> h.bits(),
+                fingerprint(&txid, h.bits()),
+                "slot {slot}"
+            );
+        }
+        assert_eq!(occupied, 300);
+        for (txid, fk) in &by_rel {
+            assert_eq!(probe_one(&h, txid).unwrap(), vec![*fk]);
+            assert!(h
+                .dump_page_hop(txid)
+                .scan
+                .cands
+                .iter()
+                .any(|&(_, r)| r == fk.0));
+        }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1377,7 +1291,6 @@ mod tests {
         }
         let h = AddressHead::open(&path).unwrap();
         assert_eq!(h.bits(), 12);
-        assert_eq!(h.entry_bytes(), 4);
         assert_eq!(probe_one(&h, &[7u8; 32]).unwrap(), vec![Fk(3)]);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
@@ -1427,76 +1340,6 @@ mod tests {
             same_page.push(t);
         }
         let _ = probe_batch(&h, &same_page).unwrap();
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(meta_path(&path));
-    }
-
-    /// Held pool session must probe pages via the shared [`IoCtx`] (same
-    /// results as serial, SQEs on the held ring).
-    #[test]
-    fn probe_fks_batch_held_pool_session_matches_serial() {
-        use crate::uring_session::{IoCtx, SessionKind, UringSession};
-        let path = tmp("probe_ctx");
-        let h = head_bits(&path, 14).unwrap();
-        let mut txid = [0u8; 32];
-        txid[0] = 0x42;
-        insert_one(&h, &txid, Fk(9)).unwrap();
-        let serial = probe_one(&h, &txid).unwrap();
-        let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-        let mut ctx = IoCtx::held(&mut session);
-        let batch = h
-            .probe_fks_batch_ctx(&[txid], &mut ctx)
-            .expect("held-session probe");
-        session.drain_all().unwrap();
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0], serial);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(meta_path(&path));
-    }
-
-    /// Bulk page load must match per-slot reads (regression: load_page_slots)
-    /// used to call load_u32 once per slot — ~1024× cost on every insert/probe).
-    #[test]
-    fn load_page_slots_matches_per_slot_reads() {
-        let path = tmp("page_bulk");
-        let h = head_bits(&path, 14).unwrap();
-        // Pack many inserts so some pages are multi-occupied.
-        let mut entries = Vec::new();
-        for i in 1..=200u64 {
-            let mut txid = [0u8; 32];
-            txid[0] = (i & 0xff) as u8;
-            txid[1] = ((i >> 8) & 0xff) as u8;
-            txid[2] = 0xee;
-            entries.push((txid, Fk(i)));
-        }
-        h.insert_many_in_place(&mut entries).unwrap();
-
-        let es = h.entry_bytes();
-        let page_slots = page_slot_count(h.bits());
-        // Page 0 for bits=14 is the whole table when bits<=10; for 14 use page 0.
-        let page_base = 0u64;
-        let mut bulk = [0u8; PROBE_REGION_BYTES];
-        let n = h.load_page_slots(page_base, page_slots, &mut bulk).unwrap();
-        let nslots = (n / es as usize) as u64;
-        assert!(nslots > 0);
-        assert_eq!(n, (nslots as usize) * es as usize);
-        // Full first page for a normal create (slot region only — no footer bytes).
-        assert_eq!(nslots, page_slots.min(h.layout.slots()));
-
-        for local in 0..nslots {
-            let slot = page_base + local;
-            let expected = read_slot(&h, slot);
-            let from_bulk = entry_from_page_buf(&bulk[..n], local, es).unwrap_or(0);
-            assert_eq!(
-                from_bulk, expected,
-                "slot {slot} bulk={from_bulk} serial={expected}"
-            );
-        }
-        // Slot region must not extend into trailing footer.
-        // Probe path still finds inserts.
-        for (txid, fk) in &entries {
-            assert!(probe_one(&h, txid).unwrap().contains(fk), "missing {fk:?}");
-        }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(meta_path(&path));
     }
@@ -1683,7 +1526,6 @@ mod tests {
     #[test]
     fn mainnet_default_bits_is_25() {
         assert_eq!(MAINNET_BITS, 25);
-        assert_eq!(entry_bytes_for_bits(MAINNET_BITS), 4);
         // 4 B × 1024 = 4 KiB pages at mainnet default.
         assert_eq!(PAGE_SLOTS as usize * 4, 4096);
     }
@@ -1695,24 +1537,28 @@ mod tests {
         // Null fk
         let mut page = vec![0u8; 4096];
         assert!(matches!(
-            insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk::NULL),
+            insert_fk_into_page_buf(&mut page, 12, &txid, Fk::NULL),
             Err(StoreError::InvalidFk)
         ));
-        // 4-byte entry can't hold fk > u32::MAX
+        // A slot can't hold fk > u32::MAX
         assert!(matches!(
-            insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk(u64::from(u32::MAX) + 1)),
+            insert_fk_into_page_buf(&mut page, 12, &txid, Fk(u64::from(u32::MAX) + 1)),
             Err(StoreError::InvalidFk)
         ));
+        // A rel that does not fit in `bits` would fold into the fingerprint.
+        assert!(matches!(
+            insert_fk_into_page_buf(&mut page, 12, &txid, Fk(1 << 12)),
+            Err(StoreError::InvalidFk)
+        ));
+        assert!(
+            !page.iter().any(|&b| b != 0),
+            "a rejected rel writes nothing"
+        );
         // Happy path insert + idempotent
-        let r = insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk(7)).unwrap();
+        let r = insert_fk_into_page_buf(&mut page, 12, &txid, Fk(7)).unwrap();
         assert!(r.wrote_new);
-        let r2 = insert_fk_into_page_buf(&mut page, 0, 12, 4, &txid, Fk(7)).unwrap();
+        let r2 = insert_fk_into_page_buf(&mut page, 12, &txid, Fk(7)).unwrap();
         assert!(!r2.wrote_new);
-        // 8-byte entries
-        let mut page8 = vec![0u8; 8192];
-        let r8 = insert_fk_into_page_buf(&mut page8, 0, 12, 8, &txid, Fk(u64::from(u32::MAX) + 9))
-            .unwrap();
-        assert!(r8.wrote_new);
         // probe_index bits ≤ PAGE_SLOT_BITS branch
         let _ = probe_index(&txid, 0, MIN_BITS);
         let _ = probe_index(&txid, 3, PAGE_SLOT_BITS);
@@ -1770,10 +1616,8 @@ mod tests {
         let _ = h2_in_page(&txid, MAINNET_BITS);
         let _ = page_slot_count(MAINNET_BITS);
         let _ = page_base_for_txid(&txid, MAINNET_BITS);
-        assert_eq!(entry_file_off(0, 4), 0);
-        assert_eq!(entry_file_off(3, 4), 12);
-        assert_eq!(entry_bytes_for_bits(TINY_BITS), 4);
-        assert_eq!(entry_bytes_for_bits(MAX_BITS), 8);
+        assert_eq!(entry_file_off(0), 0);
+        assert_eq!(entry_file_off(3), 12);
         let layout = default_layout(HeadScale::Tiny);
         assert!((MIN_BITS..=MAX_BITS).contains(&layout.bits));
         assert_eq!(default_layout(HeadScale::Tiny).bits, layout.bits);

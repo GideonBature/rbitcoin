@@ -124,7 +124,7 @@ pub(crate) fn fsync_parent_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Trailing-header tables (`tx.head`): 16-byte store identity + 16-byte layout
-/// extension (bits / entry_bytes / generation). Slots still start at file offset 0
+/// extension (bits / entry width / generation). Slots still start at file offset 0
 /// so probe pages stay OS-page-aligned.
 pub const TRAILING_FOOTER_LEN: usize = 32;
 

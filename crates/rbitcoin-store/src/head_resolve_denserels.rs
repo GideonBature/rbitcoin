@@ -15,7 +15,8 @@
 //! [`resolve_fk_and_range_batch`] is the **stamp short-circuit**: stops after
 //! loc, returns `(fk, body_range)` so prep denserels-loads by offset.
 //!
-//! **IO shape:** probe may use one TLS [`UringSession`]; sidefile ID is
+//! **IO shape:** the open OA probe hops a read-only map of its slots (no
+//! syscall); sealed `g` pages may use one TLS [`UringSession`]; sidefile ID is
 //! page-grouped bulk pread (one read per OS page of `txid.body`). Nested TLS
 //! uring remains a hard error.
 //!
@@ -93,7 +94,7 @@ fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDiag) 
         .unwrap_or_else(|| "-".into());
     let mut s = format!(
         "leftover probe diag txid={} mix={} page_base={} bits={} file_id={} first_fk={} age={} \
-         hit_empty={} depth_end={} empty_local={} occ={} hop2eq={} ncand={}",
+         hit_empty={} depth_end={} empty_local={} occ={} ncand={}",
         hex_bytes(&d.txid),
         hex_bytes(&d.mixed_prefix),
         d.page_base,
@@ -105,7 +106,6 @@ fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDiag) 
         d.depth_end,
         d.empty_local,
         d.page_occupied,
-        u8::from(d.hop_equal_second),
         d.cands.len(),
     );
     for c in &d.cands {
@@ -147,7 +147,19 @@ fn diagnose_txid_probe(
     let page_base = page_base_for_txid(&mixed, bits);
     let first_fks = table.head.first_fks_snapshot();
     let (file_id, first_fk, hop) = table.head.leftover_open_hop(&mixed)?;
-    let abs_cands = table.head.probe_candidates(&mixed)?;
+    // Every occupant of the open chain (the fingerprint skips most of them on
+    // a real probe), then whatever the real probe adds from sealed segments.
+    let mut abs_cands: Vec<Fk> = hop
+        .scan
+        .cands
+        .iter()
+        .map(|&(_, rel)| Fk(first_fk + rel - 1))
+        .collect();
+    for fk in table.head.probe_candidates(&mixed)? {
+        if !abs_cands.contains(&fk) {
+            abs_cands.push(fk);
+        }
+    }
     let side = table.txid_sidefile();
     let mask = if bits <= crate::address_head::PAGE_SLOT_BITS {
         (1u64 << bits) - 1
@@ -195,7 +207,6 @@ fn diagnose_txid_probe(
         depth_end: hop.scan.depth_end,
         empty_local: hop.scan.empty_local,
         page_occupied: hop.occupied,
-        hop_equal_second: hop.hop_equal_second,
         cands,
     })
 }
@@ -785,7 +796,7 @@ mod tests {
         use crate::address_head::HeadLayout;
         use crate::height_fence::FenceRun;
         let dir = tmp("fence-across-segs");
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
         let n = 204u32.saturating_mul(6);
         let mut items = Vec::new();

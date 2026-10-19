@@ -119,7 +119,6 @@ pub struct LeftoverProbeDiag {
     pub depth_end: u32,
     pub empty_local: u64,
     pub page_occupied: u32,
-    pub hop_equal_second: bool,
     pub cands: Vec<LeftoverProbeCand>,
 }
 
@@ -484,7 +483,6 @@ mod tests {
             depth_end: 0,
             empty_local: 0,
             page_occupied: 0,
-            hop_equal_second: true,
             cands: Vec::new(),
         }
     }
