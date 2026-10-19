@@ -2,4 +2,4 @@
 # cargo-mutants ignores this file when the command line passes --exclude.
 exclude_globs = ["crates/rbitcoin-bench/**/*.rs"]
 # The skip attributes compile only with this feature. Default node builds leave it off.
-additional_cargo_args = "--features mutants"
+features = ["mutants"]

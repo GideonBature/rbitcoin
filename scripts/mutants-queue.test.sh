@@ -451,8 +451,8 @@ assert_ok "parent stamp skip is behind the mutants feature" \
   "$ROOT/crates/rbitcoin-query/src/stamp.rs"
 assert_ok "nightly list builds the mutants feature" \
   grep -q -- '--features mutants --workspace' "$NIGHTLY"
-assert_ok "mutants.toml passes the feature to cargo" \
-  grep -q 'additional_cargo_args = "--features mutants"' "$TOML"
+assert_ok "mutants.toml enables the mutants feature" \
+  grep -q 'features = \["mutants"\]' "$TOML"
 for toml in "$ROOT"/crates/*/Cargo.toml; do
   assert_ok "mutants feature in $(basename "$(dirname "$toml")")" \
     grep -q '^mutants = ' "$toml"
