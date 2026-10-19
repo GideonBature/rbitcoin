@@ -3408,9 +3408,11 @@ mod tests {
         assert!(found, "need a same-slot miss key (page+h1)");
         let hits = s.get_fk_by_txid_batch(&[b]).unwrap();
         assert!(hits[0].1.is_none(), "B is not in the head");
+        // A sits on B's chain but carries another fingerprint, so the probe
+        // drops it before identity: the miss is on the head, with no cands.
         let (on, n_cands) = crate::head_resolve_stats::take_leftover_miss().expect("classified");
-        assert_eq!(on, LeftoverMissOn::Body);
-        assert!(n_cands >= 1, "A must be a hop cand, n_cands={n_cands}");
+        assert_eq!(on, LeftoverMissOn::Head);
+        assert_eq!(n_cands, 0, "fingerprint must skip A, n_cands={n_cands}");
         assert!(
             !crate::head_resolve_stats::leftover_probe_diag_recorded(&b),
             "resolve must not dump this key; leftover caller does"
@@ -3421,7 +3423,7 @@ mod tests {
         assert_eq!(diag.txid, b);
         assert_eq!(diag.page_base, page_a);
         assert!(diag.hit_empty, "hop must stop at empty");
-        assert!(diag.hop_equal_second, "second page load must match first");
+        assert!(diag.hop_equal_file, "file page must match the RAM image");
         assert!(
             diag.cands
                 .iter()
@@ -3827,11 +3829,9 @@ mod tests {
 
         let dir = tmp();
         // bits=8 → 256 slots, seal ~204 keys. Five segments ⇒ oldest age ≥4.
-        let s = Store::create_layout_with_head(
-            StoreLayout::tiny(&dir),
-            HeadLayout::with_entry_bytes(8, 4).unwrap(),
-        )
-        .unwrap();
+        let s =
+            Store::create_layout_with_head(StoreLayout::tiny(&dir), HeadLayout::new(8).unwrap())
+                .unwrap();
         let txid = [0xCDu8; 32];
         let old = put_one(&s, txid, 1);
         let n = 204u32.saturating_mul(5);

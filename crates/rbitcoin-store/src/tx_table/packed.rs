@@ -1153,9 +1153,8 @@ pub struct HeadResizeSizeSnapshot {
     pub class_a_n: u64,
     pub primary_bits: u32,
     pub primary_slots: u64,
-    pub primary_entry_b: u8,
     pub primary_occupied: u64,
-    /// Logical size of one segment head file (`slots × entry_bytes`).
+    /// Logical size of one segment head file (`slots × 4 B`).
     pub primary_body_bytes: u64,
     pub segment_count: u64,
     pub sealed_segments: u64,
@@ -1163,6 +1162,8 @@ pub struct HeadResizeSizeSnapshot {
     pub fuse8_bytes: u64,
     /// In-RAM BDZ `g` arrays (0 after FdOnly open).
     pub mphf_g_bytes: u64,
+    /// RAM slot images of the unsealed `tx.head` segments (4 B × slots each).
+    pub head_mirror_bytes: u64,
     /// Compact BDZ occupancy heap (supers after mmap; 0 occ copy).
     pub mphf_occ_bytes: u64,
     /// Class C L2 images (strong_tx + confirmed + header_txs).

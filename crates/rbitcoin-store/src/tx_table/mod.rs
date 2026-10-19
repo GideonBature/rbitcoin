@@ -966,7 +966,7 @@ impl TxTable {
             std::fs::create_dir_all(seqsigwit_dir).map_err(|e| StoreError::io(seqsigwit_dir, e))?;
         }
         let secret = crate::store_secret::StoreSecret::load_or_create(dir, true)?;
-        let layout = HeadLayout::with_entry_bytes(layout.bits, 4)?;
+        let layout = HeadLayout::new(layout.bits)?;
         let (seal_bits, workers) = Self::resolve_open_opts(opts);
         Ok(Self {
             body: VarTable::create(dir, "txout", TableKind::TxOut)?,
@@ -1280,8 +1280,67 @@ impl TxTable {
                 t.head.flush()?;
             }
             t.seal_unsealed_nontail_from_body()?;
+            t.fill_open_head_fingerprints()?;
         }
         Ok(t)
+    }
+
+    /// Rows of the open segment loaded from the file carry no fingerprint, so
+    /// every row on a chain would stay an identity candidate. Mix their txids
+    /// from `txid.body` and set the RAM fingerprints (file untouched).
+    fn fill_open_head_fingerprints(&self) -> Result<(), StoreError> {
+        let n_body = self.count();
+        for (file_id, first_fk, count) in self.head.unsealed_ranges() {
+            let last = first_fk.saturating_add(count).saturating_sub(1);
+            if count == 0 || first_fk == 0 || last > n_body {
+                continue;
+            }
+            let t0 = std::time::Instant::now();
+            let workers = self.rebuild_workers().max(1) as u64;
+            let span = count.div_ceil(workers).max(1);
+            std::thread::scope(|sc| {
+                let handles: Vec<_> = (first_fk..=last)
+                    .step_by(span as usize)
+                    .map(|cur| {
+                        let end = (cur + span - 1).min(last);
+                        sc.spawn(move || self.fill_head_fingerprints_range(file_id, cur, end))
+                    })
+                    .collect();
+                for h in handles {
+                    h.join()
+                        .map_err(|_| StoreError::Corrupt("tx.head fingerprint fill panicked"))??;
+                }
+                Ok::<(), StoreError>(())
+            })?;
+            rbitcoin_log::info!(
+                "store: tx.head fingerprints filled file_id={file_id} first_fk={first_fk} \
+                 count={count} workers={workers} ms={}",
+                t0.elapsed().as_millis()
+            );
+        }
+        Ok(())
+    }
+
+    fn fill_head_fingerprints_range(
+        &self,
+        file_id: u32,
+        first: u64,
+        last: u64,
+    ) -> Result<(), StoreError> {
+        const CHUNK: u64 = 65_536;
+        let mut cur = first;
+        while cur <= last {
+            let end = (cur + CHUNK - 1).min(last);
+            let keys: Vec<([u8; 32], Fk)> = self
+                .body_txid_range(cur, end)?
+                .iter()
+                .zip(cur..)
+                .map(|(txid, fk)| (self.secret.mix_txid(txid), Fk(fk)))
+                .collect();
+            self.head.fill_fingerprints(file_id, &keys)?;
+            cur = end + 1;
+        }
+        Ok(())
     }
 
     pub fn prune_seqsigwit_mode(&self) -> bool {
@@ -3046,18 +3105,18 @@ impl TxTable {
         let bits = self.head.bits();
         let slots = self.head.slots();
         let occ = self.head.occupied();
-        let body_bytes = slots.saturating_mul(u64::from(self.head.entry_bytes()));
+        let body_bytes = slots.saturating_mul(crate::address_head::ENTRY_BYTES);
         HeadResizeSizeSnapshot {
             class_a_n: n,
             primary_bits: bits,
             primary_slots: slots,
-            primary_entry_b: self.head.entry_bytes(),
             primary_occupied: occ,
             primary_body_bytes: body_bytes,
             segment_count: self.head.segment_count() as u64,
             sealed_segments: self.head.sealed_segment_count() as u64,
             fuse8_bytes: self.head.sealed_fuse_resident_bytes(),
             mphf_g_bytes: self.head.sealed_mphf_g_resident_bytes(),
+            head_mirror_bytes: self.head.open_mirror_resident_bytes(),
             mphf_occ_bytes: 0,
             class_c_l2_bytes: 0,
         }

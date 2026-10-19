@@ -3500,7 +3500,7 @@ fn pread_two_spans_parallel_matches_serial() {
 fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
     let dir = tempfile_dir("bip30-seal");
     // 10-bit: max_keys = 819
-    let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+    let layout = HeadLayout::new(10).unwrap();
     let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
     let mut shared = [0u8; 32];
     shared[0..8].copy_from_slice(&1u64.to_le_bytes());
@@ -3568,12 +3568,51 @@ fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// After a restart the open segment's rows get their RAM fingerprint back, so
+/// a probe returns only the key's own create even when foreigners share its
+/// chain (200 keys in 256 slots collide often).
+#[test]
+fn reopen_fills_open_head_fingerprints() {
+    let dir = tempfile_dir("reopen-fp");
+    let layout = HeadLayout::new(8).unwrap();
+    let recs: Vec<TxRecord> = (1..=200u64)
+        .map(|i| {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&i.to_le_bytes());
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_start_fk: Fk::NULL,
+                input_count: 0,
+                output_start_fk: Fk::NULL,
+                output_count: 0,
+            }
+        })
+        .collect();
+    let fks = {
+        let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
+        let fks = t
+            .put_full_batch_indexed(&meta_only_items(&recs), true)
+            .unwrap();
+        t.flush().unwrap();
+        fks
+    };
+    let t = TxTable::open(&dir).unwrap();
+    assert_eq!(t.head.sealed_segment_count(), 0);
+    for (rec, fk) in recs.iter().zip(&fks) {
+        let mixed = t.mix_txid_for_head(&rec.txid);
+        assert_eq!(t.head.probe_candidates(&mixed).unwrap(), vec![*fk]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Reopen mid-open-segment, then fill to seal: pre-reopen creates must not FN.
 #[test]
 fn reopen_mid_segment_then_seal_no_fuse_fn() {
     let dir = tempfile_dir("reopen-seal-fn");
     // 10-bit: max_keys = floor(0.8*1024) = 819
-    let layout = HeadLayout::with_entry_bytes(10, 4).unwrap();
+    let layout = HeadLayout::new(10).unwrap();
     let half = 400u64;
     {
         let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
@@ -3648,7 +3687,7 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
 fn orphan_class_a_bodies_do_not_drop_head_entries_at_seal() {
     let dir = tempfile_dir("orphan-gap-seal");
     // 8-bit: max_keys = floor(0.8*256) = 204.
-    let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+    let layout = HeadLayout::new(8).unwrap();
     let rec = |i: u64| {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
@@ -3722,7 +3761,7 @@ fn orphan_class_a_bodies_do_not_drop_head_entries_at_seal() {
 #[test]
 fn seal_without_retained_keys_matches_fuse_contains() {
     let dir = tempfile_dir("seal-no-retain-keys");
-    let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+    let layout = HeadLayout::new(8).unwrap();
     let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
     let recs: Vec<TxRecord> = (0..205u64)
         .map(|i| {
@@ -3760,7 +3799,7 @@ fn seal_without_retained_keys_matches_fuse_contains() {
 fn fat_creates_do_not_roll_head() {
     with_env_lock(|| {
         let dir = tempfile_dir("no-body-span-roll");
-        let layout = HeadLayout::with_entry_bytes(14, 4).unwrap();
+        let layout = HeadLayout::new(14).unwrap();
         let t = TxTable::create_with_head_layout_opts(&dir, layout, HeadOpenOpts::TINY).unwrap();
         let mk = |i: u64| {
             let mut txid = [0u8; 32];
@@ -3809,7 +3848,7 @@ fn fat_creates_do_not_roll_head() {
 #[test]
 fn segmented_head_roll_and_lookup_via_tx_table() {
     let dir = tempfile_dir("seg-roll");
-    let layout = HeadLayout::with_entry_bytes(10, 4).unwrap(); // max_keys=819
+    let layout = HeadLayout::new(10).unwrap(); // max_keys=819
     let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
     let n = 820u64; // one seal @ bits=10 (max_keys=819)
     let recs: Vec<TxRecord> = (0..n)
@@ -4296,7 +4335,7 @@ fn open_seals_unsealed_nontail_after_copied_roll() {
     let dir = tempfile_dir("bg-seal-live");
     let copy = tempfile_dir("bg-seal-copy");
     {
-        let layout = HeadLayout::with_entry_bytes(8, 4).unwrap();
+        let layout = HeadLayout::new(8).unwrap();
         let t = TxTable::create_with_head_layout(&dir, layout).unwrap();
         let n = 205u64;
         let recs: Vec<TxRecord> = (0..n)

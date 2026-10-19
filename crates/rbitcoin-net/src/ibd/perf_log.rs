@@ -1212,13 +1212,13 @@ fn ser_process_owned<S: serde::Serializer>(
             "class_a_n": h.class_a_n,
             "primary_bits": h.primary_bits,
             "primary_slots": h.primary_slots,
-            "primary_entry_b": h.primary_entry_b,
             "primary_occupied": h.primary_occupied,
             "primary_body_bytes": h.primary_body_bytes,
             "segment_count": h.segment_count,
             "sealed_segments": h.sealed_segments,
             "fuse8_bytes": h.fuse8_bytes,
             "mphf_g_bytes": h.mphf_g_bytes,
+            "head_mirror_bytes": h.head_mirror_bytes,
             "mphf_occ_bytes": h.mphf_occ_bytes,
             "class_c_l2_bytes": h.class_c_l2_bytes
         }

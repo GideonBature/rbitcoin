@@ -1082,9 +1082,8 @@ pub fn with_thread_local<R>(
 }
 
 /// Kind byte for [`pack_ud`]. Distinct per machine so a leftover CQE cannot
-/// complete a different stage's slot (probe slot `5` ≠ ID op `5`).
+/// complete a different stage's slot (pwrite slot `5` ≠ ID op `5`).
 pub const KIND_BULK_PREAD: u8 = 1;
-pub const KIND_PROBE: u8 = 3;
 pub const KIND_BULK_PWRITE: u8 = 4;
 pub const KIND_SPEND_PAGE_READ: u8 = 7;
 pub const KIND_SPEND_PAGE_WRITE: u8 = 8;
@@ -1290,7 +1289,6 @@ mod tests {
     fn pack_ud_kinds_are_unique_and_do_not_alias() {
         let kinds = [
             KIND_BULK_PREAD,
-            KIND_PROBE,
             KIND_BULK_PWRITE,
             KIND_SPEND_PAGE_READ,
             KIND_SPEND_PAGE_WRITE,
@@ -1304,14 +1302,17 @@ mod tests {
         for k in kinds {
             assert!(seen.insert(k), "duplicate kind {k}");
         }
-        // Leftover probe slot 5 must not look like a bulk-pread slot 5.
-        let probe = pack_ud(KIND_PROBE, 1, 5);
+        // Leftover pwrite slot 5 must not look like a bulk-pread slot 5.
+        let write = pack_ud(KIND_BULK_PWRITE, 1, 5);
         let id = pack_ud(KIND_BULK_PREAD, 1, 5);
-        assert_ne!(probe, id);
+        assert_ne!(write, id);
         // Epoch N CQE is a different ud than epoch N+1 (same kind+slot).
-        assert_ne!(pack_ud(KIND_PROBE, 1, 5), pack_ud(KIND_PROBE, 2, 5));
-        let (k, e, s) = unpack_ud(probe);
-        assert_eq!((k, e, s), (KIND_PROBE, 1, 5));
+        assert_ne!(
+            pack_ud(KIND_BULK_PWRITE, 1, 5),
+            pack_ud(KIND_BULK_PWRITE, 2, 5)
+        );
+        let (k, e, s) = unpack_ud(write);
+        assert_eq!((k, e, s), (KIND_BULK_PWRITE, 1, 5));
     }
 
     #[test]
