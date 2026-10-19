@@ -18,7 +18,7 @@ fn config_helpers_and_param_parsers() {
     let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
     assert_eq!(
         cfg.genesis_hash_hex,
-        bitcoin::Txid::from_byte_array(*(&params.genesis_hash.to_byte_array())).to_string()
+        bitcoin::Txid::from_byte_array(params.genesis_hash.to_byte_array()).to_string()
     );
     assert!(cfg.banner.contains("rbitcoin"));
     assert_eq!(cfg.tweaks_min_dust, crate::tweaks::DEFAULT_TWEAKS_MIN_DUST);

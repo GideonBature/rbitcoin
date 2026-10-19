@@ -848,7 +848,7 @@ async fn electrum_server_version_history_balance() {
     );
 
     let create_hex =
-        bitcoin::Txid::from_byte_array(*(&chain.matured_coinbase_txid.to_byte_array())).to_string();
+        bitcoin::Txid::from_byte_array(chain.matured_coinbase_txid.to_byte_array()).to_string();
     let spend_hex = bitcoin::Txid::from_byte_array(
         chain.blocks.last().unwrap().txdata[1]
             .compute_txid()
@@ -1446,8 +1446,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
     .await
     .expect("electrum listen");
     let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
-    let want =
-        bitcoin::Txid::from_byte_array(*(&parent.compute_txid().to_byte_array())).to_string();
+    let want = bitcoin::Txid::from_byte_array(parent.compute_txid().to_byte_array()).to_string();
     let bal = rpc(
         &mut stream,
         1,
@@ -1532,7 +1531,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
         "consensus-invalid broadcast with hub: {bad_tx}"
     );
 
-    let cb1 = bitcoin::Txid::from_byte_array(*(&coinbase_txids[0].to_byte_array())).to_string();
+    let cb1 = bitcoin::Txid::from_byte_array(coinbase_txids[0].to_byte_array()).to_string();
     let conf = rpc(
         &mut stream,
         8,
@@ -1603,7 +1602,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
         Some("success"),
         "{packed}"
     );
-    let cb = bitcoin::Txid::from_byte_array(*(&cb2.to_byte_array())).to_string();
+    let cb = bitcoin::Txid::from_byte_array(cb2.to_byte_array()).to_string();
     let spent = rpc(
         &mut stream,
         7,
@@ -1651,8 +1650,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
         "non-verbose package: {packed2}"
     );
 
-    let pkg_txid =
-        bitcoin::Txid::from_byte_array(*(&pkg.compute_txid().to_byte_array())).to_string();
+    let pkg_txid = bitcoin::Txid::from_byte_array(pkg.compute_txid().to_byte_array()).to_string();
     let verbose = rpc(
         &mut stream,
         12,
@@ -1763,15 +1761,15 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
 
     let sh = electrum_scripthash_hex(create_spk.as_bytes());
     let asof_create =
-        bitcoin::Txid::from_byte_array(*(&create_blk.block_hash().to_byte_array())).to_string();
+        bitcoin::Txid::from_byte_array(create_blk.block_hash().to_byte_array()).to_string();
     let asof_spend =
-        bitcoin::Txid::from_byte_array(*(&spend_blk.block_hash().to_byte_array())).to_string();
+        bitcoin::Txid::from_byte_array(spend_blk.block_hash().to_byte_array()).to_string();
     let tag_create = format!("asof:{asof_create}");
     let tag_spend = format!("asof:{asof_spend}");
     let create_hex =
-        bitcoin::Txid::from_byte_array(*(&create.compute_txid().to_byte_array())).to_string();
+        bitcoin::Txid::from_byte_array(create.compute_txid().to_byte_array()).to_string();
     let spend_hex =
-        bitcoin::Txid::from_byte_array(*(&spend.compute_txid().to_byte_array())).to_string();
+        bitcoin::Txid::from_byte_array(spend.compute_txid().to_byte_array()).to_string();
 
     let q = Arc::new(q);
     let esplora_cfg = rbitcoin_esplora::EsploraConfig::with_network(
@@ -1941,7 +1939,7 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         q.pin_sh_chain_view_at(&lag_hash).unwrap().is_none(),
         "asof of a confirmed hash ahead of visible SH must not pin"
     );
-    let asof_lag = bitcoin::Txid::from_byte_array(*(&lag_hash)).to_string();
+    let asof_lag = bitcoin::Txid::from_byte_array(lag_hash).to_string();
     let at_wm = rpc(
         &mut stream,
         13,
@@ -2045,7 +2043,7 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
     )
     .await;
     let tip_b =
-        bitcoin::Txid::from_byte_array(*(&spend_blk_b.block_hash().to_byte_array())).to_string();
+        bitcoin::Txid::from_byte_array(spend_blk_b.block_hash().to_byte_array()).to_string();
     assert_eq!(
         live_b["chain_tip"].as_str(),
         Some(tip_b.as_str()),

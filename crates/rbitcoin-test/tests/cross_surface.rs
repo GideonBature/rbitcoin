@@ -822,7 +822,7 @@ async fn pin_esplora_tx_json_unknown_coinbase(esplora_addr: SocketAddr, cb_txid:
 async fn pin_esplora_scripthash_pages(esplora_addr: SocketAddr) {
     use rbitcoin_store::script_hash;
 
-    let sh_hex = bitcoin::Txid::from_byte_array(*(&script_hash(&[0x51]))).to_string();
+    let sh_hex = bitcoin::Txid::from_byte_array(script_hash(&[0x51])).to_string();
     let (st, body) = http_get(esplora_addr, &format!("/scripthash/{sh_hex}")).await;
     assert_eq!(st, 200, "{body}");
     let info: Value = serde_json::from_str(&body).unwrap();
@@ -905,7 +905,7 @@ async fn pin_esplora_after_txid_and_post_multi(
 fn encode_tx(tx: &Transaction) -> String {
     let mut raw = Vec::new();
     tx.consensus_encode(&mut raw).unwrap();
-    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(&raw)))
+    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&raw))
 }
 
 fn acs_spend(prev: Txid, input_sat: u64, fee: u64, spk: ScriptBuf) -> Transaction {
@@ -1626,7 +1626,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     let mut miss_raw = Vec::new();
     miss.consensus_encode(&mut miss_raw).unwrap();
     let miss_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(&miss_raw)),
+        std::convert::AsRef::<[u8]>::as_ref(&miss_raw),
     );
     let tma = jsonrpc(rpc_addr, "testmempoolaccept", json!([[miss_hex]])).await;
     assert_eq!(tma["result"][0]["allowed"], false, "{tma}");
@@ -2294,7 +2294,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         rpc_addr,
         "sendrawtransaction",
         json!([bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(&imm_raw))
+            std::convert::AsRef::<[u8]>::as_ref(&imm_raw)
         )]),
     )
     .await;

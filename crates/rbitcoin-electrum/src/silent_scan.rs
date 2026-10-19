@@ -117,7 +117,7 @@ pub fn scan_hits(
             if tx_matches(sub, &tw) {
                 hits.push(json!({
                     "height": h,
-                    "tx_hash": bitcoin::Txid::from_byte_array(*(&txid)).to_string(),
+                    "tx_hash": bitcoin::Txid::from_byte_array(txid).to_string(),
                     "tweak_key": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(tw.tweak))),
                 }));
             }
@@ -161,7 +161,7 @@ fn encode_sp_address(network: Network, scan_sk: &SecretKey, spend: &PublicKey) -
         Err(_) => format!(
             "{hrp}1{}",
             bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                &(&data)
+                &data
             ))
         ),
     }

@@ -1044,7 +1044,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["1"].as_object().unwrap();
         assert_eq!(txs.len(), 1, "dust-only txs must leave the height map");
-        let txid = bitcoin::Txid::from_byte_array(*(&rows[0].txid)).to_string();
+        let txid = bitcoin::Txid::from_byte_array(rows[0].txid).to_string();
         assert_eq!(txs[&txid]["output_pubkeys"].as_object().unwrap().len(), 1);
         assert_eq!(txs[&txid]["output_pubkeys"]["1"][1], 1001);
     }
@@ -1059,7 +1059,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["1"].as_object().unwrap();
         assert_eq!(txs.len(), 1);
-        let txid = bitcoin::Txid::from_byte_array(*(&rows[1].txid)).to_string();
+        let txid = bitcoin::Txid::from_byte_array(rows[1].txid).to_string();
         assert_eq!(txs[&txid]["output_pubkeys"]["0"][1], 547);
     }
 
@@ -1070,7 +1070,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["1"].as_object().unwrap();
         assert_eq!(txs.len(), 1);
-        let txid = bitcoin::Txid::from_byte_array(*(&rows[0].txid)).to_string();
+        let txid = bitcoin::Txid::from_byte_array(rows[0].txid).to_string();
         let outs = txs[&txid]["output_pubkeys"].as_object().unwrap();
         assert_eq!(outs.len(), 2);
         assert_eq!(outs["0"][1], 0);
@@ -1087,7 +1087,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["850000"].as_object().unwrap();
         assert_eq!(txs.len(), 1, "height key stays; dust-only tx is gone");
-        let txid = bitcoin::Txid::from_byte_array(*(&rows[1].txid)).to_string();
+        let txid = bitcoin::Txid::from_byte_array(rows[1].txid).to_string();
         assert!(txs.contains_key(&txid));
         assert_eq!(txs[&txid]["output_pubkeys"]["1"][1], 5410);
     }

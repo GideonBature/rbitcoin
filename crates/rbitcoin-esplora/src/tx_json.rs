@@ -337,12 +337,11 @@ fn tx_json_from_wire(
                 .get("scriptpubkey")
                 .and_then(|x| x.as_str())
                 .and_then(|h| {
-                    <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-                        let h = h;
+                    <Vec<u8> as bitcoin::hex::FromHex>::from_hex(
                         h.strip_prefix("0x")
                             .or_else(|| h.strip_prefix("0X"))
-                            .unwrap_or(h)
-                    })
+                            .unwrap_or(h),
+                    )
                     .ok()
                 })
                 .unwrap_or_default();

@@ -2034,7 +2034,7 @@ mod tests {
 
     fn display_txid(txid: bitcoin::Txid) -> String {
         use bitcoin::hashes::Hash;
-        bitcoin::Txid::from_byte_array(*(&txid.to_byte_array())).to_string()
+        bitcoin::Txid::from_byte_array(txid.to_byte_array()).to_string()
     }
 
     /// electrs: a start index at or past the last tx is 404, not an empty page.

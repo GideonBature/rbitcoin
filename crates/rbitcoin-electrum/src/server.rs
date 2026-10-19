@@ -140,7 +140,7 @@ impl ElectrumConfig {
             banner: "rbitcoin electrum — libre-relay-class (0.1 sat/vB, no dust ban, full RBF)"
                 .into(),
             donation_address: String::new(),
-            genesis_hash_hex: bitcoin::Txid::from_byte_array(*(&genesis)).to_string(),
+            genesis_hash_hex: bitcoin::Txid::from_byte_array(genesis).to_string(),
             limits: ServeLimits::for_public_proxy(),
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
@@ -2039,7 +2039,7 @@ fn dispatch_pinned(
                         return Ok(verbose_tx_json(query, &raw, &txid, Some(fk), chain.network));
                     }
                     return Ok(json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-                        std::convert::AsRef::<[u8]>::as_ref(&(&raw))
+                        std::convert::AsRef::<[u8]>::as_ref(&raw)
                     )));
                 }
             }
@@ -2053,7 +2053,7 @@ fn dispatch_pinned(
                             return Ok(verbose_tx_json(query, &raw, &txid, None, chain.network));
                         }
                         return Ok(json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-                            std::convert::AsRef::<[u8]>::as_ref(&(&raw))
+                            std::convert::AsRef::<[u8]>::as_ref(&raw)
                         )));
                     }
                 }

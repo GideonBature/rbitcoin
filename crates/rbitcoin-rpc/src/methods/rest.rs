@@ -211,7 +211,7 @@ fn headers(ctx: &RpcContext, fmt: RestFmt, rest: &str) -> Result<RestReply, Rest
     match fmt {
         RestFmt::Bin => Ok(bin_body(raw)),
         RestFmt::Hex => Ok(hex_body(&bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(&raw)),
+            std::convert::AsRef::<[u8]>::as_ref(&raw),
         ))),
         RestFmt::Json => Ok(json_body(json!(json_headers))),
     }
@@ -257,7 +257,7 @@ fn block(
     match wire {
         RestWire::Bin => Ok(bin_body(raw)),
         RestWire::Hex => Ok(hex_body(&bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(&raw)),
+            std::convert::AsRef::<[u8]>::as_ref(&raw),
         ))),
     }
 }
@@ -434,7 +434,7 @@ fn blockfilter(ctx: &RpcContext, fmt: RestFmt, rest: &str) -> Result<RestReply, 
         })?;
     match fmt {
         RestFmt::Json => Ok(json_body(
-            json!({ "filter": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(&body))) }),
+            json!({ "filter": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&body)) }),
         )),
         RestFmt::Bin | RestFmt::Hex => {
             let raw = serialize_rest_filter(&parsed, &body);
@@ -442,7 +442,7 @@ fn blockfilter(ctx: &RpcContext, fmt: RestFmt, rest: &str) -> Result<RestReply, 
                 Ok(bin_body(raw))
             } else {
                 Ok(hex_body(&bitcoin::hex::DisplayHex::to_lower_hex_string(
-                    std::convert::AsRef::<[u8]>::as_ref(&(&raw)),
+                    std::convert::AsRef::<[u8]>::as_ref(&raw),
                 )))
             }
         }

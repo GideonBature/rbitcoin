@@ -925,7 +925,7 @@ pub(crate) fn getblockfilter(ctx: &RpcContext, params: &RpcParams) -> Result<Val
         .ok_or_else(|| rpc_error(ERR_INVALID_ADDRESS_OR_KEY, "Block not found"))?;
     use bitcoin::hashes::Hash;
     Ok(json!({
-        "filter": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(&body))),
+        "filter": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&body)),
         "header": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(header.as_byte_array()))),
     }))
 }
@@ -1016,7 +1016,7 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         "confirmations": confs,
         "value": Amount::from_sat(out.value).to_btc(),
         "scriptPubKey": {
-            "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(&out.script))),
+            "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&out.script)),
             "asm": ScriptBuf::from_bytes(out.script.clone()).to_asm_string(),
         },
         "coinbase": coinbase,
