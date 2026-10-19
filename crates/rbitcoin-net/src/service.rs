@@ -47,6 +47,9 @@ pub struct P2PNode {
     /// Shared inbound slots across all listen sockets.
     inbound_sem: Arc<tokio::sync::Semaphore>,
     dialer: crate::socks::Dialer,
+    /// Wakes accept, dial, and connect-retry so `shutdown` does not sit out
+    /// its grace waiting on a recv or a 2s tick.
+    stop_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl P2PNode {
@@ -149,6 +152,7 @@ impl P2PNode {
         let cache = hub.cache.clone();
         let query = hub.query.clone();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let (stop_tx, _stop_rx) = tokio::sync::watch::channel(false);
 
         let (listener, local_addr) = if let Some(addr) = listen {
             let listener = TcpListener::bind(addr).await?;
@@ -182,6 +186,7 @@ impl P2PNode {
                 inbound_sem.clone(),
                 shutdown.clone(),
                 session_tasks.clone(),
+                stop_tx.subscribe(),
             ));
         }
 
@@ -193,8 +198,17 @@ impl P2PNode {
         let dial_shutdown = shutdown.clone();
         let sessions_dial = session_tasks.clone();
         let dialer_task = dialer.clone();
+        let mut dial_stop = stop_tx.subscribe();
         let dial_task = tokio::spawn(async move {
-            while let Some(req) = dial_rx.recv().await {
+            loop {
+                let req = tokio::select! {
+                    biased;
+                    _ = dial_stop.changed() => break,
+                    r = dial_rx.recv() => match r {
+                        Some(req) => req,
+                        None => break,
+                    },
+                };
                 if dial_shutdown.load(Ordering::SeqCst) {
                     break;
                 }
@@ -230,12 +244,17 @@ impl P2PNode {
         // pool (`PeerHub::redial_remembered_off_runtime`).
         let retry_peers = peers.clone();
         let retry_shutdown = shutdown.clone();
+        let mut retry_stop = stop_tx.subscribe();
         let retry_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            let mut interval = tokio::time::interval(REDIAL_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    biased;
+                    _ = retry_stop.changed() => break,
+                    _ = interval.tick() => {}
+                }
                 if retry_shutdown.load(Ordering::SeqCst) {
                     break;
                 }
@@ -259,6 +278,7 @@ impl P2PNode {
             max_inbound,
             inbound_sem,
             dialer,
+            stop_tx,
         })
     }
 
@@ -290,6 +310,7 @@ impl P2PNode {
             self.inbound_sem.clone(),
             self.shutdown.clone(),
             self.session_tasks.clone(),
+            self.stop_tx.subscribe(),
         );
         self.tasks.push(accept_task);
         Ok(local_addr)
@@ -434,6 +455,7 @@ impl P2PNode {
 
     pub async fn shutdown(mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        let _ = self.stop_tx.send(true);
         for p in self.peers.live_peers() {
             p.request_disconnect();
         }
@@ -463,6 +485,7 @@ impl Drop for P2PNode {
         // The connect-retry interval runs until this flag or an abort.
         // Dropping the handle without `shutdown` must not pin the test runtime.
         self.shutdown.store(true, Ordering::SeqCst);
+        let _ = self.stop_tx.send(true);
         for t in &self.tasks {
             t.abort();
         }
@@ -493,15 +516,20 @@ fn spawn_inbound_accept(
     inbound_sem: Arc<tokio::sync::Semaphore>,
     shutdown: Arc<AtomicBool>,
     session_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            let accept = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+            let accept = tokio::select! {
+                biased;
+                _ = stop.changed() => break,
+                a = listener.accept() => a,
+            };
             match accept {
-                Ok(Ok((stream, peer_addr))) => {
+                Ok((stream, peer_addr)) => {
                     if peers.inbound_discouraged(peer_addr) {
                         rbitcoin_log::info!("p2p: reject discouraged inbound {peer_addr}");
                         drop(stream);
@@ -579,8 +607,7 @@ fn spawn_inbound_accept(
                     let _ = ah_tx.send(h.abort_handle());
                     push_session_task(&sessions, h);
                 }
-                Ok(Err(_)) => break,
-                Err(_) => continue,
+                Err(_) => break,
             }
         }
     })
@@ -608,6 +635,13 @@ struct PreparedOutbound {
 /// longer). Without it a proxy that accepts and never answers holds the
 /// dial, and its [`crate::peers::DialInFlight`] mark, for good, so the
 /// redial pass would never try that target again.
+/// How often a down `--connect` / `addnode` target is tried again.
+#[cfg(not(any(test, feature = "test-hooks")))]
+const REDIAL_INTERVAL: Duration = Duration::from_secs(2);
+/// Crate tests and journeys. The node binary keeps the 2s pass.
+#[cfg(any(test, feature = "test-hooks"))]
+const REDIAL_INTERVAL: Duration = Duration::from_millis(250);
+
 #[cfg(not(test))]
 const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(test)]
@@ -859,6 +893,36 @@ mod tests {
             matches!(err, NetError::Protocol("discouraged")),
             "feeler dialed a discouraged address, got {err:?}"
         );
+    }
+
+    /// Dial and connect-retry block on a channel and a tick. Shutdown must
+    /// wake them; the grace is only for a session that is still unwinding.
+    #[tokio::test]
+    async fn shutdown_finishes_without_the_dial_grace() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rbitcoin-shutdown-grace-{n}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let node = P2PNode::start_outbound_only(
+            Query::open_or_create_tiny(&dir).unwrap(),
+            ChainParams::regtest(),
+            Milestone::NONE,
+            "/rbitcoin:test/".into(),
+            0,
+            crate::socks::Dialer::Direct,
+        )
+        .await
+        .unwrap();
+        let t0 = tokio::time::Instant::now();
+        node.shutdown().await;
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "dial and retry must observe shutdown, took {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// One datadir, two node lifetimes. The first is dropped without

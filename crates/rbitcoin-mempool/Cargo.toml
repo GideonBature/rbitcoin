@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Cluster mempool with InRam buffers + private sidecar files under datadir/mempool/"
 
+[lib]
+doctest = false
+
 [dependencies]
 rbitcoin-log = { workspace = true }
 rbitcoin-consensus = { workspace = true }

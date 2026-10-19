@@ -1090,7 +1090,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
         local,
         None,
     );
-    assert_eq!(hub.query.block_queue_stats().2, 1);
+    assert_eq!(hub.query.block_queue_stats().1, 1);
 
     let b2 = shell(h1, 2, 2);
     let h2 = b2.block_hash();
@@ -1304,7 +1304,7 @@ fn mine(
 #[allow(clippy::cognitive_complexity)] // one chain, many fork and reject arms
 #[test]
 fn ibd_bad_prev_fork() {
-    use super::super::assign::tests::{dummy_slot, lock_default_assign_stop};
+    use super::super::assign::tests::dummy_slot;
     use super::super::assign::{assign_work_ordered, AssignDepth};
     use super::super::confirm::{ConfirmEvent, ConfirmFeed};
     use super::super::exit::header_lag_behind_peers;
@@ -1324,7 +1324,6 @@ fn ibd_bad_prev_fork() {
     use std::sync::atomic::AtomicU32;
     use std::time::{Duration, Instant};
 
-    let _env = lock_default_assign_stop();
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("bad-prev-fork");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();
@@ -1433,7 +1432,7 @@ fn ibd_bad_prev_fork() {
         local,
         Some(&feed),
     );
-    assert_eq!(hub.query.block_queue_stats().2, 0, "undecodable wire");
+    assert_eq!(hub.query.block_queue_stats().1, 0, "undecodable wire");
     assert_eq!(feed.size_snap().0, 0);
     assert!(st.inflight.is_empty() && !st.body.is_pending(&a1));
     assert!(!st.body.is_rejected(&a1), "the hash stays fetchable");
@@ -1460,7 +1459,7 @@ fn ibd_bad_prev_fork() {
             Some(&feed),
         );
         assert!(st.body.is_pending(&a1) && st.inflight.is_empty());
-        assert_eq!(hub.query.block_queue_stats().2, 1);
+        assert_eq!(hub.query.block_queue_stats().1, 1);
         assert_eq!(feed.size_snap().0, 1);
     }
 
@@ -2429,11 +2428,9 @@ fn wire_pad_copy_keeps_the_other_tip() {
 /// honest body from another peer connects.
 #[test]
 fn ibd_mutated_body_is_refetched_not_blacklisted() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use bitcoin::{ScriptBuf, Transaction, Witness};
     use std::sync::Arc;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("mutated-body", 5);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let honest = rbitcoin_consensus::mine_regtest_paying(
@@ -2529,13 +2526,11 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
 /// block is claimed while the one before it is still in the pipeline.
 #[test]
 fn isolation_claims_one_block_at_a_time() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
     use std::time::{Duration, Instant};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("isolate-serial", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -2582,12 +2577,10 @@ fn isolation_claims_one_block_at_a_time() {
 /// honest bodies connect.
 #[test]
 fn ibd_batched_mutated_body_is_isolated_to_its_block() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("batched-mutated", 3);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -2652,14 +2645,12 @@ fn ibd_batched_mutated_body_is_isolated_to_its_block() {
 /// tip+2 alone is rejected as invalid.
 #[test]
 fn batched_write_reject_offers_the_wave_back() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::confirm::ConfirmEvent;
     use super::super::state::InflightReq;
     use bitcoin::{ScriptBuf, Sequence};
     use rbitcoin_consensus::mine_regtest_paying;
     use std::time::{Duration, Instant};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("write-reject", 2);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -2756,12 +2747,10 @@ fn batched_write_reject_offers_the_wave_back() {
 /// is archived, not connected): tip+1 is invalid, and tip+2 is not judged.
 #[test]
 fn batched_spend_of_a_later_block_is_rejected_alone() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("forward-spend", 2);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -2810,12 +2799,10 @@ fn batched_spend_of_a_later_block_is_rejected_alone() {
 /// the archive, and that retry must still pin the same-block parent.
 #[test]
 fn archived_retry_pins_a_same_block_parent() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::{Amount, ScriptBuf};
     use rbitcoin_consensus::{grind_regtest_pow, mine_regtest_paying};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("archived-same-block", 2);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -2867,12 +2854,10 @@ fn archived_retry_pins_a_same_block_parent() {
 /// first, noted in flight with no outs.
 #[test]
 fn archived_wave_pins_a_parent_from_the_previous_chunk() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("archived-cross-chunk", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let op_true = ScriptBuf::from_bytes(vec![0x51]);
@@ -2950,12 +2935,10 @@ fn archived_wave_pins_a_parent_from_the_previous_chunk() {
 /// connects with no later wave, disconnect, or reorg to re-arm lookup.
 #[test]
 fn load_engine_fault_near_the_tip_retakes_the_wave() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("load-engine-fault", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let b1 = mine_regtest_paying(
@@ -2988,13 +2971,11 @@ fn load_engine_fault_near_the_tip_retakes_the_wave() {
 /// outputs read again, both blocks connect.
 #[test]
 fn batched_pin_engine_fault_retries_one_block_at_a_time() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
     use std::time::{Duration, Instant};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("pin-engine-fault", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3085,14 +3066,12 @@ fn isolated_soft_reject_does_not_count_toward_cascade_halt() {
 /// and tip+2 alone is rejected as invalid.
 #[test]
 fn batched_scripts_reject_offers_the_wave_back() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::confirm::ConfirmEvent;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
     use std::time::{Duration, Instant};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("scripts-reject", 2);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3177,14 +3156,12 @@ fn batched_scripts_reject_offers_the_wave_back() {
 /// is still the peer dropped, and both honest bodies then connect.
 #[test]
 fn isolated_mutated_head_punishes_its_sender_when_lookup_runs_ahead() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::confirm::ConfirmEvent;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
     use std::time::{Duration, Instant};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("mutated-head-ahead", 3);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3270,7 +3247,6 @@ fn isolated_mutated_head_punishes_its_sender_when_lookup_runs_ahead() {
 /// the live sender of the replacement.
 #[test]
 fn mutated_verdict_punishes_its_copy_not_a_replacement() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::assign::{assign_work_ordered, AssignDepth};
     use super::super::confirm::ConfirmEvent;
     use super::super::state::InflightReq;
@@ -3278,7 +3254,6 @@ fn mutated_verdict_punishes_its_copy_not_a_replacement() {
     use rbitcoin_consensus::mine_regtest_paying;
     use std::time::{Duration, Instant};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("mutated-replaced", 3);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let b1 = mine_regtest_paying(
@@ -3353,13 +3328,12 @@ fn mutated_verdict_punishes_its_copy_not_a_replacement() {
 #[test]
 fn mutated_body_from_an_earlier_run_punishes_no_current_peer() {
     use super::super::archive::rehydrate_block_queue_into_confirm;
-    use super::super::assign::tests::{dummy_slot, lock_default_assign_stop};
+    use super::super::assign::tests::dummy_slot;
     use super::super::dial::next_peer_id;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("sender-across-runs", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let b1 = mine_regtest_paying(
@@ -3462,7 +3436,7 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
     );
     assert!(st.slots[0].alive, "Core's encoding is not undecodable wire");
     assert!(st.body.is_pending(&hash));
-    assert_eq!(hub.query.block_queue_stats().2, 1);
+    assert_eq!(hub.query.block_queue_stats().1, 1);
 
     let (ev_tx, ev_rx) = channel();
     let (engine, _queues) = spawn_confirm_engine(
@@ -3534,11 +3508,9 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
 /// not halt, and it follows the other valid tip+1.
 #[test]
 fn ibd_spend_of_an_unknown_txid_is_invalid() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("unknown-parent", 2);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3582,11 +3554,9 @@ fn ibd_spend_of_an_unknown_txid_is_invalid() {
 /// marked invalid, as it would be without the restart.
 #[test]
 fn spend_of_an_unknown_txid_after_restart_is_invalid() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("unknown-parent-restart", 1).restart(|_| {});
     let t = rig.t;
     let ghost = WireRig::spend(bitcoin::Txid::from_byte_array([0xcd; 32]));
@@ -3616,12 +3586,10 @@ fn spend_of_an_unknown_txid_after_restart_is_invalid() {
 /// still be draining. The parent is on the chain, so tip+2 connects.
 #[test]
 fn lone_spend_of_the_block_just_written_connects() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::state::InflightReq;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("spend-just-written", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3665,12 +3633,10 @@ fn lone_spend_of_the_block_just_written_connects() {
 /// view), so the new chain's block that spends it is invalid.
 #[test]
 fn spend_of_a_reorged_out_tx_is_invalid() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::reorg::maybe_rewind_to_best_work;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("reorged-parent", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3725,12 +3691,10 @@ fn spend_of_a_reorged_out_tx_is_invalid() {
 /// invalid without waiting for its pending mark to go stale.
 #[test]
 fn verdict_applied_after_the_tip_moved_asks_for_the_body_again() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use super::super::reorg::apply_header_rewind;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("verdict-tip-moved", 1);
     let t = rig.t;
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3770,11 +3734,9 @@ fn verdict_applied_after_the_tip_moved_asks_for_the_body_again() {
 /// connected chain: a store fault, so IBD halts and the hash stays valid.
 #[test]
 fn spend_of_a_create_the_head_lost_is_not_invalid() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new("lost-head-row", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3819,11 +3781,9 @@ fn spend_of_a_create_the_head_lost_is_not_invalid() {
 /// connected chain: a store fault, so the block is not marked invalid.
 #[test]
 fn spend_of_a_create_the_head_lost_before_a_roll_is_not_invalid() {
-    use super::super::assign::tests::lock_default_assign_stop;
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::{mine_empty_regtest, mine_regtest_paying};
 
-    let _env = lock_default_assign_stop();
     let mut rig = WireRig::new_small_head("lost-head-row-roll", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
     let spk = ScriptBuf::from_bytes(vec![0x51]);
@@ -3894,7 +3854,7 @@ fn spend_of_a_create_the_head_lost_before_a_roll_is_not_invalid() {
 /// for it again, or confirm waits at that height forever.
 #[test]
 fn ibd_refused_body_is_asked_again() {
-    use super::super::assign::tests::{dummy_slot, lock_default_assign_stop};
+    use super::super::assign::tests::dummy_slot;
     use super::super::assign::{assign_work_ordered, AssignDepth};
     use super::super::confirm::{ConfirmEvent, ConfirmFeed};
     use super::super::path::seed_work_path_from_store;
@@ -3908,7 +3868,6 @@ fn ibd_refused_body_is_asked_again() {
     use std::sync::atomic::AtomicU32;
     use std::time::Instant;
 
-    let _env = lock_default_assign_stop();
     let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("refused-body-reask");
     hub.ensure_genesis().unwrap();
     let gen = hub.tip_hash().unwrap();

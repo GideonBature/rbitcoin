@@ -9,6 +9,12 @@ description = "Bitcoin P2P (BIP324, IBD, tip follow, compact v2, tx relay)"
 
 [features]
 mutants = []
+# Journeys turn this on. The node binary does not, so its redial pass stays
+# 2s and a SAM retry stays 500ms.
+test-hooks = []
+
+[lib]
+doctest = false
 
 [dependencies]
 rbitcoin-primitives = { workspace = true }

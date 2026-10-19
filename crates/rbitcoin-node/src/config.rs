@@ -10,6 +10,7 @@ use rbitcoin_primitives::{
 use rbitcoin_store::HeadScale;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Default max concurrent inbound P2P sessions (same as net `DEFAULT_MAX_INBOUND`).
 pub const DEFAULT_MAX_INBOUND: u32 = rbitcoin_net::DEFAULT_MAX_INBOUND as u32;
@@ -346,12 +347,14 @@ pub struct NodeConfig {
     /// Validity of each per-connection Noise certificate. Default 3600 s.
     pub sv2_tp_cert_validity_secs: u64,
     /// How long a template on a replaced tip still answers. Default 10 s.
-    pub sv2_tp_stale_grace_secs: u64,
+    /// Conf and CLI set whole seconds; tests may set a shorter duration.
+    pub sv2_tp_stale_grace: Duration,
     /// Fee gain over a session's last template that pushes a rebuild on the
     /// same tip. Default 1000 sat.
     pub sv2_tp_fee_delta: u64,
-    /// Minimum seconds from a session's last push to a fee push. Default 5.
-    pub sv2_tp_template_interval_secs: u64,
+    /// Minimum time from a session's last push to a fee push. Default 5 s.
+    /// Conf and CLI set whole seconds (at least 1); tests may set the floor.
+    pub sv2_tp_template_interval: Duration,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
     pub milestone_height: u32,
     /// Set when conf or CLI applied `milestone` (including 0).
@@ -434,9 +437,9 @@ impl Default for NodeConfig {
             sv2_tp_listen: None,
             sv2_tp_authority_sec: None,
             sv2_tp_cert_validity_secs: 3600,
-            sv2_tp_stale_grace_secs: 10,
+            sv2_tp_stale_grace: Duration::from_secs(10),
             sv2_tp_fee_delta: rbitcoin_sv2::FEE_DELTA,
-            sv2_tp_template_interval_secs: rbitcoin_sv2::TEMPLATE_INTERVAL.as_secs(),
+            sv2_tp_template_interval: rbitcoin_sv2::TEMPLATE_INTERVAL,
             milestone_height: 0,
             milestone_explicit: false,
             inhibit_suspend: false,
@@ -1170,10 +1173,14 @@ impl NodeConfig {
             }
             "sv2_tp_stale_grace" => {
                 let max = rbitcoin_sv2::MAX_STALE_GRACE.as_secs();
-                self.sv2_tp_stale_grace_secs =
-                    val.parse().ok().filter(|&s| s <= max).ok_or_else(|| {
+                let secs = val
+                    .parse()
+                    .ok()
+                    .filter(|&s: &u64| s <= max)
+                    .ok_or_else(|| {
                         NodeError::Config(format!("conf sv2_tp_stale_grace: want seconds <= {max}"))
                     })?;
+                self.sv2_tp_stale_grace = Duration::from_secs(secs);
             }
             "sv2_tp_fee_delta" => {
                 self.sv2_tp_fee_delta = val
@@ -1182,15 +1189,16 @@ impl NodeConfig {
             }
             "sv2_tp_template_interval" => {
                 let max = rbitcoin_sv2::MAX_TEMPLATE_INTERVAL.as_secs();
-                self.sv2_tp_template_interval_secs = val
+                let secs = val
                     .parse()
                     .ok()
-                    .filter(|&s| (1..=max).contains(&s))
+                    .filter(|&s: &u64| (1..=max).contains(&s))
                     .ok_or_else(|| {
                         NodeError::Config(format!(
                             "conf sv2_tp_template_interval: want seconds in 1..={max}"
                         ))
                     })?;
+                self.sv2_tp_template_interval = Duration::from_secs(secs);
             }
             "sv2_tp_cert_validity" => {
                 self.sv2_tp_cert_validity_secs = val
@@ -1801,9 +1809,9 @@ mod tests {
         let mut c = NodeConfig::default().with_datadir(tmp());
         assert_eq!(c.sv2_tp_listen, None);
         assert_eq!(c.sv2_tp_cert_validity_secs, 3600);
-        assert_eq!(c.sv2_tp_stale_grace_secs, 10);
+        assert_eq!(c.sv2_tp_stale_grace, Duration::from_secs(10));
         assert_eq!(c.sv2_tp_fee_delta, 1000);
-        assert_eq!(c.sv2_tp_template_interval_secs, 5);
+        assert_eq!(c.sv2_tp_template_interval, Duration::from_secs(5));
         for (k, v) in [
             ("sv2_tp_listen", "127.0.0.1:8442"),
             ("sv2_tp_cert_validity", "600"),
@@ -1815,9 +1823,9 @@ mod tests {
         }
         assert_eq!(c.sv2_tp_listen, Some("127.0.0.1:8442".parse().unwrap()));
         assert_eq!(c.sv2_tp_cert_validity_secs, 600);
-        assert_eq!(c.sv2_tp_stale_grace_secs, 0);
+        assert_eq!(c.sv2_tp_stale_grace, Duration::ZERO);
         assert_eq!(c.sv2_tp_fee_delta, 0);
-        assert_eq!(c.sv2_tp_template_interval_secs, 86400);
+        assert_eq!(c.sv2_tp_template_interval, Duration::from_secs(86400));
         let no_auth = c.validate().unwrap_err();
         assert!(
             format!("{no_auth}").contains("sv2-tp-authority-sec"),

@@ -216,7 +216,7 @@ mod tests {
         let id = q
             .block_queue_enqueue(42, [0xCDu8; 32], 7, &payload)
             .unwrap();
-        assert_eq!(q.block_queue_stats().2, 1);
+        assert_eq!(q.block_queue_stats().1, 1);
         let _ = id;
         assert!(q.block_queue_has_height(42));
         assert_eq!(
@@ -225,12 +225,12 @@ mod tests {
         );
         // Confirm-write hook: dequeue by height.
         assert_eq!(q.block_queue_dequeue_height(42).unwrap(), 1);
-        assert_eq!(q.block_queue_stats().2, 0);
+        assert_eq!(q.block_queue_stats().1, 0);
         // Restart: RAM queue is empty (by design — redownload, no double disk write).
         drop(q);
         let q2 = Query::open_or_create_tiny(dir.path()).unwrap();
         assert!(!q2.block_queue_has_height(42));
-        assert_eq!(q2.block_queue_stats().2, 0);
+        assert_eq!(q2.block_queue_stats().1, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -242,13 +242,13 @@ mod tests {
         let p2 = vec![2u8; 64 * 1024];
         let o1 = q.block_queue_offer(1, [1u8; 32], 1, &p1).unwrap();
         assert!(o1.queue_id > 0);
-        assert_eq!(q.block_queue_stats().2, 1);
+        assert_eq!(q.block_queue_stats().1, 1);
         let o2 = q.block_queue_offer(2, [2u8; 32], 2, &p2).unwrap();
         assert!(o2.queue_id > 0);
-        assert_eq!(q.block_queue_stats().2, 2);
+        assert_eq!(q.block_queue_stats().1, 2);
         let n = q.block_queue_dequeue_height(1).unwrap();
         assert_eq!(n, 1);
-        assert_eq!(q.block_queue_stats().2, 1);
+        assert_eq!(q.block_queue_stats().1, 1);
         assert!(q.block_queue_has_height(2));
         assert!(!q.block_queue_has_height(1));
         assert_eq!(
@@ -269,7 +269,7 @@ mod tests {
             Some(wire.as_slice())
         );
         assert!(q.block_queue_has_height(10));
-        assert_eq!(q.block_queue_stats().2, 1, "peek does not dequeue");
+        assert_eq!(q.block_queue_stats().1, 1, "peek does not dequeue");
         assert!(q.block_queue_payload(999).unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -357,14 +357,14 @@ mod tests {
         let chunk = vec![0u8; 80 * 1024 * 1024];
         q.block_queue_enqueue(1, [1u8; 32], 1, &chunk).unwrap();
         q.block_queue_enqueue(2, [2u8; 32], 2, &chunk).unwrap();
-        assert!(q.block_queue_stats().1 > BQ_SOFT_FREE_BYTES);
+        assert!(q.block_queue_stats().0 > BQ_SOFT_FREE_BYTES);
         assert!(
             q.block_queue_update_soft_pressure(None),
             "bytes over free floor → restricted"
         );
         // Drop one chunk → under free floor → unrestricted.
         q.block_queue_dequeue_height(1).unwrap();
-        assert!(q.block_queue_stats().1 < BQ_SOFT_FREE_BYTES);
+        assert!(q.block_queue_stats().0 < BQ_SOFT_FREE_BYTES);
         assert!(
             !q.block_queue_update_soft_pressure(None),
             "bytes under free floor → unrestricted"
@@ -557,7 +557,7 @@ mod tests {
         assert!(q.block_queue_raw_payload(7).unwrap().is_none());
         assert!(q.block_queue_payload(7).unwrap().unwrap().is_empty());
         assert_eq!(
-            q.block_queue_stats().1,
+            q.block_queue_stats().0,
             64 + 6,
             "charge 64 + leftover raw wire-8"
         );

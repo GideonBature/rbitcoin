@@ -966,7 +966,7 @@ impl AccountedHeap {
 
     fn from_hub(hub: &ChainHub, inflight_bytes: u64, wire_bytes: u64) -> Self {
         let owned = hub.query.process_owned_size_snapshot();
-        let (_stop, bq_bytes, _count) = hub.query.block_queue_stats();
+        let (bq_bytes, _count) = hub.query.block_queue_stats();
         let head = owned.head;
         Self {
             bq_bytes,

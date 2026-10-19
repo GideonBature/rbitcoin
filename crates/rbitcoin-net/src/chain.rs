@@ -6246,7 +6246,7 @@ mod tests {
         {
             let hub = hub.clone();
             thread::spawn(move || {
-                let until = Instant::now() + Duration::from_secs(2);
+                let until = Instant::now() + Duration::from_millis(200);
                 while Instant::now() < until {
                     assert_eq!(hub.best_header_height(), 2);
                     assert!(hub.chaintips().iter().any(|t| t.hash == tip));

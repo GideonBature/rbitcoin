@@ -181,7 +181,7 @@ absolute path. Keep default-tier fixtures small: on tmpfs, test bytes are RAM.
 | `rbitcoin-store --lib` | **&lt;45 s** | Catalog-run fixtures stay tens of tiny files, not thousands |
 | `rbitcoin-consensus --lib` | **&lt;30 s** | Pure-result rule: [True journeys](#true-journeys). Mainnet 866342 (~1.6 s) is the historical prevout pin — one zstd decode, overweight on a clone. |
 | `rbitcoin-query --lib` | **&lt;20 s** | |
-| `rbitcoin-test --test scenarios` | **&lt;15 s** | Prefer `pad_empty_from` / shared mature helpers |
+| `rbitcoin-test --test journeys` | **&lt;15 s** for the old scenarios module | Prefer `pad_empty_from` / shared mature helpers. Default journeys are one binary (`scenarios::` and the rest). |
 | **Full** `cargo test --workspace` | **≤3 min** warm | Stretch **&lt;2 min** |
 
 **New default-suite test rule:** if a new or expanded default test routinely takes **&gt;2 s wall** on a warm tree, the PR must **justify** it (what contract needs that cost, why a smaller N / unit cannot hit the branch). Prefer `#[ignore]` + reason string for true microbenches / host-only forensics.

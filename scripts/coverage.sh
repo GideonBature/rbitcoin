@@ -21,8 +21,10 @@ fi
 # Core JSON corpora are staged from the v31.1 submodule (not in-tree copies).
 ./scripts/core-functional/init-submodule.sh
 
-# Ensure bins exist for binary smoke scenarios (instrumented tree).
-cargo build -p rbitcoin-node -p rbitcoin-cli
+# `cargo llvm-cov test` builds `journey-node` when a journey execs it.
+# Node and cli smoke go through `cli_main`, not the bin. A plain
+# `cargo build` here compiled the workspace a second time with different
+# RUSTFLAGS.
 
 # Prefer system llvm-tools when rustup component is unavailable (Nix).
 if [[ -z "${LLVM_COV:-}" ]] && command -v llvm-cov >/dev/null 2>&1; then

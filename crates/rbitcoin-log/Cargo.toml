@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Minimal leveled stderr logger and long-stage progress registry (no external deps)"
 
+[lib]
+doctest = false
+
 [dependencies]
 
 [lints]

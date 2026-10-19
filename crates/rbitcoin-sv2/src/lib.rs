@@ -47,7 +47,19 @@ pub const TEMPLATE_INTERVAL: Duration = Duration::from_secs(5);
 /// A client cycling budgets costs at most one mempool-locked build per this
 /// interval. A changed budget can lag by up to this long. Tip events are
 /// not delayed.
+#[cfg(not(any(test, feature = "test-hooks")))]
 pub const CONSTRAINTS_COOLDOWN: Duration = Duration::from_secs(1);
+/// Crate tests and journeys. The node binary keeps 1s.
+#[cfg(any(test, feature = "test-hooks"))]
+pub const CONSTRAINTS_COOLDOWN: Duration = Duration::from_millis(100);
+
+/// True when this crate was compiled with the `test-hooks` feature.
+///
+/// A workspace build unifies that into the node, which then uses the short
+/// budget cooldown. The node warns at startup.
+pub fn compiled_with_test_hooks() -> bool {
+    cfg!(feature = "test-hooks")
+}
 
 /// Lower bound on [`Sv2TpConfig::template_interval`]. CPU trade: each check
 /// after a mempool change is one build under the mempool read lock, so a

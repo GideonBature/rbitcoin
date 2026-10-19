@@ -71,8 +71,8 @@ pub use regtest_pad::pad_empty_from;
 pub use resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
 pub use soft_densify::{
     bq_assign_stop_bytes, soft_ahead_quarter_full, soft_assign_restricted,
-    soft_confirm_window_covered, soft_confirm_window_n, soft_densify_band_hi, BQ_SOFT_FREE_BYTES,
-    TIP_HOLE_MIN_AHEAD_BLOCKS,
+    soft_confirm_window_covered, soft_confirm_window_n, soft_densify_band_hi, BQ_ASSIGN_STOP_BYTES,
+    BQ_SOFT_FREE_BYTES, TIP_HOLE_MIN_AHEAD_BLOCKS,
 };
 pub use sp_read::{tweaks_at_height, tweaks_for_height, tweaks_from_thin_and_body};
 pub use sp_tweaks::{ThinTweakRangeLimits, ThinTweakRow};
@@ -1497,13 +1497,14 @@ impl Query {
         self.tx_index.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// In-RAM block queue stats: `(assign_stop_bytes, bytes, count)`.
+    /// In-RAM block queue stats: `(bytes, count)`.
     ///
-    /// Bytes are process heap (wire payloads). First field is the densify
-    /// assign-stop ([`bq_assign_stop_bytes`]; `u64::MAX` when unlimited).
-    pub fn block_queue_stats(&self) -> (u64, u64, usize) {
+    /// Bytes are process heap (wire payloads). The densify cap is
+    /// [`bq_assign_stop_bytes`], copied onto the IBD config when that config
+    /// is built.
+    pub fn block_queue_stats(&self) -> (u64, usize) {
         let g = self.block_queue.lock().unwrap();
-        (bq_assign_stop_bytes(), g.bytes(), g.count())
+        (g.bytes(), g.count())
     }
 
     /// In-RAM entry count (soft time-depth meter).

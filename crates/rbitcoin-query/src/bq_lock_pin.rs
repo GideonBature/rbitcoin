@@ -106,12 +106,12 @@ fn stats_follow_enqueue_and_dequeue() {
     let q = open();
     q.block_queue_enqueue(5, [5u8; 32], 1, b"aaaaa").unwrap();
     q.block_queue_enqueue(9, [9u8; 32], 1, b"bbb").unwrap();
-    let (_stop, bytes, count) = q.block_queue_stats();
+    let (bytes, count) = q.block_queue_stats();
     assert_eq!(count, 2);
     assert_eq!(bytes, 8);
     assert_eq!(q.block_queue_max_height(), Some(9));
     q.block_queue_dequeue_height(9).unwrap();
-    let (_stop, bytes, count) = q.block_queue_stats();
+    let (bytes, count) = q.block_queue_stats();
     assert_eq!(count, 1);
     assert_eq!(bytes, 5);
     assert_eq!(q.block_queue_max_height(), Some(5));

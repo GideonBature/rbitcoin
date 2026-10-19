@@ -632,14 +632,14 @@ mod tests {
     use tokio::time::Instant;
 
     #[test]
-    fn constraints_rebuild_at_uses_the_one_second_cooldown() {
+    fn constraints_rebuild_at_uses_the_cooldown() {
         let built_at = Instant::now();
-        let soon = built_at + Duration::from_millis(999);
+        let soon = built_at + crate::CONSTRAINTS_COOLDOWN - Duration::from_millis(1);
         assert_eq!(
             constraints_rebuild_at(built_at, soon),
-            Some(built_at + Duration::from_secs(1))
+            Some(built_at + crate::CONSTRAINTS_COOLDOWN)
         );
-        let due = built_at + Duration::from_secs(1);
+        let due = built_at + crate::CONSTRAINTS_COOLDOWN;
         assert_eq!(constraints_rebuild_at(built_at, due), None);
     }
 

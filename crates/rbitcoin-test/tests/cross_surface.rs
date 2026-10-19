@@ -2539,6 +2539,22 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         );
     }
 
+    let tip = u32::try_from(
+        jsonrpc(rpc_addr, "getblockcount", json!([])).await["result"]
+            .as_u64()
+            .expect("block count"),
+    )
+    .expect("block count fits u32");
+    let mempool_dir = td.path().join("mempool");
+    let history_deadline = Instant::now() + Duration::from_secs(5);
+    let history = loop {
+        if fee_history_has_height(&mempool_dir, tip) || Instant::now() > history_deadline {
+            break fee_history_has_height(&mempool_dir, tip);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(history, "fee history missing connected height {tip}");
+
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
     match stopped {
@@ -3468,10 +3484,10 @@ async fn sv2_tp_bootstrap() {
     cfg.rpc.listen = Some(rpc_addr);
     cfg.sv2_tp_listen = Some(sv2_addr);
     cfg.sv2_tp_authority_sec = Some(Sv2AuthoritySecret(SV2_AUTHORITY_SEC));
-    cfg.sv2_tp_stale_grace_secs = 1;
+    cfg.sv2_tp_stale_grace = Duration::from_millis(200);
     // Over the bootstrap tx's 10_000 sat fee: only the fee-push story pushes.
     cfg.sv2_tp_fee_delta = 10_001;
-    cfg.sv2_tp_template_interval_secs = 1;
+    cfg.sv2_tp_template_interval = Duration::from_millis(200);
     let health_addr = ephemeral_addr();
     cfg.listen.health = Some(health_addr);
     cfg.metrics = true;
@@ -3506,7 +3522,7 @@ async fn sv2_tp_bootstrap() {
     let first = {
         let recv = c.recv();
         tokio::pin!(recv);
-        let held = tokio::time::timeout(Duration::from_millis(500), &mut recv).await;
+        let held = tokio::time::timeout(Duration::from_millis(150), &mut recv).await;
         assert!(held.is_err(), "no template while the stale tip keeps IBD");
         let mined = jsonrpc(rpc_addr, "generateblock", json!(["raw(51)", []])).await;
         assert!(mined["result"]["hash"].is_string(), "{mined}");
@@ -3589,7 +3605,7 @@ async fn sv2_tp_bootstrap() {
         last,
         "within the grace"
     );
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
     c.request_transaction_data(last).await.unwrap();
     assert_eq!(
         sv2_tx_data_error(sv2_recv(&mut c).await),
@@ -3691,7 +3707,7 @@ async fn sv2_tp_bootstrap() {
     let fee_push = {
         let recv = c.recv();
         tokio::pin!(recv);
-        let below = tokio::time::timeout(Duration::from_millis(1500), &mut recv).await;
+        let below = tokio::time::timeout(Duration::from_millis(400), &mut recv).await;
         assert!(below.is_err(), "2_000 sat is below the 10_001 delta");
         let sent = jsonrpc(
             rpc_addr,
@@ -3709,12 +3725,12 @@ async fn sv2_tp_bootstrap() {
             .expect("fee push in time")
             .expect("sv2 message")
     };
-    // The 5 s default's first check is at least 5 s after `solving`; the 1 s
-    // interval's second is about 2 s after it.
+    // The default interval's first check is seconds after `solving`. This
+    // session's 200 ms interval should have pushed well inside a second.
     let waited = solving.elapsed();
     assert!(
-        waited < Duration::from_millis(4500),
-        "pushed on the 1 s interval, waited {waited:?}"
+        waited < Duration::from_millis(1500),
+        "pushed on the 200 ms interval, waited {waited:?}"
     );
     let fee_push = sv2_template(fee_push);
     assert!(!fee_push.future_template, "fee push keeps the prev hash");
@@ -3722,7 +3738,7 @@ async fn sv2_tp_bootstrap() {
     assert_eq!(fee_push.value_remaining, next.value_remaining + 11_000);
 
     // Seven templates reached this client, and the below-delta check built
-    // one it did not send; the 1 s interval ran a check per second since.
+    // one it did not send. The 200 ms interval has run at least two checks.
     let m = scrape_metrics(health_addr).await;
     let builds = m["rbitcoin_sv2_template_builds_total"];
     assert!(builds >= 8.0, "{m:?}");

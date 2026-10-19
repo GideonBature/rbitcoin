@@ -544,7 +544,7 @@ when fees rise enough to matter, throttled. Requires Plan B.
   split into build and send.
 - **Refactor:** none expected.
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`,
-  `cargo test -p rbitcoin-test --test cross_surface sv2`
+  `cargo test -p rbitcoin-test --test journeys cross_surface::sv2`
 
 ### C2 — Operator surface
 

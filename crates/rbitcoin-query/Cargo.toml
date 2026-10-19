@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Query API over the rbitcoin store"
 
+[lib]
+doctest = false
+
 [dependencies]
 rbitcoin-consensus = { workspace = true }
 rbitcoin-primitives = { workspace = true }

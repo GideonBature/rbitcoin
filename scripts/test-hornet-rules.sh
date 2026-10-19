@@ -20,6 +20,6 @@ cargo test -p rbitcoin-consensus --lib -- \
   assemble_second_block_rejects_stale_nversion
 
 echo "== connect / header journey =="
-cargo test -p rbitcoin-test --test consensus_rules
+cargo test -p rbitcoin-test --test journeys consensus_rules::
 
 echo "hornet-mapped pins OK"

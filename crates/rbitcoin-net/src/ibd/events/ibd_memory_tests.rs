@@ -121,7 +121,7 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
     let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
     st.record_height(hash, 1);
     st.header_fks.insert(hash, rbitcoin_primitives::Fk(1));
-    let before = hub.query.block_queue_stats().1;
+    let before = hub.query.block_queue_stats().0;
     let write_next = AtomicU32::new(0);
     apply_block_framed(
         &mut st,
@@ -136,7 +136,7 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
         },
     );
     assert_eq!(
-        hub.query.block_queue_stats().1,
+        hub.query.block_queue_stats().0,
         before,
         "unsolicited body must not be copied into the queue"
     );
@@ -156,10 +156,10 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
         },
     );
     assert!(
-        hub.query.block_queue_stats().1 > before,
+        hub.query.block_queue_stats().0 > before,
         "a requested body is still queued"
     );
-    let queued = hub.query.block_queue_stats().1;
+    let queued = hub.query.block_queue_stats().0;
     st.inflight
         .insert(hash, super::super::state::InflightReq::new(0));
     apply_block_framed(
@@ -175,7 +175,7 @@ fn unsolicited_body_is_not_copied_into_the_queue() {
         },
     );
     assert_eq!(
-        hub.query.block_queue_stats().1,
+        hub.query.block_queue_stats().0,
         queued,
         "a second copy of a queued hash is dropped"
     );

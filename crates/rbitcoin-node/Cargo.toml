@@ -10,6 +10,10 @@ description = "rbitcoin full node binary and lifecycle"
 [[bin]]
 name = "rbitcoin-node"
 path = "src/main.rs"
+test = false
+
+[lib]
+doctest = false
 
 [features]
 mutants = []
