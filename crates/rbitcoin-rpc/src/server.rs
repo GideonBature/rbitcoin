@@ -1990,6 +1990,15 @@ mod tests {
 
         let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-token").expect("temp dir");
         std::fs::write(dir.path().join("rpc.token"), "pass").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.path().join("rpc.token"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
         let query = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
         let without_cookie = RpcConfig {
             listen: Some("127.0.0.1:0".parse().unwrap()),

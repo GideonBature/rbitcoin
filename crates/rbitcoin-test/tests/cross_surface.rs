@@ -1379,6 +1379,15 @@ async fn fee_history_backfills_from_the_chain_when_relay_starts() {
         q.flush().unwrap();
     }
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            td.path().join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let mempool_dir = td.path().join("mempool");
     for run in ["first start", "restart"] {
         let rpc_addr = ephemeral_addr();
@@ -1476,6 +1485,15 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     cfg.apply_kv("rpc_socket", rpc_sock.to_str().unwrap())
         .unwrap();
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            td.path().join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     cfg.max_run_secs = Some(90);
 
     let node = tokio::spawn(run_p2p(cfg));
@@ -2603,6 +2621,15 @@ async fn node_listen_and_exit() {
     // answer until the operator stops the node.
     std::fs::write(dir.join("ip_asn.dat"), rbitcoin_net::TWO_PREFIX_ASMAP).unwrap();
     std::fs::write(dir.join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let (electrum_addr, esplora_addr, rpc_addr, health_addr) = (
         ephemeral_addr(),
         ephemeral_addr(),
@@ -2691,6 +2718,15 @@ async fn node_listen_and_exit() {
     cfg.rpc.listen = Some(rpc_addr);
     cfg.listen.health = Some(health_addr);
     std::fs::write(dir.join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     cfg.max_run_secs = Some(30);
     let node = spawn_run_p2p(cfg);
     wait_listeners(&[rpc_addr, health_addr]).await;
@@ -3032,6 +3068,15 @@ async fn tor_control_onion_lifecycle() {
     // the datadir, and an I2P destination; getnetworkinfo lists them all.
     *tor.methods.lock().unwrap() = "HASHEDPASSWORD";
     std::fs::write(dir.join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let (p2p, electrum, esplora, rpc) = (
         ephemeral_addr(),
         ephemeral_addr(),
@@ -3193,6 +3238,15 @@ async fn enter_tip_mode_indexes() {
     let dir = td.path();
     let store = td.store_path();
     std::fs::write(dir.join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let (electrum_addr, rpc_addr) = (ephemeral_addr(), ephemeral_addr());
     let start = |shindex: bool| {
         let mut cfg = NodeConfig::default()
@@ -3386,6 +3440,15 @@ async fn sv2_tp_bootstrap() {
     cfg.listen.health = Some(health_addr);
     cfg.metrics = true;
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            td.path().join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     cfg.max_run_secs = Some(60);
     let node = tokio::spawn(run_p2p(cfg));
     wait_listeners(&[rpc_addr, sv2_addr, health_addr]).await;

@@ -51,6 +51,15 @@ async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
 
 fn write_token(dir: &Path) {
     std::fs::write(dir.join("rpc.token"), "pass\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
 }
 
 async fn handshake(bind_ip: Ipv4Addr, to: SocketAddr, agent: &str) -> V2PlainSession {
