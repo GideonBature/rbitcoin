@@ -30,7 +30,10 @@ allow = [
 
 [bans]
 multiple-versions = "deny"
-# `workspace = true` is this lint. The tree has no `version = "*"`.
+# cargo-deny 0.20.2 `bans.wildcards = "deny"` reports
+# `error[wildcard]` on every `workspace = true` line
+# (`rbitcoin-primitives = { workspace = true }` is "wildcard dependency").
+# The tree has no `version = "*"`. Leave this allow until that diagnostic changes.
 wildcards = "allow"
 deny = []
 skip = [
