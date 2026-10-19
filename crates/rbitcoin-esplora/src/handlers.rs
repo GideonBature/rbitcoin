@@ -1930,7 +1930,7 @@ fn fee_exceeds_sat_vb(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
     if max_sat_vb == 0 {
         return false;
     }
-    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
+    let vsize = rbitcoin_consensus::policy::vbytes_ceil(weight);
     fee_sat > max_sat_vb.saturating_mul(vsize)
 }
 

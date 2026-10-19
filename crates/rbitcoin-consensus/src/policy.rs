@@ -35,6 +35,20 @@ impl PolicyResult {
     }
 }
 
+/// `(weight + 3) / 4`.
+///
+/// `Weight::to_vbytes_ceil` is `(wu + 4) - 1`, and the `+ 4` panics in
+/// debug and wraps in release when `wu > u64::MAX - 4`. Sigop adjustment
+/// saturates at `u64::MAX` (unknown cost until recompute), which would
+/// become a tiny vsize. That range takes `u64::MAX / 4`, the same result
+/// as `saturating_add(3) / 4`.
+pub fn vbytes_ceil(weight: u64) -> u64 {
+    if weight > u64::MAX - 4 {
+        return u64::MAX / 4;
+    }
+    Weight::from_wu(weight).to_vbytes_ceil()
+}
+
 /// True if `fee_sat` meets the minimum relay feerate for `weight` (WU).
 ///
 /// Uses integer compare: `fee * 1000 >= vsize * MIN_RELAY_FEE_RATE_SAT_PER_KVB`.
@@ -47,7 +61,7 @@ pub fn meets_min_relay_fee_at(fee_sat: u64, weight: u64, sat_kvb: u64) -> bool {
     if sat_kvb == 0 {
         return true;
     }
-    let vsize = Weight::from_wu(weight).to_vbytes_ceil();
+    let vsize = vbytes_ceil(weight);
     if vsize == 0 {
         return false;
     }
@@ -56,7 +70,7 @@ pub fn meets_min_relay_fee_at(fee_sat: u64, weight: u64, sat_kvb: u64) -> bool {
 
 /// Feerate in sat/kvB for diagnostics (floors).
 pub fn fee_rate_sat_per_kvb(fee_sat: u64, weight: u64) -> u64 {
-    let vsize = Weight::from_wu(weight).to_vbytes_ceil();
+    let vsize = vbytes_ceil(weight);
     if vsize == 0 {
         return 0;
     }
@@ -297,6 +311,17 @@ mod tests {
     fn policy_result_is_ok_alias() {
         assert!(PolicyResult::Standard.is_ok());
         assert!(!PolicyResult::NonStandard("x").is_ok());
+    }
+
+    #[test]
+    fn saturated_weight_stays_a_huge_vsize() {
+        assert_eq!(vbytes_ceil(u64::MAX), u64::MAX / 4);
+        assert_eq!(vbytes_ceil(u64::MAX - 3), u64::MAX / 4);
+        assert_eq!(
+            vbytes_ceil(u64::MAX - 4),
+            Weight::from_wu(u64::MAX - 4).to_vbytes_ceil()
+        );
+        assert_eq!(fee_rate_sat_per_kvb(1_000, u64::MAX), 0);
     }
 
     #[test]

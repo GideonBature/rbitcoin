@@ -2379,8 +2379,8 @@ pub fn rbf_pays_for_replacement(
     if new_fee <= old_fee {
         return false;
     }
-    let new_v = bitcoin::Weight::from_wu(new_weight).to_vbytes_ceil();
-    let old_v = bitcoin::Weight::from_wu(old_weight).to_vbytes_ceil();
+    let new_v = policy::vbytes_ceil(new_weight);
+    let old_v = policy::vbytes_ceil(old_weight);
     if new_v == 0 || old_v == 0 {
         return false;
     }
@@ -2403,8 +2403,8 @@ pub fn rbf_pays_for_replacement(
 /// with `NUM/DEN = 5/4`.
 pub fn pure_rbfr_pays(new_fee: u64, new_weight: u64, direct_fee: u64, direct_weight: u64) -> bool {
     // `(weight + 3) / 4` is 0 only at weight 0, so the vsize check is the zero guard.
-    let new_v = bitcoin::Weight::from_wu(new_weight).to_vbytes_ceil();
-    let old_v = bitcoin::Weight::from_wu(direct_weight).to_vbytes_ceil();
+    let new_v = policy::vbytes_ceil(new_weight);
+    let old_v = policy::vbytes_ceil(direct_weight);
     if new_v == 0 || old_v == 0 {
         return false;
     }

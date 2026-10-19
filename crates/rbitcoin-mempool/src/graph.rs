@@ -12,7 +12,7 @@ use std::sync::Mutex;
 pub const MAX_CLUSTER_COUNT: usize = 64;
 /// Hard cap on total **virtual size** of one cluster (101 kvB).
 ///
-/// Measured as Σ `bitcoin::Weight::from_wu(weight).to_vbytes_ceil()` over cluster members.
+/// Measured as Σ [`vbytes_ceil`](rbitcoin_consensus::policy::vbytes_ceil) over cluster members.
 pub const MAX_CLUSTER_VSIZE: u64 = 101_000;
 /// Same limit as weight units: 101_000 vB × 4 WU/vB.
 ///
@@ -42,7 +42,7 @@ fn meets_block_min_feerate(modified_sat: i128, adj_weight_wu: u64, min_sat_kvb: 
     if min_sat_kvb == 0 {
         return true;
     }
-    let vsize = adj_weight_wu.saturating_add(3) / 4;
+    let vsize = rbitcoin_consensus::policy::vbytes_ceil(adj_weight_wu);
     modified_sat.saturating_mul(1000) >= i128::from(min_sat_kvb) * i128::from(vsize)
 }
 
@@ -566,9 +566,9 @@ impl TxGraph {
         let mut n = 0u64;
         for t in set {
             if self.entries.contains_key(t) {
-                n = n.saturating_add(
-                    bitcoin::Weight::from_wu(self.adjusted_weight_of(t)).to_vbytes_ceil(),
-                );
+                n = n.saturating_add(rbitcoin_consensus::policy::vbytes_ceil(
+                    self.adjusted_weight_of(t),
+                ));
             }
         }
         n

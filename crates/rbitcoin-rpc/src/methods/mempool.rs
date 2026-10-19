@@ -76,7 +76,7 @@ fn accept_fees_json(fee_sat: u64, weight: u64, wtxid: &str) -> Value {
 }
 
 fn accept_fees_parts(base_sat: u64, eff_sat: u64, weight: u64, includes: &[String]) -> Value {
-    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil().max(1);
+    let vsize = rbitcoin_consensus::policy::vbytes_ceil(weight).max(1);
     let sat_kvb = eff_sat.saturating_mul(1000).checked_div(vsize).unwrap_or(0);
     json!({
         "base": sat_btc_json(base_sat as i64),
@@ -105,7 +105,7 @@ fn submit_fees_json(
                 .saturating_add(i128::from(base))
                 .saturating_add(i128::from(delta));
             let w = mp.get_live_adjusted_weight(id).unwrap_or(0);
-            vsize_sum = vsize_sum.saturating_add(bitcoin::Weight::from_wu(w).to_vbytes_ceil());
+            vsize_sum = vsize_sum.saturating_add(rbitcoin_consensus::policy::vbytes_ceil(w));
             let Some(wt) = mp.wtxid_of(id) else {
                 inc.clear();
                 break;
@@ -139,7 +139,7 @@ pub(crate) fn sat_btc_json(sat: i64) -> Value {
 pub(crate) fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight: u64) -> Value {
     // Core `vsize` is sigop-adjusted; `weight` stays raw.
     let adj = mp.get_live_adjusted_weight(txid).unwrap_or(weight);
-    let vsize = bitcoin::Weight::from_wu(adj).to_vbytes_ceil();
+    let vsize = rbitcoin_consensus::policy::vbytes_ceil(adj);
     let delta = mp.fee_delta(txid);
     let modified = (fee as i64).saturating_add(delta);
     let (ac, asz, afee, dc, dsz, dfee, a_mod, d_mod, chunk_fee, chunk_w) =
@@ -477,7 +477,7 @@ fn fee_exceeds_max(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
     if max_sat_vb == 0 {
         return false;
     }
-    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
+    let vsize = rbitcoin_consensus::policy::vbytes_ceil(weight);
     fee_sat > max_sat_vb.saturating_mul(vsize)
 }
 
@@ -850,7 +850,7 @@ fn testmempoolaccept_package_rows(
                         "txid": txid,
                         "wtxid": wtxid,
                         "allowed": true,
-                        "vsize": bitcoin::Weight::from_wu(r.weight).to_vbytes_ceil(),
+                        "vsize": rbitcoin_consensus::policy::vbytes_ceil(r.weight),
                         "fees": accept_fees_json(r.fee_sat, r.weight, &wtxid),
                     }));
                 }
@@ -918,7 +918,7 @@ fn testmempoolaccept_single_rows(
                     "txid": txid,
                     "wtxid": wtxid,
                     "allowed": true,
-                    "vsize": bitcoin::Weight::from_wu(r.weight).to_vbytes_ceil(),
+                    "vsize": rbitcoin_consensus::policy::vbytes_ceil(r.weight),
                     "fees": accept_fees_json(r.fee_sat, r.weight, &wtxid),
                 }));
             }
@@ -1494,7 +1494,7 @@ fn submitpackage_admit(
                 wtxid,
                 json!({
                     "txid": txid_s,
-                    "vsize": bitcoin::Weight::from_wu(weight).to_vbytes_ceil(),
+                    "vsize": rbitcoin_consensus::policy::vbytes_ceil(weight),
                     "fees": { "base": sat_btc_json(fee as i64) },
                 }),
             );
@@ -1532,7 +1532,7 @@ fn submitpackage_admit(
                     wtxid.clone(),
                     json!({
                         "txid": hash_hex_display(&ok.txid.to_byte_array()),
-                        "vsize": bitcoin::Weight::from_wu(ok.weight).to_vbytes_ceil(),
+                        "vsize": rbitcoin_consensus::policy::vbytes_ceil(ok.weight),
                         "fees": submit_fees_json(
                             mp,
                             &ok.txid,
