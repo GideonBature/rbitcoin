@@ -170,9 +170,9 @@ pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
 /// shifts every remaining bit off (`0x0100ffff` was `2^224`). A partial
 /// drop stays finite and larger than the old loop: `0x0200ffff` leaves
 /// target `255`, at `257/256` of the old `2^216`. Size `33` or `34` past
-/// the limits above, and size `35` or more, drop high bits. Size `35`
-/// wraps the shift count to its low 8 bits, so the difficulty is huge
-/// where the old loop is small.
+/// the limits above drops high bits. Size `35` or more masks the shift
+/// with `0xff`. Size `35` is a shift of `0`, so the mantissa stays and
+/// the difficulty is huge where the old loop is small.
 ///
 /// `format_core_double` prints a non-finite result as `0`. Block and chain
 /// RPCs use that. `getmininginfo` puts this float straight into JSON, which
