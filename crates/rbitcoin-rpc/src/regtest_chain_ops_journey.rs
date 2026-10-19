@@ -581,6 +581,7 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_submit_overweight(&ctx, &hub, &mut cbs);
     chain_ops_maxfeerate(&ctx, &mut cbs);
     chain_ops_invalidate_and_precious(&ctx, &hub, &mut cbs, &p2wpkh);
+    chain_ops_reconsider_most_work(&ctx, &p2wpkh);
 
     // Two networks cannot be one chain: the same hub behind a mainnet RPC view.
     ctx.network = Network::Mainnet;
@@ -2579,6 +2580,121 @@ fn chain_ops_invalidate_and_precious(
     let h1 = dispatch(ctx, "getblockhash", vec![json!(1)]).unwrap();
     dispatch(ctx, "preciousblock", vec![h1]).unwrap();
     assert_eq!(best_hash(ctx), tip, "precious of less work must not activate");
+}
+
+/// Core `reconsiderblock`: clear the marks, then activate the most-work
+/// chain. Restored paths join into one branch, and a restored block that
+/// loses stays a fork the next `invalidateblock` can return to.
+fn chain_ops_reconsider_most_work(ctx: &RpcContext, p2wpkh: &ScriptBuf) {
+    let best = || best_hash(ctx).as_str().unwrap().parse::<BlockHash>().unwrap();
+    let call = |method: &str, hash: BlockHash| {
+        dispatch(ctx, method, vec![json!(hash.to_string())]).unwrap();
+    };
+    let generate = |n: u32| -> Vec<BlockHash> {
+        let mined = dispatch(ctx, "generate", vec![json!(n)]).unwrap();
+        let mined = mined.as_array().unwrap();
+        mined.iter().map(|h| h.as_str().unwrap().parse().unwrap()).collect()
+    };
+    let side = |mut prev: BlockHash, n: u32| -> Vec<BlockHash> {
+        let parent = dispatch(ctx, "getblockheader", vec![json!(prev.to_string())]).unwrap();
+        let mut time = parent["time"].as_u64().unwrap() as u32;
+        let mut height = parent["height"].as_u64().unwrap() as u32;
+        let mut out = Vec::new();
+        for _ in 0..n {
+            time += 900;
+            height += 1;
+            let block =
+                rbitcoin_consensus::mine_regtest_paying(prev, time, height, p2wpkh.clone(), vec![]);
+            dispatch(ctx, "submitblock", vec![json!(block_hex(&block))]).unwrap();
+            prev = block.block_hash();
+            out.push(prev);
+        }
+        out
+    };
+    let status = |hash: BlockHash| {
+        let tips = dispatch(ctx, "getchaintips", vec![]).unwrap();
+        let tips = tips.as_array().unwrap();
+        tips.iter()
+            .find(|t| t["hash"] == json!(hash.to_string()))
+            .map(|t| t["status"].as_str().unwrap().to_owned())
+    };
+
+    // a2 alone only ties b2. The two restored paths outweigh it together.
+    let a = generate(3);
+    call("invalidateblock", a[2]);
+    call("invalidateblock", a[1]);
+    let b = side(a[0], 1);
+    assert_eq!(best(), b[0]);
+    call("reconsiderblock", a[1]);
+    assert_eq!(best(), a[2]);
+    assert_eq!(status(b[0]).as_deref(), Some("valid-fork"));
+
+    // a3..a4 loses to c3..c5 but stays a fork, so invalidating c3 returns
+    // to a4. Only the leaf a4 is a tip.
+    let a4 = generate(1)[0];
+    call("invalidateblock", a4);
+    call("invalidateblock", a[2]);
+    assert_eq!(best(), a[1]);
+    let c = side(a[1], 3);
+    call("reconsiderblock", a[2]);
+    assert_eq!(best(), c[2]);
+    assert_eq!(status(a4).as_deref(), Some("valid-fork"));
+    assert_eq!(status(a[2]), None, "a block under a4 is not a fork tip");
+    assert_eq!(status(a[1]), None, "a connected block is not a fork tip");
+    call("invalidateblock", c[0]);
+    assert_eq!(best(), a4);
+
+    // d7 and the sibling e7..e8 share the restored d5..d6.
+    let d = generate(3);
+    call("invalidateblock", d[2]);
+    let e = side(d[1], 2);
+    call("invalidateblock", e[0]);
+    call("invalidateblock", d[0]);
+    assert_eq!(best(), a4);
+    call("reconsiderblock", d[0]);
+    assert_eq!(best(), e[1]);
+    assert_eq!(status(d[2]).as_deref(), Some("valid-fork"));
+
+    // f2 is a fork tip after g2..g5 wins. The restored f3..f4 on top of it
+    // was connected before, so f4 is a fork tip too. f2 stays one: with f3
+    // invalid again, invalidating g2 returns to f2.
+    let f = generate(4);
+    call("invalidateblock", f[2]);
+    let g = side(f[0], 4);
+    assert_eq!(best(), g[3]);
+    call("reconsiderblock", f[2]);
+    assert_eq!(best(), g[3]);
+    assert_eq!(status(f[3]).as_deref(), Some("valid-fork"));
+    call("invalidateblock", f[2]);
+    call("invalidateblock", g[0]);
+    assert_eq!(best(), f[1]);
+    call("reconsiderblock", f[2]);
+    assert_eq!(best(), f[3]);
+
+    // A held child that never connected does not hide its restored parent:
+    // h4 under the invalid h5 is still a fork to return to.
+    let h = generate(4);
+    let top = dispatch(ctx, "getblockheader", vec![json!(h[3].to_string())]).unwrap();
+    let mut bad = rbitcoin_consensus::mine_regtest_paying(
+        h[3],
+        top["time"].as_u64().unwrap() as u32 + 1,
+        top["height"].as_u64().unwrap() as u32 + 1,
+        p2wpkh.clone(),
+        vec![],
+    );
+    let value = &mut bad.txdata[0].output[0].value;
+    *value = bitcoin::Amount::from_sat(value.to_sat() + 1);
+    bad.header.merkle_root = bad.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut bad.header);
+    call("invalidateblock", h[2]);
+    dispatch(ctx, "submitblock", vec![json!(block_hex(&bad))]).unwrap();
+    let i = side(h[0], 5);
+    call("reconsiderblock", h[2]);
+    assert_eq!(best(), i[4]);
+    assert_eq!(status(h[3]).as_deref(), Some("valid-fork"));
+    call("invalidateblock", bad.block_hash());
+    call("invalidateblock", i[0]);
+    assert_eq!(best(), h[3]);
 }
 
 /// Last beat, because it corrupts the store: a connected spend whose parent
