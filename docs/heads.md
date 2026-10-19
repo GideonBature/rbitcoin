@@ -28,7 +28,7 @@ spk hash    ──► scripthash.head/NN.mphf+.val  sealed BDZ3 main (2-bit g + 
 | Module | On disk | Key → value | Who reads it |
 |--------|---------|-------------|--------------|
 | `HashHead` | `header.head` (+ `.gN`) | header **hash prefix** → header fk (`.mlt` if several) | Header ensure / `has_block` / prev walk |
-| `AddressHead` + `SegmentedTxHead` | `tx.head/` (`meta`, open `NNNNNN`, sealed `.mphf|.fuse8`) | **mixed txid** → relative **create_fk** (body-verify on `txid.body`). Live OA rolls at 80% slots; wipe-rebuild seals **2²⁵** keys/range in parallel (no OA). Lookup maps `.fuse8` read-only (heap `fuse8=0`); packed BDZ `g` is FdOnly (4 KiB page stream); MPHF output is `rel−1`. The open OA file is keyless; the process holds its whole slot array in RAM (4 B × slots, 128 MiB at 2²⁵) with a 7-bit fingerprint of the mixed key in each slot's spare bits. Probes and inserts hop that image; an insert pwrites the page; open refills fingerprints from `txid.body`. The seal sidecar collects keys from `txid.body`. | Confirm **lookup** stamp after live pin miss |
+| `AddressHead` + `SegmentedTxHead` | `tx.head/` (`meta`, open `NNNNNN`, sealed `.mphf|.fuse8`) | **mixed txid** → relative **create_fk** (body-verify on `txid.body`). Live OA rolls at 80% slots; wipe-rebuild seals **2²⁵** keys/range in parallel (no OA). Lookup maps `.fuse8` read-only (heap `fuse8=0`); packed BDZ `g` is FdOnly (4 KiB page stream); MPHF output is `rel−1`. The open OA is keyless, but each 4 B slot carries a 7-bit fingerprint of the mixed key in its spare bits. Probes and inserts hop a read-only `MAP_SHARED` view of the slot file; an insert pwrites the page. A meta v1 head (no fingerprints) gets them written from `txid.body` on first open, then meta v2 marks it tagged. The seal sidecar collects keys from `txid.body`. | Confirm **lookup** stamp after live pin miss |
 | Sealed SH main | `scripthash.head/NN.mphf` + `.val` | Electrum **scripthash prefix** → pack8 locators. Compact BDZ3: packed 2-bit `g` FdOnly; occupancy mapped (prefix through occ, not tags); tags/val FdOnly. Pass-1 extract BDZ writes this path (`inline_one` vs Empty) before pack; **`MphfHead::exists` is not pack-done** (RAM unsealed until `publish_packed_shard`). | After tip bulk |
 | Ingest + L0/L1 ovf | `scripthash.ovf/ingest`, L0 `SHSR`, L1 MPHF, `ovf/body` | Same pack8 key for incremental / post-seal new keys | Tip; lookup ingest → L0 → L1 → main |
 
@@ -37,7 +37,7 @@ spk hash    ──► scripthash.head/NN.mphf+.val  sealed BDZ3 main (2-bit g + 
 ## Lookup path (txid → create_fk)
 
 1. Live pipeline pin by prev_txid (same Weak as outs).
-2. **Open** wave: every unsealed OA (insert tail + in-flight seal), newest-first — one RAM probe (no IO; the fingerprint drops most foreign occupants), then two-shot `txid.body`. Retire keys whose create is fence-connected.
+2. **Open** wave: every unsealed OA (insert tail + in-flight seal), newest-first — one probe through the mapped slots (no syscall; the fingerprint drops most foreign occupants), then two-shot `txid.body`. Retire keys whose create is fence-connected.
 3. Still unfinished: each **sealed** segment, newest first. Fuse + one MPHF batch (or the sealed OA), then the same two-shot identity, then retire. A fence-connected hit skips every older segment. An unconnected body match does not.
 
 `TipThenAny` / `TipOnly` still walk older segments after an unconnected earlier
@@ -58,8 +58,8 @@ Roles: [`concurrency.md`](./concurrency.md).
 **lookup** is the only stage that probes `tx.head`: BQ-ahead TipOnly
 `get_fk_by_txid_batch` (open wave, then each sealed segment newest-first;
 a segment runs only for keys still unfinished). In-page hop keeps 8
-`(depth, fk)` on the stack and spills past that. The open OA hop reads the
-RAM image, not the file; sealed `g` pages still stream on the ring.
+`(depth, fk)` on the stack and spills past that. The open OA hop reads a
+read-only map of the slot file; sealed `g` pages still stream on the ring.
 Combined `head_loc` cdf3 was ~90% on late-mainnet — not enough to pay a
 full-depth probe for every key. Revisit if leftover-split `wave` cdf3 is
 &lt;60%. Write inserts via `head_insert_many` on `ibd-confirm-head` (Drain ∥

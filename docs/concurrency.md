@@ -85,7 +85,7 @@ spend annotations.
 | Capacity grow (`TableFile`) | Grow with fallocate/`set_len` and a published HWM. Do not introduce remap-epoch schemes (retired example: map epochs). Readers use the published HWM (Acquire) |
 | Atomic `count` / HWM | Publish barrier (Acquire readers / Release appender) |
 | Role exclusivity | One appender, one annotator — not a global store mutex |
-| `tx.head` insert | **Sole writer**: page-coalesced `pwrite` + `published_len` Release, then the RAM image slot store (Release; no CAS, no CPU fence). Lookups hop the image with Acquire loads and never read the open OA file. Role exclusivity — not multi-inserter safe |
+| `tx.head` insert | **Sole writer**: page-coalesced `pwrite` + `published_len` Release (no CAS, no CPU fence). Lookups hop a read-only `MAP_SHARED` view of the slot file; the page cache makes a landed `pwrite` visible, and they never `pread` the open OA. Role exclusivity — not multi-inserter safe |
 | `tx.head` segment seal | Roll opens the next OA immediately; BDZ+fuse8 runs on a sidecar. Lookup probes every unsealed OA until publish. Write joins the sidecar only on the *next* roll, `flush`, or `Drop` (not on the rolling insert). |
 | `header.head` overflow | Insert past 7/8 rolls `header.head.gN` (new empty file). Occupied rewrite is open-only: undersized single gen writes `header.head.grow` then rename. |
 | `ChainHub::confirmed` | `RwLock<HashSet>` for O(1) `has_block` (IBD assign path) |

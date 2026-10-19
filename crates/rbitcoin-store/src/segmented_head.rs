@@ -28,15 +28,20 @@ use crate::fuse8_filter::{fuse_key_from_mixed, open_file, SealedFuse8};
 use crate::tx_head_mphf::TxHeadMphf;
 use rbitcoin_primitives::{Fk, SCHEMA_VERSION, STORE_MAGIC};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-const META_VERSION: u32 = 1;
+/// v2 adds [`FLAG_TAGGED`]. A v1 meta still opens: its unsealed OAs predate
+/// slot fingerprints and get them written on that open.
+const META_VERSION: u32 = 2;
+const META_V1_UNTAGGED: u32 = 1;
 const META_HEADER_LEN: usize = 24;
 const SEG_DESC_LEN: usize = 32;
 const FLAG_SEALED: u32 = 1;
+/// Every slot of this unsealed OA carries its key's fingerprint.
+const FLAG_TAGGED: u32 = 2;
 
 /// Collect `(fuse_key, rel)` for a sealed range (`first_fk`, `count`).
 ///
@@ -53,6 +58,9 @@ struct Segment {
     count: AtomicU64,
     file_id: u32,
     sealed: bool,
+    /// Unsealed OA whose slots all carry fingerprints (false only for a
+    /// meta v1 head until `TxTable` writes them).
+    tagged: AtomicBool,
     head: Option<Arc<AddressHead>>,
     pack: Option<Arc<TxHeadMphf>>,
     fuse: Option<SealedFuse8>,
@@ -103,6 +111,7 @@ impl SegmentedTxHead {
         for d in descs {
             let path = segment_head_path(&dir, d.file_id);
             let sealed = d.flags & FLAG_SEALED != 0;
+            let tagged = sealed || d.flags & FLAG_TAGGED != 0;
             let (head, pack) = if sealed {
                 if !TxHeadMphf::exists(&path) {
                     return Err(StoreError::Corrupt("tx.head sealed segment missing mphf"));
@@ -138,6 +147,7 @@ impl SegmentedTxHead {
                 count: AtomicU64::new(d.count),
                 file_id: d.file_id,
                 sealed,
+                tagged: AtomicBool::new(tagged),
                 head,
                 pack,
                 fuse,
@@ -264,16 +274,40 @@ impl SegmentedTxHead {
             .sum()
     }
 
-    /// RAM slot images of the unsealed segments (insert tail + in-flight seal).
-    pub fn open_mirror_resident_bytes(&self) -> u64 {
+    /// Mapped slot arrays of the unsealed segments (file-backed, not heap).
+    pub fn open_map_bytes(&self) -> u64 {
         self.segments_snapshot()
             .iter()
-            .map(|s| s.head.as_ref().map(|h| h.mirror_bytes()).unwrap_or(0))
+            .map(|s| s.head.as_ref().map(|h| h.map_bytes()).unwrap_or(0))
             .sum()
     }
 
-    /// Fingerprint rows of unsealed segment `file_id` loaded at open. `keys`
-    /// are `(mixed, absolute fk)`; fks before the segment are skipped.
+    /// Unsealed segments whose slots still lack fingerprints (meta v1 heads):
+    /// `(file_id, first_fk, count)`.
+    pub fn untagged_open_ranges(&self) -> Vec<(u32, u64, u64)> {
+        self.segments_snapshot()
+            .iter()
+            .filter(|s| !s.sealed && !s.tagged.load(Ordering::Relaxed))
+            .map(|s| (s.file_id, s.first_fk, s.count.load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    /// Record that every slot of unsealed segment `file_id` carries its
+    /// fingerprint (after [`Self::fill_fingerprints`] and a flush).
+    pub fn mark_tagged(&self, file_id: u32) -> Result<(), StoreError> {
+        let _w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let segs = self.segments_snapshot();
+        let seg = segs
+            .iter()
+            .find(|s| s.file_id == file_id)
+            .ok_or(StoreError::Corrupt("tx.head mark tagged: file_id missing"))?;
+        seg.tagged.store(true, Ordering::Relaxed);
+        self.persist_meta_locked()
+    }
+
+    /// Write fingerprints into unsealed segment `file_id` for rows that
+    /// predate tags. `keys` are `(mixed, absolute fk)`; fks before the segment
+    /// are skipped.
     pub fn fill_fingerprints(
         &self,
         file_id: u32,
@@ -294,8 +328,7 @@ impl SegmentedTxHead {
             .filter(|(_, fk)| fk.0 >= seg.first_fk)
             .map(|(m, fk)| (*m, Fk(fk.0 - seg.first_fk + 1)))
             .collect();
-        head.fill_fingerprints(&rels);
-        Ok(())
+        head.fill_fingerprints(&rels)
     }
 
     /// Heap-owned sealed fuse8 fingerprints (**0** when mapped from `.fuse8`).
@@ -328,7 +361,6 @@ impl SegmentedTxHead {
                         depth_end: 0,
                         empty_local: 0,
                     },
-                    hop_equal_file: true,
                     occupied: 0,
                 },
             ));
@@ -336,7 +368,7 @@ impl SegmentedTxHead {
         let Some(head) = last.head.as_ref() else {
             return Err(StoreError::Corrupt("tx.head leftover hop: tail sealed"));
         };
-        let dump = head.dump_page_hop(mixed)?;
+        let dump = head.dump_page_hop(mixed);
         Ok((last.file_id, last.first_fk, dump))
     }
 
@@ -643,6 +675,26 @@ impl SegmentedTxHead {
         Ok(())
     }
 
+    /// Rewrite this head as a meta v1 head: untagged slots, no `FLAG_TAGGED`.
+    #[cfg(test)]
+    pub(crate) fn downgrade_to_v1_for_test(&self) -> Result<(), StoreError> {
+        let segs = self.segments_snapshot();
+        let mut descs = Vec::new();
+        for s in segs.iter() {
+            if let Some(head) = s.head.as_ref() {
+                head.strip_tags_for_test()?;
+            }
+            let flags = if s.sealed { FLAG_SEALED } else { 0 };
+            descs.push((
+                s.first_fk,
+                s.count.load(Ordering::Relaxed),
+                s.file_id,
+                flags,
+            ));
+        }
+        write_meta_versioned(&self.dir, META_V1_UNTAGGED, self.layout.bits, &descs)
+    }
+
     pub fn flush(&self) -> Result<(), StoreError> {
         let segs = self.segments_snapshot();
         for s in segs.iter() {
@@ -691,6 +743,7 @@ impl SegmentedTxHead {
             count: AtomicU64::new(0),
             file_id,
             sealed: false,
+            tagged: AtomicBool::new(true),
             head: Some(Arc::new(head)),
             pack: None,
             fuse: None,
@@ -776,6 +829,7 @@ impl SegmentedTxHead {
                 count: AtomicU64::new(count),
                 file_id,
                 sealed: true,
+                tagged: AtomicBool::new(true),
                 head: None,
                 pack: Some(Arc::new(p.pack)),
                 fuse: Some(map_segment_fuse(&self.dir, file_id)?),
@@ -790,7 +844,8 @@ impl SegmentedTxHead {
         drop(guard);
         // Sealed meta must be durable before the OA is unlinked: a crash after
         // unlink with meta still "open" would force a full head rebuild. A
-        // leftover OA after persist is discarded on open.
+        // leftover OA after persist is discarded on open (Windows also lands
+        // here when a lookup still holds the OA map).
         self.persist_meta_locked()?;
         let base = segment_head_path(&self.dir, p.file_id);
         let _ = std::fs::remove_file(&base);
@@ -878,6 +933,7 @@ impl SegmentedTxHead {
     }
 
     /// Unsealed segments `(file_id, first_fk, count)` (insert tail + in-flight seal).
+    #[cfg(test)]
     pub fn unsealed_ranges(&self) -> Vec<(u32, u64, u64)> {
         self.segments_snapshot()
             .iter()
@@ -914,6 +970,7 @@ impl SegmentedTxHead {
                 count: AtomicU64::new(count),
                 file_id: p.file_id,
                 sealed: true,
+                tagged: AtomicBool::new(true),
                 head: None,
                 pack: Some(Arc::new(p.pack)),
                 fuse: Some(fuse),
@@ -934,7 +991,10 @@ impl SegmentedTxHead {
         let descs: Vec<(u64, u64, u32, u32)> = segs
             .iter()
             .map(|s| {
-                let flags = if s.sealed { FLAG_SEALED } else { 0 };
+                let mut flags = if s.sealed { FLAG_SEALED } else { 0 };
+                if s.tagged.load(Ordering::Relaxed) {
+                    flags |= FLAG_TAGGED;
+                }
                 (
                     s.first_fk,
                     s.count.load(Ordering::Relaxed),
@@ -1130,6 +1190,15 @@ pub fn wipe_segmented_head_files(dir: &Path) {
 }
 
 fn write_meta(dir: &Path, bits: u32, segs: &[(u64, u64, u32, u32)]) -> Result<(), StoreError> {
+    write_meta_versioned(dir, META_VERSION, bits, segs)
+}
+
+fn write_meta_versioned(
+    dir: &Path,
+    version: u32,
+    bits: u32,
+    segs: &[(u64, u64, u32, u32)],
+) -> Result<(), StoreError> {
     let path = meta_path(dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| StoreError::io(parent, e))?;
@@ -1138,7 +1207,7 @@ fn write_meta(dir: &Path, bits: u32, segs: &[(u64, u64, u32, u32)]) -> Result<()
     buf.extend_from_slice(&STORE_MAGIC);
     buf.extend_from_slice(&SCHEMA_VERSION.to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&META_VERSION.to_le_bytes());
+    buf.extend_from_slice(&version.to_le_bytes());
     buf.extend_from_slice(&(segs.len() as u32).to_le_bytes());
     buf.extend_from_slice(&bits.to_le_bytes());
     buf.extend_from_slice(&0u32.to_le_bytes());
@@ -1177,7 +1246,7 @@ fn read_meta_buf(buf: &[u8]) -> Result<(u32, Vec<SegDesc>), StoreError> {
         return Err(StoreError::Corrupt("tx.head.meta magic"));
     }
     let meta_ver = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-    if meta_ver != META_VERSION {
+    if meta_ver != META_VERSION && meta_ver != META_V1_UNTAGGED {
         return Err(StoreError::Corrupt("tx.head.meta version"));
     }
     let seg_count = u32::from_le_bytes(buf[12..16].try_into().unwrap()) as usize;

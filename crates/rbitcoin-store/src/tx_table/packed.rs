@@ -1162,8 +1162,8 @@ pub struct HeadResizeSizeSnapshot {
     pub fuse8_bytes: u64,
     /// In-RAM BDZ `g` arrays (0 after FdOnly open).
     pub mphf_g_bytes: u64,
-    /// RAM slot images of the unsealed `tx.head` segments (4 B × slots each).
-    pub head_mirror_bytes: u64,
+    /// Mapped slot arrays of the unsealed `tx.head` segments (file-backed, not heap).
+    pub head_map_bytes: u64,
     /// Compact BDZ occupancy heap (supers after mmap; 0 occ copy).
     pub mphf_occ_bytes: u64,
     /// Class C L2 images (strong_tx + confirmed + header_txs).

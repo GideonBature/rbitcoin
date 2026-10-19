@@ -15,10 +15,10 @@
 //! [`resolve_fk_and_range_batch`] is the **stamp short-circuit**: stops after
 //! loc, returns `(fk, body_range)` so prep denserels-loads by offset.
 //!
-//! **IO shape:** the open OA probe hops the RAM slot image (no IO); sealed
-//! `g` pages may use one TLS [`UringSession`]; sidefile ID is page-grouped
-//! bulk pread (one read per OS page of `txid.body`). Nested TLS uring remains
-//! a hard error.
+//! **IO shape:** the open OA probe hops a read-only map of its slots (no
+//! syscall); sealed `g` pages may use one TLS [`UringSession`]; sidefile ID is
+//! page-grouped bulk pread (one read per OS page of `txid.body`). Nested TLS
+//! uring remains a hard error.
 //!
 //! Backend: global `RBITCOIN_IO` (`uring` \| `pool` \| `pread`).
 
@@ -94,7 +94,7 @@ fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDiag) 
         .unwrap_or_else(|| "-".into());
     let mut s = format!(
         "leftover probe diag txid={} mix={} page_base={} bits={} file_id={} first_fk={} age={} \
-         hit_empty={} depth_end={} empty_local={} occ={} hop2eq={} ncand={}",
+         hit_empty={} depth_end={} empty_local={} occ={} ncand={}",
         hex_bytes(&d.txid),
         hex_bytes(&d.mixed_prefix),
         d.page_base,
@@ -106,7 +106,6 @@ fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDiag) 
         d.depth_end,
         d.empty_local,
         d.page_occupied,
-        u8::from(d.hop_equal_file),
         d.cands.len(),
     );
     for c in &d.cands {
@@ -208,7 +207,6 @@ fn diagnose_txid_probe(
         depth_end: hop.scan.depth_end,
         empty_local: hop.scan.empty_local,
         page_occupied: hop.occupied,
-        hop_equal_file: hop.hop_equal_file,
         cands,
     })
 }

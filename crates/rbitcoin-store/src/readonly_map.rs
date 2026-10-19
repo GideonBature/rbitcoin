@@ -1,7 +1,10 @@
-//! Read-only mmap of an immutable sealed file (not [`crate::file::TableFile`]).
+//! Read-only mmap of a sealed file, or of the open `tx.head` OA (not
+//! [`crate::file::TableFile`]).
 //!
-//! Used for `.fuse8` fingerprints and BDZ3 occupancy. Kernel reclaim drops
-//! clean file pages (no swap write).
+//! Used for `.fuse8` fingerprints, BDZ3 occupancy, and the open `tx.head`
+//! slot array, whose sole writer `pwrite`s pages through its own fd: a
+//! `MAP_SHARED` view reads them through the same page cache. Kernel reclaim
+//! drops clean file pages (no swap write).
 //!
 //! `map_path` maps the file length from that open. `map_prefix` refuses a
 //! caller length past the file. Truncating the file after the map is

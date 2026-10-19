@@ -3568,12 +3568,12 @@ fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// After a restart the open segment's rows get their RAM fingerprint back, so
-/// a probe returns only the key's own create even when foreigners share its
-/// chain (200 keys in 256 slots collide often).
+/// A meta v1 head opens, gets its fingerprints written from `txid.body`, and
+/// is marked tagged: a probe then returns only the key's own create even when
+/// foreigners share its chain (200 keys in 256 slots collide often).
 #[test]
-fn reopen_fills_open_head_fingerprints() {
-    let dir = tempfile_dir("reopen-fp");
+fn open_tags_a_meta_v1_head() {
+    let dir = tempfile_dir("tag-v1");
     let layout = HeadLayout::new(8).unwrap();
     let recs: Vec<TxRecord> = (1..=200u64)
         .map(|i| {
@@ -3596,14 +3596,24 @@ fn reopen_fills_open_head_fingerprints() {
             .put_full_batch_indexed(&meta_only_items(&recs), true)
             .unwrap();
         t.flush().unwrap();
+        t.head.downgrade_to_v1_for_test().unwrap();
         fks
     };
     let t = TxTable::open(&dir).unwrap();
-    assert_eq!(t.head.sealed_segment_count(), 0);
+    assert!(
+        t.head.untagged_open_ranges().is_empty(),
+        "open tags the v1 head"
+    );
     for (rec, fk) in recs.iter().zip(&fks) {
         let mixed = t.mix_txid_for_head(&rec.txid);
         assert_eq!(t.head.probe_candidates(&mixed).unwrap(), vec![*fk]);
     }
+    drop(t);
+    let t = TxTable::open(&dir).unwrap();
+    assert!(
+        t.head.untagged_open_ranges().is_empty(),
+        "meta v2 stays tagged"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

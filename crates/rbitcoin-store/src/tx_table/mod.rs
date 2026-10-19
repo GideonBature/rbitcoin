@@ -1280,17 +1280,18 @@ impl TxTable {
                 t.head.flush()?;
             }
             t.seal_unsealed_nontail_from_body()?;
-            t.fill_open_head_fingerprints()?;
+            t.tag_untagged_open_heads()?;
         }
         Ok(t)
     }
 
-    /// Rows of the open segment loaded from the file carry no fingerprint, so
-    /// every row on a chain would stay an identity candidate. Mix their txids
-    /// from `txid.body` and set the RAM fingerprints (file untouched).
-    fn fill_open_head_fingerprints(&self) -> Result<(), StoreError> {
+    /// A meta v1 head predates slot fingerprints: every row on a chain is an
+    /// identity candidate. Mix the open segment's txids from `txid.body`,
+    /// write each row's fingerprint into its slot, then record the segment as
+    /// tagged. Runs once per upgraded datadir.
+    fn tag_untagged_open_heads(&self) -> Result<(), StoreError> {
         let n_body = self.count();
-        for (file_id, first_fk, count) in self.head.unsealed_ranges() {
+        for (file_id, first_fk, count) in self.head.untagged_open_ranges() {
             let last = first_fk.saturating_add(count).saturating_sub(1);
             if count == 0 || first_fk == 0 || last > n_body {
                 continue;
@@ -1303,7 +1304,7 @@ impl TxTable {
                     .step_by(span as usize)
                     .map(|cur| {
                         let end = (cur + span - 1).min(last);
-                        sc.spawn(move || self.fill_head_fingerprints_range(file_id, cur, end))
+                        sc.spawn(move || self.tag_head_range(file_id, cur, end))
                     })
                     .collect();
                 for h in handles {
@@ -1312,8 +1313,11 @@ impl TxTable {
                 }
                 Ok::<(), StoreError>(())
             })?;
+            // Slots durable before the meta says they are tagged.
+            self.head.flush()?;
+            self.head.mark_tagged(file_id)?;
             rbitcoin_log::info!(
-                "store: tx.head fingerprints filled file_id={file_id} first_fk={first_fk} \
+                "store: tx.head fingerprints written file_id={file_id} first_fk={first_fk} \
                  count={count} workers={workers} ms={}",
                 t0.elapsed().as_millis()
             );
@@ -1321,12 +1325,7 @@ impl TxTable {
         Ok(())
     }
 
-    fn fill_head_fingerprints_range(
-        &self,
-        file_id: u32,
-        first: u64,
-        last: u64,
-    ) -> Result<(), StoreError> {
+    fn tag_head_range(&self, file_id: u32, first: u64, last: u64) -> Result<(), StoreError> {
         const CHUNK: u64 = 65_536;
         let mut cur = first;
         while cur <= last {
@@ -3116,7 +3115,7 @@ impl TxTable {
             sealed_segments: self.head.sealed_segment_count() as u64,
             fuse8_bytes: self.head.sealed_fuse_resident_bytes(),
             mphf_g_bytes: self.head.sealed_mphf_g_resident_bytes(),
-            head_mirror_bytes: self.head.open_mirror_resident_bytes(),
+            head_map_bytes: self.head.open_map_bytes(),
             mphf_occ_bytes: 0,
             class_c_l2_bytes: 0,
         }

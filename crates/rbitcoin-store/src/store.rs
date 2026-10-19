@@ -3423,7 +3423,6 @@ mod tests {
         assert_eq!(diag.txid, b);
         assert_eq!(diag.page_base, page_a);
         assert!(diag.hit_empty, "hop must stop at empty");
-        assert!(diag.hop_equal_file, "file page must match the RAM image");
         assert!(
             diag.cands
                 .iter()

@@ -1218,7 +1218,7 @@ fn ser_process_owned<S: serde::Serializer>(
             "sealed_segments": h.sealed_segments,
             "fuse8_bytes": h.fuse8_bytes,
             "mphf_g_bytes": h.mphf_g_bytes,
-            "head_mirror_bytes": h.head_mirror_bytes,
+            "head_map_bytes": h.head_map_bytes,
             "mphf_occ_bytes": h.mphf_occ_bytes,
             "class_c_l2_bytes": h.class_c_l2_bytes
         }
