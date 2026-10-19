@@ -339,7 +339,10 @@ impl Orphanage {
     }
 
     /// Take all orphans that listed `parent` as missing (for re-accept).
-    pub fn take_children_of(&mut self, parent: &Txid) -> Vec<Transaction> {
+    ///
+    /// The announcer list comes with the transaction. A child that still
+    /// misses another parent is parked again under those same peers.
+    pub fn take_children_of(&mut self, parent: &Txid) -> Vec<OrphanSnapshot> {
         let Some(children) = self.by_parent.remove(parent) else {
             return Vec::new();
         };
@@ -359,7 +362,10 @@ impl Orphanage {
                         }
                     }
                 }
-                out.push(e.tx);
+                out.push(OrphanSnapshot {
+                    tx: e.tx,
+                    announcers: e.announcers.into_iter().collect(),
+                });
             }
         }
         out
@@ -586,7 +592,7 @@ mod tests {
         assert!(o.announcers_of(&tid).contains(&1));
         let kids = o.take_children_of(&parent);
         assert!(
-            kids.iter().any(|tx| tx.compute_txid() == tid),
+            kids.iter().any(|child| child.tx.compute_txid() == tid),
             "the parent still delivers peer 1's orphan"
         );
     }

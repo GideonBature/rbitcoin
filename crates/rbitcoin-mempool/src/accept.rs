@@ -4,7 +4,7 @@ use crate::error::MempoolError;
 use crate::graph::{
     sigops_adjusted_weight, SelectBudget, Selected, TxEntry, TxGraph, MAX_BLOCK_SIGOPS_COST,
 };
-use crate::orphanage::Orphanage;
+use crate::orphanage::{OrphanSnapshot, Orphanage};
 use crate::packed::VinAux;
 use crate::store::Mempool;
 use bitcoin::{OutPoint, Transaction, TxOut, Txid, Wtxid};
@@ -1102,7 +1102,7 @@ impl ActiveMempool {
     }
 
     /// Take orphans waiting on `parent` (hub promote outside the write lock).
-    pub fn take_orphan_children(&mut self, parent: Txid) -> Vec<Transaction> {
+    pub fn take_orphan_children(&mut self, parent: Txid) -> Vec<OrphanSnapshot> {
         self.orphanage.take_children_of(&parent)
     }
 
@@ -1427,11 +1427,11 @@ impl ActiveMempool {
         let mut queue = VecDeque::new();
         self.push_orphan_children(parent, &mut queue);
         while let Some(child) = queue.pop_front() {
-            match self.accept_tx_with(&child, utxos, tip, 0, true, None) {
+            match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None) {
                 Ok(r) => self.push_orphan_children(r.txid, &mut queue),
                 Err(e) => {
                     if let AcceptError::Orphaned { missing, .. } = e {
-                        let _ = self.park_orphan(&child, missing);
+                        let _ = self.park_announced(&child.tx, missing, &child.announcers);
                     }
                     for id in self.restore_conflicts(utxos, tip, RestoreOrphans::Defer) {
                         self.push_orphan_children(id, &mut queue);
@@ -1442,7 +1442,7 @@ impl ActiveMempool {
     }
 
     /// Orphans of `parent`, earlier children still ahead of later ones.
-    fn push_orphan_children(&mut self, parent: Txid, queue: &mut VecDeque<Transaction>) {
+    fn push_orphan_children(&mut self, parent: Txid, queue: &mut VecDeque<OrphanSnapshot>) {
         for child in self.orphanage.take_children_of(&parent).into_iter().rev() {
             queue.push_front(child);
         }
@@ -1762,13 +1762,22 @@ impl ActiveMempool {
     }
 
     /// Park `tx` under `missing` and restore every announcing peer.
-    fn park_announced(&mut self, tx: &Transaction, missing: BTreeSet<Txid>, announcers: &[u64]) {
+    ///
+    /// The first peer is recorded by the insert. The rest are added before
+    /// this write lock returns, so a disconnect sees the full set.
+    pub fn park_announced(
+        &mut self,
+        tx: &Transaction,
+        missing: BTreeSet<Txid>,
+        announcers: &[u64],
+    ) -> AcceptError {
         let txid = tx.compute_txid();
         let first = announcers.first().copied();
-        let _ = self.park_orphan_from(tx, missing, first);
+        let err = self.park_orphan_from(tx, missing, first);
         for peer in announcers.iter().skip(1) {
             self.orphanage.add_announcer(&txid, *peer);
         }
+        err
     }
 
     fn rollback_accepted_package(
@@ -3944,6 +3953,63 @@ mod tests {
             "both parents present must admit the parked child"
         );
         assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second parent is still missing, so the child goes back. The peer
+    /// that announced it stays on the repark, and a disconnect drops it.
+    #[test]
+    fn promote_keeps_the_announcer_of_a_multi_parent_orphan() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent_a = spend_tx(ops[0], 99_000);
+        let parent_b = spend_tx(ops[1], 99_000);
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_a.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_b.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(197_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let child_id = child.compute_txid();
+        let mut missing = BTreeSet::new();
+        missing.insert(parent_a.compute_txid());
+        missing.insert(parent_b.compute_txid());
+        mp.park_orphan_from(&child, missing, Some(4));
+        mp.accept_tx(&parent_a, &utxos, TIP_OK)
+            .expect("first parent");
+        assert_eq!(
+            mp.orphanage.announcers_of(&child_id),
+            vec![4],
+            "the repark must keep the announcing peer"
+        );
+        mp.orphanage.erase_for_peer(4);
+        assert!(
+            !mp.orphanage.contains(&child_id),
+            "a disconnect of the only announcer must drop the orphan"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

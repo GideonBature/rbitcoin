@@ -1900,7 +1900,7 @@ impl MempoolHub {
         from: Option<u64>,
     ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
-        self.accept_with_utxo(tx, &self.utxo_provider(), from, false)
+        self.accept_with_utxo(tx, &self.utxo_provider(), from, false, &[])
     }
 
     /// Admit one `submitpackage` member without trimming and without parking.
@@ -1908,7 +1908,7 @@ impl MempoolHub {
     /// The package trims once at the end. A missing-input child stays a
     /// reconsiderable error so the parent can be retried with it.
     fn accept_tx_defer_trim(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
-        self.accept_with_utxo(tx, &self.utxo_provider(), None, true)
+        self.accept_with_utxo(tx, &self.utxo_provider(), None, true, &[])
     }
 
     /// Prepare under read lock; scripts off-lock. Parking is the caller's job.
@@ -2114,6 +2114,7 @@ impl MempoolHub {
         utxo: &impl rbitcoin_mempool::UtxoProvider,
         from: Option<u64>,
         defer_trim: bool,
+        announcers: &[u64],
     ) -> Result<AcceptResult, AcceptError> {
         utxo.note_spender(tx);
         let t0 = Instant::now();
@@ -2164,7 +2165,11 @@ impl MempoolHub {
                     }
                     let parked = {
                         let mut g = self.lock_write();
-                        g.park_orphan_from(tx, missing.clone(), from)
+                        if announcers.is_empty() {
+                            g.park_orphan_from(tx, missing.clone(), from)
+                        } else {
+                            g.park_announced(tx, missing.clone(), announcers)
+                        }
                     };
                     let us = t0.elapsed().as_micros() as u64;
                     self.meter_accept_stages(lock_us, stages);
@@ -2330,7 +2335,7 @@ impl MempoolHub {
         for item in ready {
             let from = item.announcers.first().copied();
             if let Err(AcceptError::Orphaned { .. }) =
-                self.accept_with_utxo(&item.tx, &utxo, from, false)
+                self.accept_with_utxo(&item.tx, &utxo, from, false, &[])
             {
                 let id = item.tx.compute_txid();
                 for peer in item.announcers.iter().skip(1) {
@@ -2511,7 +2516,7 @@ impl MempoolHub {
         promote_note(parent);
         self.enqueue_noted_orphans(&mut queue);
         while let Some(child) = queue.pop_front() {
-            let _ = self.accept_with_utxo(&child, utxo, None, false);
+            let _ = self.accept_with_utxo(&child.tx, utxo, None, false, &child.announcers);
             self.enqueue_noted_orphans(&mut queue);
         }
     }
@@ -2519,7 +2524,7 @@ impl MempoolHub {
     /// Move orphans of every tx noted since the last drain onto `queue`.
     /// Earlier notes stay ahead of later ones. A second take of the same
     /// txid is empty.
-    fn enqueue_noted_orphans(&self, queue: &mut VecDeque<Transaction>) {
+    fn enqueue_noted_orphans(&self, queue: &mut VecDeque<rbitcoin_mempool::OrphanSnapshot>) {
         let notes = promote_take_notes();
         if notes.is_empty() {
             return;
@@ -5843,7 +5848,9 @@ mod tests {
             map: HashMap::from([(op, coin)]),
             hits: AtomicUsize::new(0),
         };
-        let err = hub.accept_with_utxo(&tx, &utxo, None, false).unwrap_err();
+        let err = hub
+            .accept_with_utxo(&tx, &utxo, None, false, &[])
+            .unwrap_err();
         assert!(
             matches!(err, AcceptError::MissingPrevout(missing) if missing == op),
             "coin spent during the script check must conflict, got {err}"
@@ -8868,7 +8875,7 @@ mod tests {
             write_hits: Arc::clone(&hits),
         };
         let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
-        hub.accept_with_utxo(&tx, &probe, None, false)
+        hub.accept_with_utxo(&tx, &probe, None, false, &[])
             .expect("accept");
         assert_eq!(
             hits.load(Ordering::Relaxed),
@@ -8878,7 +8885,7 @@ mod tests {
         hits.store(0, Ordering::Relaxed);
         let held = spend_true(cbs[1], 1_000, ScriptBuf::from_bytes(vec![0x52]));
         let _view = q.store().hold_utxo_view();
-        hub.accept_with_utxo(&held, &probe, None, false)
+        hub.accept_with_utxo(&held, &probe, None, false, &[])
             .expect("accept while the view is held");
         assert_eq!(
             hits.load(Ordering::Relaxed),
@@ -8941,7 +8948,7 @@ mod tests {
             }],
         };
         let h = Arc::clone(&hub);
-        let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall, None, false));
+        let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall, None, false, &[]));
         let start = Instant::now();
         while !entered.load(Ordering::Acquire) {
             assert!(
