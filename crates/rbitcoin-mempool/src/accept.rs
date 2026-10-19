@@ -1681,7 +1681,7 @@ impl ActiveMempool {
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
-                    for item in self.repark_lifted(&lifted, utxos, tip) {
+                    for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0) {
                         match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None) {
                             Ok(r) => self.promote_orphans_of(r.txid, utxos, tip),
                             Err(AcceptError::Orphaned { missing, .. }) => {
@@ -1722,13 +1722,15 @@ impl ActiveMempool {
     /// The missing set saved at the lift is not used. A parent can arrive
     /// while the child is out of the orphanage, and parking under that parent
     /// leaves the child with nobody left to wake it. Parents still absent are
-    /// resolved again here. A child whose parents are all present is returned
-    /// so the caller can admit it. Announcers are kept on either path.
+    /// resolved again here. `fee_delta` is the caller's `prioritisetransaction`
+    /// map: a child under the raw relay floor is still returned when that
+    /// delta clears it. Announcers are kept on either path.
     pub fn repark_lifted(
         &mut self,
         lifted: &[LiftedOrphan],
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
+        fee_delta: &impl Fn(&Txid) -> i64,
     ) -> Vec<LiftedOrphan> {
         let mut ready = Vec::new();
         for item in lifted {
@@ -1736,7 +1738,7 @@ impl ActiveMempool {
             if self.graph.contains(&txid) {
                 continue;
             }
-            match self.prepare_admit(&item.tx, utxos, tip, 0, true, None) {
+            match self.prepare_admit(&item.tx, utxos, tip, fee_delta(&txid), true, None) {
                 Err(AcceptError::Orphaned { missing, .. }) => {
                     self.park_announced(&item.tx, missing, &item.announcers);
                 }

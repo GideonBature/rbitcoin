@@ -9,7 +9,9 @@ Fixed
   `submitpackage` and Electrum, so a parked child included in the package
   is not rolled out of the mempool. A failed package puts that child back
   under the parents it still does not have, keeps the peers who announced
-  it, and admits it when those parents are already in the mempool.
+  it, and admits it when those parents are already in the mempool. That
+  admit uses the child's `prioritisetransaction` delta, so a fee under the
+  raw relay floor is not thrown away.
 - **Electrum history refuses a window wider than 8,064 blocks.** A
   `from_height` of 1 or more still scans that window and does not use
   the scripthash create cap.

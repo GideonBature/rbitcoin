@@ -2318,9 +2318,14 @@ impl MempoolHub {
         }
         let utxo = self.utxo_provider();
         let tip = self.chain_tip_ctx();
+        // Read the priority map before the mempool write lock. A child under
+        // the raw relay floor is still admissible when its delta clears it.
+        let deltas = self.prioritised_txs();
         let ready = {
             let mut g = self.lock_write();
-            g.repark_lifted(lifted, &utxo, tip)
+            g.repark_lifted(lifted, &utxo, tip, &|id| {
+                deltas.get(id).copied().unwrap_or(0)
+            })
         };
         for item in ready {
             let from = item.announcers.first().copied();
@@ -7194,6 +7199,70 @@ mod tests {
             vec![4, 8],
             "putting the child back must keep the peers who announced it"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A prioritised child is under the relay floor until its delta is applied.
+    /// A failed package must still admit it once its parent is in the mempool.
+    #[test]
+    fn failed_package_admits_prioritised_child() {
+        let (_store, q, cbs) = pad_cbs(3);
+        let dir = tmp();
+        let hub = MempoolHub::open(&dir, Arc::clone(&q)).unwrap();
+        hub.set_relay_enabled(true);
+        let spk = ScriptBuf::from_bytes(vec![0x51]);
+        let parent = spend_true(cbs[2], 10_000, spk);
+        let parent_id = parent.compute_txid();
+        hub.accept_tx(&parent).expect("parent pays for itself");
+        let parent_value = 50_0000_0000 - 10_000;
+        let child = spend_vout(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            parent_value - 1,
+        );
+        let child_id = child.compute_txid();
+        let err = hub
+            .accept_tx(&child)
+            .expect_err("one sat is under the relay floor");
+        assert!(
+            matches!(err, AcceptError::Policy("min relay fee")),
+            "raw fee must miss the floor before the delta, got {err:?}"
+        );
+        hub.prioritise_tx(child_id, 1_000_000);
+        {
+            let mut missing = BTreeSet::new();
+            missing.insert(parent_id);
+            let mut g = hub.lock_write();
+            g.park_orphan_from(&child, missing, Some(4));
+        }
+        let dummy = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x46; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let err = hub
+            .accept_package(&[child, dummy])
+            .expect_err("the second member has no parent");
+        assert!(
+            hub.contains(&child_id),
+            "a prioritised child must be admitted after the package fails, got {err:?}"
+        );
+        assert_eq!(hub.orphan_count(), 0);
+        assert!(hub.contains(&parent_id));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
