@@ -41,18 +41,9 @@ pub(crate) fn hash_hex_display(h: &[u8; 32]) -> String {
 }
 
 /// Parse Core display-order 32-byte hex → internal byte order.
-///
-/// A short non-hex id is `hash/txid must be 32 bytes hex`. Odd length and a
-/// bad digit keep their own sentences.
 pub(crate) fn parse_hash32_display(hex: &str) -> Result<[u8; 32], Value> {
-    match rbitcoin_primitives::parse_display_hash32(hex) {
-        Ok(b) => Ok(b),
-        Err(rbitcoin_primitives::DisplayHashError::WrongLength { .. }) => Err(rpc_error(
-            ERR_INVALID_PARAMS,
-            "hash/txid must be 32 bytes hex",
-        )),
-        Err(e) => Err(rpc_error(ERR_INVALID_PARAMS, e.to_string())),
-    }
+    rbitcoin_primitives::parse_display_hash32(hex)
+        .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))
 }
 
 /// Core's `ConnectBlock` returns before adding the genesis coinbase output

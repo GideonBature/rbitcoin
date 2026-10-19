@@ -1462,7 +1462,7 @@ fn dispatch_param_type_edges_and_subscribe_cap() {
         (
             "blockchain.scripthash.get_balance",
             json!(["aa"]),
-            "scripthash must be 32 bytes hex",
+            "failed to parse hex",
         ),
         (
             "blockchain.scripthash.listunspent",
@@ -1477,7 +1477,7 @@ fn dispatch_param_type_edges_and_subscribe_cap() {
         (
             "blockchain.scripthash.unsubscribe",
             json!(["zz".repeat(32)]),
-            "invalid hex",
+            "failed to parse hex digit",
         ),
         (
             "blockchain.scripthash.get_mempool",
@@ -1487,7 +1487,7 @@ fn dispatch_param_type_edges_and_subscribe_cap() {
         (
             "blockchain.transaction.get",
             json!(["aabb"]),
-            "txid must be 32 bytes hex",
+            "failed to parse hex",
         ),
         (
             "blockchain.transaction.get_merkle",
@@ -1522,7 +1522,7 @@ fn dispatch_param_type_edges_and_subscribe_cap() {
         (
             "blockchain.transaction.broadcast_package",
             json!([["zz"]]),
-            "invalid hex digit",
+            "invalid char, failed to create bytes from hex",
         ),
         (
             "blockchain.transaction.broadcast_package",

@@ -2408,21 +2408,12 @@ pub(crate) fn param_str(params: &Value, idx: usize) -> Result<&str, String> {
 
 fn param_scripthash(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     let s = param_str(params, idx)?;
-    parse_id32(s, "scripthash must be 32 bytes hex")
+    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| e.to_string())
 }
 
 fn param_txid(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     let s = param_str(params, idx)?;
-    parse_id32(s, "txid must be 32 bytes hex")
-}
-
-/// Display-order 32-byte id. `wrong_len` is the scripthash or txid sentence.
-fn parse_id32(s: &str, wrong_len: &str) -> Result<[u8; 32], String> {
-    match rbitcoin_primitives::parse_display_hash32(s) {
-        Ok(b) => Ok(b),
-        Err(rbitcoin_primitives::DisplayHashError::WrongLength { .. }) => Err(wrong_len.into()),
-        Err(e) => Err(e.to_string()),
-    }
+    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| e.to_string())
 }
 
 fn decode_hex_bytes(s: &str) -> Result<Vec<u8>, String> {

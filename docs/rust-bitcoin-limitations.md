@@ -394,16 +394,10 @@ the helper after the bugs above are in.
   input walk applies the same non-minimal refusal as `VarInt`
   (`NonMinimalVarInt`) without allocating a `Block`. That compact-size
   codec is not an upstream gap. Hex encode, decode, and display-order
-  32-byte ids live in `rbitcoin-primitives`. The bodies are
-  hex-conservative, the crate behind `bitcoin::hex`. `0x` / `0X` is
-  stripped there.
-- **Short id hex.** `FromHex` for a fixed 32 bytes returns a length error
-  whenever the string is not 64 characters, and it does not look at the
-  digits. A short non-hex id (`zz`) is therefore the length sentence
-  (`hash/txid must be 32 bytes hex` on RPC, `scripthash must be 32 bytes
-  hex` / `txid must be 32 bytes hex` on Electrum), not `invalid hex
-  digit`. Odd length is still reported first. A full 64 characters of
-  non-hex is still `invalid hex digit`.
+  32-byte ids live in `rbitcoin-primitives`. The bodies and the errors
+  are hex-conservative, the crate behind `bitcoin::hex`. `0x` / `0X` is
+  stripped there. A 32-byte id whose hex is not 64 characters is that
+  crate's length error, which does not look at the digits.
 - **Non-canonical compact difficulty.** `difficulty_float` matches Core
   `GetDifficulty` when every mantissa bit lands inside the 256-bit target.
   The mantissa is at most `0x7fffff`. Size `3..=32` qualifies. Size `33`
@@ -421,11 +415,6 @@ the helper after the bugs above are in.
   `getblock`, `getblockheader`, and `getblockchaininfo` return.
   `getmininginfo` puts the raw float in JSON, which is `null` when the
   value is non-finite. A connected tip cannot have a zero target.
-- **Esplora hex errors.** Transaction and package broadcast return
-  hex-conservative's own sentence after the `invalid hex:` prefix
-  (`invalid char, failed to create bytes from hex`, `odd length, failed
-  to create bytes from hex`). Electrum and `decodescript` still say
-  `invalid hex digit` / `odd hex length`.
 - **RB-008 as an upstream port.** Do not send the interpreter.
 
 ## Related
