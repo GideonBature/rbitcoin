@@ -2580,8 +2580,23 @@ async fn node_listen_and_exit() {
     assert!(mempool.exists(), "run_p2p opens the mempool");
     let book = rbitcoin_net::AddrMan::load(&peers).expect("junk book replaced");
     assert!(
-        book.flags(&dead).failed_last_connect(),
-        "the refused --connect is in the saved book"
+        book.entry(&dead).is_none(),
+        "loopback is not restored from the peers file"
+    );
+    let text = std::fs::read_to_string(&peers).expect("peers saved");
+    let row = text
+        .lines()
+        .find(|line| line.starts_with(&format!("{dead} ")))
+        .unwrap_or_else(|| panic!("the refused --connect is in the saved book\n{text}"));
+    let flags = row
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.strip_prefix("0x"))
+        .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        .unwrap_or(0);
+    assert!(
+        flags & rbitcoin_net::PeerFlags::FAILED_LAST_CONNECT != 0,
+        "the refused --connect is in the saved book, row {row}"
     );
 
     // The asmap is in place now, the saved book loads, and the wallet servers
