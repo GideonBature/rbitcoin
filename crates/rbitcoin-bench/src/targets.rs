@@ -9,7 +9,7 @@ use std::str::FromStr;
 
 /// Electrum / Esplora display scripthash: SHA256(spk) bytes reversed, hex.
 pub fn electrum_scripthash_hex(spk: &[u8]) -> String {
-    bitcoin::Txid::from_byte_array(sha256::Hash::hash(spk).to_byte_array()).to_string()
+    sha256::Hash::hash(spk).to_string()
 }
 
 pub const CORPUS_HOT: &str = include_str!("../corpora/hot.txt");
@@ -31,14 +31,9 @@ pub fn parse_target_line(line: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     if line.len() == 64
-        && <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = line;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .ok()
-        .is_some_and(|b| b.len() == 32)
+        && rbitcoin_primitives::hex_decode(line)
+            .ok()
+            .is_some_and(|b| b.len() == 32)
     {
         return Ok(Some(line.to_ascii_lowercase()));
     }

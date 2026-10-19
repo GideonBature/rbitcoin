@@ -405,9 +405,7 @@ fn submit_known_block(
     if uninvalidate {
         let _ = oracle.core_reconsider_block(&hash);
     }
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(block)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(block)));
     match oracle.submitblock_hex(&hex) {
         OracleReply::NullAccept => Ok(()),
         OracleReply::Reason(r) if stored.contains(&r.as_str()) => {
@@ -446,9 +444,7 @@ pub fn submit_pad_to_oracle(
     bodies: &[Block],
 ) -> Result<(), &'static str> {
     for b in bodies {
-        let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(serialize(b))),
-        );
+        let hex = rbitcoin_primitives::hex_encode(&(serialize(b)));
         match oracle.submitblock_hex(&hex) {
             OracleReply::NullAccept => {}
             _ => return Err("pad submit"),
@@ -971,9 +967,7 @@ pub fn compare_tx_bytes(hub: &ChainHub, oracle: &dyn BlockOracle, raw: &[u8]) ->
     if ours == DiffVerdict::Skip {
         return CompareOne::Skipped;
     }
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&tx)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(&tx)));
     let reply = oracle.testmempoolaccept_hex(&hex);
     if let OracleReply::Reason(reason) = &reply {
         if is_core_mempool_policy_skip(reason) {
@@ -1016,9 +1010,7 @@ pub fn compare_mempool_one(
         Ok(v) => v,
         Err(msg) => return CompareOne::Harness(msg),
     };
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&tx)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(&tx)));
     let reply = oracle.testmempoolaccept_hex(&hex);
     if matches!(reply, OracleReply::Dead)
         || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
@@ -1068,12 +1060,8 @@ pub fn compare_script_verify_one(
         Ok(()) => DiffVerdict::Accept,
         Err(_) => DiffVerdict::Reject,
     };
-    let hex1 = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&tx1)),
-    ));
-    let hex2 = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&tx2)),
-    ));
+    let hex1 = rbitcoin_primitives::hex_encode(&(serialize(&tx1)));
+    let hex2 = rbitcoin_primitives::hex_encode(&(serialize(&tx2)));
     let reply = oracle.testmempoolaccept_hexes(&[&hex1, &hex2]);
     if matches!(reply, OracleReply::Dead)
         || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
@@ -1487,9 +1475,7 @@ pub fn compare_fork_one(
         Ok(v) => v,
         Err(msg) => return CompareOne::Harness(msg),
     };
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&child)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(&child)));
     let reply = oracle.submitblock_hex(&hex);
     if matches!(reply, OracleReply::Dead)
         || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
@@ -1616,9 +1602,7 @@ pub fn compare_fork_n_one(
             return CompareOne::Harness(msg);
         }
     };
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&child)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(&child)));
     let reply = oracle.submitblock_hex(&hex);
     if matches!(reply, OracleReply::Dead)
         || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
@@ -1693,9 +1677,7 @@ pub fn compare_cmpct_reorg_one(
     } else {
         DiffVerdict::Reject
     };
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&child)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(&child)));
     let reply = oracle.submitblock_hex(&hex);
     if matches!(reply, OracleReply::Dead)
         || (matches!(reply, OracleReply::RpcError) && !oracle.liveness_ok())
@@ -1745,9 +1727,7 @@ fn finish_reorg_compare(
     ours: DiffVerdict,
     reply: &OracleReply,
 ) -> CompareOne {
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(child)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(child)));
     let reason = match reply {
         OracleReply::Reason(s) => s.as_str(),
         _ => "",
@@ -1897,9 +1877,7 @@ fn replay_honest_twin(
 ) -> CompareOne {
     let keep = tip.height;
     let hash = honest.block_hash();
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&honest)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(&honest)));
     let ours = match verdict_from_accept(hub.accept_received_block(honest)) {
         Ok(v) => v,
         Err(msg) => return CompareOne::Harness(msg),
@@ -1993,9 +1971,7 @@ fn compare_offered(
     block: Block,
 ) -> CompareOne {
     let keep = tip.height;
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&block)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(&(serialize(&block)));
     let ours_res = hub.accept_received_block(block);
     let ours = match verdict_from_accept(ours_res) {
         Ok(v) => v,

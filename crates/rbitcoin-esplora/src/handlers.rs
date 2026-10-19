@@ -433,9 +433,7 @@ fn tx_merkleblock_proof_sync(st: AppState, txid_hex: String) -> Response {
     if mb.consensus_encode(&mut raw).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "merkleblock encode").into_response();
     }
-    plain_ok(bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(raw)),
-    ))
+    plain_ok(rbitcoin_primitives::hex_encode(&(raw)))
 }
 
 pub async fn tx_outspend(
@@ -1856,16 +1854,15 @@ pub async fn get_txs_outspends(
 #[allow(clippy::result_large_err)] // public error enum
 fn decode_tx_hex_str(hex: &str) -> Result<bitcoin::Transaction, Response> {
     let hex = hex.trim().trim_matches('"');
-    let raw = match <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = hex;
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    }) {
+    let raw = match rbitcoin_primitives::hex_decode(hex) {
         Ok(r) => r,
         Err(e) => {
             // hex-conservative's sentence, not Electrum's `invalid hex digit`.
-            return Err((StatusCode::BAD_REQUEST, format!("invalid hex: {e}")).into_response());
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("invalid hex: {}", e.library_sentence()),
+            )
+                .into_response());
         }
     };
     match deserialize(&raw) {
@@ -2072,18 +2069,13 @@ pub async fn post_tx_package(State(st): State<AppState>, body: Bytes) -> Respons
             )
                 .into_response();
         };
-        let raw = match <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = hex.trim();
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        }) {
+        let raw = match rbitcoin_primitives::hex_decode(hex.trim()) {
             Ok(r) => r,
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
                     // Same library sentence as the single-tx broadcast error.
-                    format!("package[{i}] invalid hex: {e}"),
+                    format!("package[{i}] invalid hex: {}", e.library_sentence()),
                 )
                     .into_response();
             }

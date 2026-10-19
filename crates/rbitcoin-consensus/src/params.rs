@@ -412,7 +412,10 @@ pub fn default_min_chain_work_be(network: rbitcoin_primitives::Network) -> Optio
 }
 
 fn min_work_from_display_hex(hex: &str) -> [u8; 32] {
-    <[u8; 32] as bitcoin::hex::FromHex>::from_hex(hex).expect("min chain work hex")
+    rbitcoin_primitives::hex_decode(hex)
+        .expect("min chain work hex")
+        .try_into()
+        .expect("min chain work hex")
 }
 
 /// Verify height-0 block hash matches params genesis.

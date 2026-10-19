@@ -8,13 +8,8 @@ pub(crate) fn decoderawtransaction(ctx: &RpcContext, params: &RpcParams) -> Resu
     params.reject_unknown(&["hexstring", "iswitness"])?;
     let hex = params.req_str(0, "hexstring")?;
     let force_witness = params.opt_bool(1, "iswitness")?;
-    let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = hex;
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed"))?;
+    let raw = rbitcoin_primitives::hex_decode(hex)
+        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed"))?;
     if force_witness == Some(false) && raw.len() >= 6 && raw[4] == 0x00 && raw[5] == 0x01 {
         return Err(rpc_error(ERR_DESERIALIZATION, "TX decode failed"));
     }
@@ -26,21 +21,8 @@ pub(crate) fn decoderawtransaction(ctx: &RpcContext, params: &RpcParams) -> Resu
 pub(crate) fn decodescript(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["hexstring"])?;
     let hex = params.req_str(0, "hexstring")?;
-    let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = hex;
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .map_err(|e| {
-        rpc_error(
-            ERR_INVALID_PARAMS,
-            match e {
-                bitcoin::hex::HexToBytesError::OddLengthString(_) => "odd hex length",
-                bitcoin::hex::HexToBytesError::InvalidChar(_) => "invalid hex digit",
-            },
-        )
-    })?;
+    let raw = rbitcoin_primitives::hex_decode(hex)
+        .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))?;
     Ok(script_pubkey_json(
         &ScriptBuf::from_bytes(raw),
         rpc_btc_network(ctx.network),
@@ -69,7 +51,7 @@ pub(crate) fn validateaddress(ctx: &RpcContext, params: &RpcParams) -> Result<Va
     let mut obj = json!({
         "isvalid": true,
         "address": addr.to_string(),
-        "scriptPubKey": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(spk.as_bytes()))),
+        "scriptPubKey": rbitcoin_primitives::hex_encode(spk.as_bytes() ),
         "isscript": isscript,
         "iswitness": iswitness,
     });
@@ -80,9 +62,7 @@ pub(crate) fn validateaddress(ctx: &RpcContext, params: &RpcParams) -> Result<Va
                 m.insert("witness_version".into(), json!(wp.version().to_num()));
                 m.insert(
                     "witness_program".into(),
-                    json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-                        std::convert::AsRef::<[u8]>::as_ref(&(wp.program().as_bytes()))
-                    )),
+                    json!(rbitcoin_primitives::hex_encode(wp.program().as_bytes())),
                 );
             }
         }

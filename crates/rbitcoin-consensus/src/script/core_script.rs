@@ -1,16 +1,7 @@
 //! Shared Core script-language assembler and hex decode (unit-test only).
 
 pub fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    use bitcoin::hex::{FromHex, HexToBytesError};
-    let s = s.trim();
-    let s = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    Vec::<u8>::from_hex(s).map_err(|e| match e {
-        HexToBytesError::OddLengthString(_) => "odd hex length".into(),
-        HexToBytesError::InvalidChar(_) => "invalid hex digit".into(),
-    })
+    rbitcoin_primitives::hex_decode(s.trim()).map_err(|e| e.to_string())
 }
 
 /// Assemble Core script string ("1 2 ADD", "0x4c 0x01 0x07", "'Az'") to bytes.

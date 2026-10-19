@@ -411,9 +411,9 @@ fn from_height_window_is_served_above_the_create_cap() {
         .iter()
         .filter_map(|r| r["tx_hash"].as_str())
         .collect();
-    let tip_hex = bitcoin::Txid::from_byte_array(tip_cb).to_string();
-    let spend_hex = bitcoin::Txid::from_byte_array(spend_txid).to_string();
-    let old_hex = bitcoin::Txid::from_byte_array(oldest).to_string();
+    let tip_hex = rbitcoin_primitives::display_hash_hex(tip_cb);
+    let spend_hex = rbitcoin_primitives::display_hash_hex(spend_txid);
+    let old_hex = rbitcoin_primitives::display_hash_hex(oldest);
     assert!(hashes.contains(&tip_hex.as_str()), "{hashes:?}");
     assert!(hashes.contains(&spend_hex.as_str()), "{hashes:?}");
     assert!(!hashes.contains(&old_hex.as_str()), "{hashes:?}");
@@ -482,9 +482,9 @@ fn from_height_ignores_a_spend_of_another_output() {
             .filter_map(|r| r["tx_hash"].as_str().map(str::to_owned))
             .collect::<Vec<_>>()
     };
-    let foreign_hex = bitcoin::Txid::from_byte_array(foreign_txid).to_string();
-    let real_hex = bitcoin::Txid::from_byte_array(real_txid).to_string();
-    let tip_hex = bitcoin::Txid::from_byte_array(tip_cb).to_string();
+    let foreign_hex = rbitcoin_primitives::display_hash_hex(foreign_txid);
+    let real_hex = rbitcoin_primitives::display_hash_hex(real_txid);
+    let tip_hex = rbitcoin_primitives::display_hash_hex(tip_cb);
     let other = hashes_of(3, 4);
     assert!(
         !other.iter().any(|h| h == &foreign_hex),

@@ -140,7 +140,7 @@ impl ElectrumConfig {
             banner: "rbitcoin electrum — libre-relay-class (0.1 sat/vB, no dust ban, full RBF)"
                 .into(),
             donation_address: String::new(),
-            genesis_hash_hex: bitcoin::Txid::from_byte_array(genesis).to_string(),
+            genesis_hash_hex: rbitcoin_primitives::display_hash_hex(genesis),
             limits: ServeLimits::for_public_proxy(),
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
@@ -2038,9 +2038,7 @@ fn dispatch_pinned(
                     if verbose {
                         return Ok(verbose_tx_json(query, &raw, &txid, Some(fk), chain.network));
                     }
-                    return Ok(json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-                        std::convert::AsRef::<[u8]>::as_ref(&raw)
-                    )));
+                    return Ok(json!(rbitcoin_primitives::hex_encode(&raw)));
                 }
             }
             if !is_asof {
@@ -2052,9 +2050,7 @@ fn dispatch_pinned(
                         if verbose {
                             return Ok(verbose_tx_json(query, &raw, &txid, None, chain.network));
                         }
-                        return Ok(json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-                            std::convert::AsRef::<[u8]>::as_ref(&raw)
-                        )));
+                        return Ok(json!(rbitcoin_primitives::hex_encode(&raw)));
                     }
                 }
             }
@@ -2169,7 +2165,7 @@ fn tip_header_obj(query: &Query) -> Result<Value, String> {
 fn header_hex(hdr: &bitcoin::block::Header) -> String {
     let mut buf = Vec::new();
     hdr.consensus_encode(&mut buf).expect("header encode");
-    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(buf)))
+    rbitcoin_primitives::hex_encode(&(buf))
 }
 
 pub(crate) fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {
@@ -2208,13 +2204,7 @@ fn method_accepts_asof(method: &str) -> bool {
 }
 
 fn parse_blockhash32(s: &str) -> Option<[u8; 32]> {
-    let s = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    s.parse::<bitcoin::BlockHash>()
-        .ok()
-        .map(|h| h.to_byte_array())
+    rbitcoin_primitives::parse_display_hash32(s).ok()
 }
 
 fn protocol_tuple(s: &str) -> Option<Vec<u32>> {
@@ -2426,37 +2416,17 @@ fn param_txid(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     parse_id32(s, "txid must be 32 bytes hex")
 }
 
-/// Display-order 32-byte id.
-///
-/// `FromHex` for `[u8; 32]` reports a wrong length whenever the string is
-/// not 64 characters, before it looks at the digits. A short non-hex id
-/// (`zz`) is the length sentence, not `invalid hex digit`. Odd length is
-/// still reported first. `0x` / `0X` is stripped here.
+/// Display-order 32-byte id. `wrong_len` is the scripthash or txid sentence.
 fn parse_id32(s: &str, wrong_len: &str) -> Result<[u8; 32], String> {
-    let s = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    if !s.len().is_multiple_of(2) {
-        return Err("odd hex length".into());
-    }
-    match s.parse::<bitcoin::Txid>() {
-        Ok(id) => Ok(id.to_byte_array()),
-        Err(bitcoin::hex::HexToArrayError::InvalidLength(_)) => Err(wrong_len.into()),
-        Err(bitcoin::hex::HexToArrayError::InvalidChar(_)) => Err("invalid hex digit".into()),
+    match rbitcoin_primitives::parse_display_hash32(s) {
+        Ok(b) => Ok(b),
+        Err(rbitcoin_primitives::DisplayHashError::WrongLength { .. }) => Err(wrong_len.into()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
 fn decode_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
-    use bitcoin::hex::{FromHex, HexToBytesError};
-    let s = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    Vec::<u8>::from_hex(s).map_err(|e| match e {
-        HexToBytesError::OddLengthString(_) => "odd hex length".into(),
-        HexToBytesError::InvalidChar(_) => "invalid hex digit".into(),
-    })
+    rbitcoin_primitives::hex_decode(s).map_err(|e| e.to_string())
 }
 
 fn txid_hex(txid: &[u8; 32]) -> String {
@@ -2501,7 +2471,7 @@ fn verbose_tx_json(
     network: bitcoin::Network,
 ) -> Value {
     let mut obj = json!({
-        "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(raw))),
+        "hex": rbitcoin_primitives::hex_encode(raw),
         "txid": txid_hex(txid),
         "size": raw.len(),
     });
@@ -2541,7 +2511,7 @@ fn verbose_tx_json(
 fn verbose_vin(input: &bitcoin::TxIn) -> Value {
     if input.previous_output.is_null() {
         json!({
-            "coinbase": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(input.script_sig.as_bytes()))),
+            "coinbase": rbitcoin_primitives::hex_encode(input.script_sig.as_bytes()),
             "sequence": input.sequence.0,
         })
     } else {
@@ -2550,7 +2520,7 @@ fn verbose_vin(input: &bitcoin::TxIn) -> Value {
             "vout": input.previous_output.vout,
             "scriptSig": {
                 "asm": input.script_sig.to_asm_string(),
-                "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(input.script_sig.as_bytes()))),
+                "hex": rbitcoin_primitives::hex_encode(input.script_sig.as_bytes()),
             },
             "sequence": input.sequence.0,
         });
@@ -2559,11 +2529,7 @@ fn verbose_vin(input: &bitcoin::TxIn) -> Value {
                 input
                     .witness
                     .iter()
-                    .map(|w| {
-                        json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-                            std::convert::AsRef::<[u8]>::as_ref(&(w))
-                        ))
-                    })
+                    .map(|w| json!(rbitcoin_primitives::hex_encode(w)))
                     .collect(),
             );
         }
@@ -2574,7 +2540,7 @@ fn verbose_vin(input: &bitcoin::TxIn) -> Value {
 fn verbose_vout(n: usize, out: &bitcoin::TxOut, network: bitcoin::Network) -> Value {
     let mut spk = json!({
         "asm": out.script_pubkey.to_asm_string(),
-        "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(out.script_pubkey.as_bytes()))),
+        "hex": rbitcoin_primitives::hex_encode(out.script_pubkey.as_bytes()),
     });
     if let Ok(addr) = bitcoin::Address::from_script(&out.script_pubkey, network) {
         spk["address"] = json!(addr.to_string());
@@ -2588,7 +2554,7 @@ fn verbose_vout(n: usize, out: &bitcoin::TxOut, network: bitcoin::Network) -> Va
 }
 
 fn hash_hex_rev(h: &[u8; 32]) -> String {
-    bitcoin::Txid::from_byte_array(*(h)).to_string()
+    rbitcoin_primitives::display_hash_hex(*(h))
 }
 
 fn history_row_json(i: &rbitcoin_query::ScriptHashHistoryItem) -> Value {
@@ -2637,9 +2603,7 @@ fn scripthash_status(hist: &[rbitcoin_query::ScriptHashHistoryItem]) -> String {
         s.push_str(&format!("{}:{}:", txid_hex(&i.txid), i.height));
     }
     let hash = sha256::Hash::hash(s.as_bytes());
-    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(hash.to_byte_array()),
-    ))
+    rbitcoin_primitives::hex_encode(hash.to_byte_array())
 }
 
 fn scripthash_status_full(query: &Query, mp: &MempoolHub, sh: &[u8; 32]) -> Result<String, String> {

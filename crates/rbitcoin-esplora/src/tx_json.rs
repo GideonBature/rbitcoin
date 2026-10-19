@@ -313,11 +313,7 @@ fn tx_json_from_wire(
         if !wit_raw.is_empty() {
             let wit: Vec<String> = wit_raw
                 .iter()
-                .map(|b| {
-                    bitcoin::hex::DisplayHex::to_lower_hex_string(
-                        std::convert::AsRef::<[u8]>::as_ref(&b),
-                    )
-                })
+                .map(rbitcoin_primitives::hex_encode)
                 .collect();
             vin_obj["witness"] = json!(wit);
         }
@@ -337,7 +333,7 @@ fn tx_json_from_wire(
                 .get("scriptpubkey")
                 .and_then(|x| x.as_str())
                 .and_then(|h| {
-                    <Vec<u8> as bitcoin::hex::FromHex>::from_hex(
+                    rbitcoin_primitives::hex_decode(
                         h.strip_prefix("0x")
                             .or_else(|| h.strip_prefix("0X"))
                             .unwrap_or(h),
@@ -453,7 +449,7 @@ fn vout_fields(script: &[u8], value: u64, network: Network) -> Value {
 }
 
 fn block_hash_hex(hash: &[u8; 32]) -> String {
-    bitcoin::Txid::from_byte_array(*(hash)).to_string()
+    rbitcoin_primitives::display_hash_hex(*(hash))
 }
 
 /// electrs `get_innerscripts`: redeem only for P2SH; witness script only for

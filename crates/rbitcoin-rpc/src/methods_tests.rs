@@ -178,9 +178,7 @@ fn decode_rpc_subset() {
     assert_eq!(dec["vin"][0]["vout"], json!(0));
     assert_eq!(
         dec["vin"][0]["scriptSig"]["hex"],
-        json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(script_sig.as_bytes()))
-        ))
+        json!(rbitcoin_primitives::hex_encode(script_sig.as_bytes()))
     );
     assert!(dec["vin"][0]["scriptSig"]["asm"]
         .as_str()
@@ -240,9 +238,7 @@ fn decode_rpc_subset() {
         .unwrap()
         .require_network(BtcNetwork::Regtest)
         .unwrap();
-    let spk_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(p2wpkh.script_pubkey().as_bytes())),
-    );
+    let spk_hex = rbitcoin_primitives::hex_encode(p2wpkh.script_pubkey().as_bytes());
     let script = dispatch(&ctx, "decodescript", vec![json!(spk_hex.clone())]).unwrap();
     assert_eq!(script["type"], json!("witness_v0_keyhash"));
     assert_eq!(script["address"], json!(p2wpkh.to_string()));
@@ -287,7 +283,7 @@ fn decode_rpc_subset() {
     assert_eq!(mainnet, json!({"isvalid": false}));
 
     let p2tr_spk = ScriptBuf::from_bytes(
-        <Vec<u8> as bitcoin::hex::FromHex>::from_hex(
+        rbitcoin_primitives::hex_decode(
             "512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         )
         .unwrap(),
@@ -400,28 +396,13 @@ fn filter_header_hex(filter_hex: &str, parent_header_hex: &str) -> String {
     use bitcoin::bip158::{BlockFilter, FilterHeader};
     use bitcoin::hashes::Hash;
     let parent = FilterHeader::from_byte_array(
-        <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = parent_header_hex;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .unwrap()
-        .try_into()
-        .unwrap(),
+        rbitcoin_primitives::hex_decode(parent_header_hex)
+            .unwrap()
+            .try_into()
+            .unwrap(),
     );
-    let filter = BlockFilter::new(
-        &<Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = filter_hex;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .unwrap(),
-    );
-    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(filter.filter_header(&parent).as_byte_array()),
-    ))
+    let filter = BlockFilter::new(&rbitcoin_primitives::hex_decode(filter_hex).unwrap());
+    rbitcoin_primitives::hex_encode(filter.filter_header(&parent).as_byte_array())
 }
 
 #[test]
@@ -461,13 +442,7 @@ fn getblockfilter_rebuilds_unsealed_and_chains_from_a_sealed_parent() {
         "{gap}"
     );
 
-    let body = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = g["filter"].as_str().unwrap();
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .unwrap();
+    let body = rbitcoin_primitives::hex_decode(g["filter"].as_str().unwrap()).unwrap();
     let fk = ctx
         .query
         .store()
@@ -508,13 +483,7 @@ fn getblockfilter_rebuilds_unsealed_and_chains_from_a_sealed_parent() {
         "{stale_gap}"
     );
 
-    let one_body = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = one["filter"].as_str().unwrap();
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .unwrap();
+    let one_body = rbitcoin_primitives::hex_decode(one["filter"].as_str().unwrap()).unwrap();
     let one_fk = ctx
         .query
         .store()
@@ -579,13 +548,7 @@ fn blockchain_empty_store() {
 }
 
 fn chainwork_f64(hex: &str) -> f64 {
-    let b = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = hex;
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .unwrap();
+    let b = rbitcoin_primitives::hex_decode(hex).unwrap();
     b.iter().fold(0.0, |a, x| a * 256.0 + f64::from(*x))
 }
 
@@ -729,17 +692,12 @@ fn hash_hex_display_matches_blockhash_display_and_reverses_parse() {
         *b = i as u8;
     }
     let disp = hash_hex_display(&internal);
-    let via_type = bitcoin::BlockHash::from_byte_array(internal).to_string();
+    let via_type = rbitcoin_primitives::display_hash_hex(internal);
     assert_eq!(disp, via_type);
     let back = parse_hash32_display(&disp).unwrap();
     assert_eq!(back, internal);
     // Raw internal hex is not equal to display.
-    assert_ne!(
-        disp,
-        bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-            &(internal)
-        ))
-    );
+    assert_ne!(disp, rbitcoin_primitives::hex_encode(internal));
 }
 
 #[test]
@@ -1291,13 +1249,7 @@ fn getblock_verbosity_2_size_weight_and_tx_fee() {
     assert_eq!(confirmed["blockhash"], tip);
     assert_eq!(confirmed["blocktime"], confirmed["time"]);
     let raw = dispatch(&ctx, "getblock", vec![tip.clone(), json!(0)]).unwrap();
-    let raw_bytes = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = raw.as_str().unwrap();
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .unwrap();
+    let raw_bytes = rbitcoin_primitives::hex_decode(raw.as_str().unwrap()).unwrap();
     let block: bitcoin::Block = deserialize(&raw_bytes).unwrap();
     assert_eq!(v2["size"].as_u64().unwrap(), block.total_size() as u64);
     assert_eq!(v2["weight"].as_u64().unwrap(), block.weight().to_wu());
@@ -1646,12 +1598,7 @@ fn spend_generated_coinbase(
             script_pubkey: script,
         }],
     };
-    (
-        bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-            &(serialize(&spend)),
-        )),
-        spend,
-    )
+    (rbitcoin_primitives::hex_encode(serialize(&spend)), spend)
 }
 
 fn mature_coinbase_spend_hex(ctx: &RpcContext, keep_sat: u64) -> (String, Transaction) {
@@ -1889,9 +1836,7 @@ fn submitpackage_child_fail_keeps_parent() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let bad_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&bad))),
-    );
+    let bad_hex = rbitcoin_primitives::hex_encode(serialize(&bad));
     let pkg = dispatch(
         &ctx,
         "submitpackage",
@@ -1981,12 +1926,8 @@ fn submitpackage_maxfeerate_skips_package_eval_and_reports_replacements() {
         "submitpackage",
         vec![
             json!([
-                bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                    &(serialize(&parent))
-                )),
-                bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                    &(serialize(&child))
-                ))
+                rbitcoin_primitives::hex_encode(serialize(&parent)),
+                rbitcoin_primitives::hex_encode(serialize(&child))
             ]),
             json!(max_feerate),
         ],
@@ -2041,9 +1982,7 @@ fn rpc_submit_nonstandard_version_is_version() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let child_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&child))),
-    );
+    let child_hex = rbitcoin_primitives::hex_encode(serialize(&child));
     let send = dispatch(&ctx, "sendrawtransaction", vec![json!(child_hex.clone())]).unwrap_err();
     assert_eq!(send["code"], ERR_VERIFY_REJECTED, "{send}");
     assert_eq!(send["message"], json!("version"), "{send}");
@@ -2106,9 +2045,7 @@ fn mempool_under_pressure() {
     let spk = ScriptBuf::from_bytes(vec![0x51]);
     let (parent_hex, parent) = spend_generated_coinbase(&ctx, 1, 50_0000_0000 - 1_000, spk.clone());
     let child = child_of(&parent, 1_000);
-    let child_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&child))),
-    );
+    let child_hex = rbitcoin_primitives::hex_encode(serialize(&child));
 
     let unsorted = dispatch(
         &ctx,
@@ -2150,9 +2087,7 @@ fn mempool_under_pressure() {
         "testmempoolaccept",
         vec![json!([
             parent_hex.clone(),
-            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                &(serialize(&garbage))
-            ))
+            rbitcoin_primitives::hex_encode(serialize(&garbage))
         ])],
     )
     .unwrap();
@@ -2185,9 +2120,7 @@ fn mempool_under_pressure() {
             script_pubkey: spk.clone(),
         }],
     };
-    let conflict_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&conflict_b))),
-    );
+    let conflict_hex = rbitcoin_primitives::hex_encode(serialize(&conflict_b));
     let tma = dispatch(
         &ctx,
         "testmempoolaccept",
@@ -2224,9 +2157,7 @@ fn mempool_under_pressure() {
     // two members used to evict the parent and answer `mempool full`.
     let (low_hex, low_parent) = spend_generated_coinbase(&ctx, 3, 50_0000_0000 - 1, spk.clone());
     let low_child = child_of(&low_parent, 80_000);
-    let low_child_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&low_child))),
-    );
+    let low_child_hex = rbitcoin_primitives::hex_encode(serialize(&low_child));
     let mp = ctx.mempool.as_ref().unwrap();
     mp.set_max_weight(low_parent.weight().to_wu() + low_child.weight().to_wu());
     let kept = dispatch(&ctx, "submitpackage", vec![json!([low_hex, low_child_hex])]).unwrap();
@@ -2462,9 +2393,7 @@ fn pressure_tiny_weight() {
         "submitpackage",
         vec![json!([
             low_hex,
-            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                &(serialize(&low_child))
-            ))
+            rbitcoin_primitives::hex_encode(serialize(&low_child))
         ])],
     )
     .unwrap();
@@ -2497,18 +2426,14 @@ fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
     let (chain_hex, chain_parent) = spend_generated_coinbase(ctx, 2, 50_0000_0000 - 1, spk.clone());
     let chain_child = child_of(&chain_parent, 1);
     let chain_grand = child_of(&chain_child, 80_000);
-    let chain_child_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&chain_child))),
-    );
+    let chain_child_hex = rbitcoin_primitives::hex_encode(serialize(&chain_child));
     let chain = dispatch(
         ctx,
         "submitpackage",
         vec![json!([
             chain_hex.clone(),
             chain_child_hex.clone(),
-            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                &(serialize(&chain_grand))
-            ))
+            rbitcoin_primitives::hex_encode(serialize(&chain_grand))
         ])],
     )
     .unwrap();
@@ -2535,12 +2460,8 @@ fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
         ctx,
         "testmempoolaccept",
         vec![json!([
-            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                &(serialize(&cluster_child))
-            )),
-            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-                &(serialize(&cluster_grand))
-            ))
+            rbitcoin_primitives::hex_encode(serialize(&cluster_child)),
+            rbitcoin_primitives::hex_encode(serialize(&cluster_grand))
         ])],
     )
     .unwrap();
@@ -2581,9 +2502,7 @@ fn submitpackage_oversized_spk_is_scriptpubkey() {
             script_pubkey: ScriptBuf::from_bytes(vec![b'a'; 10_001]),
         }],
     };
-    let child_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&child))),
-    );
+    let child_hex = rbitcoin_primitives::hex_encode(serialize(&child));
     let pkg = dispatch(
         &ctx,
         "submitpackage",
@@ -2651,9 +2570,7 @@ fn generate_selects_chained_mempool_parent_first() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let parent_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&parent))),
-    );
+    let parent_hex = rbitcoin_primitives::hex_encode(serialize(&parent));
     let parent_id = dispatch(&ctx, "sendrawtransaction", vec![json!(parent_hex)]).unwrap();
     let child = Transaction {
         version: TxVersion::TWO,
@@ -2675,9 +2592,7 @@ fn generate_selects_chained_mempool_parent_first() {
     let child_id = dispatch(
         &ctx,
         "sendrawtransaction",
-        vec![json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(serialize(&child)))
-        ))],
+        vec![json!(rbitcoin_primitives::hex_encode(serialize(&child)))],
     )
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
@@ -2715,9 +2630,7 @@ fn generate_selects_chained_mempool_parent_first() {
     let e = dispatch(
         &ctx,
         "sendrawtransaction",
-        vec![json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(serialize(&bad)))
-        ))],
+        vec![json!(rbitcoin_primitives::hex_encode(serialize(&bad)))],
     )
     .unwrap_err();
     assert_eq!(e["code"], ERR_VERIFY_REJECTED);
@@ -2801,9 +2714,7 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     dispatch(
         &ctx,
         "sendrawtransaction",
-        vec![json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(serialize(&spend)))
-        ))],
+        vec![json!(rbitcoin_primitives::hex_encode(serialize(&spend)))],
     )
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
@@ -3259,9 +3170,7 @@ fn getpeerinfo_header_only_best_known_is_not_synced_blocks() {
     let prev = chain.tip_hash().unwrap();
     let time = chain.tip_header().unwrap().time + 1;
     let child = mine_regtest_paying(prev, time, 1, script, vec![]);
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&child)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(serialize(&child));
     dispatch(&ctx, "submitheader", vec![json!(hex)]).unwrap();
     let hub = PeerHub::new();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18444);
@@ -3698,9 +3607,7 @@ fn testmempoolaccept_rbf_does_not_evict_conflict() {
             script_pubkey: spk,
         }],
     };
-    let high_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&(serialize(&high))),
-    );
+    let high_hex = rbitcoin_primitives::hex_encode(serialize(&high));
     let row = dispatch(&ctx, "testmempoolaccept", vec![json!([high_hex])]).unwrap();
     assert_eq!(row[0]["allowed"], json!(true), "{row}");
     assert!(
@@ -3740,9 +3647,7 @@ fn testmempoolaccept_missing_inputs_is_missing_inputs() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-        &(serialize(&tx)),
-    ));
+    let hex = rbitcoin_primitives::hex_encode(serialize(&tx));
     let row = dispatch(&ctx, "testmempoolaccept", vec![json!([hex])]).unwrap();
     assert_eq!(row[0]["allowed"], json!(false), "{row}");
     assert_eq!(row[0]["reject-reason"], json!("missing-inputs"), "{row}");
@@ -4606,16 +4511,7 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
         proposed.is_null(),
         "a template built on this tip is a valid proposal: {proposed}"
     );
-    let mut fat_cb: Block = deserialize(
-        &<Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = &hex;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .unwrap(),
-    )
-    .unwrap();
+    let mut fat_cb: Block = deserialize(&rbitcoin_primitives::hex_decode(&hex).unwrap()).unwrap();
     let cb = &mut fat_cb.txdata[0].output[0].value;
     *cb = bitcoin::Amount::from_sat(cb.to_sat() + 1);
     fat_cb.header.merkle_root = fat_cb.compute_merkle_root().unwrap();
@@ -4626,16 +4522,7 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     )
     .unwrap();
     assert_eq!(over_subsidy, "bad-cb-amount", "{over_subsidy}");
-    let mut block: Block = deserialize(
-        &<Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = &hex;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .unwrap(),
-    )
-    .unwrap();
+    let mut block: Block = deserialize(&rbitcoin_primitives::hex_decode(&hex).unwrap()).unwrap();
     let original_bits = block.header.bits;
     let original_time = block.header.time;
     block.header.bits = CompactTarget::from_consensus(0x1d00ffff);
@@ -4663,16 +4550,8 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     )
     .unwrap();
     assert_eq!(too_new, "time-too-new", "{too_new}");
-    let mut wrong_prev: Block = deserialize(
-        &<Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = &hex;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .unwrap(),
-    )
-    .unwrap();
+    let mut wrong_prev: Block =
+        deserialize(&rbitcoin_primitives::hex_decode(&hex).unwrap()).unwrap();
     wrong_prev.header.prev_blockhash = bitcoin::BlockHash::from_byte_array([0xab; 32]);
     let not_tip = dispatch(
         &ctx,
@@ -5150,12 +5029,7 @@ fn spend_coinbase_two_outputs(ctx: &RpcContext, height: u32, value: u64) -> (Str
             },
         ],
     };
-    (
-        bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-            &(serialize(&spend)),
-        )),
-        spend,
-    )
+    (rbitcoin_primitives::hex_encode(serialize(&spend)), spend)
 }
 
 include!("regtest_chain_ops_journey.rs");

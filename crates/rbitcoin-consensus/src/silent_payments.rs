@@ -381,13 +381,7 @@ mod tests {
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {
-        <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = s;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .expect("hex")
+        rbitcoin_primitives::hex_decode(s).expect("hex")
     }
 
     fn decode_witness(s: &str) -> Witness {
@@ -484,11 +478,7 @@ mod tests {
                     Some(Value::String(exp)) => {
                         let t = got.unwrap_or_else(|| panic!("expected tweak for {comment}"));
                         assert_eq!(
-                            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<
-                                [u8],
-                            >::as_ref(
-                                &(t.tweak)
-                            )),
+                            rbitcoin_primitives::hex_encode(t.tweak),
                             exp.to_ascii_lowercase(),
                             "tweak mismatch: {comment}"
                         );
@@ -498,9 +488,7 @@ mod tests {
                         assert!(
                             got.is_none(),
                             "expected skip for {comment}, got {:?}",
-                            got.map(|g| bitcoin::hex::DisplayHex::to_lower_hex_string(
-                                std::convert::AsRef::<[u8]>::as_ref(&(g.tweak))
-                            ))
+                            got.map(|g| rbitcoin_primitives::hex_encode(g.tweak))
                         );
                         n += 1;
                     }

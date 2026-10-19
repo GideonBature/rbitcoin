@@ -1919,9 +1919,7 @@ fn electrum_tip_notify(ev: TipEvent) -> Option<TipNotify> {
     }
     Some(TipNotify {
         height: ev.height,
-        header_hex: bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&(buf)),
-        ),
+        header_hex: rbitcoin_primitives::hex_encode(&(buf)),
         reorg_from_height: if ev.reorg_branch_len > 0 {
             Some(ev.height.saturating_sub(ev.reorg_branch_len))
         } else {

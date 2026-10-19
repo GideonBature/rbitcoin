@@ -16,10 +16,7 @@ fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
 fn config_helpers_and_param_parsers() {
     let params = ChainParams::regtest();
     let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
-    assert_eq!(
-        cfg.genesis_hash_hex,
-        bitcoin::Txid::from_byte_array(params.genesis_hash.to_byte_array()).to_string()
-    );
+    assert_eq!(cfg.genesis_hash_hex, params.genesis_hash.to_string());
     assert!(cfg.banner.contains("rbitcoin"));
     assert_eq!(cfg.tweaks_min_dust, crate::tweaks::DEFAULT_TWEAKS_MIN_DUST);
 
@@ -208,9 +205,9 @@ fn config_helpers_and_param_parsers() {
     let preimage = format!("{}:1:", txid_hex(&[1u8; 32]));
     assert_eq!(
         one,
-        bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
-            &(bitcoin::hashes::sha256::Hash::hash(preimage.as_bytes()).to_byte_array())
-        )),
+        rbitcoin_primitives::hex_encode(
+            bitcoin::hashes::sha256::Hash::hash(preimage.as_bytes()).to_byte_array()
+        ),
         "confirmed row status is tx_hash:height: with no block hash"
     );
 
@@ -810,13 +807,7 @@ fn get_history_height_window_and_status_full() {
     assert!(!status_s.is_empty());
     // Recompute status from full confirmed history and match.
     let sh_bytes = {
-        let mut b = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-            let h = &sh;
-            h.strip_prefix("0x")
-                .or_else(|| h.strip_prefix("0X"))
-                .unwrap_or(h)
-        })
-        .unwrap();
+        let mut b = rbitcoin_primitives::hex_decode(&sh).unwrap();
         b.reverse();
         let mut out = [0u8; 32];
         out.copy_from_slice(&b);

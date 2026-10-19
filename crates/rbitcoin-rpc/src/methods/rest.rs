@@ -210,9 +210,7 @@ fn headers(ctx: &RpcContext, fmt: RestFmt, rest: &str) -> Result<RestReply, Rest
     }
     match fmt {
         RestFmt::Bin => Ok(bin_body(raw)),
-        RestFmt::Hex => Ok(hex_body(&bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&raw),
-        ))),
+        RestFmt::Hex => Ok(hex_body(&rbitcoin_primitives::hex_encode(&raw))),
         RestFmt::Json => Ok(json_body(json!(json_headers))),
     }
 }
@@ -256,9 +254,7 @@ fn block(
     })?;
     match wire {
         RestWire::Bin => Ok(bin_body(raw)),
-        RestWire::Hex => Ok(hex_body(&bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&raw),
-        ))),
+        RestWire::Hex => Ok(hex_body(&rbitcoin_primitives::hex_encode(&raw))),
     }
 }
 
@@ -284,13 +280,8 @@ fn tx(ctx: &RpcContext, fmt: RestFmt, txid: &str) -> Result<RestReply, RestReply
             &format!("{txid} not found"),
         )
     })?;
-    let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = hex;
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .map_err(|_| err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tx hex"))?;
+    let raw = rbitcoin_primitives::hex_decode(hex)
+        .map_err(|_| err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tx hex"))?;
     match wire {
         RestWire::Bin => Ok(bin_body(raw)),
         RestWire::Hex => Ok(hex_body(hex)),
@@ -434,16 +425,14 @@ fn blockfilter(ctx: &RpcContext, fmt: RestFmt, rest: &str) -> Result<RestReply, 
         })?;
     match fmt {
         RestFmt::Json => Ok(json_body(
-            json!({ "filter": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&body)) }),
+            json!({ "filter": rbitcoin_primitives::hex_encode(&body) }),
         )),
         RestFmt::Bin | RestFmt::Hex => {
             let raw = serialize_rest_filter(&parsed, &body);
             if fmt == RestFmt::Bin {
                 Ok(bin_body(raw))
             } else {
-                Ok(hex_body(&bitcoin::hex::DisplayHex::to_lower_hex_string(
-                    std::convert::AsRef::<[u8]>::as_ref(&raw),
-                )))
+                Ok(hex_body(&rbitcoin_primitives::hex_encode(&raw)))
             }
         }
     }

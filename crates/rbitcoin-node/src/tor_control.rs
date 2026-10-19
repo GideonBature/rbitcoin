@@ -1,7 +1,6 @@
 //! Tor control-port AUTH (cookie or password) for hidden-service setup.
 
 use crate::error::NodeError;
-use bitcoin::hex::DisplayHex;
 use bitcoin_hashes::{hmac, sha256, Hash, HashEngine};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -100,7 +99,7 @@ impl TorControl {
         let reply = self
             .command(&format!(
                 "AUTHCHALLENGE SAFECOOKIE {}",
-                client_nonce.to_lower_hex_string()
+                rbitcoin_primitives::hex_encode(client_nonce)
             ))
             .await?;
         let challenge = parse_authchallenge_reply(&reply)?;
@@ -112,13 +111,16 @@ impl TorControl {
         if want_server != challenge.server_hash {
             return Err(NodeError::Init(format!(
                 "tor control SAFECOOKIE server hash mismatch want={} got={}",
-                want_server.to_lower_hex_string(),
-                challenge.server_hash.to_lower_hex_string()
+                rbitcoin_primitives::hex_encode(want_server),
+                rbitcoin_primitives::hex_encode(challenge.server_hash)
             )));
         }
         let client = hmac_sha256(SAFECOOKIE_CLIENT_KEY, &mat);
-        self.command(&format!("AUTHENTICATE {}", client.to_lower_hex_string()))
-            .await
+        self.command(&format!(
+            "AUTHENTICATE {}",
+            rbitcoin_primitives::hex_encode(client)
+        ))
+        .await
     }
 
     async fn protocol_auth_info(&mut self) -> Result<ProtocolAuthInfo, NodeError> {

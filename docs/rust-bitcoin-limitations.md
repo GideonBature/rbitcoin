@@ -393,10 +393,10 @@ the helper after the bugs above are in.
   because store and mempool records are not rust-bitcoin values. The IBD
   input walk applies the same non-minimal refusal as `VarInt`
   (`NonMinimalVarInt`) without allocating a `Block`. That compact-size
-  codec is not an upstream gap. Hex is `bitcoin::hex` (`DisplayHex` /
-  `FromHex`). Display-order 32-byte ids use `Txid` or `BlockHash`
-  `Display` / `FromStr`. `FromHex` does not strip a `0x` prefix; callers
-  that accept one strip it themselves.
+  codec is not an upstream gap. Hex encode, decode, and display-order
+  32-byte ids live in `rbitcoin-primitives`. The bodies are
+  hex-conservative, the crate behind `bitcoin::hex`. `0x` / `0X` is
+  stripped there.
 - **Short id hex.** `FromHex` for a fixed 32 bytes returns a length error
   whenever the string is not 64 characters, and it does not look at the
   digits. A short non-hex id (`zz`) is therefore the length sentence

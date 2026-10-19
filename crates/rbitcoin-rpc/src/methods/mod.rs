@@ -1,14 +1,12 @@
 //! Tier-1 Core-class JSON-RPC method handlers (pure dispatch over Query/mempool).
 
-use bitcoin::hashes::Hash;
-use bitcoin::{Block, BlockHash, ScriptBuf, Transaction, Txid};
+use bitcoin::{Block, BlockHash, ScriptBuf, Transaction};
 use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,32 +37,21 @@ pub(crate) fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
 }
 
 pub(crate) fn hash_hex_display(h: &[u8; 32]) -> String {
-    Txid::from_byte_array(*h).to_string()
+    rbitcoin_primitives::display_hash_hex(*h)
 }
 
 /// Parse Core display-order 32-byte hex → internal byte order.
 ///
-/// `FromHex` for `[u8; 32]` reports a wrong length whenever the string is
-/// not 64 characters, before it looks at the digits. A short non-hex id
-/// (`zz`) is `hash/txid must be 32 bytes hex`, not `invalid hex digit`.
-/// Odd length is still reported first. `0x` / `0X` is stripped here.
+/// A short non-hex id is `hash/txid must be 32 bytes hex`. Odd length and a
+/// bad digit keep their own sentences.
 pub(crate) fn parse_hash32_display(hex: &str) -> Result<[u8; 32], Value> {
-    let hex = hex
-        .strip_prefix("0x")
-        .or_else(|| hex.strip_prefix("0X"))
-        .unwrap_or(hex);
-    if !hex.len().is_multiple_of(2) {
-        return Err(rpc_error(ERR_INVALID_PARAMS, "odd hex length"));
-    }
-    match Txid::from_str(hex) {
-        Ok(id) => Ok(id.to_byte_array()),
-        Err(bitcoin::hex::HexToArrayError::InvalidLength(_)) => Err(rpc_error(
+    match rbitcoin_primitives::parse_display_hash32(hex) {
+        Ok(b) => Ok(b),
+        Err(rbitcoin_primitives::DisplayHashError::WrongLength { .. }) => Err(rpc_error(
             ERR_INVALID_PARAMS,
             "hash/txid must be 32 bytes hex",
         )),
-        Err(bitcoin::hex::HexToArrayError::InvalidChar(_)) => {
-            Err(rpc_error(ERR_INVALID_PARAMS, "invalid hex digit"))
-        }
+        Err(e) => Err(rpc_error(ERR_INVALID_PARAMS, e.to_string())),
     }
 }
 

@@ -684,24 +684,12 @@ async fn pin_esplora_txid_raw_hex_merkleblock(
     assert_eq!(st, 200);
     let (st, hex_body) = http_get(esplora_addr, &format!("/tx/{cb_txid}/hex")).await;
     assert_eq!(st, 200, "{hex_body}");
-    let hex_bytes = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = hex_body.trim();
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .unwrap();
+    let hex_bytes = rbitcoin_primitives::hex_decode(hex_body.trim()).unwrap();
     assert_eq!(raw_tx, hex_bytes);
 
     let (st, body) = http_get(esplora_addr, &format!("/tx/{cb_txid}/merkleblock-proof")).await;
     assert_eq!(st, 200, "{body}");
-    let mb_bytes = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
-        let h = body.trim();
-        h.strip_prefix("0x")
-            .or_else(|| h.strip_prefix("0X"))
-            .unwrap_or(h)
-    })
-    .unwrap();
+    let mb_bytes = rbitcoin_primitives::hex_decode(body.trim()).unwrap();
     let mb: MerkleBlock = deserialize(&mb_bytes).expect("merkleblock");
     let mut matches = Vec::new();
     let mut indexes = Vec::new();
@@ -822,7 +810,7 @@ async fn pin_esplora_tx_json_unknown_coinbase(esplora_addr: SocketAddr, cb_txid:
 async fn pin_esplora_scripthash_pages(esplora_addr: SocketAddr) {
     use rbitcoin_store::script_hash;
 
-    let sh_hex = bitcoin::Txid::from_byte_array(script_hash(&[0x51])).to_string();
+    let sh_hex = rbitcoin_primitives::display_hash_hex(script_hash(&[0x51]));
     let (st, body) = http_get(esplora_addr, &format!("/scripthash/{sh_hex}")).await;
     assert_eq!(st, 200, "{body}");
     let info: Value = serde_json::from_str(&body).unwrap();
@@ -905,7 +893,7 @@ async fn pin_esplora_after_txid_and_post_multi(
 fn encode_tx(tx: &Transaction) -> String {
     let mut raw = Vec::new();
     tx.consensus_encode(&mut raw).unwrap();
-    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&raw))
+    rbitcoin_primitives::hex_encode(&raw)
 }
 
 fn acs_spend(prev: Txid, input_sat: u64, fee: u64, spk: ScriptBuf) -> Transaction {
@@ -1625,9 +1613,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     };
     let mut miss_raw = Vec::new();
     miss.consensus_encode(&mut miss_raw).unwrap();
-    let miss_hex = bitcoin::hex::DisplayHex::to_lower_hex_string(
-        std::convert::AsRef::<[u8]>::as_ref(&miss_raw),
-    );
+    let miss_hex = rbitcoin_primitives::hex_encode(&miss_raw);
     let tma = jsonrpc(rpc_addr, "testmempoolaccept", json!([[miss_hex]])).await;
     assert_eq!(tma["result"][0]["allowed"], false, "{tma}");
     assert_eq!(tma["result"][0]["reject-reason"], "missing-inputs", "{tma}");
@@ -2293,9 +2279,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     let imm = jsonrpc(
         rpc_addr,
         "sendrawtransaction",
-        json!([bitcoin::hex::DisplayHex::to_lower_hex_string(
-            std::convert::AsRef::<[u8]>::as_ref(&imm_raw)
-        )]),
+        json!([rbitcoin_primitives::hex_encode(&imm_raw)]),
     )
     .await;
     assert_eq!(imm["error"]["code"], -26, "{imm}");
@@ -2893,7 +2877,6 @@ async fn fake_tor_session(
     replies: Arc<Mutex<Vec<String>>>,
     minted: Arc<Mutex<Vec<String>>>,
 ) {
-    use bitcoin::hex::{DisplayHex, FromHex};
     let (r, mut w) = s.into_split();
     let mut lines = BufReader::new(r).lines();
     let mut client_hash: Option<[u8; 32]> = None;
@@ -2905,7 +2888,7 @@ async fn fake_tor_session(
         } else if let Some(nonce) = line.strip_prefix("AUTHCHALLENGE SAFECOOKIE ") {
             let server_nonce = [0x5a; 32];
             let mut mat = TOR_COOKIE.to_vec();
-            mat.extend(Vec::<u8>::from_hex(nonce).unwrap());
+            mat.extend(rbitcoin_primitives::hex_decode(nonce).unwrap());
             mat.extend(server_nonce);
             client_hash = Some(hmac_sha256(
                 b"Tor safe cookie authentication controller-to-server hash",
@@ -2917,12 +2900,12 @@ async fn fake_tor_session(
             );
             format!(
                 "250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n",
-                server_hash.to_lower_hex_string(),
-                server_nonce.to_lower_hex_string()
+                rbitcoin_primitives::hex_encode(server_hash),
+                rbitcoin_primitives::hex_encode(server_nonce)
             )
         } else if let Some(auth) = line.strip_prefix("AUTHENTICATE ") {
             let ok = auth == format!("\"{TOR_PASSWORD}\"")
-                || client_hash.is_some_and(|h| auth == h.to_lower_hex_string());
+                || client_hash.is_some_and(|h| auth == rbitcoin_primitives::hex_encode(h));
             if ok {
                 "250 OK\r\n"
             } else {
