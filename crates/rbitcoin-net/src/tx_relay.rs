@@ -1900,7 +1900,7 @@ impl MempoolHub {
         from: Option<u64>,
     ) -> Result<AcceptResult, AcceptError> {
         crate::reactor::assert_not_reactor("mempool accept");
-        self.accept_with_utxo(tx, &self.utxo_provider(), from, false)
+        self.accept_with_utxo(tx, &self.utxo_provider(), from, false, &[])
     }
 
     /// Admit one `submitpackage` member without trimming and without parking.
@@ -1908,7 +1908,7 @@ impl MempoolHub {
     /// The package trims once at the end. A missing-input child stays a
     /// reconsiderable error so the parent can be retried with it.
     fn accept_tx_defer_trim(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
-        self.accept_with_utxo(tx, &self.utxo_provider(), None, true)
+        self.accept_with_utxo(tx, &self.utxo_provider(), None, true, &[])
     }
 
     /// Prepare under read lock; scripts off-lock. Parking is the caller's job.
@@ -2114,6 +2114,7 @@ impl MempoolHub {
         utxo: &impl rbitcoin_mempool::UtxoProvider,
         from: Option<u64>,
         defer_trim: bool,
+        announcers: &[u64],
     ) -> Result<AcceptResult, AcceptError> {
         utxo.note_spender(tx);
         let t0 = Instant::now();
@@ -2164,7 +2165,11 @@ impl MempoolHub {
                     }
                     let parked = {
                         let mut g = self.lock_write();
-                        g.park_orphan_from(tx, missing.clone(), from)
+                        if announcers.is_empty() {
+                            g.park_orphan_from(tx, missing.clone(), from)
+                        } else {
+                            g.park_announced(tx, missing.clone(), announcers)
+                        }
                     };
                     let us = t0.elapsed().as_micros() as u64;
                     self.meter_accept_stages(lock_us, stages);
@@ -2328,15 +2333,17 @@ impl MempoolHub {
             })
         };
         for item in ready {
-            let from = item.announcers.first().copied();
-            if let Err(AcceptError::Orphaned { .. }) =
-                self.accept_with_utxo(&item.tx, &utxo, from, false)
-            {
-                let id = item.tx.compute_txid();
-                for peer in item.announcers.iter().skip(1) {
-                    self.add_orphan_announcer(&id, *peer);
-                }
-            }
+            let id = item.tx.compute_txid();
+            // Every announcer is restored under the accept lock. A disconnect
+            // during the lift already edited the in-flight record.
+            let _ = self.accept_with_utxo(
+                &item.tx,
+                &utxo,
+                item.announcers.first().copied(),
+                false,
+                &item.announcers,
+            );
+            self.forget_taken_orphan(id, item.taken_gen);
         }
     }
 
@@ -2511,7 +2518,11 @@ impl MempoolHub {
         promote_note(parent);
         self.enqueue_noted_orphans(&mut queue);
         while let Some(child) = queue.pop_front() {
-            let _ = self.accept_with_utxo(&child, utxo, None, false);
+            let txid = child.tx.compute_txid();
+            let _ = self.accept_with_utxo(&child.tx, utxo, None, false, &child.announcers);
+            // Admitted or rejected without a repark. A repark already consumed
+            // this generation. A newer take of the same txid keeps its own.
+            self.forget_taken_orphan(txid, child.taken_gen);
             self.enqueue_noted_orphans(&mut queue);
         }
     }
@@ -2519,7 +2530,7 @@ impl MempoolHub {
     /// Move orphans of every tx noted since the last drain onto `queue`.
     /// Earlier notes stay ahead of later ones. A second take of the same
     /// txid is empty.
-    fn enqueue_noted_orphans(&self, queue: &mut VecDeque<Transaction>) {
+    fn enqueue_noted_orphans(&self, queue: &mut VecDeque<rbitcoin_mempool::OrphanSnapshot>) {
         let notes = promote_take_notes();
         if notes.is_empty() {
             return;
@@ -2929,6 +2940,11 @@ impl MempoolHub {
                 .finish_accept_err(us, AcceptError::Policy("mempool full"))
                 .unwrap_err());
         }
+        // The failure path forgets inside abandon. Success leaves the lifted
+        // txs in the mempool, so the in-flight rows would outlive the admit.
+        for item in &lifted {
+            self.forget_taken_orphan(item.tx.compute_txid(), item.taken_gen);
+        }
         let us = t0.elapsed().as_micros() as u64;
         self.meter_accept_stages(lock_us, stages);
         let per = us / (accepted.len().max(1) as u64);
@@ -3083,6 +3099,10 @@ impl MempoolHub {
         let _g = crate::reactor::BlockingRegion::enter();
         self.orphan_write(|g| g.orphanage.add_announcer_wtxid(wtxid, peer))
             .unwrap_or(false)
+    }
+
+    fn forget_taken_orphan(&self, txid: Txid, gen: u64) {
+        let _ = self.orphan_write(|g| g.orphanage.forget_taken_gen(&txid, gen));
     }
 
     pub fn erase_orphans_for_peer(&self, peer: u64) {
@@ -5843,7 +5863,9 @@ mod tests {
             map: HashMap::from([(op, coin)]),
             hits: AtomicUsize::new(0),
         };
-        let err = hub.accept_with_utxo(&tx, &utxo, None, false).unwrap_err();
+        let err = hub
+            .accept_with_utxo(&tx, &utxo, None, false, &[])
+            .unwrap_err();
         assert!(
             matches!(err, AcceptError::MissingPrevout(missing) if missing == op),
             "coin spent during the script check must conflict, got {err}"
@@ -7018,12 +7040,20 @@ mod tests {
                 "spend of the missing parent must park, got {err:?}"
             );
         }
+        assert!(
+            hub.add_orphan_announcer(&child_id, 4),
+            "the parked child takes the peer"
+        );
         let accepted = hub
             .accept_package(&[parent.clone(), child.clone()])
             .expect("hub package contains the parked child");
         assert_eq!(accepted.len(), 2);
         assert!(hub.try_contains(&parent_id));
         assert!(hub.try_contains(&child_id));
+        assert!(
+            !hub.lock_write().orphanage.has_announcer(4),
+            "admitting the lifted child must drop its in-flight peer"
+        );
         assert!(
             hub.try_contains(&sibling_id),
             "a parked sibling outside the package must still be admitted"
@@ -8868,7 +8898,7 @@ mod tests {
             write_hits: Arc::clone(&hits),
         };
         let tx = spend_true(cbs[0], 1_000, ScriptBuf::from_bytes(vec![0x51]));
-        hub.accept_with_utxo(&tx, &probe, None, false)
+        hub.accept_with_utxo(&tx, &probe, None, false, &[])
             .expect("accept");
         assert_eq!(
             hits.load(Ordering::Relaxed),
@@ -8878,7 +8908,7 @@ mod tests {
         hits.store(0, Ordering::Relaxed);
         let held = spend_true(cbs[1], 1_000, ScriptBuf::from_bytes(vec![0x52]));
         let _view = q.store().hold_utxo_view();
-        hub.accept_with_utxo(&held, &probe, None, false)
+        hub.accept_with_utxo(&held, &probe, None, false, &[])
             .expect("accept while the view is held");
         assert_eq!(
             hits.load(Ordering::Relaxed),
@@ -8941,7 +8971,7 @@ mod tests {
             }],
         };
         let h = Arc::clone(&hub);
-        let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall, None, false));
+        let join = thread::spawn(move || h.accept_with_utxo(&tx, &stall, None, false, &[]));
         let start = Instant::now();
         while !entered.load(Ordering::Acquire) {
             assert!(

@@ -24,6 +24,7 @@ thread_local! {
     static WATCH_READABLE: Cell<bool> = const { Cell::new(false) };
     static READABLE_BROKE: Cell<bool> = const { Cell::new(false) };
     static FAIL_CLEAR_UNDO: Cell<bool> = const { Cell::new(false) };
+    static FAIL_NEXT_DEFERRED_FREE: Cell<bool> = const { Cell::new(false) };
 }
 
 const UNDO_AT: usize = 256;
@@ -64,6 +65,22 @@ struct DeferredRewrite {
     removed: u64,
 }
 
+/// A full-list unlink. The empty head and the page free wait until the
+/// confirmed tip shrink is durable.
+pub(super) struct PendingEmpty {
+    scripthash: [u8; 32],
+    home: LocatedHome,
+    old: ShHeadValue,
+    removed: u64,
+    /// Empty head is durable. A retry must not write it again, and a second
+    /// defer of this key must not replace the page list.
+    head_synced: bool,
+    /// Pages still to free. `None` means they have not been read yet.
+    pages_left: Option<Vec<(u8, u64)>>,
+    /// `live_count` already dropped `removed`. A header retry must not do it again.
+    live_applied: bool,
+}
+
 enum SuffixPlan {
     NotSuffix,
     Absent,
@@ -87,19 +104,32 @@ impl ScriptHashTable {
     /// `Ok(true)` when at least one fk was stored. A pure suffix of an extent
     /// rewrites the tail pages. Any other shape rewrites the key once, and the
     /// previous pages stay readable until the head names the replacement.
-    pub fn unlink_creates(
+    ///
+    /// Refused while any empty head is still queued. Disconnect publishes
+    /// those through [`Self::commit_deferred_empty_heads`] after the tip flush.
+    #[cfg(test)]
+    pub(super) fn unlink_creates(
         &self,
         scripthash: &[u8; 32],
         create_tx_fks: &[Fk],
     ) -> Result<bool, StoreError> {
+        if !self.pending_empty.lock().unwrap().is_empty() {
+            return Err(StoreError::Rejected(
+                "scripthash unlink while an empty head is still queued",
+            ));
+        }
         let mut batch = UnlinkBatch::default();
         let changed = self.unlink_one(scripthash, create_tx_fks, &mut batch)?;
         self.finish_unlink_batch(batch)?;
+        // The queue was empty on entry, so this publishes only a full drop
+        // this call just deferred.
+        self.commit_deferred_for(scripthash)?;
         Ok(changed)
     }
 
     /// Unlink every group, then sync the new chains and heads once before any
-    /// replaced page is freed. One scripthash uses [`Self::unlink_creates`].
+    /// replaced page is freed. A full-list drop stays in memory until
+    /// [`Self::commit_deferred_empty_heads`].
     pub fn unlink_creates_batch(&self, groups: &[([u8; 32], Vec<Fk>)]) -> Result<(), StoreError> {
         let mut batch = UnlinkBatch::default();
         for (scripthash, fks) in groups {
@@ -140,9 +170,10 @@ impl ScriptHashTable {
         }
     }
 
-    /// Unlink one create_tx_fk (disconnect tip). One tx pays a scripthash once,
-    /// however many outputs share that script.
-    pub fn unlink_create(
+    /// Unlink one create_tx_fk. One tx pays a scripthash once, however many
+    /// outputs share that script. Disconnect uses [`Self::unlink_creates_batch`].
+    #[cfg(test)]
+    pub(super) fn unlink_create(
         &self,
         scripthash: &[u8; 32],
         create_tx_fk: Fk,
@@ -218,6 +249,10 @@ impl ScriptHashTable {
         live.retain(|fk| !remove.contains(&fk.0));
         if live.len() == before {
             return Ok(false);
+        }
+        if live.is_empty() {
+            self.defer_full_unlink(scripthash, home, old.clone(), before as u64);
+            return Ok(true);
         }
         let alloc_mu = self.alloc_for(scripthash, super::KeyHome::from(home));
         let mut alloc = alloc_mu.lock().unwrap();
@@ -316,6 +351,198 @@ impl ScriptHashTable {
         Ok(())
     }
 
+    fn defer_full_unlink(
+        &self,
+        scripthash: &[u8; 32],
+        home: LocatedHome,
+        old: ShHeadValue,
+        removed: u64,
+    ) {
+        let mut q = self.pending_empty.lock().unwrap();
+        // A retry before the empty head is durable is the same chain. A later
+        // chain, queued after that head synced, has to sit beside it or the
+        // new pages are never freed.
+        if let Some(job) = q
+            .iter_mut()
+            .find(|job| &job.scripthash == scripthash && !job.head_synced)
+        {
+            job.home = home;
+            job.old = old;
+            job.removed = removed;
+            job.pages_left = None;
+            return;
+        }
+        q.push(PendingEmpty {
+            scripthash: *scripthash,
+            home,
+            old,
+            removed,
+            head_synced: false,
+            pages_left: None,
+            live_applied: false,
+        });
+    }
+
+    /// True while a full-list unlink is waiting for the tip shrink.
+    ///
+    /// The disk head may still be the previous value, or it may already be
+    /// empty while a free is still queued. Callers that refresh a RAM cache
+    /// must treat this as empty.
+    pub fn deferred_empty(&self, scripthash: &[u8; 32]) -> bool {
+        self.pending_empty
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|job| &job.scripthash == scripthash)
+    }
+
+    /// Sync empty heads and free their pages. Disconnect calls this after
+    /// `flush_confirmed_only` has returned.
+    ///
+    /// A free that fails after the head sync stays queued. The retry frees
+    /// only the pages that are still on the list.
+    pub fn commit_deferred_empty_heads(&self) -> Result<(), StoreError> {
+        // One free error used to stop the loop and sit at the end, so the
+        // next pop retried it before any key that had not been tried. Drain
+        // the jobs already queued. Failures go back after that pass.
+        let mut failed = Vec::new();
+        let mut first_err = None;
+        loop {
+            let Some(mut job) = self.pending_empty.lock().unwrap().pop() else {
+                break;
+            };
+            if let Err(e) = self.commit_one_empty(&mut job) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                failed.push(job);
+            }
+        }
+        if !failed.is_empty() {
+            let mut q = self.pending_empty.lock().unwrap();
+            // Jobs deferred while this pass ran stay at the end, so the next
+            // pop sees them before these retries.
+            for job in failed.into_iter().rev() {
+                q.insert(0, job);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Publish empty heads for `scripthash` only. Jobs for other keys stay queued.
+    #[cfg(test)]
+    fn commit_deferred_for(&self, scripthash: &[u8; 32]) -> Result<(), StoreError> {
+        let mine = {
+            let mut q = self.pending_empty.lock().unwrap();
+            let mut mine = Vec::new();
+            let mut keep = Vec::new();
+            for job in q.drain(..) {
+                if &job.scripthash == scripthash {
+                    mine.push(job);
+                } else {
+                    keep.push(job);
+                }
+            }
+            *q = keep;
+            mine
+        };
+        let mut failed = Vec::new();
+        let mut first_err = None;
+        for mut job in mine {
+            if let Err(e) = self.commit_one_empty(&mut job) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                failed.push(job);
+            }
+        }
+        if !failed.is_empty() {
+            let mut q = self.pending_empty.lock().unwrap();
+            for job in failed.into_iter().rev() {
+                q.insert(0, job);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn commit_one_empty(&self, job: &mut PendingEmpty) -> Result<(), StoreError> {
+        if !job.head_synced {
+            self.unlink_write_home(&job.scripthash, job.home, &ShHeadValue::Empty)?;
+            self.sync_home(job.home, &job.scripthash)?;
+            job.head_synced = true;
+        }
+        if job.pages_left.is_none() {
+            job.pages_left = Some(self.deferred_page_list(job)?);
+        }
+        let mut pages = job.pages_left.take().unwrap_or_default();
+        let body = self.body_for(&job.scripthash, super::KeyHome::from(job.home));
+        let alloc_mu = self.alloc_for(&job.scripthash, super::KeyHome::from(job.home));
+        let mut alloc = alloc_mu.lock().unwrap();
+        let mut next = 0;
+        while next < pages.len() {
+            let (class, off) = pages[next];
+            if let Err(e) = self.free_deferred_page(body, &mut alloc, class, off) {
+                job.pages_left = Some(pages.split_off(next));
+                return Err(e);
+            }
+            next = next.saturating_add(1);
+        }
+        if !job.live_applied {
+            alloc.live_count = alloc.live_count.saturating_sub(job.removed);
+            job.live_applied = true;
+        }
+        if let Err(e) = write_alloc_header(body, &alloc) {
+            job.pages_left = Some(Vec::new());
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Page offsets, read before any freelist write. A later free error
+    /// retries this list instead of walking a page that is already a freelist link.
+    fn deferred_page_list(&self, job: &PendingEmpty) -> Result<Vec<(u8, u64)>, StoreError> {
+        let body = self.body_for(&job.scripthash, super::KeyHome::from(job.home));
+        match &job.old {
+            ShHeadValue::Extent { last_page } => {
+                let first = super::paged_first_from_last(body, *last_page)?;
+                let mut pages = Vec::new();
+                super::follow_page_chain(body, first, super::SH_PAGE_CHAIN_MAX, |_body, off| {
+                    pages.push((SH_PAGE_SLAB_CLASS, off));
+                    Ok(())
+                })?;
+                Ok(pages)
+            }
+            ShHeadValue::Slab { class, off, .. } => Ok(vec![(*class, *off)]),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn free_deferred_page(
+        &self,
+        body: &TableFile,
+        alloc: &mut AllocState,
+        class: u8,
+        off: u64,
+    ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if FAIL_NEXT_DEFERRED_FREE.with(|c| c.replace(false)) {
+            return Err(StoreError::Corrupt("scripthash deferred free failed"));
+        }
+        self.free_slab(body, alloc, class, off)
+    }
+
+    /// The next deferred page free fails once, before the freelist changes.
+    #[cfg(test)]
+    pub fn fail_next_deferred_free() {
+        FAIL_NEXT_DEFERRED_FREE.with(|c| c.set(true));
+    }
+
     fn apply_suffix_plan(
         &self,
         scripthash: &[u8; 32],
@@ -328,11 +555,8 @@ impl ScriptHashTable {
         let mut alloc = alloc_mu.lock().unwrap();
         match plan {
             SuffixPlan::DropAll { removed } => {
-                self.unlink_write_home(scripthash, home, &ShHeadValue::Empty)?;
-                self.sync_home(home, scripthash)?;
-                self.free_if_paged(body, &mut alloc, old)?;
-                alloc.live_count = alloc.live_count.saturating_sub(removed);
-                write_alloc_header(body, &alloc)?;
+                drop(alloc);
+                self.defer_full_unlink(scripthash, home, old.clone(), removed);
                 Ok(removed > 0)
             }
             SuffixPlan::Rewrite {

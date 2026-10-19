@@ -267,6 +267,91 @@ fn bad_prev_on_the_tip_child_is_fetched_again() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A tip-child BadPrev that a new body cannot fix stops after three tries.
+/// The hash is not fetched again and is not blacklisted.
+#[test]
+fn tip_child_bad_prev_halts_on_the_third_retry() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("bad-prev-tip-child-halt");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let t = hub.tip_height().unwrap();
+    let hash = h(0x45);
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(t));
+    st.record_height(hash, t + 1);
+    st.note_path_prev(hash, tip);
+    let err = "consensus: unexpected previous header";
+    for _ in 0..3 {
+        apply_confirm_reject(
+            &mut st,
+            t + 1,
+            hash,
+            err,
+            Some(hub.query.as_ref()),
+            Some(&hub),
+        );
+    }
+    assert!(
+        st.halt
+            .as_deref()
+            .is_some_and(|s| s.contains("cascade repeated")),
+        "halt={:?}",
+        st.halt
+    );
+    assert!(!st.body.is_missing(&hash));
+    assert!(!st.body.is_rejected(&hash));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Another block's soft reject must not zero the tip-child count.
+#[test]
+fn tip_child_bad_prev_survives_another_soft_reject() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("bad-prev-tip-child-mixed");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let t = hub.tip_height().unwrap();
+    let hash = h(0x47);
+    let other = h(0x48);
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(t));
+    st.record_height(hash, t + 1);
+    st.note_path_prev(hash, tip);
+    let err = "consensus: unexpected previous header";
+    apply_confirm_reject(
+        &mut st,
+        t + 1,
+        hash,
+        err,
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    apply_confirm_reject(
+        &mut st,
+        t + 2,
+        other,
+        "consensus: bad block: merkle root mismatch",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    for _ in 0..2 {
+        apply_confirm_reject(
+            &mut st,
+            t + 1,
+            hash,
+            err,
+            Some(hub.query.as_ref()),
+            Some(&hub),
+        );
+    }
+    assert!(
+        st.halt
+            .as_deref()
+            .is_some_and(|s| s.contains("cascade repeated")),
+        "halt={:?}",
+        st.halt
+    );
+    assert!(!st.body.is_missing(&hash));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `body.rejected ⊆ consensus-invalid set` — Cascade / SoftWire / EngineFault
 /// / Cancelled never blacklist.
 #[test]

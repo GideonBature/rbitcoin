@@ -1527,18 +1527,12 @@ fn addr_sample_seed(bind: SocketAddr, now: u64) -> u64 {
 }
 
 fn ip_is_advertisable(ip: &IpAddr, cjdns_reachable: bool) -> bool {
-    match ip {
-        IpAddr::V4(v) => !(v.is_unspecified() || v.is_loopback() || v.is_private()),
-        IpAddr::V6(v) => {
-            if v.is_unspecified() || v.is_loopback() {
-                return false;
-            }
-            if crate::netaddr::is_cjdns_ip(*v) {
-                return cjdns_reachable;
-            }
-            true
+    if let IpAddr::V6(v) = ip {
+        if crate::netaddr::is_cjdns_ip(*v) {
+            return cjdns_reachable;
         }
     }
+    !crate::netaddr::clearnet_unroutable(*ip)
 }
 
 impl PeerHub {
@@ -4065,6 +4059,27 @@ mod tests {
             got.is_empty(),
             "getaddr must not advertise unroutable clearnet: {got:?}"
         );
+    }
+
+    #[test]
+    fn external_ip_uses_the_clearnet_bogon_filter() {
+        let blocked = [
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)),
+            IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1)),
+        ];
+        for ip in blocked {
+            assert!(
+                !ip_is_advertisable(&ip, true),
+                "{ip} must not be self-announced"
+            );
+        }
+        assert!(ip_is_advertisable(
+            &IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            false
+        ));
     }
 
     include!("overlay_addrman_journey.rs");

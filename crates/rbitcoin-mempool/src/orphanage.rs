@@ -38,6 +38,8 @@ struct OrphanEntry {
 pub struct OrphanSnapshot {
     pub tx: Transaction,
     pub announcers: Vec<u64>,
+    /// In-flight generation from `take_children_of`. Zero for any other snapshot.
+    pub taken_gen: u64,
 }
 
 /// Side pool of not-yet-acceptable txs waiting on parent(s).
@@ -53,6 +55,29 @@ pub struct Orphanage {
     peer_weight: HashMap<u64, u64>,
     max_weight: u64,
     max_count: usize,
+    /// Orphans `take_children_of` removed and that are not parked or admitted yet.
+    ///
+    /// A disconnect in that gap cannot see `by_txid`. It edits this map, and
+    /// the repark uses the result instead of the announcer list from the take.
+    taken: HashMap<Txid, TakenOrphan>,
+    /// Next generation for [`Self::taken`]. Zero is never assigned.
+    next_taken_gen: u64,
+}
+
+/// Announcers copied at take time. `drop` means a disconnect removed the last one.
+#[derive(Debug, Default)]
+struct TakenOrphan {
+    announcers: BTreeSet<u64>,
+    drop: bool,
+    gen: u64,
+}
+
+/// What the repark should do with an orphan that was taken.
+pub(crate) enum TakenClaim {
+    /// Park under these peers. Empty means the orphan never had an announcer.
+    Keep(Vec<u64>),
+    /// The last announcer disconnected while the orphan was out. Do not park.
+    Drop,
 }
 
 impl Orphanage {
@@ -70,6 +95,8 @@ impl Orphanage {
             peer_weight: HashMap::new(),
             max_weight: max_weight.max(MAX_ORPHAN_TX_WEIGHT),
             max_count: max_count.max(1),
+            taken: HashMap::new(),
+            next_taken_gen: 0,
         }
     }
 
@@ -339,7 +366,10 @@ impl Orphanage {
     }
 
     /// Take all orphans that listed `parent` as missing (for re-accept).
-    pub fn take_children_of(&mut self, parent: &Txid) -> Vec<Transaction> {
+    ///
+    /// The announcer list comes with the transaction. A child that still
+    /// misses another parent is parked again under those same peers.
+    pub fn take_children_of(&mut self, parent: &Txid) -> Vec<OrphanSnapshot> {
         let Some(children) = self.by_parent.remove(parent) else {
             return Vec::new();
         };
@@ -359,10 +389,70 @@ impl Orphanage {
                         }
                     }
                 }
-                out.push(e.tx);
+                let announcers = e.announcers;
+                let gen = self.alloc_taken_gen();
+                self.taken.insert(
+                    cid,
+                    TakenOrphan {
+                        announcers: announcers.clone(),
+                        drop: false,
+                        gen,
+                    },
+                );
+                out.push(OrphanSnapshot {
+                    tx: e.tx,
+                    announcers: announcers.into_iter().collect(),
+                    taken_gen: gen,
+                });
             }
         }
         out
+    }
+
+    fn alloc_taken_gen(&mut self) -> u64 {
+        self.next_taken_gen = self.next_taken_gen.wrapping_add(1);
+        if self.next_taken_gen == 0 {
+            self.next_taken_gen = 1;
+        }
+        self.next_taken_gen
+    }
+
+    /// Remember `txid` as out of the pool. A package lift uses this; promote
+    /// records the same way inside `take_children_of`.
+    pub fn note_taken(&mut self, txid: Txid, announcers: &[u64]) -> u64 {
+        let gen = self.alloc_taken_gen();
+        self.taken.insert(
+            txid,
+            TakenOrphan {
+                announcers: announcers.iter().copied().collect(),
+                drop: false,
+                gen,
+            },
+        );
+        gen
+    }
+
+    /// Consume the in-flight record. `None` when this tx was not taken.
+    pub(crate) fn claim_taken(&mut self, txid: &Txid) -> Option<TakenClaim> {
+        let taken = self.taken.remove(txid)?;
+        if taken.drop {
+            Some(TakenClaim::Drop)
+        } else {
+            Some(TakenClaim::Keep(taken.announcers.into_iter().collect()))
+        }
+    }
+
+    /// Drop the in-flight record when it is still the one `gen` inserted.
+    ///
+    /// A newer take of the same txid must survive. The repark already consumed
+    /// its own record, so this only clears an admit or a reject that did not park.
+    pub fn forget_taken_gen(&mut self, txid: &Txid, gen: u64) {
+        if gen == 0 {
+            return;
+        }
+        if self.taken.get(txid).is_some_and(|t| t.gen == gen) {
+            self.taken.remove(txid);
+        }
     }
 
     pub fn announcers_of(&self, txid: &Txid) -> Vec<u64> {
@@ -374,6 +464,7 @@ impl Orphanage {
 
     pub fn has_announcer(&self, peer: u64) -> bool {
         self.by_txid.values().any(|e| e.announcers.contains(&peer))
+            || self.taken.values().any(|t| t.announcers.contains(&peer))
     }
 
     pub fn add_announcer(&mut self, txid: &Txid, peer: u64) -> bool {
@@ -398,6 +489,8 @@ impl Orphanage {
     }
 
     /// Drop `peer` as announcer; erase orphans with no remaining announcers.
+    ///
+    /// Also edits orphans that are out for a promote. The repark reads that.
     pub fn erase_for_peer(&mut self, peer: u64) {
         let hit: Vec<(Txid, u64, bool)> = self
             .by_txid
@@ -423,6 +516,11 @@ impl Orphanage {
             self.remove_txid(&t);
         }
         self.fifo.retain(|t| self.by_txid.contains_key(t));
+        for taken in self.taken.values_mut() {
+            if taken.announcers.remove(&peer) && taken.announcers.is_empty() {
+                taken.drop = true;
+            }
+        }
     }
 
     pub fn snapshot(&self) -> Vec<OrphanSnapshot> {
@@ -436,6 +534,7 @@ impl Orphanage {
                 out.push(OrphanSnapshot {
                     tx: e.tx.clone(),
                     announcers: e.announcers.iter().copied().collect(),
+                    taken_gen: 0,
                 });
             }
         }
@@ -586,7 +685,7 @@ mod tests {
         assert!(o.announcers_of(&tid).contains(&1));
         let kids = o.take_children_of(&parent);
         assert!(
-            kids.iter().any(|tx| tx.compute_txid() == tid),
+            kids.iter().any(|child| child.tx.compute_txid() == tid),
             "the parent still delivers peer 1's orphan"
         );
     }

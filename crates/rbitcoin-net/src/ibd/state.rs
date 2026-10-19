@@ -193,6 +193,8 @@ pub(crate) struct IbdWorkState {
     pub confirm_quiesce: bool,
     /// Repeated Cascade at the same tip for the same hash → escalate to halt.
     pub cascade_at: Option<(BlockHash, [u8; 32], u8)>,
+    /// Tip-child BadPrev retries. Another block's soft reject does not clear this.
+    pub tip_child_bad_prev: Option<(BlockHash, [u8; 32], u8)>,
     /// Assign-stop byte budget, snapshotted when assign runs (`u64::MAX` = off).
     pub(crate) intake_stop: u64,
     /// Body-queue bytes snapshotted with [`Self::intake_stop`].
@@ -294,6 +296,7 @@ impl IbdWorkState {
             confirm_stuck_since: None,
             confirm_quiesce: false,
             cascade_at: None,
+            tip_child_bad_prev: None,
             intake_stop: u64::MAX,
             intake_queued: 0,
             block_lens: VecDeque::new(),

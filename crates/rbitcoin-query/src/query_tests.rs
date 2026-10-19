@@ -430,6 +430,116 @@ fn history_window_wider_than_eight_weeks_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A newest page whose creates sit more than eight weeks under the tip reads
+/// spend slots. It does not walk `input.body` across the gap.
+///
+/// One chain fills the page, checks that dormant page, then spends the
+/// create that falls below the page.
+#[test]
+fn newest_page_wide_gap_uses_spend_slots() {
+    let sh = rbitcoin_store::script_hash(&[0x51]);
+    let page = crate::scripthash::HistoryFilter::esplora_chain_page(None);
+    let (dir, q) = temp_query("newest-page-wide");
+    q.set_spend_index(true);
+    let mut prev = Fk::NULL;
+    let mut parent = None;
+    let mut txids = Vec::new();
+    for h in 0..25u32 {
+        let (header, ta) = coinbase_block(h, prev, parent);
+        txids.push(ta.tx.txid);
+        parent = Some(header.hash);
+        prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+    }
+    let mut view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    view.height = Height(view.height.0.saturating_add(8_065));
+    let rows = q
+        .scripthash_history_summary_filtered_in(&sh, &page, &view)
+        .expect("dormant page")
+        .rows;
+    let got: Vec<[u8; 32]> = rows.iter().map(|row| row.txid).collect();
+    assert_eq!(got.len(), txids.len());
+    for txid in &txids {
+        assert!(got.contains(txid), "page drops a create inside the limit");
+    }
+
+    let (header, ta) = coinbase_block(25, prev, parent);
+    txids.push(ta.tx.txid);
+    parent = Some(header.hash);
+    prev = q.connect_block(Height(25), &header, &[ta]).unwrap();
+    let older = txids[0];
+    let page_creates = txids[1..].to_vec();
+    let create_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+    let (header, mut spend) = coinbase_block(26, prev, parent);
+    spend.tx.txid[30] = 0x5e;
+    spend.outputs = vec![OutputRecord::unspent(49_0000_0000, vec![0x00])];
+    spend.inputs = vec![InputRecord {
+        prev_txid: older,
+        parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
+        sequence: u32::MAX,
+        script_sig: vec![],
+        witness: vec![],
+    }];
+    let spend_txid = spend.tx.txid;
+    q.connect_block(Height(26), &header, &[spend]).unwrap();
+    let mut view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    view.height = Height(view.height.0.saturating_add(8_065));
+    let rows = q
+        .scripthash_history_summary_filtered_in(&sh, &page, &view)
+        .expect("page with an in-window spend")
+        .rows;
+    let got: Vec<[u8; 32]> = rows.iter().map(|row| row.txid).collect();
+    assert!(
+        got.contains(&spend_txid),
+        "a spend of an older coin inside the page window must be on the page"
+    );
+    assert!(
+        !got.contains(&older),
+        "the older create itself is below the page"
+    );
+    assert_eq!(got.len(), 25, "the spend takes one slot on the page");
+    for txid in &page_creates[1..] {
+        assert!(
+            got.contains(txid),
+            "page drops a create newer than the spend's slot"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Disconnect of one block that holds a whole scripthash extent ends with an
+/// empty head and no tip. The empty head is published only after the tip shrink.
+#[test]
+fn disconnect_one_block_megakey_clears_the_head() {
+    let (dir, q) = temp_query("disconnect-megakey");
+    let sh = rbitcoin_store::script_hash(&[0x51]);
+    let (header, base) = coinbase_block(0, Fk::NULL, None);
+    let mut txs = Vec::with_capacity(257);
+    for i in 0..257u32 {
+        let mut ta = base.clone();
+        ta.tx.txid[0..4].copy_from_slice(&i.to_le_bytes());
+        ta.inputs[0].script_sig = vec![(i & 0xff) as u8];
+        txs.push(ta);
+    }
+    q.connect_block(Height(0), &header, &txs).unwrap();
+    assert!(
+        matches!(
+            q.store().scripthash.head_value(&sh).unwrap().unwrap(),
+            rbitcoin_store::ShHeadValue::Extent { .. }
+        ),
+        "257 creates of one script are a page chain"
+    );
+    assert_eq!(q.tip_height().map(|h| h.0), Some(0));
+    q.disconnect_tip().unwrap();
+    assert!(q.tip_height().is_none());
+    let head = q.store().scripthash.head_value(&sh).unwrap();
+    assert!(head
+        .as_ref()
+        .map(rbitcoin_store::ShHeadValue::is_empty)
+        .unwrap_or(true));
+    assert!(!q.store().scripthash.deferred_empty(&sh));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Slow-pin log is only emitted when load work_ms > 2s — keep the formatter unit.
 #[test]
 fn format_slow_pin_omits_retired_tokens() {

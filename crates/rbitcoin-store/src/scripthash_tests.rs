@@ -1981,6 +1981,203 @@ fn extent_ingest_torn_tail_restores_on_open() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn page_freelist_is_acyclic(t: &ScriptHashTable, sh: &[u8; 32]) -> bool {
+    let home = t.key_home(sh).unwrap();
+    let body = t.body_for(sh, home);
+    let alloc = t.alloc_for(sh, home).lock().unwrap();
+    let mut off = alloc.free_head[SH_PAGE_SLAB_CLASS as usize];
+    let mut seen = std::collections::HashSet::new();
+    let mut guard = 0u32;
+    while off != 0 {
+        if !seen.insert(off) || guard > 10_000 {
+            return false;
+        }
+        guard = guard.saturating_add(1);
+        let mut next = [0u8; 8];
+        if body.read_at(off, &mut next).is_err() {
+            return false;
+        }
+        off = u64::from_le_bytes(next);
+    }
+    true
+}
+
+/// One page chain covers a repeated defer and a free that fails midway.
+/// The creates stay until the commit, and the pages are freed once.
+#[test]
+fn extent_drop_all_retry_and_failed_free_release_once() {
+    let dir = tmp();
+    let sh = script_hash(&[0x72]);
+    let n = 300u64;
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+    t.put_create_batch_append(&many, &mut HashMap::new())
+        .unwrap();
+    let fks: Vec<_> = (1..=n).map(Fk).collect();
+    t.unlink_creates_batch(&[(sh, fks.clone())]).unwrap();
+    assert!(t.deferred_empty(&sh));
+    assert_eq!(
+        t.entries(&sh).unwrap().len(),
+        n as usize,
+        "the empty head is not durable before the tip flush"
+    );
+    t.unlink_creates_batch(&[(sh, fks)]).unwrap();
+    ScriptHashTable::fail_next_deferred_free();
+    assert!(t.commit_deferred_empty_heads().is_err());
+    assert!(t.deferred_empty(&sh));
+    t.commit_deferred_empty_heads().unwrap();
+    assert!(!t.deferred_empty(&sh));
+    assert!(t.entries(&sh).unwrap().is_empty());
+    assert!(
+        page_freelist_is_acyclic(&t, &sh),
+        "a retried full-list unlink freed a page twice"
+    );
+    put_create(&t, rec(sh, n + 1, 0));
+    assert_eq!(t.entries(&sh).unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A free error leaves the old chain queued. A later full drop of a new
+/// chain on that key must still be published.
+#[test]
+fn extent_drop_all_after_a_synced_job_frees_the_new_chain() {
+    let dir = tmp();
+    let sh = script_hash(&[0x74]);
+    let n = 300u64;
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+    t.put_create_batch_append(&many, &mut HashMap::new())
+        .unwrap();
+    let fks: Vec<_> = (1..=n).map(Fk).collect();
+    t.unlink_creates_batch(&[(sh, fks)]).unwrap();
+    ScriptHashTable::fail_next_deferred_free();
+    assert!(t.commit_deferred_empty_heads().is_err());
+    assert!(t.deferred_empty(&sh));
+    let more: Vec<_> = (n + 1..=n + n).map(|i| rec(sh, i, 0)).collect();
+    t.put_create_batch_append(&more, &mut HashMap::new())
+        .unwrap();
+    let new_fks: Vec<_> = (n + 1..=n + n).map(Fk).collect();
+    t.unlink_creates_batch(&[(sh, new_fks)]).unwrap();
+    t.commit_deferred_empty_heads().unwrap();
+    assert!(!t.deferred_empty(&sh));
+    assert!(
+        t.entries(&sh).unwrap().is_empty(),
+        "the rebuilt chain stayed on disk after its full unlink"
+    );
+    assert!(page_freelist_is_acyclic(&t, &sh));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One key's free error must not keep the other keys in the batch from
+/// publishing their empty heads.
+#[test]
+fn extent_drop_all_one_free_error_still_commits_the_other_key() {
+    let dir = tmp();
+    let sh_a = script_hash(&[0x75]);
+    let sh_b = script_hash(&[0x76]);
+    let n = 300u64;
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let many_a: Vec<_> = (1..=n).map(|i| rec(sh_a, i, 0)).collect();
+    t.put_create_batch_append(&many_a, &mut HashMap::new())
+        .unwrap();
+    put_create(&t, rec(sh_b, 1, 0));
+    let fks_a: Vec<_> = (1..=n).map(Fk).collect();
+    t.unlink_creates_batch(&[(sh_a, fks_a), (sh_b, vec![Fk(1)])])
+        .unwrap();
+    ScriptHashTable::fail_next_deferred_free();
+    assert!(t.commit_deferred_empty_heads().is_err());
+    let a_waiting = t.deferred_empty(&sh_a);
+    let b_waiting = t.deferred_empty(&sh_b);
+    assert!(
+        a_waiting != b_waiting,
+        "one free error left both keys unpublished"
+    );
+    let (done, stuck) = if a_waiting {
+        (sh_b, sh_a)
+    } else {
+        (sh_a, sh_b)
+    };
+    assert!(t.entries(&done).unwrap().is_empty());
+    t.commit_deferred_empty_heads().unwrap();
+    assert!(!t.deferred_empty(&stuck));
+    assert!(t.entries(&stuck).unwrap().is_empty());
+    assert!(page_freelist_is_acyclic(&t, &sh_a));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A one-key unlink is refused while any empty head is still queued.
+/// Neither key is edited. The tip flush still publishes the waiting key.
+#[test]
+fn single_key_unlink_refuses_while_an_empty_head_is_queued() {
+    let dir = tmp();
+    let a = script_hash(&[0x81]);
+    let b = script_hash(&[0x82]);
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    put_create(&t, rec(a, 1, 0));
+    put_create(&t, rec(b, 2, 0));
+    t.unlink_creates_batch(&[(a, vec![Fk(1)])]).unwrap();
+    assert!(t.deferred_empty(&a));
+    assert_eq!(t.entries(&a).unwrap().len(), 1);
+    let err = t.unlink_creates(&b, &[Fk(2)]).unwrap_err();
+    assert!(
+        matches!(err, StoreError::Rejected(_)),
+        "a one-key unlink ran while an empty head was queued, got {err}"
+    );
+    assert!(
+        t.deferred_empty(&a),
+        "the refused call published the waiting empty head"
+    );
+    assert_eq!(
+        t.entries(&a).unwrap().len(),
+        1,
+        "the waiting key lost its creates before the tip flush"
+    );
+    assert_eq!(
+        t.entries(&b).unwrap().len(),
+        1,
+        "the refused call unlinked the key it was given"
+    );
+    t.commit_deferred_empty_heads().unwrap();
+    assert!(!t.deferred_empty(&a));
+    assert!(t.entries(&a).unwrap().is_empty());
+    assert_eq!(t.entries(&b).unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A whole-extent unlink that has not reached the tip flush leaves the
+/// creates on disk. Open has no undo record to apply, and it must not
+/// invent an empty head.
+#[test]
+fn extent_drop_all_before_tip_flush_keeps_creates() {
+    let dir = tmp();
+    let sh = script_hash(&[0x71]);
+    let n = 300u64;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+        t.put_create_batch_append(&many, &mut HashMap::new())
+            .unwrap();
+        assert!(matches!(
+            t.head_value(&sh).unwrap().unwrap(),
+            ShHeadValue::Extent { .. }
+        ));
+        let fks: Vec<_> = (1..=n).map(Fk).collect();
+        t.unlink_creates_batch(&[(sh, fks)]).unwrap();
+        assert!(t.deferred_empty(&sh));
+        assert_eq!(
+            t.entries(&sh).unwrap().len(),
+            n as usize,
+            "the empty head is not durable before the tip flush"
+        );
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A torn tail on a sealed overflow file, and again after L1 promote.
 #[test]
 fn extent_sealed_ovf_torn_tail_restores_on_open() {
