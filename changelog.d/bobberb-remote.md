@@ -35,3 +35,6 @@ Fixed
 - **`GET /broadcast` is not served.** `POST /tx` remains the admit path.
 - **A panicking script-pool chunk releases the wave.** `wait_done`
   returns, and the worker keeps running.
+- **IBD plants a stored sibling of an invalid tip block.** The header
+  store supplies the parent when the work path has not recorded it yet,
+  so download continues onto that sibling.

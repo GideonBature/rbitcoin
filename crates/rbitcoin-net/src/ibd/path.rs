@@ -193,7 +193,7 @@ fn plant_find_valid_child(
         if st.reorg.invalid.contains(h.to_byte_array()) || st.body.is_rejected(&h) {
             continue;
         }
-        let Some(prev) = st.path_prev.get(&h).copied() else {
+        let Some(prev) = st.path_prev.get(&h).copied().or_else(|| hub.prev_of(&h)) else {
             continue;
         };
         if prev != tip_hash {
@@ -258,12 +258,12 @@ fn plant_hash_at_height(st: &IbdWorkState, ht: u32) -> Option<BlockHash> {
 
 fn plant_next_connected(
     st: &IbdWorkState,
-    _hub: &ChainHub,
+    hub: &ChainHub,
     parent: BlockHash,
     ht: u32,
 ) -> Option<BlockHash> {
     let n = plant_hash_at_height(st, ht)?;
-    let p = st.path_prev.get(&n).copied()?;
+    let p = st.path_prev.get(&n).copied().or_else(|| hub.prev_of(&n))?;
     (p == parent).then_some(n)
 }
 
@@ -505,6 +505,64 @@ mod tests {
         assert!(st.ordered_set.contains(&ext.block_hash()));
         assert_eq!(st.height_to_hash.get(&1), Some(&child.block_hash()));
         assert_eq!(st.height_to_hash.get(&2), Some(&ext.block_hash()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A sibling known only from the header store (no `path_prev` yet) is
+    /// still the tip child. The unknown-txid IBD pump depends on this after
+    /// the active tip+1 is marked invalid.
+    #[test]
+    fn plant_valid_tip_child_uses_stored_prev_without_path_prev() {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::block::{Header, Version};
+        use bitcoin::script::ScriptBuf;
+        use bitcoin::transaction::Version as TxVersion;
+        use bitcoin::{
+            Amount, Block, CompactTarget, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness,
+        };
+
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("plant-stored-prev");
+        hub.ensure_genesis().unwrap();
+        let mine = |prev: BlockHash, time: u32, height: u32| {
+            let mut ss = rbitcoin_consensus::bip34_height_script(height);
+            while ss.len() < 2 {
+                ss.push(0x00);
+            }
+            let coinbase = Transaction {
+                version: TxVersion::ONE,
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::from_bytes(ss),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(50_0000_0000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                }],
+            };
+            let mut block = Block {
+                header: Header {
+                    version: Version::from_consensus(4),
+                    prev_blockhash: prev,
+                    merkle_root: bitcoin::TxMerkleNode::from_byte_array([0u8; 32]),
+                    time,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
+                    nonce: 0,
+                },
+                txdata: vec![coinbase],
+            };
+            block.header.merkle_root = block.compute_merkle_root().unwrap();
+            rbitcoin_consensus::grind_regtest_pow(&mut block.header);
+            block
+        };
+        let child = mine(hub.tip_hash().unwrap(), 1_300_000_600, 1);
+        hub.ensure_header(&child.header).unwrap();
+        let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+        st.hash_height.insert(child.block_hash(), 1);
+        super::plant_valid_tip_child(&mut st, &hub);
+        assert_eq!(st.height_to_hash.get(&1), Some(&child.block_hash()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
