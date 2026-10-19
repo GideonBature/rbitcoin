@@ -30,52 +30,24 @@ pub(crate) fn is_anyone_can_spend(script: &Script) -> bool {
 /// BIP141 witness program: `OP_0`/`OP_1`..`OP_16` + a single push of 2..=40 bytes.
 /// Returns `(version, program)` where version is 0 for OP_0 and 1..=16 for OP_1..OP_16.
 pub(crate) fn witness_program(script: &Script) -> Option<(u8, &[u8])> {
-    let b = script.as_bytes();
-    // `push_len` is at most 40, so `b.len() == 2 + push_len` already rejects
-    // a script longer than 42 bytes.
-    if b.len() < 4 {
-        return None;
-    }
-    let version = match b[0] {
-        0x00 => 0u8,
-        v @ 0x51..=0x60 => v - 0x50,
-        _ => return None,
-    };
-    let push_len = b[1] as usize;
-    // Direct push opcodes 0x02..0x28 only (BIP141 / Core IsWitnessProgram).
-    if !(2..=40).contains(&push_len) {
-        return None;
-    }
-    if b.len() != 2 + push_len {
-        return None;
-    }
-    Some((version, &b[2..]))
+    let version = script.witness_version()?;
+    Some((version.to_num(), &script.as_bytes()[2..]))
 }
 
 pub(crate) fn classify(script: &Script) -> ScriptKind {
-    let b = script.as_bytes();
-    if b.len() == 22 && b[0] == 0x00 && b[1] == 0x14 {
-        return ScriptKind::P2wpkh;
+    if script.is_p2wpkh() {
+        ScriptKind::P2wpkh
+    } else if script.is_p2wsh() {
+        ScriptKind::P2wsh
+    } else if script.is_p2tr() {
+        ScriptKind::P2tr
+    } else if script.is_p2pkh() {
+        ScriptKind::P2pkh
+    } else if script.is_p2sh() {
+        ScriptKind::P2sh
+    } else {
+        ScriptKind::Bare
     }
-    if b.len() == 34 && b[0] == 0x00 && b[1] == 0x20 {
-        return ScriptKind::P2wsh;
-    }
-    if b.len() == 34 && b[0] == 0x51 && b[1] == 0x20 {
-        return ScriptKind::P2tr;
-    }
-    if b.len() == 25
-        && b[0] == 0x76
-        && b[1] == 0xa9
-        && b[2] == 0x14
-        && b[23] == 0x88
-        && b[24] == 0xac
-    {
-        return ScriptKind::P2pkh;
-    }
-    if b.len() == 23 && b[0] == 0xa9 && b[1] == 0x14 && b[22] == 0x87 {
-        return ScriptKind::P2sh;
-    }
-    ScriptKind::Bare
 }
 
 #[cfg(test)]

@@ -1,13 +1,14 @@
 //! sigop_cost_tests (peeled from block.rs).
 
 use super::{
-    is_p2sh_script, last_script_push, p2sh_sigop_count, prevout_spk_sigops, script_sigop_count,
-    tx_sigop_cost, witness_sigop_count,
+    last_script_push, p2sh_sigop_count, prevout_spk_sigops, script_sigop_count, tx_sigop_cost,
+    witness_sigop_count,
 };
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
+use bitcoin::Script;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 
 fn spks(prevouts: &[TxOut]) -> Vec<&[u8]> {
@@ -57,10 +58,11 @@ fn last_push_pushdata_and_non_push_skip() {
     assert!(last_script_push(&[0x4c, 0x05, 0x01]).is_none());
     assert!(last_script_push(&[0x4e, 0x10, 0x00, 0x00, 0x00]).is_none());
     assert_eq!(last_script_push(&[0x02, 0xaa, 0xbb, 0x51]), Some(&[][..]));
-    assert!(is_p2sh_script(&[
+    assert!(Script::from_bytes(&[
         0xa9, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x87
-    ]));
-    assert!(!is_p2sh_script(&[0x51]));
+    ])
+    .is_p2sh());
+    assert!(!Script::from_bytes(&[0x51]).is_p2sh());
 }
 
 #[test]
@@ -199,8 +201,8 @@ fn last_push_and_p2sh_shape() {
         v.push(0x87);
         v
     };
-    assert!(is_p2sh_script(&p2sh));
-    assert!(!is_p2sh_script(&[0x51]));
+    assert!(Script::from_bytes(&p2sh).is_p2sh());
+    assert!(!Script::from_bytes(&[0x51]).is_p2sh());
 }
 
 #[test]

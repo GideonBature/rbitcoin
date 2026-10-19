@@ -266,7 +266,7 @@ fn run_script_row(
         return Err("DISCOURAGE_UPGRADABLE_NOPS".into());
     }
     // SCRIPT_VERIFY_SIGPUSHONLY, and BIP16 P2SH always requires push-only scriptSig.
-    if flags.sig_push_only || (flags.p2sh && is_p2sh_script(script_pubkey)) {
+    if flags.sig_push_only || (flags.p2sh && bitcoin::Script::from_bytes(script_pubkey).is_p2sh()) {
         let mut tmp = Vec::new();
         interpreter::eval_script_sig_pushes(Script::from_bytes(script_sig), &mut tmp)
             .map_err(|_| "SIG_PUSHONLY".to_string())?;
@@ -391,7 +391,7 @@ fn eval_bare_pair(
     }
 
     // BIP16 P2SH: if flag set and scriptPubKey is P2SH, restore stack and eval redeem.
-    if flags.p2sh && is_p2sh_script(script_pubkey) {
+    if flags.p2sh && bitcoin::Script::from_bytes(script_pubkey).is_p2sh() {
         // scriptPubKey must have left a true top (serialized).
         interpreter::require_true_top(&stack).map_err(|e| format!("{e}"))?;
         stack = stack_copy;
@@ -428,10 +428,6 @@ fn eval_bare_pair(
         interpreter::require_true_top(&stack).map_err(|e| format!("{e}"))?;
     }
     Ok(())
-}
-
-fn is_p2sh_script(spk: &[u8]) -> bool {
-    spk.len() == 23 && spk[0] == 0xa9 && spk[1] == 0x14 && spk[22] == 0x87
 }
 
 // ── Allowlist: explicit, machine-checked ────────────────────────────────────

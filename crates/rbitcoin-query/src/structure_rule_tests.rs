@@ -17,12 +17,11 @@ use bitcoin::{
 };
 use rbitcoin_consensus::block::{
     apply_witness_commitment, bip16_active_from_prev_mtp, bip34_height_script, block_has_witness,
-    block_has_witness_from_pres, block_subsidy, check_tx_local, is_p2sh_script, is_p2wpkh_program,
-    is_p2wsh_program, last_script_push, merkle_root_bytes, script_sigop_count,
-    validate_block_structure, validate_block_structure_with_pres, witness_commitment_script,
-    PendingCreates, ScriptCheckJob, ScriptVerifyFlags, ValidationContext, BIP16_EXCEPTION_MAINNET,
-    MAX_BLOCK_STRIPPED_SIZE, MAX_BLOCK_TX_COUNT, MAX_BLOCK_WEIGHT, MIN_TX_WEIGHT,
-    TAPROOT_EXCEPTION_MAINNET,
+    block_has_witness_from_pres, block_subsidy, check_tx_local, last_script_push,
+    merkle_root_bytes, script_sigop_count, validate_block_structure,
+    validate_block_structure_with_pres, witness_commitment_script, PendingCreates, ScriptCheckJob,
+    ScriptVerifyFlags, ValidationContext, BIP16_EXCEPTION_MAINNET, MAX_BLOCK_STRIPPED_SIZE,
+    MAX_BLOCK_TX_COUNT, MAX_BLOCK_WEIGHT, MIN_TX_WEIGHT, TAPROOT_EXCEPTION_MAINNET,
 };
 use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone, TxPrecompute};
 use rbitcoin_primitives::Height;
@@ -973,18 +972,18 @@ fn script_sigop_count_and_last_push_helpers() {
     let mut p2sh = vec![0xa9, 0x14];
     p2sh.extend_from_slice(&[0u8; 20]);
     p2sh.push(0x87);
-    assert!(is_p2sh_script(&p2sh));
-    assert!(!is_p2sh_script(&[0x00]));
-    assert!(!is_p2sh_script(&[0xa9, 0x14]));
+    assert!(bitcoin::Script::from_bytes(&p2sh).is_p2sh());
+    assert!(!bitcoin::Script::from_bytes(&[0x00]).is_p2sh());
+    assert!(!bitcoin::Script::from_bytes(&[0xa9, 0x14]).is_p2sh());
     let mut wpkh = vec![0x00, 0x14];
     wpkh.extend_from_slice(&[1u8; 20]);
-    assert!(is_p2wpkh_program(&wpkh));
-    assert!(!is_p2wpkh_program(&[0x51, 0x14]));
+    assert!(bitcoin::Script::from_bytes(&wpkh).is_p2wpkh());
+    assert!(!bitcoin::Script::from_bytes(&[0x51, 0x14]).is_p2wpkh());
     let mut wsh = vec![0x00, 0x20];
     wsh.extend_from_slice(&[2u8; 32]);
-    assert!(is_p2wsh_program(&wsh));
-    assert!(!is_p2wsh_program(&wpkh));
-    assert!(!is_p2wsh_program(&[0x51, 0x20]));
+    assert!(bitcoin::Script::from_bytes(&wsh).is_p2wsh());
+    assert!(!bitcoin::Script::from_bytes(&wpkh).is_p2wsh());
+    assert!(!bitcoin::Script::from_bytes(&[0x51, 0x20]).is_p2wsh());
 }
 
 #[test]

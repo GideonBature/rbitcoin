@@ -444,21 +444,9 @@ pub fn last_script_push(script: &[u8]) -> Option<&[u8]> {
     Some(last)
 }
 
-pub fn is_p2sh_script(spk: &[u8]) -> bool {
-    spk.len() == 23 && spk[0] == 0xa9 && spk[1] == 0x14 && spk[22] == 0x87
-}
-
-pub fn is_p2wpkh_program(prog: &[u8]) -> bool {
-    prog.len() == 22 && prog[0] == 0x00 && prog[1] == 0x14
-}
-
-pub fn is_p2wsh_program(prog: &[u8]) -> bool {
-    prog.len() == 34 && prog[0] == 0x00 && prog[1] == 0x20
-}
-
 /// BIP16 P2SH sigops from redeem scripts (accurate CHECKMULTISIG count).
 fn p2sh_sigops_one(inp: &bitcoin::TxIn, spk: &[u8]) -> u64 {
-    if !is_p2sh_script(spk) {
+    if !Script::from_bytes(spk).is_p2sh() {
         return 0;
     }
     last_script_push(inp.script_sig.as_bytes())
@@ -481,16 +469,17 @@ fn p2sh_sigop_count(tx: &Transaction, prev_spks: &[&[u8]]) -> u64 {
 /// BIP141 witness sigop count (not witness-scaled).
 fn witness_sigops_one(inp: &bitcoin::TxIn, spk: &[u8]) -> u64 {
     let mut program = spk;
-    if is_p2sh_script(program) {
+    if Script::from_bytes(program).is_p2sh() {
         if let Some(redeem) = last_script_push(inp.script_sig.as_bytes()) {
             program = redeem;
         } else {
             return 0;
         }
     }
-    if is_p2wpkh_program(program) {
+    let program = Script::from_bytes(program);
+    if program.is_p2wpkh() {
         1
-    } else if is_p2wsh_program(program) {
+    } else if program.is_p2wsh() {
         inp.witness
             .last()
             .map(|ws| script_sigop_count(ws, true))
