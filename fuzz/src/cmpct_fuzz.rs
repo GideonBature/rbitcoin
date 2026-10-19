@@ -21,8 +21,6 @@ use rbitcoin_net::{
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 
-use rbitcoin_primitives::hex_encode;
-
 use crate::block_diff::{
     same_hash_merkle_mutant, verdict_from_core_reply, BlockOracle, BlockStanding, CompareOne,
     DiffVerdict, OracleReply,
@@ -300,7 +298,9 @@ pub fn follow_invalid_cmpct(
         }
     }
     let hash = succ_hash.to_string();
-    let hex = hex_encode(serialize(&successor));
+    let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+        &(serialize(&successor)),
+    ));
     let (core, reason) = match follow_core_verdict(oracle, &hex, &hash) {
         Ok(v) => v,
         Err(fate) => return fate,
@@ -683,12 +683,12 @@ mod tests {
             "65cf78f7756e9040065276fbbfc42c8c7fd07636edfde1eb703aa735bd274ca5"
         );
         assert_eq!(
-            hex_encode(
-                block.txdata[1].input[0]
+            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+                &block.txdata[1].input[0]
                     .previous_output
                     .txid
-                    .as_byte_array()
-            ),
+                    .as_byte_array(),
+            )),
             "9213e78bc5a99212e9a1ebf1ac29f173742cc203dde8f53447c390b78e209684"
         );
         assert_eq!(block.txdata[1].input[0].previous_output.vout, 0);

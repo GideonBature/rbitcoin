@@ -8,9 +8,8 @@
 //! `historicalMode=false` omits confirmed-spent P2TR outs.
 //! Serve-time `--sptweaks-dust` omits P2TR outs with `value <=` the floor.
 
+use bitcoin::hashes::Hash;
 use rbitcoin_consensus::{ChainParams, TxTweak};
-#[cfg(test)]
-use rbitcoin_primitives::hex_encode;
 use rbitcoin_primitives::Height;
 use rbitcoin_query::tweaks_for_height;
 use rbitcoin_query::{Query, ThinTweakRangeLimits, ThinTweakRow};
@@ -460,7 +459,7 @@ fn push_hex(s: &mut String, data: &[u8]) {
 }
 
 fn push_txid_display_hex(s: &mut String, txid: &[u8; 32]) {
-    s.push_str(&rbitcoin_primitives::display_hash_hex(txid));
+    s.push_str(&bitcoin::Txid::from_byte_array(*(txid)).to_string());
 }
 
 /// Cake `noData` / resubscribe signal (`fromJson` catch path reads `message`).
@@ -517,17 +516,25 @@ pub fn height_object(tweaks: &std::collections::BTreeMap<[u8; 32], TxTweak>) -> 
 pub fn encode_tx_tweak(t: &TxTweak) -> Value {
     let mut outs = Map::new();
     for o in &t.output_pubkeys {
-        outs.insert(o.vout.to_string(), json!([hex_encode(o.xonly), o.value]));
+        outs.insert(
+            o.vout.to_string(),
+            json!([
+                bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+                    &(o.xonly)
+                )),
+                o.value
+            ]),
+        );
     }
     json!({
-        "tweak": hex_encode(t.tweak),
+        "tweak": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(t.tweak))),
         "output_pubkeys": Value::Object(outs),
     })
 }
 
 #[cfg(test)]
 fn txid_display_hex(txid: &[u8; 32]) -> String {
-    rbitcoin_primitives::display_hash_hex(txid)
+    bitcoin::Txid::from_byte_array(*(txid)).to_string()
 }
 
 #[cfg(test)]
@@ -1037,7 +1044,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["1"].as_object().unwrap();
         assert_eq!(txs.len(), 1, "dust-only txs must leave the height map");
-        let txid = rbitcoin_primitives::display_hash_hex(&rows[0].txid);
+        let txid = bitcoin::Txid::from_byte_array(*(&rows[0].txid)).to_string();
         assert_eq!(txs[&txid]["output_pubkeys"].as_object().unwrap().len(), 1);
         assert_eq!(txs[&txid]["output_pubkeys"]["1"][1], 1001);
     }
@@ -1052,7 +1059,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["1"].as_object().unwrap();
         assert_eq!(txs.len(), 1);
-        let txid = rbitcoin_primitives::display_hash_hex(&rows[1].txid);
+        let txid = bitcoin::Txid::from_byte_array(*(&rows[1].txid)).to_string();
         assert_eq!(txs[&txid]["output_pubkeys"]["0"][1], 547);
     }
 
@@ -1063,7 +1070,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["1"].as_object().unwrap();
         assert_eq!(txs.len(), 1);
-        let txid = rbitcoin_primitives::display_hash_hex(&rows[0].txid);
+        let txid = bitcoin::Txid::from_byte_array(*(&rows[0].txid)).to_string();
         let outs = txs[&txid]["output_pubkeys"].as_object().unwrap();
         assert_eq!(outs.len(), 2);
         assert_eq!(outs["0"][1], 0);
@@ -1080,7 +1087,7 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         let txs = v["850000"].as_object().unwrap();
         assert_eq!(txs.len(), 1, "height key stays; dust-only tx is gone");
-        let txid = rbitcoin_primitives::display_hash_hex(&rows[1].txid);
+        let txid = bitcoin::Txid::from_byte_array(*(&rows[1].txid)).to_string();
         assert!(txs.contains_key(&txid));
         assert_eq!(txs[&txid]["output_pubkeys"]["1"][1], 5410);
     }

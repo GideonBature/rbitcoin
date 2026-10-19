@@ -6,6 +6,7 @@ use rbitcoin_esplora::EsploraListen;
 use rbitcoin_primitives::{
     Network, DEFAULT_ELECTRUM_PORT, DEFAULT_ESPLORA_PORT, DEFAULT_HEALTH_PORT,
 };
+
 use rbitcoin_store::HeadScale;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -1589,9 +1590,13 @@ pub fn parse_minimum_chain_work(spec: &str) -> Result<[u8; 32], String> {
     }
     let mut padded = String::from("0").repeat(64 - hex.len());
     padded.push_str(hex);
-    let raw = rbitcoin_primitives::hex_decode(&padded).map_err(|_| {
-        format!("Invalid minimum work specified ({spec}), must be up to 64 hex digits")
-    })?;
+    let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+        let h = &padded;
+        h.strip_prefix("0x")
+            .or_else(|| h.strip_prefix("0X"))
+            .unwrap_or(h)
+    })
+    .map_err(|_| format!("Invalid minimum work specified ({spec}), must be up to 64 hex digits"))?;
     let mut out = [0u8; 32];
     out.copy_from_slice(&raw);
     Ok(out)

@@ -17,11 +17,11 @@ fn best_hash(ctx: &RpcContext) -> Value {
 }
 
 fn block_hex(block: &Block) -> String {
-    hex_encode(bitcoin::consensus::encode::serialize(block))
+    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(bitcoin::consensus::encode::serialize(block))))
 }
 
 fn tx_hex(tx: &Transaction) -> String {
-    hex_encode(bitcoin::consensus::encode::serialize(tx))
+    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(bitcoin::consensus::encode::serialize(tx))))
 }
 
 fn propose(ctx: &RpcContext, block: &Block) -> Value {
@@ -35,7 +35,7 @@ fn proposal_on_tip(ctx: &RpcContext, extra: Vec<Transaction>) -> Block {
     use bitcoin::block::{Header, Version as BlockVersion};
     use bitcoin::TxMerkleNode;
     let raw = dispatch(ctx, "getblock", vec![best_hash(ctx), json!(0)]).unwrap();
-    let mined: Block = deserialize(&hex_decode(raw.as_str().unwrap()).unwrap()).unwrap();
+    let mined: Block = deserialize(&<Vec<u8> as bitcoin::hex::FromHex>::from_hex({ let h = raw.as_str().unwrap(); h.strip_prefix("0x").or_else(|| h.strip_prefix("0X")).unwrap_or(h) }).unwrap()).unwrap();
     let mut coinbase = mined.txdata[0].clone();
     let mut height_push = rbitcoin_consensus::bip34_height_script(tip_count(ctx) as u32 + 1);
     height_push.resize(height_push.len().max(2), 0x00);
@@ -485,7 +485,7 @@ fn chain_ops_fresh_tip_age_template_and_header_cap() {
         merkle[..4].copy_from_slice(&i.to_le_bytes());
         hdr.merkle_root = bitcoin::TxMerkleNode::from_byte_array(merkle);
         rbitcoin_consensus::grind_regtest_pow(&mut hdr);
-        let hex = hex_encode(bitcoin::consensus::encode::serialize(&hdr));
+        let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(bitcoin::consensus::encode::serialize(&hdr))));
         dispatch(&ctx, "submitheader", vec![json!(hex)]).unwrap();
     }
     let tips = dispatch(&ctx, "getchaintips", vec![]).unwrap();
@@ -941,7 +941,7 @@ fn chain_ops_refusals_at_genesis(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub)
         bits: bitcoin::CompactTarget::from_consensus(0x207f_ffff),
         nonce: 0,
     });
-    let e = dispatch(ctx, "submitheader", vec![json!(hex_encode(orphan))]).unwrap_err();
+    let e = dispatch(ctx, "submitheader", vec![json!(bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(orphan))))]).unwrap_err();
     assert_eq!(e["code"], ERR_VERIFY_ERROR);
     assert!(
         e["message"]
@@ -975,14 +975,14 @@ fn chain_ops_first_block_to_an_address(
     assert_eq!(best_s, tip.to_string(), "getbestblockhash is display order");
     assert_ne!(
         best_s,
-        hex_encode(tip.to_byte_array()),
+        bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(tip.to_byte_array()))),
         "display order differs from internal hex"
     );
     assert_eq!(dispatch(ctx, "getblockhash", vec![json!(1)]).unwrap(), best);
 
     let blk = dispatch(ctx, "getblock", vec![best.clone(), json!(2)]).unwrap();
     let cb_out = &blk["tx"][0]["vout"][0]["scriptPubKey"];
-    assert_eq!(cb_out["hex"], hex_encode(p2wpkh.as_bytes()));
+    assert_eq!(cb_out["hex"], bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(p2wpkh.as_bytes()))));
     assert_eq!(cb_out["address"], json!(addr));
     // Core getblock(hash, False) is verbosity 0 (raw hex).
     let raw = dispatch(ctx, "getblock", vec![best.clone(), json!(false)]).unwrap();
@@ -1009,7 +1009,7 @@ fn chain_ops_first_block_to_an_address(
     assert_eq!(same, raw_tx);
     let verbose = dispatch(ctx, "getrawtransaction", vec![json!(cb_txid), json!(true)]).unwrap();
     assert_eq!(verbose["txid"], cb_txid);
-    let internal = hex_encode(parse_hash32_display(cb_txid).unwrap());
+    let internal = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(parse_hash32_display(cb_txid).unwrap())));
     assert!(
         dispatch(ctx, "getrawtransaction", vec![json!(internal)]).is_err(),
         "internal-order hex must not resolve as a Core display txid"
@@ -1196,7 +1196,7 @@ fn chain_ops_header_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
     let e = dispatch(
         ctx,
         "submitheader",
-        vec![json!(hex_encode(bitcoin::consensus::encode::serialize(&old_hdr)))],
+        vec![json!(bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(bitcoin::consensus::encode::serialize(&old_hdr)))))],
     )
     .unwrap_err();
     assert_eq!(e["code"], ERR_VERIFY_ERROR);
@@ -1221,7 +1221,7 @@ fn chain_ops_header_rejects(ctx: &RpcContext, hub: &rbitcoin_net::ChainHub, p2wp
         vec![],
     );
     for header in [&parent.header, &child.header] {
-        let hex = hex_encode(bitcoin::consensus::encode::serialize(header));
+        let hex = bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(bitcoin::consensus::encode::serialize(header))));
         dispatch(ctx, "submitheader", vec![json!(hex)]).unwrap();
     }
     let n_before = dispatch(ctx, "getchaintips", vec![]).unwrap().as_array().unwrap().len();
@@ -1985,7 +1985,7 @@ fn chain_ops_big_sigops_cluster(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
     };
     let mut txdata = vec![coinbase];
     for t in ttxs {
-        let raw = hex_decode(t["data"].as_str().unwrap()).unwrap();
+        let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({ let h = t["data"].as_str().unwrap(); h.strip_prefix("0x").or_else(|| h.strip_prefix("0X")).unwrap_or(h) }).unwrap();
         txdata.push(deserialize(&raw).unwrap());
     }
     let prev = parse_hash32_display(tmpl["previousblockhash"].as_str().unwrap()).unwrap();

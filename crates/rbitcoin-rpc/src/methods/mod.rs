@@ -1,14 +1,14 @@
 //! Tier-1 Core-class JSON-RPC method handlers (pure dispatch over Query/mempool).
 
-use bitcoin::{Block, BlockHash, ScriptBuf, Transaction};
+use bitcoin::hashes::Hash;
+use bitcoin::{Block, BlockHash, ScriptBuf, Transaction, Txid};
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::{
-    display_hash_hex, hex_decode, hex_encode, parse_display_hash32, DisplayHashError, Network,
-};
+use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,17 +39,31 @@ pub(crate) fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
 }
 
 pub(crate) fn hash_hex_display(h: &[u8; 32]) -> String {
-    display_hash_hex(h)
+    Txid::from_byte_array(*h).to_string()
 }
 
 /// Parse Core display-order 32-byte hex → internal byte order.
+///
+/// `FromHex` does not strip `0x`. Odd length stays distinct from a wrong
+/// even length so the RPC text matches the previous decoder.
 pub(crate) fn parse_hash32_display(hex: &str) -> Result<[u8; 32], Value> {
-    parse_display_hash32(hex).map_err(|e| match e {
-        DisplayHashError::WrongLength { .. } => {
-            rpc_error(ERR_INVALID_PARAMS, "hash/txid must be 32 bytes hex")
+    let hex = hex
+        .strip_prefix("0x")
+        .or_else(|| hex.strip_prefix("0X"))
+        .unwrap_or(hex);
+    if !hex.len().is_multiple_of(2) {
+        return Err(rpc_error(ERR_INVALID_PARAMS, "odd hex length"));
+    }
+    match Txid::from_str(hex) {
+        Ok(id) => Ok(id.to_byte_array()),
+        Err(bitcoin::hex::HexToArrayError::InvalidLength(_)) => Err(rpc_error(
+            ERR_INVALID_PARAMS,
+            "hash/txid must be 32 bytes hex",
+        )),
+        Err(bitcoin::hex::HexToArrayError::InvalidChar(_)) => {
+            Err(rpc_error(ERR_INVALID_PARAMS, "invalid hex digit"))
         }
-        DisplayHashError::Hex(h) => rpc_error(ERR_INVALID_PARAMS, h.to_string()),
-    })
+    }
 }
 
 /// Core's `ConnectBlock` returns before adding the genesis coinbase output

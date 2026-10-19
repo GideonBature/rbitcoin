@@ -6,6 +6,7 @@ use bitcoin::script::Builder;
 use bitcoin::{Address, Block, BlockHash, Network as BtcNetwork, ScriptBuf, Transaction, Txid};
 use rbitcoin_net::Selected;
 use rbitcoin_primitives::{Height, Network};
+
 use serde_json::{json, Value};
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
@@ -55,7 +56,7 @@ pub(crate) fn rpc_btc_network(n: Network) -> BtcNetwork {
 
 pub(crate) fn script_pubkey_json(script: &ScriptBuf, network: BtcNetwork) -> Value {
     let mut obj = json!({
-        "hex": hex_encode(script.as_bytes()),
+        "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(script.as_bytes()))),
         "asm": script.to_asm_string(),
         "type": script_core_type(script),
     });
@@ -109,10 +110,20 @@ pub(crate) fn decode_output_script(ctx: &RpcContext, s: &str) -> Result<ScriptBu
             }
         }
     }
-    let bytes = hex_decode(s).map_err(|e| {
+    let bytes = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+        let h = s;
+        h.strip_prefix("0x")
+            .or_else(|| h.strip_prefix("0X"))
+            .unwrap_or(h)
+    })
+    .map_err(|e| {
+        let why = match e {
+            bitcoin::hex::HexToBytesError::OddLengthString(_) => "odd hex length",
+            bitcoin::hex::HexToBytesError::InvalidChar(_) => "invalid hex digit",
+        };
         rpc_error(
             ERR_INVALID_PARAMS,
-            format!("output must be an address or hex script: {e}"),
+            format!("output must be an address or hex script: {why}"),
         )
     })?;
     Ok(ScriptBuf::from_bytes(bytes))
@@ -368,7 +379,13 @@ pub(crate) fn generatetodescriptor(ctx: &RpcContext, params: &RpcParams) -> Resu
 pub(crate) fn parse_raw_descriptor(desc: &str) -> Option<ScriptBuf> {
     let bare = desc.split('#').next()?.trim();
     let inner = bare.strip_prefix("raw(")?.strip_suffix(")")?;
-    let bytes = hex_decode(inner).ok()?;
+    let bytes = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+        let h = inner;
+        h.strip_prefix("0x")
+            .or_else(|| h.strip_prefix("0X"))
+            .unwrap_or(h)
+    })
+    .ok()?;
     Some(ScriptBuf::from_bytes(bytes))
 }
 
@@ -709,7 +726,7 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         "bits": format!("{bits:08x}"),
         "height": next_h,
         "rules": ["segwit"],
-        "default_witness_commitment": hex_encode(witness_commit),
+        "default_witness_commitment": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(witness_commit))),
     }))
 }
 
@@ -719,8 +736,13 @@ pub(crate) fn gbt_proposal(ctx: &RpcContext, req: Option<&Value>) -> Result<Valu
         .and_then(|o| o.get("data"))
         .and_then(Value::as_str)
         .ok_or_else(|| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
-    let raw =
-        hex_decode(data).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+    let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+        let h = data;
+        h.strip_prefix("0x")
+            .or_else(|| h.strip_prefix("0X"))
+            .unwrap_or(h)
+    })
+    .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
     let block: Block =
         deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
     match gbt_check_proposal(ctx, &block) {
@@ -1256,7 +1278,13 @@ fn submit_reject_reason(e: &rbitcoin_net::NetError) -> String {
 pub(crate) fn submitblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     params.reject_unknown(&["hexdata", "dummy"])?;
     let hex = params.req_str(0, "hexdata")?;
-    let raw = hex_decode(hex).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
+    let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+        let h = hex;
+        h.strip_prefix("0x")
+            .or_else(|| h.strip_prefix("0X"))
+            .unwrap_or(h)
+    })
+    .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
     let block: Block =
         deserialize(&raw).map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block decode failed"))?;
     let outcome = if let Some(chain) = ctx.chain.as_ref() {
@@ -1276,7 +1304,13 @@ pub(crate) fn submitblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value,
 }
 
 pub(crate) fn decode_tx_hex(hex: &str) -> Result<Transaction, Value> {
-    let b = hex_decode(hex).map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed:"))?;
+    let b = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+        let h = hex;
+        h.strip_prefix("0x")
+            .or_else(|| h.strip_prefix("0X"))
+            .unwrap_or(h)
+    })
+    .map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed:"))?;
     deserialize(&b).map_err(|_| rpc_error(ERR_DESERIALIZATION, "TX decode failed:"))
 }
 
@@ -1286,7 +1320,7 @@ pub(crate) fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNet
     for (i, inp) in tx.input.iter().enumerate() {
         let mut row = if tx.is_coinbase() {
             json!({
-                "coinbase": hex_encode(inp.script_sig.as_bytes()),
+                "coinbase": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(inp.script_sig.as_bytes()))),
                 "sequence": inp.sequence.to_consensus_u32(),
                 "n": i,
             })
@@ -1296,7 +1330,7 @@ pub(crate) fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNet
                 "vout": inp.previous_output.vout,
                 "scriptSig": {
                     "asm": inp.script_sig.to_asm_string(),
-                    "hex": hex_encode(inp.script_sig.as_bytes()),
+                    "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(inp.script_sig.as_bytes()))),
                 },
                 "sequence": inp.sequence.to_consensus_u32(),
                 "n": i,
@@ -1304,7 +1338,15 @@ pub(crate) fn tx_to_json(tx: &Transaction, extra: Option<Value>, network: BtcNet
         };
         // Core keeps a segwit coinbase's witness reserved value here too.
         if !inp.witness.is_empty() {
-            let stack: Vec<String> = inp.witness.iter().map(hex_encode).collect();
+            let stack: Vec<String> = inp
+                .witness
+                .iter()
+                .map(|b| {
+                    bitcoin::hex::DisplayHex::to_lower_hex_string(
+                        std::convert::AsRef::<[u8]>::as_ref(&b),
+                    )
+                })
+                .collect();
             if let Some(m) = row.as_object_mut() {
                 m.insert("txinwitness".into(), json!(stack));
             }

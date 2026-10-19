@@ -1,12 +1,25 @@
 //! Frigate `blockchain.silentpayments.subscribe` (session-only scan key).
 
+use bitcoin::hashes::Hash;
+use bitcoin::hex::{FromHex, HexToBytesError};
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::Network;
 use rbitcoin_consensus::{taproot_matches_scan, ChainParams};
-use rbitcoin_primitives::{hex_decode, Height};
+use rbitcoin_primitives::Height;
 use rbitcoin_query::tweaks_for_height;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
+
+fn decode_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    Vec::<u8>::from_hex(s).map_err(|e| match e {
+        HexToBytesError::OddLengthString(_) => "odd hex length".into(),
+        HexToBytesError::InvalidChar(_) => "invalid hex digit".into(),
+    })
+}
 
 /// Heights scanned when the client omits a start or passes 0.
 pub const SP_HISTORY_WINDOW: u32 = 256;
@@ -27,12 +40,12 @@ pub struct SpSub {
 pub fn parse_sub(params: &Value, network: Network, tip: Option<u32>) -> Result<SpSub, String> {
     let scan_hex = param_str(params, 0)?;
     let spend_hex = param_str(params, 1)?;
-    let scan_bytes = hex_decode(scan_hex).map_err(|e| e.to_string())?;
+    let scan_bytes = decode_hex_bytes(scan_hex)?;
     if scan_bytes.len() != 32 {
         return Err("scan_private_key must be 32 bytes".into());
     }
     let scan = SecretKey::from_slice(&scan_bytes).map_err(|e| e.to_string())?;
-    let spend_bytes = hex_decode(spend_hex).map_err(|e| e.to_string())?;
+    let spend_bytes = decode_hex_bytes(spend_hex)?;
     let spend = PublicKey::from_slice(&spend_bytes).map_err(|e| e.to_string())?;
     let start = match params.as_array().and_then(|a| a.get(2)) {
         None | Some(Value::Null) => 0,
@@ -104,8 +117,8 @@ pub fn scan_hits(
             if tx_matches(sub, &tw) {
                 hits.push(json!({
                     "height": h,
-                    "tx_hash": rbitcoin_primitives::display_hash_hex(&txid),
-                    "tweak_key": rbitcoin_primitives::hex_encode(tw.tweak),
+                    "tx_hash": bitcoin::Txid::from_byte_array(*(&txid)).to_string(),
+                    "tweak_key": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(tw.tweak))),
                 }));
             }
         }
@@ -145,7 +158,12 @@ fn encode_sp_address(network: Network, scan_sk: &SecretKey, spend: &PublicKey) -
         &data,
     ) {
         Ok(s) => s,
-        Err(_) => format!("{hrp}1{}", rbitcoin_primitives::hex_encode(&data)),
+        Err(_) => format!(
+            "{hrp}1{}",
+            bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+                &(&data)
+            ))
+        ),
     }
 }
 
@@ -246,11 +264,20 @@ mod tests {
         let scan = "0f694e068028a717f8af6b9411f9a133dd3565258714cc226594b34db90c1f2c";
         let spend = "025cc9856d6f8375350e123978daac200c260cb5b5ae83106cab90484dcd8fcf36";
         let sub = parse_sub(&json!([scan, spend, 0, [0, 1]]), Network::Regtest, Some(0)).unwrap();
-        let tweak =
-            hex_decode("024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004")
-                .unwrap();
-        let xonly =
-            hex_decode("3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1").unwrap();
+        let tweak = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+            let h = "024ac253c216532e961988e2a8ce266a447c894c781e52ef6cee902361db960004";
+            h.strip_prefix("0x")
+                .or_else(|| h.strip_prefix("0X"))
+                .unwrap_or(h)
+        })
+        .unwrap();
+        let xonly = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+            let h = "3e9fce73d4e77a4809908e3c3a2e54ee147b9312dc5044a193d1fc85de46e3c1";
+            h.strip_prefix("0x")
+                .or_else(|| h.strip_prefix("0X"))
+                .unwrap_or(h)
+        })
+        .unwrap();
         let mut tw33 = [0u8; 33];
         tw33.copy_from_slice(&tweak);
         let mut x32 = [0u8; 32];

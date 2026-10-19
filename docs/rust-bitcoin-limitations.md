@@ -392,8 +392,11 @@ the helper after the bugs above are in.
 - **Local codecs.** `read_compact_size` / `write_compact_size` exist
   because store and mempool records are not rust-bitcoin values. The IBD
   input walk applies the same non-minimal refusal as `VarInt`
-  (`NonMinimalVarInt`) without allocating a `Block`. Display-order hex
-  replaces the `hex` crate. Neither is an upstream gap.
+  (`NonMinimalVarInt`) without allocating a `Block`. That compact-size
+  codec is not an upstream gap. Hex is `bitcoin::hex` (`DisplayHex` /
+  `FromHex`). Display-order 32-byte ids use `Txid` or `BlockHash`
+  `Display` / `FromStr`. `FromHex` does not strip a `0x` prefix; callers
+  that accept one strip it themselves.
 - **RB-008 as an upstream port.** Do not send the interpreter.
 
 ## Related

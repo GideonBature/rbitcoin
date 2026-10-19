@@ -3,6 +3,7 @@ use bitcoin::consensus::{deserialize, Encodable};
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Txid};
 use rbitcoin_primitives::{median_time_past_times, Height};
+
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -123,7 +124,9 @@ pub(crate) fn signet_challenge_hex(ctx: &RpcContext) -> Option<String> {
         .as_ref()
         .and_then(|c| c.params.signet_challenge.clone())
         .unwrap_or_else(rbitcoin_consensus::default_signet_challenge);
-    Some(hex_encode(script.as_bytes()))
+    Some(bitcoin::hex::DisplayHex::to_lower_hex_string(
+        std::convert::AsRef::<[u8]>::as_ref(&(script.as_bytes())),
+    ))
 }
 
 pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
@@ -308,7 +311,9 @@ fn header_hex(hdr: &bitcoin::block::Header) -> Result<String, Value> {
     let mut raw = Vec::new();
     hdr.consensus_encode(&mut raw)
         .map_err(|_| rpc_error(ERR_MISC, "header encode"))?;
-    Ok(hex_encode(raw))
+    Ok(bitcoin::hex::DisplayHex::to_lower_hex_string(
+        std::convert::AsRef::<[u8]>::as_ref(&(raw)),
+    ))
 }
 
 fn insert_previousblockhash(obj: &mut Value, prev: &str) {
@@ -360,7 +365,9 @@ fn off_chain_header(ctx: &RpcContext, hash: &[u8; 32]) -> Result<Option<OffChain
                 header_fk,
                 (works.len() as u32).saturating_sub(1),
                 None,
-                hex_encode(sum_header_work(works).to_be_bytes()),
+                bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+                    &(sum_header_work(works).to_be_bytes()),
+                )),
                 &times,
             )?));
         }
@@ -394,7 +401,9 @@ fn off_chain_header(ctx: &RpcContext, hash: &[u8; 32]) -> Result<Option<OffChain
                 header_fk,
                 height,
                 immediate_prev,
-                hex_encode(cw.to_be_bytes()),
+                bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+                    &(cw.to_be_bytes()),
+                )),
                 &times,
             )?));
         }
@@ -549,7 +558,7 @@ fn held_header_value(ctx: &RpcContext, block: &Block, verbose: bool) -> Result<V
         "nonce": block.header.nonce,
         "bits": format!("{:08x}", bits),
         "difficulty": core_f64_json(difficulty_from_bits(bits)),
-        "chainwork": hex_encode(block.header.work().to_be_bytes()),
+        "chainwork": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(block.header.work().to_be_bytes()))),
         "nTx": block.txdata.len(),
         "target": target_hex(bits),
     });
@@ -566,7 +575,9 @@ pub(crate) fn chainwork_hex(ctx: &RpcContext, through: Option<Height>) -> String
     };
     if let Some(hub) = ctx.chain.as_ref() {
         if let Ok(w) = hub.work_through_height(tip.0) {
-            return hex_encode(w.to_be_bytes());
+            return bitcoin::hex::DisplayHex::to_lower_hex_string(
+                std::convert::AsRef::<[u8]>::as_ref(&(w.to_be_bytes())),
+            );
         }
     }
     let mut works = Vec::new();
@@ -575,11 +586,11 @@ pub(crate) fn chainwork_hex(ctx: &RpcContext, through: Option<Height>) -> String
             works.push(hdr.work());
         }
     }
-    hex_encode(
-        rbitcoin_net::sum_work(works.into_iter())
+    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+        &(rbitcoin_net::sum_work(works.into_iter())
             .unwrap_or(bitcoin::Work::from_be_bytes([0xff; 32]))
-            .to_be_bytes(),
-    )
+            .to_be_bytes()),
+    ))
 }
 
 fn version_hex(version: i32) -> String {
@@ -631,11 +642,15 @@ fn held_chainwork_hex(ctx: &RpcContext, block: &Block) -> String {
     if let Ok(Some(h)) = ctx.query.height_of_hash(&prev) {
         if let Some(hub) = ctx.chain.as_ref() {
             if let Ok(w) = hub.work_through_height(h.0) {
-                return hex_encode((w + block.header.work()).to_be_bytes());
+                return bitcoin::hex::DisplayHex::to_lower_hex_string(
+                    std::convert::AsRef::<[u8]>::as_ref(&((w + block.header.work()).to_be_bytes())),
+                );
             }
         }
     }
-    hex_encode(block.header.work().to_be_bytes())
+    bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(
+        &(block.header.work().to_be_bytes()),
+    ))
 }
 
 fn insert_block_size_fields(obj: &mut Value, block: &Block) {
@@ -744,7 +759,9 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         block
             .consensus_encode(&mut raw)
             .map_err(|_| rpc_error(ERR_MISC, "block encode"))?;
-        return Ok(json!(hex_encode(raw)));
+        return Ok(json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
+            std::convert::AsRef::<[u8]>::as_ref(&(raw))
+        )));
     }
     let txids: Vec<String> = block
         .txdata
@@ -792,7 +809,9 @@ fn disconnected_block_value(
         block
             .consensus_encode(&mut raw)
             .map_err(|_| rpc_error(ERR_MISC, "block encode"))?;
-        return Ok(json!(hex_encode(raw)));
+        return Ok(json!(bitcoin::hex::DisplayHex::to_lower_hex_string(
+            std::convert::AsRef::<[u8]>::as_ref(&(raw))
+        )));
     }
     let txids: Vec<String> = block
         .txdata
@@ -885,8 +904,8 @@ pub(crate) fn getblockfilter(ctx: &RpcContext, params: &RpcParams) -> Result<Val
         .ok_or_else(|| rpc_error(ERR_INVALID_ADDRESS_OR_KEY, "Block not found"))?;
     use bitcoin::hashes::Hash;
     Ok(json!({
-        "filter": hex_encode(&body),
-        "header": hex_encode(header.as_byte_array()),
+        "filter": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(&body))),
+        "header": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(header.as_byte_array()))),
     }))
 }
 
@@ -914,7 +933,7 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
                         "confirmations": 0,
                         "value": out.value.to_btc(),
                         "scriptPubKey": {
-                            "hex": hex_encode(out.script_pubkey.as_bytes()),
+                            "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(out.script_pubkey.as_bytes()))),
                             "asm": out.script_pubkey.to_asm_string(),
                         },
                         "coinbase": false,
@@ -976,7 +995,7 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         "confirmations": confs,
         "value": Amount::from_sat(out.value).to_btc(),
         "scriptPubKey": {
-            "hex": hex_encode(&out.script),
+            "hex": bitcoin::hex::DisplayHex::to_lower_hex_string(std::convert::AsRef::<[u8]>::as_ref(&(&out.script))),
             "asm": ScriptBuf::from_bytes(out.script.clone()).to_asm_string(),
         },
         "coinbase": coinbase,
@@ -1187,8 +1206,13 @@ pub(crate) fn submitheader(ctx: &RpcContext, params: &RpcParams) -> Result<Value
 }
 
 pub(crate) fn decode_header_hex(hex: &str) -> Result<bitcoin::block::Header, Value> {
-    let raw = hex_decode(hex)
-        .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block header decode failed"))?;
+    let raw = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+        let h = hex;
+        h.strip_prefix("0x")
+            .or_else(|| h.strip_prefix("0X"))
+            .unwrap_or(h)
+    })
+    .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block header decode failed"))?;
     if raw.len() >= 80 {
         if let Ok(h) = deserialize::<bitcoin::block::Header>(&raw[..80]) {
             return Ok(h);

@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use bitcoin::consensus::Encodable;
+use bitcoin::hashes::Hash;
 use bitcoin::Network;
 use rbitcoin_electrum::ServeLimits;
 use rbitcoin_net::MempoolHub;
@@ -1047,13 +1048,17 @@ async fn tx_hex(State(st): State<AppState>, Path(txid_hex): Path<String>) -> Res
         };
         match st.query.get_tx_by_txid(&txid) {
             Ok(Some((fk, _))) => match st.query.tx_wire_bytes(fk) {
-                Ok(raw) => plain_ok(rbitcoin_primitives::hex_encode(raw)),
+                Ok(raw) => plain_ok(bitcoin::hex::DisplayHex::to_lower_hex_string(
+                    std::convert::AsRef::<[u8]>::as_ref(&(raw)),
+                )),
                 Err(e) => store_err(e),
             },
             Ok(None) => match mempool_wire(&st, &txid) {
                 Some(tx) => {
                     let raw = bitcoin::consensus::serialize(&tx);
-                    plain_ok(rbitcoin_primitives::hex_encode(raw))
+                    plain_ok(bitcoin::hex::DisplayHex::to_lower_hex_string(
+                        std::convert::AsRef::<[u8]>::as_ref(&(raw)),
+                    ))
                 }
                 None => not_found(),
             },
@@ -1138,12 +1143,18 @@ pub(crate) fn store_err(e: rbitcoin_query::QueryError) -> Response {
 
 /// Esplora / Core display order (internal hash bytes reversed).
 pub(crate) fn block_hash_hex(hash: &[u8; 32]) -> String {
-    rbitcoin_primitives::display_hash_hex(hash)
+    bitcoin::BlockHash::from_byte_array(*hash).to_string()
 }
 
 /// Parse 32-byte hash/txid hex (display order) → internal byte order.
 pub(crate) fn parse_hash32(s: &str) -> Result<[u8; 32], ()> {
-    rbitcoin_primitives::parse_display_hash32(s).map_err(|_| ())
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    s.parse::<bitcoin::Txid>()
+        .map(|id| id.to_byte_array())
+        .map_err(|_| ())
 }
 
 pub(crate) fn mempool_wire(st: &AppState, txid: &[u8; 32]) -> Option<bitcoin::Transaction> {
@@ -1156,7 +1167,9 @@ fn encode_header_hex(hdr: &bitcoin::block::Header) -> Result<String, String> {
     let mut buf = Vec::with_capacity(80);
     hdr.consensus_encode(&mut buf)
         .map_err(|_| "header encode".to_string())?;
-    Ok(rbitcoin_primitives::hex_encode(buf))
+    Ok(bitcoin::hex::DisplayHex::to_lower_hex_string(
+        std::convert::AsRef::<[u8]>::as_ref(&(buf)),
+    ))
 }
 
 #[cfg(test)]
@@ -1944,7 +1957,13 @@ mod tests {
             0,
             "merkleblock-proof uses txid.body + header, not full reconstruct"
         );
-        let mb_bytes = rbitcoin_primitives::hex_decode(&body).unwrap();
+        let mb_bytes = <Vec<u8> as bitcoin::hex::FromHex>::from_hex({
+            let h = &body;
+            h.strip_prefix("0x")
+                .or_else(|| h.strip_prefix("0X"))
+                .unwrap_or(h)
+        })
+        .unwrap();
         let mb: MerkleBlock = deserialize(&mb_bytes).expect("merkleblock");
         let mut matches = Vec::new();
         let mut indexes = Vec::new();
@@ -2015,7 +2034,7 @@ mod tests {
 
     fn display_txid(txid: bitcoin::Txid) -> String {
         use bitcoin::hashes::Hash;
-        rbitcoin_primitives::display_hash_hex(&txid.to_byte_array())
+        bitcoin::Txid::from_byte_array(*(&txid.to_byte_array())).to_string()
     }
 
     /// electrs: a start index at or past the last tx is 404, not an empty page.
