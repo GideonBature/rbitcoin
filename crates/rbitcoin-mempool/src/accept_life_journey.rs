@@ -507,7 +507,7 @@ fn sigop_adjusted_vsize_boundary(life: &mut Life) {
             life.mp.set_bytes_per_sigop(bps);
             let r = life.mp.accept_tx(&tx, &utxos, TIP_OK).expect("admits");
             assert_eq!(
-                policy::get_virtual_size(r.weight),
+                bitcoin::Weight::from_wu(r.weight).to_vbytes_ceil(),
                 want,
                 "bps={bps} n={n} pad={bytes}"
             );
@@ -616,7 +616,7 @@ fn sigop_rbf_package_and_cluster(life: &mut Life) {
         .mp
         .accept_tx(&wide, &wide_utxos, TIP_OK)
         .expect("parent admits");
-    assert_eq!(policy::get_virtual_size(r.weight), 200_000);
+    assert_eq!(bitcoin::Weight::from_wu(r.weight).to_vbytes_ceil(), 200_000);
     life.mp
         .accept_tx(&wide_child, &wide_utxos, TIP_OK)
         .expect("child admits");

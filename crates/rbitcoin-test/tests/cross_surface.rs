@@ -1004,7 +1004,7 @@ fn tx_wu(tx: &Transaction) -> u64 {
 }
 
 fn min_relay_fee_sat(weight: u64) -> u64 {
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
     vsize
         .saturating_mul(rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB)
         .saturating_add(999)
@@ -1070,7 +1070,7 @@ fn one_sat_vb_max_weight(prev: Txid, vout: u32, input_sat: u64, spk: ScriptBuf) 
         (390_000..=rbitcoin_consensus::policy::MAX_STANDARD_TX_WEIGHT).contains(&weight),
         "pad missed max standard weight: {weight}"
     );
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
     assert!(input_sat > vsize, "input {input_sat} cannot pay {vsize}");
     tx.output[0].value = Amount::from_sat(input_sat - vsize);
     let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(vsize, tx_wu(&tx));

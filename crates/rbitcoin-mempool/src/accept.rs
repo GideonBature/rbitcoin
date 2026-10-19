@@ -2379,8 +2379,8 @@ pub fn rbf_pays_for_replacement(
     if new_fee <= old_fee {
         return false;
     }
-    let new_v = policy::get_virtual_size(new_weight);
-    let old_v = policy::get_virtual_size(old_weight);
+    let new_v = bitcoin::Weight::from_wu(new_weight).to_vbytes_ceil();
+    let old_v = bitcoin::Weight::from_wu(old_weight).to_vbytes_ceil();
     if new_v == 0 || old_v == 0 {
         return false;
     }
@@ -2403,8 +2403,8 @@ pub fn rbf_pays_for_replacement(
 /// with `NUM/DEN = 5/4`.
 pub fn pure_rbfr_pays(new_fee: u64, new_weight: u64, direct_fee: u64, direct_weight: u64) -> bool {
     // `(weight + 3) / 4` is 0 only at weight 0, so the vsize check is the zero guard.
-    let new_v = policy::get_virtual_size(new_weight);
-    let old_v = policy::get_virtual_size(direct_weight);
+    let new_v = bitcoin::Weight::from_wu(new_weight).to_vbytes_ceil();
+    let old_v = bitcoin::Weight::from_wu(direct_weight).to_vbytes_ceil();
     if new_v == 0 || old_v == 0 {
         return false;
     }
@@ -2702,7 +2702,7 @@ mod tests {
             vout: 0,
         };
         let probe = spend_tx(probe_op, 99_000);
-        let vsize = policy::get_virtual_size(probe.weight().to_wu());
+        let vsize = bitcoin::Weight::from_wu(probe.weight().to_wu()).to_vbytes_ceil();
         let fee = vsize.saturating_mul(before).div_ceil(1_000);
         let tx = spend_tx(probe_op, 100_000 - fee);
         let mut map = HashMap::new();
@@ -3777,7 +3777,7 @@ mod tests {
     }
 
     fn vsize_of(tx: &Transaction) -> u64 {
-        policy::get_virtual_size(tx.weight().to_wu())
+        bitcoin::Weight::from_wu(tx.weight().to_wu()).to_vbytes_ceil()
     }
 
     /// Zero-fee parent + heavy-sigop child: 200 sat pays the raw package

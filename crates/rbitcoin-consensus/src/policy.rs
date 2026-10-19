@@ -10,7 +10,7 @@
 //! min relay, **no dust limit** (1-sat OK; 0-value spendable is dust), full
 //! RBF, Libre annex.
 
-use bitcoin::Transaction;
+use bitcoin::{Transaction, Weight};
 
 /// Minimum relay feerate: **0.1 sat/vB** = 100 sat/kvB.
 pub const MIN_RELAY_FEE_RATE_SAT_PER_KVB: u64 = 100;
@@ -35,12 +35,6 @@ impl PolicyResult {
     }
 }
 
-/// Virtual size in vbytes: `(weight + 3) / 4`.
-#[inline]
-pub fn get_virtual_size(weight: u64) -> u64 {
-    weight.saturating_add(3) / 4
-}
-
 /// True if `fee_sat` meets the minimum relay feerate for `weight` (WU).
 ///
 /// Uses integer compare: `fee * 1000 >= vsize * MIN_RELAY_FEE_RATE_SAT_PER_KVB`.
@@ -53,7 +47,7 @@ pub fn meets_min_relay_fee_at(fee_sat: u64, weight: u64, sat_kvb: u64) -> bool {
     if sat_kvb == 0 {
         return true;
     }
-    let vsize = get_virtual_size(weight);
+    let vsize = Weight::from_wu(weight).to_vbytes_ceil();
     if vsize == 0 {
         return false;
     }
@@ -62,7 +56,7 @@ pub fn meets_min_relay_fee_at(fee_sat: u64, weight: u64, sat_kvb: u64) -> bool {
 
 /// Feerate in sat/kvB for diagnostics (floors).
 pub fn fee_rate_sat_per_kvb(fee_sat: u64, weight: u64) -> u64 {
-    let vsize = get_virtual_size(weight);
+    let vsize = Weight::from_wu(weight).to_vbytes_ceil();
     if vsize == 0 {
         return 0;
     }
@@ -309,7 +303,7 @@ mod tests {
     fn vsize_fee_zero_and_libre_gates() {
         assert!(!meets_min_relay_fee(1, 0));
         assert_eq!(fee_rate_sat_per_kvb(100, 0), 0);
-        assert_eq!(get_virtual_size(1), 1);
+        assert_eq!(Weight::from_wu(1).to_vbytes_ceil(), 1);
 
         // Coinbase rejected.
         let cb = Transaction {

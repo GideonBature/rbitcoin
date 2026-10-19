@@ -12,7 +12,7 @@ use std::sync::Mutex;
 pub const MAX_CLUSTER_COUNT: usize = 64;
 /// Hard cap on total **virtual size** of one cluster (101 kvB).
 ///
-/// Measured as Σ `get_virtual_size(weight)` over cluster members.
+/// Measured as Σ `bitcoin::Weight::from_wu(weight).to_vbytes_ceil()` over cluster members.
 pub const MAX_CLUSTER_VSIZE: u64 = 101_000;
 /// Same limit as weight units: 101_000 vB × 4 WU/vB.
 ///
@@ -566,9 +566,9 @@ impl TxGraph {
         let mut n = 0u64;
         for t in set {
             if self.entries.contains_key(t) {
-                n = n.saturating_add(rbitcoin_consensus::policy::get_virtual_size(
-                    self.adjusted_weight_of(t),
-                ));
+                n = n.saturating_add(
+                    bitcoin::Weight::from_wu(self.adjusted_weight_of(t)).to_vbytes_ceil(),
+                );
             }
         }
         n
@@ -1665,7 +1665,6 @@ mod tests {
 
     #[test]
     fn graph_stats_size_sums_per_tx_virtual_size() {
-        use rbitcoin_consensus::policy::get_virtual_size;
         let mut g = TxGraph::new();
         let parent = make_tx(None, 1, 2);
         let mut pe = entry_for(&parent, 500, 0);
@@ -1679,10 +1678,24 @@ mod tests {
         g.insert(ce, &child);
         let ps = g.graph_stats(&pid).unwrap();
         let cs = g.graph_stats(&cid).unwrap();
-        assert_eq!(ps.ancestorsize, get_virtual_size(1));
-        assert_eq!(ps.descendantsize, get_virtual_size(1) + get_virtual_size(5));
-        assert_eq!(cs.ancestorsize, get_virtual_size(1) + get_virtual_size(5));
-        assert_eq!(cs.descendantsize, get_virtual_size(5));
+        assert_eq!(
+            ps.ancestorsize,
+            bitcoin::Weight::from_wu(1).to_vbytes_ceil()
+        );
+        assert_eq!(
+            ps.descendantsize,
+            bitcoin::Weight::from_wu(1).to_vbytes_ceil()
+                + bitcoin::Weight::from_wu(5).to_vbytes_ceil()
+        );
+        assert_eq!(
+            cs.ancestorsize,
+            bitcoin::Weight::from_wu(1).to_vbytes_ceil()
+                + bitcoin::Weight::from_wu(5).to_vbytes_ceil()
+        );
+        assert_eq!(
+            cs.descendantsize,
+            bitcoin::Weight::from_wu(5).to_vbytes_ceil()
+        );
         assert_ne!(ps.descendantsize, (1 + 5) / 4);
     }
 
@@ -2019,13 +2032,12 @@ mod tests {
     /// sigop-adjusted vsize.
     #[test]
     fn graph_stats_sizes_use_sigop_adjusted_vsize() {
-        use rbitcoin_consensus::policy::get_virtual_size;
         let mut g = TxGraph::new();
         let parent = make_tx(None, 1, 2);
         let pid = parent.compute_txid();
         let child = make_tx(Some((pid, 0)), 1, 3);
         let cid = child.compute_txid();
-        let pv = get_virtual_size(parent.weight().to_wu());
+        let pv = bitcoin::Weight::from_wu(parent.weight().to_wu()).to_vbytes_ceil();
         g.insert(entry_for(&parent, 500, 0), &parent);
         let mut ce = entry_for(&child, 500, 1);
         ce.sigop_cost = 69; // 1_380 WU → 345 vB

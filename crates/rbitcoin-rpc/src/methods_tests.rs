@@ -1008,7 +1008,6 @@ fn getmempoolentry_vsize_ceils_weight() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::policy::get_virtual_size;
 
     let (ctx, dir, coinbase_txids) = ctx_from_empty_102();
     let mp = ctx.mempool.as_ref().expect("mempool");
@@ -1057,8 +1056,8 @@ fn getmempoolentry_vsize_ceils_weight() {
         0,
         "witness remainder distinguishes floor vs ceil"
     );
-    let want = get_virtual_size(weight);
-    let fund_v = get_virtual_size(fund.weight().to_wu());
+    let want = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
+    let fund_v = bitcoin::Weight::from_wu(fund.weight().to_wu()).to_vbytes_ceil();
     let hex = hash_hex_display(&spend.compute_txid().to_byte_array());
     let entry = dispatch(&ctx, "getmempoolentry", vec![json!(hex.clone())]).unwrap();
     assert_eq!(entry["vsize"], want);
@@ -1612,7 +1611,7 @@ fn generated_coinbase_value(ctx: &RpcContext, height: u32) -> u64 {
 }
 
 fn default_max_raw_fee_sat(weight: u64) -> u64 {
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
     10_000u64.saturating_mul(vsize)
 }
 
@@ -1908,8 +1907,8 @@ fn submitpackage_maxfeerate_skips_package_eval_and_reports_replacements() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x52]),
         }],
     };
-    let parent_vb = rbitcoin_consensus::policy::get_virtual_size(parent.weight().to_wu());
-    let child_vb = rbitcoin_consensus::policy::get_virtual_size(child.weight().to_wu());
+    let parent_vb = bitcoin::Weight::from_wu(parent.weight().to_wu()).to_vbytes_ceil();
+    let child_vb = bitcoin::Weight::from_wu(child.weight().to_wu()).to_vbytes_ceil();
     let parent_fee = 2_000u64;
     let child_fee = 10_000u64;
     let max_feerate = parent_fee.div_ceil(parent_vb.max(1));
@@ -2263,7 +2262,7 @@ fn p2wsh_item_lens(target_vsize: u64) -> Vec<usize> {
     let mut lens = Vec::new();
     loop {
         let tx = p2wsh_with_lens(bitcoin::OutPoint::null(), 1_000_000, 1, 1, &lens);
-        let vsize = rbitcoin_consensus::policy::get_virtual_size(tx.weight().to_wu());
+        let vsize = bitcoin::Weight::from_wu(tx.weight().to_wu()).to_vbytes_ceil();
         if vsize == target_vsize {
             return lens;
         }
@@ -2357,7 +2356,7 @@ fn pressure_tiny_weight() {
     );
     let cb = generated_coinbase_value(&fee_ctx, 1);
     let probe = spend_generated_coinbase(&fee_ctx, 1, cb - 1, spk.clone()).1;
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(probe.weight().to_wu());
+    let vsize = bitcoin::Weight::from_wu(probe.weight().to_wu()).to_vbytes_ceil();
     let minrelay_fee = vsize.div_ceil(10);
     let (low_hex, low) = spend_generated_coinbase(&fee_ctx, 1, cb - minrelay_fee, spk.clone());
     // Child fee stays under the default 10_000 sat/vB `maxfeerate`. A 1 sat
@@ -2380,7 +2379,7 @@ fn pressure_tiny_weight() {
             script_pubkey: spk,
         }],
     };
-    let child_vb = rbitcoin_consensus::policy::get_virtual_size(low_child.weight().to_wu());
+    let child_vb = bitcoin::Weight::from_wu(low_child.weight().to_wu()).to_vbytes_ceil();
     assert!(
         child_fee <= 10_000u64.saturating_mul(child_vb),
         "child fee {child_fee} must stay within default maxfeerate, vsize {child_vb}"

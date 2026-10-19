@@ -3509,7 +3509,7 @@ impl MempoolHub {
         g.graph.iter().fold((0, 0, 0), |(n, vb, fee), (_, e)| {
             (
                 n + 1,
-                vb + rbitcoin_consensus::policy::get_virtual_size(e.adjusted_weight(bps)),
+                vb + bitcoin::Weight::from_wu(e.adjusted_weight(bps)).to_vbytes_ceil(),
                 fee + e.fee_sat,
             )
         })
