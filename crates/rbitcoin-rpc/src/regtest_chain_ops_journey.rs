@@ -581,7 +581,7 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_submit_overweight(&ctx, &hub, &mut cbs);
     chain_ops_maxfeerate(&ctx, &mut cbs);
     chain_ops_invalidate_and_precious(&ctx, &hub, &mut cbs, &p2wpkh);
-    chain_ops_reconsider_most_work(&ctx, &p2wpkh);
+    chain_ops_reconsider_most_work(&ctx, &hub, &p2wpkh);
 
     // Two networks cannot be one chain: the same hub behind a mainnet RPC view.
     ctx.network = Network::Mainnet;
@@ -2585,7 +2585,11 @@ fn chain_ops_invalidate_and_precious(
 /// Core `reconsiderblock`: clear the marks, then activate the most-work
 /// chain. Restored paths join into one branch, and a restored block that
 /// loses stays a fork the next `invalidateblock` can return to.
-fn chain_ops_reconsider_most_work(ctx: &RpcContext, p2wpkh: &ScriptBuf) {
+fn chain_ops_reconsider_most_work(
+    ctx: &RpcContext,
+    hub: &rbitcoin_net::ChainHub,
+    p2wpkh: &ScriptBuf,
+) {
     let best = || best_hash(ctx).as_str().unwrap().parse::<BlockHash>().unwrap();
     let call = |method: &str, hash: BlockHash| {
         dispatch(ctx, method, vec![json!(hash.to_string())]).unwrap();
@@ -2672,7 +2676,9 @@ fn chain_ops_reconsider_most_work(ctx: &RpcContext, p2wpkh: &ScriptBuf) {
     assert_eq!(best(), f[3]);
 
     // A held child that never connected does not hide its restored parent:
-    // h4 under the invalid h5 is still a fork to return to.
+    // h4 under the invalid h5 is still a fork to return to. h5 comes from a
+    // peer and is held under the invalidated h4 (Core's submitblock refuses
+    // it as `bad-prevblk`).
     let h = generate(4);
     let top = dispatch(ctx, "getblockheader", vec![json!(h[3].to_string())]).unwrap();
     let mut bad = rbitcoin_consensus::mine_regtest_paying(
@@ -2687,7 +2693,7 @@ fn chain_ops_reconsider_most_work(ctx: &RpcContext, p2wpkh: &ScriptBuf) {
     bad.header.merkle_root = bad.compute_merkle_root().unwrap();
     rbitcoin_consensus::grind_regtest_pow(&mut bad.header);
     call("invalidateblock", h[2]);
-    dispatch(ctx, "submitblock", vec![json!(block_hex(&bad))]).unwrap();
+    let _ = hub.accept_received_block(bad.clone());
     let i = side(h[0], 5);
     call("reconsiderblock", h[2]);
     assert_eq!(best(), i[4]);
