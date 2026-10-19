@@ -683,6 +683,21 @@ fn template_follows_the_fork_after_invalidate() {
 }
 
 #[test]
+fn template_follows_the_fork_after_header_rewind() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![tip, json!(1)]).unwrap();
+    let parent = blk["previousblockhash"].clone();
+    let height = blk["height"].as_u64().unwrap();
+    hub.rewind_to_height(u32::try_from(height - 1).unwrap())
+        .unwrap();
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(gbt["previousblockhash"], parent, "{gbt}");
+    assert_eq!(gbt["height"].as_u64(), Some(height), "{gbt}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn template_follows_blocks_the_hub_connects() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
     dispatch(&ctx, "generate", vec![json!(2)]).unwrap();

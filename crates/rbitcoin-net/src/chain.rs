@@ -2742,6 +2742,11 @@ impl ChainHub {
         if keep_height > tip {
             return Err(NetError::Protocol("rewind above tip"));
         }
+        // Before the commit lock, same order as `disconnect_to`. This rewind
+        // already holds that lock, so it cannot call `disconnect_to`, and the
+        // mark would stay on the block that was just disconnected.
+        let mp_hold = self.mempool().cloned();
+        let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let _commit = if wait {
             self.query
                 .lock_tip_commit()
@@ -2752,6 +2757,12 @@ impl ChainHub {
             return Ok(false);
         };
         self.disconnect_to_in_commit(keep_height)?;
+        if let Some(hold) = template_hold.as_mut() {
+            if let Ok(Some((_, rec))) = self.query.header_at_height(Height(keep_height)) {
+                hold.commit(rec.hash);
+            }
+        }
+        drop(template_hold);
         Ok(true)
     }
 
