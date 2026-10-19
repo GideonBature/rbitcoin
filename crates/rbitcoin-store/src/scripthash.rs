@@ -280,6 +280,8 @@ pub struct ScriptHashTable {
     allocs: Vec<Mutex<AllocState>>,
     /// Dir-variant ovf alloc. Shared: `None` (ovf uses `allocs[0]`).
     ovf_alloc: Option<Mutex<AllocState>>,
+    /// Full-list unlinks whose empty head waits for the tip shrink.
+    pending_empty: Mutex<Vec<unlink::PendingEmpty>>,
 }
 
 struct OvfL1 {
@@ -901,6 +903,7 @@ impl ScriptHashTable {
                 .into_boxed_slice(),
             allocs,
             ovf_alloc: Some(Mutex::new(ovf_st)),
+            pending_empty: Mutex::new(Vec::new()),
         })
     }
 
@@ -985,6 +988,7 @@ impl ScriptHashTable {
             pack_marked,
             allocs,
             ovf_alloc,
+            pending_empty: Mutex::new(Vec::new()),
         };
         // v1 = schema-13 slabs; v2 = schema-14 pages; v3 = schema-15 slabs.
         // Field layout is the same; only an empty older header upgrades silently.

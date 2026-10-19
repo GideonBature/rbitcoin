@@ -87,6 +87,7 @@ Open revalidation runs in `Query::open_or_create` **before** P2P can extend tip.
   back. A crash does the same restore, so the same disconnect can run again.
   A non-suffix unlink writes the replacement, syncs those bytes and the new
   heads once for the whole disconnect, then frees the old pages.
+  A full-list unlink does not sync the empty head until the tip shrink is durable.
 - No tip-mode full rebuild; corrupt index ⇒ reindex (wipe store / redo IBD).
 
 ## Flush

@@ -512,6 +512,40 @@ fn newest_page_wide_gap_uses_spend_slots() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Disconnect of one block that holds a whole scripthash extent ends with an
+/// empty head and no tip. The empty head is published only after the tip shrink.
+#[test]
+fn disconnect_one_block_megakey_clears_the_head() {
+    let (dir, q) = temp_query("disconnect-megakey");
+    let sh = rbitcoin_store::script_hash(&[0x51]);
+    let (header, base) = coinbase_block(0, Fk::NULL, None);
+    let mut txs = Vec::with_capacity(257);
+    for i in 0..257u32 {
+        let mut ta = base.clone();
+        ta.tx.txid[0..4].copy_from_slice(&i.to_le_bytes());
+        ta.inputs[0].script_sig = vec![(i & 0xff) as u8];
+        txs.push(ta);
+    }
+    q.connect_block(Height(0), &header, &txs).unwrap();
+    assert!(
+        matches!(
+            q.store().scripthash.head_value(&sh).unwrap().unwrap(),
+            rbitcoin_store::ShHeadValue::Extent { .. }
+        ),
+        "257 creates of one script are a page chain"
+    );
+    assert_eq!(q.tip_height().map(|h| h.0), Some(0));
+    q.disconnect_tip().unwrap();
+    assert!(q.tip_height().is_none());
+    let head = q.store().scripthash.head_value(&sh).unwrap();
+    assert!(head
+        .as_ref()
+        .map(rbitcoin_store::ShHeadValue::is_empty)
+        .unwrap_or(true));
+    assert!(!q.store().scripthash.deferred_empty(&sh));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Slow-pin log is only emitted when load work_ms > 2s — keep the formatter unit.
 #[test]
 fn format_slow_pin_omits_retired_tokens() {

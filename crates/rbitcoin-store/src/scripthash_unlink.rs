@@ -64,6 +64,15 @@ struct DeferredRewrite {
     removed: u64,
 }
 
+/// A full-list unlink. The empty head and the page free wait until the
+/// confirmed tip shrink is durable.
+pub(super) struct PendingEmpty {
+    scripthash: [u8; 32],
+    home: LocatedHome,
+    old: ShHeadValue,
+    removed: u64,
+}
+
 enum SuffixPlan {
     NotSuffix,
     Absent,
@@ -95,11 +104,14 @@ impl ScriptHashTable {
         let mut batch = UnlinkBatch::default();
         let changed = self.unlink_one(scripthash, create_tx_fks, &mut batch)?;
         self.finish_unlink_batch(batch)?;
+        self.commit_deferred_empty_heads()?;
         Ok(changed)
     }
 
     /// Unlink every group, then sync the new chains and heads once before any
-    /// replaced page is freed. One scripthash uses [`Self::unlink_creates`].
+    /// replaced page is freed. A full-list drop stays in memory until
+    /// [`Self::commit_deferred_empty_heads`]. One scripthash uses
+    /// [`Self::unlink_creates`].
     pub fn unlink_creates_batch(&self, groups: &[([u8; 32], Vec<Fk>)]) -> Result<(), StoreError> {
         let mut batch = UnlinkBatch::default();
         for (scripthash, fks) in groups {
@@ -219,6 +231,10 @@ impl ScriptHashTable {
         if live.len() == before {
             return Ok(false);
         }
+        if live.is_empty() {
+            self.defer_full_unlink(scripthash, home, old.clone(), before as u64);
+            return Ok(true);
+        }
         let alloc_mu = self.alloc_for(scripthash, super::KeyHome::from(home));
         let mut alloc = alloc_mu.lock().unwrap();
         let saved = *alloc;
@@ -316,6 +332,57 @@ impl ScriptHashTable {
         Ok(())
     }
 
+    fn defer_full_unlink(
+        &self,
+        scripthash: &[u8; 32],
+        home: LocatedHome,
+        old: ShHeadValue,
+        removed: u64,
+    ) {
+        self.pending_empty.lock().unwrap().push(PendingEmpty {
+            scripthash: *scripthash,
+            home,
+            old,
+            removed,
+        });
+    }
+
+    /// True while a full-list unlink is waiting for the tip shrink.
+    ///
+    /// The disk head is still the previous value. Callers that refresh a
+    /// RAM cache must treat this as empty.
+    pub fn deferred_empty(&self, scripthash: &[u8; 32]) -> bool {
+        self.pending_empty
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|job| &job.scripthash == scripthash)
+    }
+
+    /// Sync empty heads and free their pages. Disconnect calls this after
+    /// `flush_confirmed_only` has returned.
+    pub fn commit_deferred_empty_heads(&self) -> Result<(), StoreError> {
+        loop {
+            let Some(job) = self.pending_empty.lock().unwrap().pop() else {
+                return Ok(());
+            };
+            if let Err(e) = self.unlink_write_home(&job.scripthash, job.home, &ShHeadValue::Empty) {
+                self.pending_empty.lock().unwrap().push(job);
+                return Err(e);
+            }
+            if let Err(e) = self.sync_home(job.home, &job.scripthash) {
+                self.pending_empty.lock().unwrap().push(job);
+                return Err(e);
+            }
+            let body = self.body_for(&job.scripthash, super::KeyHome::from(job.home));
+            let alloc_mu = self.alloc_for(&job.scripthash, super::KeyHome::from(job.home));
+            let mut alloc = alloc_mu.lock().unwrap();
+            self.free_if_paged(body, &mut alloc, &job.old)?;
+            alloc.live_count = alloc.live_count.saturating_sub(job.removed);
+            write_alloc_header(body, &alloc)?;
+        }
+    }
+
     fn apply_suffix_plan(
         &self,
         scripthash: &[u8; 32],
@@ -328,11 +395,8 @@ impl ScriptHashTable {
         let mut alloc = alloc_mu.lock().unwrap();
         match plan {
             SuffixPlan::DropAll { removed } => {
-                self.unlink_write_home(scripthash, home, &ShHeadValue::Empty)?;
-                self.sync_home(home, scripthash)?;
-                self.free_if_paged(body, &mut alloc, old)?;
-                alloc.live_count = alloc.live_count.saturating_sub(removed);
-                write_alloc_header(body, &alloc)?;
+                drop(alloc);
+                self.defer_full_unlink(scripthash, home, old.clone(), removed);
                 Ok(removed > 0)
             }
             SuffixPlan::Rewrite {

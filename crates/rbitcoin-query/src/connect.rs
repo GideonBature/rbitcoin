@@ -1055,6 +1055,10 @@ impl Query {
         if !touched_sh.is_empty() {
             let mut heads = self.sh.heads.lock().unwrap();
             for sh in touched_sh {
+                if self.store.scripthash.deferred_empty(&sh) {
+                    heads.remove(&sh);
+                    continue;
+                }
                 match self.store.scripthash.head_value(&sh) {
                     Ok(Some(v)) if !v.is_empty() => {
                         rbitcoin_store::sh_heads_insert_capped(
@@ -1086,6 +1090,7 @@ impl Query {
             self.invalidate_height_by_hash_index();
         }
         self.store.flush_confirmed_only()?;
+        self.store.scripthash.commit_deferred_empty_heads()?;
         self.store.clamp_spend_durable()?;
         log_disconnect_tip(height.0, &hash, tx_fks.len());
 

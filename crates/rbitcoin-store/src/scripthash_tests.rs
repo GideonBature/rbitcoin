@@ -1981,6 +1981,40 @@ fn extent_ingest_torn_tail_restores_on_open() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A whole-extent unlink that has not reached the tip flush leaves the
+/// creates on disk. Open has no undo record to apply, and it must not
+/// invent an empty head.
+#[test]
+fn extent_drop_all_before_tip_flush_keeps_creates() {
+    let dir = tmp();
+    let sh = script_hash(&[0x71]);
+    let n = 300u64;
+    {
+        let t = ScriptHashTable::create_tiny(&dir).unwrap();
+        let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
+        t.put_create_batch_append(&many, &mut HashMap::new())
+            .unwrap();
+        assert!(matches!(
+            t.head_value(&sh).unwrap().unwrap(),
+            ShHeadValue::Extent { .. }
+        ));
+        let fks: Vec<_> = (1..=n).map(Fk).collect();
+        t.unlink_creates_batch(&[(sh, fks)]).unwrap();
+        assert!(t.deferred_empty(&sh));
+        assert_eq!(
+            t.entries(&sh).unwrap().len(),
+            n as usize,
+            "the empty head is not durable before the tip flush"
+        );
+    }
+    let t = ScriptHashTable::open_tiny(&dir).unwrap();
+    let got = t.entries(&sh).unwrap();
+    assert_eq!(got.len(), n as usize);
+    assert_eq!(got.first().map(|e| e.0), Some(Fk(1)));
+    assert_eq!(got.last().map(|e| e.0), Some(Fk(n)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A torn tail on a sealed overflow file, and again after L1 promote.
 #[test]
 fn extent_sealed_ovf_torn_tail_restores_on_open() {
