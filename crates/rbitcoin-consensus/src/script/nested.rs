@@ -59,7 +59,7 @@ pub(crate) fn try_p2sh_nested_segwit(
     if let Err(e) = check_p2sh_redeem_hash(outer, redeem) {
         return Some(Err(e));
     }
-    if !interpreter::cast_to_bool(program) {
+    if !bitcoin::script::read_scriptbool(program) {
         return Some(Err(ConsensusError::Script("EVAL_FALSE".into())));
     }
 

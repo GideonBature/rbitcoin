@@ -23,7 +23,7 @@ use bitcoin::{Amount, Sequence, Transaction};
 
 use super::crypto;
 use crate::error::ConsensusError;
-use rbitcoin_primitives::{scriptnum_decode, scriptnum_decode_width, scriptnum_encode};
+use rbitcoin_primitives::{scriptnum_decode_width, scriptnum_encode};
 
 /// Stack element cap (main + alt).
 pub(crate) const MAX_STACK_SIZE: usize = 1000;
@@ -351,7 +351,7 @@ pub(crate) fn require_clean_true(stack: &[Vec<u8>]) -> Result<(), ConsensusError
     if stack.len() != 1 {
         return Err(ConsensusError::Script("cleanstack".into()));
     }
-    if !cast_to_bool(&stack[0]) {
+    if !bitcoin::script::read_scriptbool(&stack[0]) {
         return Err(ConsensusError::Script("script false".into()));
     }
     Ok(())
@@ -362,7 +362,7 @@ pub(crate) fn require_clean_true(stack: &[Vec<u8>]) -> Result<(), ConsensusError
 /// **Not** cleanstack — BIP62 CLEANSTACK was never activated for non-witness
 /// consensus. Requiring `len==1` falsely rejected valid P2SH (signet 219477).
 pub(crate) fn require_true_top(stack: &[Vec<u8>]) -> Result<(), ConsensusError> {
-    if stack.is_empty() || !cast_to_bool(stack.last().unwrap()) {
+    if stack.is_empty() || !bitcoin::script::read_scriptbool(stack.last().unwrap()) {
         return Err(ConsensusError::Script("script false".into()));
     }
     Ok(())
@@ -534,7 +534,7 @@ pub(crate) fn eval_script(
                             if minimal_if && !is_minimal_if_arg(&v) {
                                 return Err(ConsensusError::Script("MINIMALIF".into()));
                             }
-                            cond = cast_to_bool(&v);
+                            cond = bitcoin::script::read_scriptbool(&v);
                         }
                         cond_stack.push(executing && cond);
                         continue;
@@ -546,7 +546,7 @@ pub(crate) fn eval_script(
                             if minimal_if && !is_minimal_if_arg(&v) {
                                 return Err(ConsensusError::Script("MINIMALIF".into()));
                             }
-                            cond = !cast_to_bool(&v);
+                            cond = !bitcoin::script::read_scriptbool(&v);
                         }
                         cond_stack.push(executing && cond);
                         continue;
@@ -601,7 +601,7 @@ pub(crate) fn eval_script(
                     0x61 => {}
                     0x69 => {
                         let v = pop(stack)?;
-                        if !cast_to_bool(&v) {
+                        if !bitcoin::script::read_scriptbool(&v) {
                             return Err(ConsensusError::Script("OP_VERIFY".into()));
                         }
                     }
@@ -662,7 +662,7 @@ pub(crate) fn eval_script(
                     }
                     0x73 => {
                         require_n(stack, 1)?;
-                        if cast_to_bool(stack.last().unwrap()) {
+                        if bitcoin::script::read_scriptbool(stack.last().unwrap()) {
                             let v = stack.last().unwrap().clone();
                             push(stack, altstack.len(), v)?;
                         }
@@ -691,7 +691,7 @@ pub(crate) fn eval_script(
                         push(stack, altstack.len(), v)?;
                     }
                     0x79 => {
-                        let n = scriptnum_decode(&pop(stack)?, rm)?;
+                        let n = decode_i64(&pop(stack)?, rm)?;
                         if n < 0 || n as usize >= stack.len() {
                             return Err(ConsensusError::Script("OP_PICK".into()));
                         }
@@ -699,7 +699,7 @@ pub(crate) fn eval_script(
                         push(stack, altstack.len(), v)?;
                     }
                     0x7a => {
-                        let n = scriptnum_decode(&pop(stack)?, rm)?;
+                        let n = decode_i64(&pop(stack)?, rm)?;
                         if n < 0 || n as usize >= stack.len() {
                             return Err(ConsensusError::Script("OP_ROLL".into()));
                         }
@@ -743,45 +743,45 @@ pub(crate) fn eval_script(
                         }
                     }
                     0x8b => {
-                        let v = scriptnum_decode(&pop(stack)?, rm)?;
+                        let v = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(v.saturating_add(1)))?;
                     }
                     0x8c => {
-                        let v = scriptnum_decode(&pop(stack)?, rm)?;
+                        let v = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(v.saturating_sub(1)))?;
                     }
                     0x8f => {
-                        let v = scriptnum_decode(&pop(stack)?, rm)?;
+                        let v = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(-v))?;
                     }
                     0x90 => {
-                        let v = scriptnum_decode(&pop(stack)?, rm)?;
+                        let v = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(v.abs()))?;
                     }
                     0x91 => {
-                        let v = scriptnum_decode(&pop(stack)?, rm)?;
+                        let v = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), bool_encode(v == 0))?;
                     }
                     0x92 => {
-                        let v = scriptnum_decode(&pop(stack)?, rm)?;
+                        let v = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), bool_encode(v != 0))?;
                     }
                     0x93 => bin_arith(stack, altstack.len(), rm, |a, b| a + b)?,
                     0x94 => bin_arith(stack, altstack.len(), rm, |a, b| a - b)?,
                     0x9a => {
-                        let b = scriptnum_decode(&pop(stack)?, rm)?;
-                        let a = scriptnum_decode(&pop(stack)?, rm)?;
+                        let b = decode_i64(&pop(stack)?, rm)?;
+                        let a = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), bool_encode(a != 0 && b != 0))?;
                     }
                     0x9b => {
-                        let b = scriptnum_decode(&pop(stack)?, rm)?;
-                        let a = scriptnum_decode(&pop(stack)?, rm)?;
+                        let b = decode_i64(&pop(stack)?, rm)?;
+                        let a = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), bool_encode(a != 0 || b != 0))?;
                     }
                     0x9c => bin_cmp(stack, altstack.len(), rm, |a, b| a == b)?,
                     0x9d => {
-                        let b = scriptnum_decode(&pop(stack)?, rm)?;
-                        let a = scriptnum_decode(&pop(stack)?, rm)?;
+                        let b = decode_i64(&pop(stack)?, rm)?;
+                        let a = decode_i64(&pop(stack)?, rm)?;
                         if a != b {
                             return Err(ConsensusError::Script("OP_NUMEQUALVERIFY".into()));
                         }
@@ -792,19 +792,19 @@ pub(crate) fn eval_script(
                     0xa1 => bin_cmp(stack, altstack.len(), rm, |a, b| a <= b)?,
                     0xa2 => bin_cmp(stack, altstack.len(), rm, |a, b| a >= b)?,
                     0xa3 => {
-                        let b = scriptnum_decode(&pop(stack)?, rm)?;
-                        let a = scriptnum_decode(&pop(stack)?, rm)?;
+                        let b = decode_i64(&pop(stack)?, rm)?;
+                        let a = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(a.min(b)))?;
                     }
                     0xa4 => {
-                        let b = scriptnum_decode(&pop(stack)?, rm)?;
-                        let a = scriptnum_decode(&pop(stack)?, rm)?;
+                        let b = decode_i64(&pop(stack)?, rm)?;
+                        let a = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), scriptnum_encode(a.max(b)))?;
                     }
                     0xa5 => {
-                        let max = scriptnum_decode(&pop(stack)?, rm)?;
-                        let min = scriptnum_decode(&pop(stack)?, rm)?;
-                        let x = scriptnum_decode(&pop(stack)?, rm)?;
+                        let max = decode_i64(&pop(stack)?, rm)?;
+                        let min = decode_i64(&pop(stack)?, rm)?;
+                        let x = decode_i64(&pop(stack)?, rm)?;
                         push(stack, altstack.len(), bool_encode(x >= min && x < max))?;
                     }
                     0xa6 => {
@@ -985,7 +985,7 @@ fn op_checksigadd(
     let pubkey = pop(stack)?;
     let n_raw = pop(stack)?;
     let sig = pop(stack)?;
-    let n = scriptnum_decode(&n_raw, ctx.minimal_data)?;
+    let n = decode_i64(&n_raw, ctx.minimal_data)?;
     match tapscript_sig_result(&sig, &pubkey, ctx)? {
         TapSigResult::EmptySig => {
             push(stack, alt_len, scriptnum_encode(n))?;
@@ -1083,7 +1083,7 @@ fn op_checkmultisig(
     ver: PreTapscript,
 ) -> Result<(), ConsensusError> {
     // Pop order matches Core: n, n keys (top=last), m, m sigs (top=last), dummy.
-    let n = scriptnum_decode(&pop(stack)?, ctx.minimal_data)?;
+    let n = decode_i64(&pop(stack)?, ctx.minimal_data)?;
     if !(0..=MAX_PUBKEYS_PER_MULTISIG).contains(&n) {
         return Err(ConsensusError::Script("multisig n".into()));
     }
@@ -1097,7 +1097,7 @@ fn op_checkmultisig(
     for _ in 0..n {
         pubkeys.push(pop(stack)?);
     }
-    let m = scriptnum_decode(&pop(stack)?, ctx.minimal_data)?;
+    let m = decode_i64(&pop(stack)?, ctx.minimal_data)?;
     if m < 0 || m > n {
         return Err(ConsensusError::Script("multisig m".into()));
     }
@@ -1496,17 +1496,17 @@ fn require_n(stack: &[Vec<u8>], n: usize) -> Result<(), ConsensusError> {
     Ok(())
 }
 
-pub(crate) fn cast_to_bool(v: &[u8]) -> bool {
-    for (i, &b) in v.iter().enumerate() {
-        if b != 0 {
-            // Negative zero
-            if i == v.len() - 1 && b == 0x80 {
-                return false;
-            }
-            return true;
-        }
-    }
-    false
+fn decode_i64(v: &[u8], require_minimal: bool) -> Result<i64, rbitcoin_primitives::ScriptNumError> {
+    use rbitcoin_primitives::ScriptNumError;
+    let parsed = if require_minimal {
+        bitcoin::script::read_scriptint(v)
+    } else {
+        bitcoin::script::read_scriptint_non_minimal(v)
+    };
+    parsed.map_err(|e| match e {
+        bitcoin::script::Error::NonMinimalPush => ScriptNumError::NonMinimal,
+        _ => ScriptNumError::Overflow,
+    })
 }
 
 /// BIP342 MINIMALIF: IF/NOTIF argument is empty vector or single-byte 0x01 only.
@@ -1551,8 +1551,8 @@ fn bin_arith(
     require_minimal: bool,
     f: impl Fn(i64, i64) -> i64,
 ) -> Result<(), ConsensusError> {
-    let b = scriptnum_decode(&pop(stack)?, require_minimal)?;
-    let a = scriptnum_decode(&pop(stack)?, require_minimal)?;
+    let b = decode_i64(&pop(stack)?, require_minimal)?;
+    let a = decode_i64(&pop(stack)?, require_minimal)?;
     push(stack, alt_len, scriptnum_encode(f(a, b)))
 }
 
@@ -1562,8 +1562,8 @@ fn bin_cmp(
     require_minimal: bool,
     f: impl Fn(i64, i64) -> bool,
 ) -> Result<(), ConsensusError> {
-    let b = scriptnum_decode(&pop(stack)?, require_minimal)?;
-    let a = scriptnum_decode(&pop(stack)?, require_minimal)?;
+    let b = decode_i64(&pop(stack)?, require_minimal)?;
+    let a = decode_i64(&pop(stack)?, require_minimal)?;
     push(stack, alt_len, bool_encode(f(a, b)))
 }
 
@@ -2698,7 +2698,7 @@ mod minimal_data_tests {
         );
         let mut stack = Vec::new();
         eval_script(sc, &mut stack, &ctx_off).expect("pre-bip66 soft-false CHECKSIG");
-        assert!(!cast_to_bool(stack.last().unwrap()));
+        assert!(!bitcoin::script::read_scriptbool(stack.last().unwrap()));
 
         let mut flags = crate::block::ScriptVerifyFlags::buried(false, false, false, false, false);
         flags.low_s = true;

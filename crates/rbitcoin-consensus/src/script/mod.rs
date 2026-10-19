@@ -198,7 +198,7 @@ fn verify_native_witness(
     }
     // Core runs the scriptPubKey first. A false program is EVAL_FALSE for every
     // version, including unknown ones, before anyone-can-spend success.
-    if !interpreter::cast_to_bool(program) {
+    if !bitcoin::script::read_scriptbool(program) {
         return Err(ConsensusError::Script("EVAL_FALSE".into()));
     }
     match (version, program.len()) {
