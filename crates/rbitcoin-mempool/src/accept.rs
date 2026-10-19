@@ -1699,17 +1699,31 @@ impl ActiveMempool {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
                     for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0) {
+                        let id = item.tx.compute_txid();
                         match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None) {
-                            Ok(r) => self.promote_orphans_of(r.txid, utxos, tip),
+                            Ok(r) => {
+                                // Admitted, so the lift row is not in flight.
+                                self.orphanage.forget_taken_gen(&id, item.taken_gen);
+                                self.promote_orphans_of(r.txid, utxos, tip);
+                            }
                             Err(AcceptError::Orphaned { missing, .. }) => {
                                 self.park_announced(&item.tx, missing, &item.announcers);
                             }
-                            Err(_) => self.restore_undone(utxos, tip),
+                            Err(_) => {
+                                // Rejected without a repark. Drop the lift row.
+                                self.orphanage.forget_taken_gen(&id, item.taken_gen);
+                                self.restore_undone(utxos, tip);
+                            }
                         }
                     }
                     return Err(e);
                 }
             }
+        }
+        // Every lifted member was admitted. A newer take keeps its own generation.
+        for item in &lifted {
+            self.orphanage
+                .forget_taken_gen(&item.tx.compute_txid(), item.taken_gen);
         }
         let ids: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
         for id in ids {
@@ -4222,6 +4236,127 @@ mod tests {
             "the last announcer disconnecting during a package lift drops the orphan"
         );
         let _ = utxos;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A package that admits a lifted orphan must drop the in-flight row.
+    /// Leaving it makes a later disconnect look like that peer still announced
+    /// an orphan.
+    #[test]
+    fn package_admit_drops_the_inflight_row() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = spend_tx(ops[0], 99_000);
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            98_000,
+        );
+        let child_id = child.compute_txid();
+        let mut missing = BTreeSet::new();
+        missing.insert(parent.compute_txid());
+        mp.park_orphan_from(&child, missing, Some(4));
+        mp.accept_package(&[parent, child], &utxos, TIP_OK)
+            .expect("package admits the parked child");
+        assert!(mp.graph.contains(&child_id));
+        assert!(
+            !mp.orphanage.has_announcer(4),
+            "an admitted lift must not keep the peer in the in-flight map"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The package fails after the lifted child was admissible on its own.
+    /// Rolling the package back still admits that child, and that admit has
+    /// to drop the in-flight row too.
+    #[test]
+    fn package_rollback_admit_drops_the_inflight_row() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 50_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = spend_tx(ops[0], 99_000);
+        mp.accept_tx(&parent, &utxos, TIP_OK).expect("parent");
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            98_000,
+        );
+        let child_id = child.compute_txid();
+        let mut missing = BTreeSet::new();
+        missing.insert(parent.compute_txid());
+        mp.park_orphan_from(&child, missing, Some(4));
+        let bad = spend_tx(ops[1], 60_000);
+        let err = mp
+            .accept_package(&[child, bad], &utxos, TIP_OK)
+            .expect_err("the overspend fails the package");
+        assert!(
+            mp.graph.contains(&child_id),
+            "the lifted child is admitted on its own, got {err}"
+        );
+        assert!(
+            !mp.orphanage.has_announcer(4),
+            "that admit must not keep the peer in the in-flight map"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The readmit of a lifted child can itself fail. A script failure does not
+    /// park the child, so the in-flight row still has to go.
+    #[test]
+    fn package_rollback_reject_drops_the_inflight_row() {
+        use bitcoin::WPubkeyHash;
+
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let spk = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x11; 20]));
+        let parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: ops[0],
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: spk,
+            }],
+        };
+        mp.accept_tx(&parent, &utxos, TIP_OK).expect("parent");
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            98_000,
+        );
+        let child_id = child.compute_txid();
+        let mut missing = BTreeSet::new();
+        missing.insert(parent.compute_txid());
+        mp.park_orphan_from(&child, missing, Some(4));
+        let err = mp
+            .accept_package(std::slice::from_ref(&child), &utxos, TIP_OK)
+            .expect_err("empty witness cannot spend the parent");
+        assert!(
+            matches!(err, AcceptError::Script(_)),
+            "script failure, got {err}"
+        );
+        assert!(!mp.graph.contains(&child_id));
+        assert!(
+            !mp.orphanage.contains(&child_id),
+            "a script failure must not put the lifted child back"
+        );
+        assert!(
+            !mp.orphanage.has_announcer(4),
+            "a rejected lift must not keep its peer"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

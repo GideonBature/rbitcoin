@@ -2940,6 +2940,11 @@ impl MempoolHub {
                 .finish_accept_err(us, AcceptError::Policy("mempool full"))
                 .unwrap_err());
         }
+        // The failure path forgets inside abandon. Success leaves the lifted
+        // txs in the mempool, so the in-flight rows would outlive the admit.
+        for item in &lifted {
+            self.forget_taken_orphan(item.tx.compute_txid(), item.taken_gen);
+        }
         let us = t0.elapsed().as_micros() as u64;
         self.meter_accept_stages(lock_us, stages);
         let per = us / (accepted.len().max(1) as u64);
@@ -7035,12 +7040,20 @@ mod tests {
                 "spend of the missing parent must park, got {err:?}"
             );
         }
+        assert!(
+            hub.add_orphan_announcer(&child_id, 4),
+            "the parked child takes the peer"
+        );
         let accepted = hub
             .accept_package(&[parent.clone(), child.clone()])
             .expect("hub package contains the parked child");
         assert_eq!(accepted.len(), 2);
         assert!(hub.try_contains(&parent_id));
         assert!(hub.try_contains(&child_id));
+        assert!(
+            !hub.lock_write().orphanage.has_announcer(4),
+            "admitting the lifted child must drop its in-flight peer"
+        );
         assert!(
             hub.try_contains(&sibling_id),
             "a parked sibling outside the package must still be admitted"

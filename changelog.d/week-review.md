@@ -18,4 +18,4 @@ Fixed
   has the creates. A one-key unlink publishes only that key.
 - **A package that fails puts a lifted orphan back without peers that
   disconnected while it was out.** If that was the only peer, the orphan
-  is dropped.
+  is dropped. A package that admits the orphan drops that in-flight record.
