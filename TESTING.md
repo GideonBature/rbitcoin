@@ -429,7 +429,23 @@ New features: add a high-level scenario; remove obsolete lower-level tests in th
 ## Core differential
 
 Nightly (not a required PR check) `fuzz.yml` runs **21** cargo-fuzz jobs.
+That nightly run is the fuzz signal on purpose. Pull requests do not run
+a short fuzz job: a 30-second smoke would not catch what the nightly
+differential run is for, and it is not a required check.
 `fuzz/` is not a default workspace member.
+Silent-payment tweaks are not a missing fuzz bin. They are libsecp
+`combine_keys` and `mul_tweak` plus a tagged hash, covered by unit tests
+and the Electrum spend test.
+
+Sanitizers, nightly only: AddressSanitizer on the wire parsers
+(`block_wire`, `v2_contents`, `addrv2_wire`, `inv_getdata_wire`,
+`electrum_json`, `asmap`), and on `store_reorg`, `v2_session`,
+`cmpct_differential`, and `script_kernel_differential`. The heavy Core
+differentials run with `--sanitizer none`. `block_spend_differential`
+uses AddressSanitizer on Sunday and none on other days. `FUZZ_SANITIZER`
+overrides that choice; unset keeps it. A Sunday (or `workflow_dispatch`)
+job runs `asmap` and `block_wire` for 120s with `--sanitizer undefined`.
+Miri stays `rbitcoin-primitives` only.
 Treat crate-root `pub` that exists only so a fuzz target can call it as
 the same smell as a test-only export: prefer `pub(crate)` plus an in-crate
 harness, or the published `rbitcoin-node` / CLI binary, even if that costs

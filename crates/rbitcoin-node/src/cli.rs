@@ -312,7 +312,7 @@ fn operator_usage() -> String {
     [--electrum-listen ADDR] [--esplora-listen ADDR] [--esplora-onion[=0|1]] [--health-listen [ADDR]] [--metrics] \\\n\
     [--sv2-tp-listen ADDR] [--sv2-tp-authority-sec KEY] [--sv2-tp-authority-sec-file PATH] [--sv2-tp-cert-validity SECS] [--sv2-tp-stale-grace SECS] [--sv2-tp-fee-delta SATS] [--sv2-tp-template-interval SECS] \\\n\
     [--sh-index] [--block-filter-index] [--prune-seqsigwit] [--prune-seqsigwit-ram-threshold-bytes N] [--datadir-hdd] [--sp-tweaks] [--sp-tweaks-dust SATS] [--max-sh-creates N] [--electrum-max-subs N] [--esplora-block-template] \\\n\
-    [--rpc] [--rpc-listen [ADDR]] [--rest] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-work-queue N] \\\n\
+    [--rpc] [--rpc-listen [ADDR]] [--rest] [--rpc-socket PATH] [--rpc-token-file PATH] [--rpc-cookie-file PATH] [--rpc-cookie-perms owner|group|all] [--rpc-work-queue N] \\\n\
     [--milestone HEIGHT] \\\n\
     [--max-outbound N] [--max-inbound N] \\\n\
     [--mempool-size-mb N] [--mempool-expiry HOURS] \\\n\
@@ -374,7 +374,7 @@ SV2: --sv2-tp-listen ADDR serves the Stratum v2 Template Distribution Protocol (
   --sv2-tp-stale-grace SECS keeps a replaced tip's templates answering for SECS, at most 86400 (default 10).\n\
   --sv2-tp-fee-delta SATS pushes a same-tip template once its fees gain SATS over the last one sent (default 1000).\n\
   --sv2-tp-template-interval SECS checks for that gain every SECS, 1 to 86400 (default 5).\n\
-RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (default 127.0.0.1 and Core-matching port). Token {{datadir}}/rpc.token (Bearer); --rpc-cookie-file opts TCP into Core cookie HTTP Basic. No --rpcuser. --rest turns on unauthenticated /rest/ on those listeners (off unless set).\n\
+RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (default 127.0.0.1 and Core-matching port). Token {{datadir}}/rpc.token (Bearer); --rpc-cookie-file opts TCP into Core cookie HTTP Basic. --rpc-cookie-perms owner|group|all (default owner) is the widest Unix mode that file may have (owner 0600, group 0640, all 0644); the node never creates or chmods it. Windows has no mode bits. No --rpcuser. --rest turns on unauthenticated /rest/ on those listeners (off unless set).\n\
 Cold files: --datadir-cold PATH puts append-only IBD files under PATH/store\n\
   (seqsigwit, txstat, input, and blockfilter / sp_tweaks once enabled).\n\
   Default (flag omitted): those files live under --datadir. --prune-seqsigwit\n\
@@ -660,6 +660,7 @@ mod tests {
             "--rpc-socket",
             "--rpc-token-file",
             "--rpc-cookie-file",
+            "--rpc-cookie-perms",
             "--proxy",
             "--onion",
             "--proxy-randomize",
@@ -1194,6 +1195,22 @@ mod tests {
         std::fs::write(&cookie, "__cookie__:secret").unwrap();
         // Socket-only RPC would silently ignore the cookie (message pinned in config.rs).
         assert_exit(run(&["--rpc"]), ExitCode::FAILURE);
+        assert_exit(
+            run(&["--rpc-listen", "--rpc-cookie-perms", "0640"]),
+            ExitCode::from(2),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_exit(run(&["--rpc-listen"]), ExitCode::FAILURE);
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o640)).unwrap();
+            assert_exit(
+                run(&["--rpc-listen", "--rpc-cookie-perms", "group"]),
+                ExitCode::SUCCESS,
+            );
+            std::fs::set_permissions(&cookie, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert_exit(run(&["--rpc-listen"]), ExitCode::SUCCESS);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -11,6 +11,9 @@ description = "rbitcoin RPC CLI client"
 name = "rbitcoin-cli"
 path = "src/main.rs"
 
+[features]
+mutants = []
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 mimalloc = { workspace = true }

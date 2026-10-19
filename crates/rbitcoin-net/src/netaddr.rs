@@ -4,7 +4,7 @@ use crate::error::NetError;
 use bitcoin::p2p::address::{AddrV2, AddrV2Message};
 use sha3::{Digest, Sha3_256};
 use std::fmt;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 const B32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -48,6 +48,164 @@ impl OnlyNet {
 
 pub(crate) fn addr_allowed(addr: NetAddr, only: &[OnlyNet]) -> bool {
     only.is_empty() || only.iter().any(|n| n.matches_addr(addr))
+}
+
+/// Prefixes `Ipv6Addr` does not classify on 1.95.
+///
+/// `2001:db8::/32` and `3fff::/20` documentation, `2001:2::/48` benchmarking,
+/// `2001:10::/28` ORCHID, `2001:20::/28` ORCHIDv2, and `100::/64` discard.
+/// `is_documentation` is still unstable.
+fn ipv6_special_unroutable(v: Ipv6Addr) -> bool {
+    let o = v.octets();
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x0d && o[3] == 0xb8 {
+        return true;
+    }
+    // RFC 9637 documentation. Core `IsRFC9637` rejects this in `IsValid`.
+    if o[0] == 0x3f && o[1] == 0xff && (o[2] & 0xf0) == 0 {
+        return true;
+    }
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && (o[3] & 0xf0) == 0x10 {
+        return true;
+    }
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && (o[3] & 0xf0) == 0x20 {
+        return true;
+    }
+    // RFC 5180 benchmarking. The IPv4 twin is `198.18.0.0/15`. The last
+    // 80 bits are free, so the whole prefix has to go.
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && o[3] == 0x02 && o[4] == 0x00 && o[5] == 0x00
+    {
+        return true;
+    }
+    o[0] == 0x01 && o[1] == 0x00 && o[2..8].iter().all(|&b| b == 0)
+}
+
+/// Tunnel and translation prefixes.
+///
+/// A public embedded IPv4 stays only in its canonical form: 6to4 and local
+/// NAT64 with the non-IPv4 bits zero, well-known NAT64, IPv4-compatible
+/// `::/96`, and SIIT `::ffff:0:0:0/96`. Any other suffix is a distinct map
+/// key and would fill the flat 8192 book. Teredo `2001::/32` is dropped
+/// entirely: the server address is 32 free bits, so a canonical suffix
+/// still fills the book. IPv4-mapped `::ffff:0:0/96` is unwrapped earlier.
+fn ipv6_embedded_bogon(v: Ipv6Addr) -> bool {
+    let o = v.octets();
+    // Teredo. Client IPv4 is bit-flipped; server, flags, and port are free.
+    if o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && o[3] == 0x00 {
+        return true;
+    }
+    // 6to4. Bytes 2–5 are the IPv4. Bytes 6–15 must be zero.
+    if o[0] == 0x20 && o[1] == 0x02 {
+        return ipv4_unroutable(Ipv4Addr::new(o[2], o[3], o[4], o[5]))
+            || o[6..].iter().any(|&b| b != 0);
+    }
+    // Well-known NAT64 `64:ff9b::/96`.
+    if o[0] == 0x00
+        && o[1] == 0x64
+        && o[2] == 0xff
+        && o[3] == 0x9b
+        && o[4..12].iter().all(|&b| b == 0)
+    {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    // Local NAT64 `64:ff9b:1::/48`. Bytes 6–11 must be zero.
+    if o[0] == 0x00 && o[1] == 0x64 && o[2] == 0xff && o[3] == 0x9b && o[4] == 0x00 && o[5] == 0x01
+    {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]))
+            || o[6..12].iter().any(|&b| b != 0);
+    }
+    // SIIT `::ffff:0:0:0/96`. Not IPv4-mapped `::ffff:0:0/96`.
+    if o[..8].iter().all(|&b| b == 0) && o[8] == 0xff && o[9] == 0xff && o[10] == 0 && o[11] == 0 {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    // Deprecated IPv4-compatible `::/96`.
+    if o[..12].iter().all(|&b| b == 0) {
+        return ipv4_unroutable(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    false
+}
+
+/// `100.64.0.0/10`. `Ipv4Addr::is_shared` is still unstable on 1.95.
+fn ipv4_shared(v: Ipv4Addr) -> bool {
+    let o = v.octets();
+    o[0] == 100 && (o[1] & 0xc0) == 64
+}
+
+/// `198.18.0.0/15`. `Ipv4Addr::is_benchmarking` is still unstable on 1.95.
+fn ipv4_benchmarking(v: Ipv4Addr) -> bool {
+    let o = v.octets();
+    o[0] == 198 && (o[1] & 0xfe) == 18
+}
+
+/// `240.0.0.0/4`. `Ipv4Addr::is_reserved` is still unstable on 1.95.
+fn ipv4_reserved(v: Ipv4Addr) -> bool {
+    v.octets()[0] & 0xf0 == 240
+}
+
+/// `0.0.0.0/8`. `is_unspecified` is only `0.0.0.0`.
+fn ipv4_this_network(v: Ipv4Addr) -> bool {
+    v.octets()[0] == 0
+}
+
+fn ipv4_unroutable(v: Ipv4Addr) -> bool {
+    v.is_unspecified()
+        || v.is_loopback()
+        || v.is_private()
+        || v.is_link_local()
+        || v.is_broadcast()
+        || v.is_multicast()
+        || v.is_documentation()
+        || ipv4_shared(v)
+        || ipv4_benchmarking(v)
+        || ipv4_reserved(v)
+        || ipv4_this_network(v)
+}
+
+/// Clearnet bogon. CJDNS `fc00::/8` is an overlay, not a unique-local bogon.
+pub(crate) fn clearnet_unroutable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => ipv4_unroutable(v),
+        IpAddr::V6(v) => {
+            if is_cjdns_ip(v) {
+                return false;
+            }
+            if let Some(v4) = v.to_ipv4_mapped() {
+                return ipv4_unroutable(v4);
+            }
+            v.is_unspecified()
+                || v.is_loopback()
+                || v.is_unicast_link_local()
+                || v.is_unique_local()
+                || v.is_multicast()
+                || ipv6_special_unroutable(v)
+                || ipv6_embedded_bogon(v)
+        }
+    }
+}
+
+/// Seed inject, IBD and steady-state addr gossip, getaddr, and peers-file
+/// load. Onion, I2P, and CJDNS are not IP bogons. `add_learned` stays open
+/// for `addpeeraddress` and `--connect`.
+pub(crate) fn netaddr_unroutable_gossip(addr: NetAddr) -> bool {
+    match addr {
+        NetAddr::Ip(s) => clearnet_unroutable(s.ip()),
+        NetAddr::Onion { .. } | NetAddr::I2p { .. } | NetAddr::Cjdns { .. } => false,
+    }
+}
+
+/// Rows the addrv2 relay loop must not forward.
+///
+/// Port 0 is not a dialable endpoint except I2P, which Core advertises with
+/// port 0. Tor v2 and CJDNS outside `fc00::/8` never become a [`NetAddr`],
+/// so the unroutable check would not see them. Unknown BIP155 network ids
+/// are still forwarded.
+pub(crate) fn addrv2_skip_relay(msg: &AddrV2Message) -> bool {
+    match &msg.addr {
+        AddrV2::I2p(_) => false,
+        AddrV2::TorV2(_) => true,
+        AddrV2::Cjdns(ip) if !is_cjdns_ip(*ip) => true,
+        _ if msg.port == 0 => true,
+        _ => NetAddr::from_addrv2(msg).is_some_and(netaddr_unroutable_gossip),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

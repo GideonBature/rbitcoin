@@ -15,10 +15,12 @@ rbitcoin-log = { workspace = true }
 bitcoin = { workspace = true }
 arc-swap = { workspace = true }
 # Attribute only. cargo-mutants reads it; it does not change compiled code.
-mutants = "0.0.4"
+mutants = { version = "0.0.4", optional = true }
 
 [features]
 test-hooks = []
+# Nightly cargo-mutants only. Off for the node build.
+mutants = ["dep:mutants"]
 
 [dev-dependencies]
 # Height-index tests write a raw confirmed slot. Dependents of this crate

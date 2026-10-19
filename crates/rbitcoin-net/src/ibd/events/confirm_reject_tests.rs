@@ -742,17 +742,26 @@ fn apply_peer_event_body_and_control_surface() {
 
     // Addrs + inject filter.
     inject_learned_addrs(&mut book, &[], local, 1);
+    let routable = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
     inject_learned_addrs(
         &mut book,
         &[
             crate::NetAddr::Ip(addr(2)),
+            crate::NetAddr::Ip(routable),
             crate::NetAddr::Ip(local),
             crate::NetAddr::Ip(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 1)),
         ],
         local,
         1,
     );
-    assert!(book.entry(&addr(2)).is_some());
+    assert!(
+        book.entry(&addr(2)).is_none(),
+        "gossip drops RFC1918; addpeeraddress still uses add_learned"
+    );
+    assert!(
+        book.entry(&routable).is_some(),
+        "gossip keeps a public address"
+    );
     let onion: crate::NetAddr =
         "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
             .parse()

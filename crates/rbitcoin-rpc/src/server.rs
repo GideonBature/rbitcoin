@@ -2,6 +2,7 @@
 
 use crate::auth::{
     parse_basic_auth, parse_bearer_auth, read_cookie_file, resolve_rpc_auth, RpcAuth, RpcCookie,
+    RpcCookiePerms,
 };
 use crate::methods::{RpcContext, RpcRegtest};
 use axum::body::Bytes;
@@ -134,6 +135,8 @@ pub struct RpcConfig {
     pub token_path: Option<PathBuf>,
     /// Optional Core-format `username:password` file accepted as HTTP Basic on TCP.
     pub cookie_path: Option<PathBuf>,
+    /// Widest mode `--rpc-cookie-perms` allows for [`Self::cookie_path`].
+    pub cookie_perms: RpcCookiePerms,
     /// `getnetworkinfo.subversion`. Empty → `/rbitcoin:VERSION/`.
     pub subversion: Option<String>,
     /// HTTP occupancy cap. `None` and `0` are [`DEFAULT_RPC_WORK_QUEUE`].
@@ -213,7 +216,7 @@ pub async fn run_rpc(
     let cookie = config
         .cookie_path
         .as_deref()
-        .map(read_cookie_file)
+        .map(|path| read_cookie_file(path, config.cookie_perms))
         .transpose()?;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -946,6 +949,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -984,6 +988,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: true,
@@ -1084,6 +1089,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1152,6 +1158,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1234,6 +1241,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1275,6 +1283,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1342,6 +1351,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1475,6 +1485,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1539,6 +1550,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1602,6 +1614,7 @@ mod tests {
                 network: Network::Regtest,
                 token_path: None,
                 cookie_path: None,
+                cookie_perms: RpcCookiePerms::Owner,
                 subversion: None,
                 work_queue: None,
                 rest: false,
@@ -1671,6 +1684,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: Some(1),
             rest: false,
@@ -1728,6 +1742,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: Some(1),
             rest: false,
@@ -1812,6 +1827,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -1983,6 +1999,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -2024,6 +2041,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: Some(cookie_path.clone()),
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -2053,7 +2071,13 @@ mod tests {
         assert!(err.contains("TCP only"), "{err}");
 
         // mempool would send the newline as part of the password: refuse to start.
+        // Mode is owner-only so the line-ending error is the one under test.
         std::fs::write(&cookie_path, "mempool:secret\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cookie_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let err = match run_rpc(
             with_cookie(),
             Arc::clone(&query),
@@ -2071,6 +2095,11 @@ mod tests {
         assert!(err.contains("line ending"), "{err}");
 
         std::fs::write(&cookie_path, "mempool:secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cookie_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let handle = run_rpc(with_cookie(), query, None, None, None, None, None)
             .await
             .unwrap();
@@ -2173,6 +2202,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,
@@ -2201,6 +2231,7 @@ mod tests {
             network: Network::Regtest,
             token_path: None,
             cookie_path: None,
+            cookie_perms: RpcCookiePerms::Owner,
             subversion: None,
             work_queue: None,
             rest: false,

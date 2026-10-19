@@ -147,6 +147,37 @@ let
   cookieDataDirMode =
     cookieInDataDir.config.systemd.tmpfiles.settings."10-rbitcoin"."/var/lib/rbitcoin".d.mode;
   cookieTcpOnly = "services.rbitcoin.rpc.cookieFile requires rpc.enable (the cookie is accepted on TCP only)";
+  cookiePermsNeedFile = "services.rbitcoin.rpc.cookiePerms requires rpc.cookieFile";
+  cookieGroup = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          rpc.enable = true;
+          rpc.cookieFile = "/run/rbitcoin/rpc.cookie";
+          rpc.cookiePerms = "group";
+        };
+      }
+    ];
+  };
+  cookieGroupExec = cookieGroup.config.systemd.services.rbitcoin.serviceConfig.ExecStart;
+  cookiePermsAlone = nixpkgs.lib.nixosSystem {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    modules = [
+      module
+      {
+        services.rbitcoin = {
+          enable = true;
+          package = fakePackage;
+          rpc.enable = true;
+          rpc.cookiePerms = "group";
+        };
+      }
+    ];
+  };
   metricsNeedHealth = "services.rbitcoin.metrics requires health.enable (--metrics needs --health-listen)";
   metricsWithoutHealth = nixpkgs.lib.nixosSystem {
     inherit (pkgs.stdenv.hostPlatform) system;
@@ -227,6 +258,7 @@ assert defaultCfg.p2p.listenOnion == false;
 assert defaultCfg.rpc.port == 8332;
 assert defaultCfg.rpc.socketPath == null;
 assert defaultCfg.rpc.cookieFile == null;
+assert defaultCfg.rpc.cookiePerms == null;
 assert defaultCfg.proxy == null;
 assert defaultCfg.onionProxy == null;
 assert defaultCfg.proxyRandomize == true;
@@ -291,6 +323,9 @@ assert builtins.match ".*--milestone 100.*" (
 ) != null;
 assert builtins.match ".*--rpc-socket /run/rbitcoin/rpc.sock.*" execStart != null;
 assert builtins.match ".*--rpc-cookie-file /run/rbitcoin/rpc.cookie.*" execStart != null;
+assert builtins.match ".*--rpc-cookie-perms.*" execStart == null;
+assert builtins.match ".*--rpc-cookie-perms group.*" cookieGroupExec != null;
+assert builtins.match ".*--rpc-cookie-file /run/rbitcoin/rpc.cookie.*" cookieGroupExec != null;
 assert builtins.elem "/run/rbitcoin" service.serviceConfig.ReadWritePaths;
 assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/run/rbitcoin".d.mode == "0750";
 assert builtins.match ".*--electrum-listen 127.0.0.1:50001.*" execStart != null;
@@ -348,6 +383,8 @@ assert builtins.match ".*--rpc-cookie-file.*" listenOffExec == null;
 assert !builtins.elem cookieTcpOnly (failedAssertions system);
 assert !builtins.elem metricsNeedHealth (failedAssertions system);
 assert builtins.elem cookieTcpOnly (failedAssertions cookieWithoutTcp);
+assert builtins.elem cookiePermsNeedFile (failedAssertions cookiePermsAlone);
+assert !builtins.elem cookiePermsNeedFile (failedAssertions cookieGroup);
 assert builtins.elem metricsNeedHealth (failedAssertions metricsWithoutHealth);
 assert builtins.elem "127.0.0.1:9332" (builtins.head rbitcoinScrape.static_configs).targets;
 assert !builtins.elem sv2KeyNotInStore (failedAssertions system);

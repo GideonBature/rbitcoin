@@ -10,6 +10,8 @@ description = "Block and transaction validation / confirmability"
 [features]
 # Lets script-oracle call the Core script assembler. Off for the node.
 corpus = ["dep:serde_json"]
+# Nightly cargo-mutants only. Off for the node build.
+mutants = ["dep:mutants"]
 
 [dependencies]
 rbitcoin-primitives = { workspace = true }
@@ -19,7 +21,7 @@ bitcoin_hashes = { workspace = true }
 # Corpus rows are JSON. The node build leaves this feature off.
 serde_json = { workspace = true, optional = true }
 # Attribute only. cargo-mutants reads it; it does not change compiled code.
-mutants = "0.0.4"
+mutants = { version = "0.0.4", optional = true }
 # Parallel script checks use in-crate `script_pool` (std threads) — no rayon.
 
 [dev-dependencies]

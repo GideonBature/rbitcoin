@@ -249,6 +249,7 @@ printf '__cookie__:%s' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" |
   --sh-index \
   --rpc-listen 127.0.0.1:8332 \
   --rpc-cookie-file /run/rbitcoin/rpc.cookie \
+  --rpc-cookie-perms group \
   --esplora-listen /run/rbitcoin/esplora.sock \
   --log-level info
 ```
@@ -366,8 +367,11 @@ listener. The node reads that file and never creates it, so write it before
 each start (the [mempool.space](#mempoolspace) command above does). Keep it
 readable only by the rbitcoin and mempool service identities.
 
-1. Start the node with `--rpc-listen 127.0.0.1:<network RPC port>` and
-   `--rpc-cookie-file /run/rbitcoin/rpc.cookie`.
+1. Start the node with `--rpc-listen 127.0.0.1:<network RPC port>`,
+   `--rpc-cookie-file /run/rbitcoin/rpc.cookie`, and
+   `--rpc-cookie-perms group` (the 0640 file above). Default `owner`
+   refuses that mode. NixOS `services.rbitcoin.rpc.cookiePerms = "group"`
+   passes the flag; leave it unset to keep the unit argv on the node default.
 2. Point mempool at the same file:
 
    ```json

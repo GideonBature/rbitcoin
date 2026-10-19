@@ -11,6 +11,9 @@ description = "rbitcoin full node binary and lifecycle"
 name = "rbitcoin-node"
 path = "src/main.rs"
 
+[features]
+mutants = []
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-log = { workspace = true }

@@ -170,6 +170,7 @@ async fn start_rpc_listener(
         network: config.network,
         token_path: Some(config.rpc_token_path()),
         cookie_path: config.rpc_cookie_path(),
+        cookie_perms: config.rpc.cookie_perms,
         work_queue: config.rpc.work_queue,
         rest: config.rpc.rest,
         subversion: Some(
@@ -3022,10 +3023,28 @@ mod tests {
             !target_hit.load(Ordering::SeqCst),
             "SOCKS dial must not open a direct TCP connection to the target"
         );
-        let book = AddrMan::load(&dir.join("peers")).expect("peers saved");
+        let peers_path = dir.join("peers");
+        let text = std::fs::read_to_string(&peers_path).expect("peers saved");
+        let row = text
+            .lines()
+            .find(|line| line.starts_with(&format!("{connect} ")))
+            .unwrap_or_else(|| {
+                panic!("IBD must flush the dial failure into the saved peer book\n{text}")
+            });
+        let flags = row
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.strip_prefix("0x"))
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            .unwrap_or(0);
         assert!(
-            book.flags(&connect).failed_last_connect(),
-            "IBD must flush the dial failure into the saved peer book"
+            flags & rbitcoin_net::PeerFlags::FAILED_LAST_CONNECT != 0,
+            "IBD must flush the dial failure into the saved peer book, row {row}"
+        );
+        let book = AddrMan::load(&peers_path).expect("peers saved");
+        assert!(
+            book.entry(&connect).is_none(),
+            "loopback is not restored from the peers file"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

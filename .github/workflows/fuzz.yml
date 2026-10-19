@@ -103,3 +103,49 @@ jobs:
           name: fuzz-crashers-${{ matrix.bin }}
           path: fuzz/crashers/
           if-no-files-found: ignore
+
+  # Sunday, or a manual dispatch. The daily cron checks out and exits.
+  ubsan:
+    name: ubsan ${{ matrix.bin }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      RUSTFLAGS: "-A warnings"
+    strategy:
+      fail-fast: false
+      matrix:
+        bin: [asmap, block_wire]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - name: sunday or dispatch
+        id: gate
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "$(date -u +%u)" == "7" ]]; then
+            echo "run=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.gate.outputs.run == '1'
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        with:
+          components: rust-src
+
+      - if: steps.gate.outputs.run == '1'
+        name: clang (libFuzzer)
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - if: steps.gate.outputs.run == '1'
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - if: steps.gate.outputs.run == '1'
+        name: UBSan ${{ matrix.bin }}
+        env:
+          FUZZ_SANITIZER: undefined
+          FUZZ_MAX_TOTAL_TIME: "120"
+        run: ./scripts/fuzz-run.sh ${{ matrix.bin }}

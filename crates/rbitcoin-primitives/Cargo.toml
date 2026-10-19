@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Shared types for the rbitcoin node"
 
+[features]
+mutants = []
+
 [dependencies]
 bitcoin_hashes = { workspace = true }
 

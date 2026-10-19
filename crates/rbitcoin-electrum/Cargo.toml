@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Electrum protocol server (scripthash JSON-RPC over TCP)"
 
+[features]
+mutants = []
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-log = { workspace = true }

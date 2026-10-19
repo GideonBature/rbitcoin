@@ -935,11 +935,11 @@ pub(crate) fn inject_learned_addrs(
     }
     let mut added = 0usize;
     for &a in addrs {
-        if a.port() == 0 {
+        if a.port() == 0 || crate::netaddr::netaddr_unroutable_gossip(a) {
             continue;
         }
         match a {
-            crate::NetAddr::Ip(s) if s == local_addr || s.ip().is_unspecified() => continue,
+            crate::NetAddr::Ip(s) if s == local_addr => continue,
             _ => {}
         }
         if book.add_learned_addr(a, MAX_PEER_POOL) {

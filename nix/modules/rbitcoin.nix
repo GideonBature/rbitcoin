@@ -83,6 +83,8 @@ let
   ++ optional (cfg.rpc.socketPath != null) cfg.rpc.socketPath
   ++ optional (cfg.rpc.cookieFile != null) "--rpc-cookie-file"
   ++ optional (cfg.rpc.cookieFile != null) (toString cfg.rpc.cookieFile)
+  ++ optional (cfg.rpc.cookiePerms != null) "--rpc-cookie-perms"
+  ++ optional (cfg.rpc.cookiePerms != null) cfg.rpc.cookiePerms
   ++ optional cfg.electrum.enable "--electrum-listen"
   ++ optional cfg.electrum.enable (socket cfg.electrum.address cfg.electrum.port)
   ++ optional (cfg.electrum.enable && cfg.electrum.maxSubs != null) "--electrum-max-subs"
@@ -433,6 +435,21 @@ in
           read it, and mempool must be able to traverse its directory and read the file.
           The unit's PrivateTmp and ProtectHome hide /tmp and /home, so keep it elsewhere
           (e.g. /run/rbitcoin). Format: docs/operator/interfaces.md.
+          A group-readable cookie (mode 0640) also needs `cookiePerms = "group"`.
+        '';
+      };
+
+      cookiePerms = mkOption {
+        type = types.nullOr (types.enum [ "owner" "group" "all" ]);
+        default = null;
+        example = "group";
+        description = ''
+          Pass `--rpc-cookie-perms`. The node never creates or chmods the cookie.
+          `null` leaves the node default (`owner`): group or world bits refuse startup.
+          `group` allows a 0640 file (group read) shared with mempool and refuses
+          group write. `all` allows world read (0644) and refuses group or world
+          write. The check is Unix mode bits. Requires `cookieFile`. Omitted from the unit
+          argv when null, so the default service command does not grow a flag.
         '';
       };
     };
@@ -579,6 +596,10 @@ in
       {
         assertion = cfg.rpc.cookieFile == null || cfg.rpc.enable;
         message = "services.rbitcoin.rpc.cookieFile requires rpc.enable (the cookie is accepted on TCP only)";
+      }
+      {
+        assertion = cfg.rpc.cookiePerms == null || cfg.rpc.cookieFile != null;
+        message = "services.rbitcoin.rpc.cookiePerms requires rpc.cookieFile";
       }
       {
         assertion = !cfg.metrics || cfg.health.enable;

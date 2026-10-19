@@ -1,5 +1,10 @@
 # IBD memory: intentional caches vs process leaks
 
+`Invalidated` is not capped. Each entry is a validated header or an operator
+`invalidateblock`. Dropping one would make that block acceptable again.
+`fork_tips` keeps 64 insertion-ordered hashes and drops the oldest. Those
+are dial and reconsider hints, not a validity set.
+
 This document is the developer/AI contract for **process-owned** memory on the
 IBD path. It is **not** about kernel page cache under FdOnly store tables
 (those count in RSS when faulted but are not Rust heap leaks). Sealed `.fuse8`

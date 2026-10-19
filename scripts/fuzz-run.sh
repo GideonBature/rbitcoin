@@ -160,6 +160,10 @@ elif [[ "$BIN" == "p2p_sequence_differential" || "$BIN" == "chain_review_differe
   sanitizer="none"
   timeout=180
 fi
+# Unset keeps the choice above. A set value overrides it, including `none`.
+if [[ -n "${FUZZ_SANITIZER:-}" ]]; then
+  sanitizer="$FUZZ_SANITIZER"
+fi
 
 WRAP="$ROOT/scripts/fuzz-rustc-allow-warnings.sh"
 export RUSTC_WRAPPER="$WRAP"
@@ -219,7 +223,7 @@ if [[ "$BIN" == "block_wire" ]]; then
   merge_seed fuzz/corpus/block_wire \
     crates/rbitcoin-consensus/tests/fixtures/signet_block_90719.bin
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" block_wire -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" block_wire -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=1048576 \
@@ -238,7 +242,7 @@ if [[ "$BIN" == "v2_contents" ]]; then
   merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_sendcmpct.bin
   merge_seed fuzz/corpus/v2_contents crates/rbitcoin-net/tests/fixtures/v2_getheaders.bin
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_contents -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" v2_contents -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
@@ -274,7 +278,7 @@ if [[ "$BIN" == "addrv2_wire" || "$BIN" == "inv_getdata_wire" || "$BIN" == "elec
     dict_args=(-dict="$dict")
   fi
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" "$BIN" -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" "$BIN" -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
@@ -292,7 +296,7 @@ if [[ "$BIN" == "v2_session" ]]; then
   merge_seed fuzz/corpus/v2_session crates/rbitcoin-net/tests/fixtures/v2_verack.bin
   log="${TMPDIR:-/tmp}/rbtc-fuzz-v2.$$.log"
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" v2_session -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" v2_session -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
@@ -325,7 +329,7 @@ if [[ "$BIN" == "cmpct_differential" ]]; then
     fuzz/fixtures/cmpct_fuzz_raw.bin
   log="${TMPDIR:-/tmp}/rbtc-fuzz-cmpct.$$.log"
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" cmpct_differential -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" cmpct_differential -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=65536 \
@@ -348,7 +352,7 @@ if [[ "$BIN" == "store_reorg" ]]; then
     crates/rbitcoin-net/tests/fixtures/store_reorg_ops.bin
   log="${TMPDIR:-/tmp}/rbtc-fuzz-store-reorg.$$.log"
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" store_reorg -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" store_reorg -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=64 \
@@ -386,7 +390,7 @@ if [[ "$BIN" == "script_kernel_differential" ]]; then
   done
   log="${TMPDIR:-/tmp}/rbtc-fuzz-script-kernel.$$.log"
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" script_kernel_differential -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" script_kernel_differential -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=2000 \
@@ -410,7 +414,7 @@ if [[ "$BIN" == "chain_review_differential" ]]; then
     fuzz/fixtures/chain_review_milestone.bin
   log="${TMPDIR:-/tmp}/rbtc-fuzz-chain-review.$$.log"
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none chain_review_differential -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" chain_review_differential -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=64 \
@@ -433,7 +437,7 @@ if [[ "$BIN" == "p2p_sequence_differential" ]]; then
     crates/rbitcoin-net/tests/fixtures/p2p_seq_two_ping.bin
   log="${TMPDIR:-/tmp}/rbtc-fuzz-p2p-seq.$$.log"
   set +e
-  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer none p2p_sequence_differential -- \
+  env -u CARGO_TARGET_DIR cargo fuzz run --target "$target" --sanitizer "$sanitizer" p2p_sequence_differential -- \
     -max_total_time="$(fuzz_max_total_time)" \
     -timeout="$timeout" \
     -max_len=256 \

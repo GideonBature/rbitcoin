@@ -110,6 +110,7 @@ Clean smoke:
 | `--rest` | `rest=` | **off** — unauthenticated `/rest/` on the RPC listener. Own queue. Needs `--rpc` or `--rpc-listen` |
 | `--rpc-token-file PATH` | `rpc_token_file=` | `{datadir}/rpc.token` (CSPRNG hex; TCP Bearer) |
 | `--rpc-cookie-file PATH` | `rpc_cookie_file=` | disabled — existing Core `username:password` cookie (no trailing newline) enables TCP HTTP Basic alongside Bearer |
+| `--rpc-cookie-perms owner\|group\|all` | `rpc_cookie_perms=` | **owner** — Unix mode ceiling. `group` is at most 0640. `all` is at most 0644. Windows ignores the flag. The node does not chmod the file. NixOS `services.rbitcoin.rpc.cookiePerms` |
 | `--rpc-work-queue N` | `rpc_work_queue=` | **16** in-flight HTTP RPC (Core `-rpcworkqueue`). One POST is one slot (array batches still run). Full permit is HTTP **503** `Work queue depth exceeded`. **0** is the default queue of 16. |
 | `--min-relay-tx-fee BTC` | `min_relay_tx_fee=` | unset — Libre default 100 sat/kvB; `0` = no floor; garbage/negatives fail start |
 | `--mempool-expiry HOURS` | `mempool_expiry=` | unset — hub default; min 1 |

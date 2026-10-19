@@ -3,7 +3,7 @@ use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::ScriptBuf;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 fn hostile_ver(addr: SocketAddr) -> VersionMessage {
     VersionMessage {
@@ -17,6 +17,131 @@ fn hostile_ver(addr: SocketAddr) -> VersionMessage {
         start_height: 0,
         relay: true,
     }
+}
+
+#[tokio::test]
+async fn addrv2_gossip_drops_unroutable_clearnet() {
+    use bitcoin::p2p::message::NetworkMessage;
+    use std::sync::{Arc, Mutex};
+
+    let peers = crate::peers::PeerHub::new();
+    let book = Arc::new(Mutex::new(crate::seeds::AddrMan::new()));
+    peers.set_addrman(Arc::clone(&book));
+    let src_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
+    let ver = hostile_ver(src_addr);
+    let peer = peers.register(
+        src_addr,
+        src_addr,
+        &ver,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
+    peer.set_wants_addrv2();
+    let dst_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)), 8333);
+    let dst = peers.register(
+        dst_addr,
+        dst_addr,
+        &ver,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
+    dst.set_wants_addrv2();
+    let (_dst_tx, mut dst_rx) = mpsc::unbounded_channel();
+    dst.attach_out(_dst_tx);
+    peers.set_mock_now(peer.connected_at_secs() + 10_000);
+
+    let public = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Ipv4(Ipv4Addr::new(9, 9, 9, 9)),
+        port: 8333,
+    };
+    let lan = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Ipv4(Ipv4Addr::new(10, 0, 0, 1)),
+        port: 8333,
+    };
+    let cgnat = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Ipv4(Ipv4Addr::new(100, 64, 0, 1)),
+        port: 8333,
+    };
+    let zero_port = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Ipv4(Ipv4Addr::new(9, 9, 9, 8)),
+        port: 0,
+    };
+    let i2p = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::I2p([0x11; 32]),
+        port: 0,
+    };
+    let tor_v2 = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::TorV2([0xab; 10]),
+        port: 8333,
+    };
+    let cjdns_bad = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Cjdns(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+        port: 8333,
+    };
+    let cjdns = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Cjdns(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)),
+        port: 8333,
+    };
+    let unknown = AddrV2Message {
+        time: 1,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Unknown(0x99, vec![1, 2, 3, 4]),
+        port: 8333,
+    };
+    let mut follow = PeerFollowState::new();
+    on_addrv2(
+        &mut follow,
+        Some(peer.as_ref()),
+        &[
+            lan,
+            public.clone(),
+            cgnat,
+            zero_port,
+            i2p.clone(),
+            tor_v2,
+            cjdns_bad,
+            cjdns.clone(),
+            unknown.clone(),
+        ],
+    )
+    .unwrap();
+
+    let got = dst_rx
+        .try_recv()
+        .expect("the public address is relayed")
+        .expect_msg();
+    let NetworkMessage::AddrV2(sent) = got else {
+        panic!("expected addrv2, got {got:?}");
+    };
+    assert_eq!(sent, vec![public, i2p, cjdns, unknown]);
+    assert!(
+        dst_rx.try_recv().is_err(),
+        "unroutable rows, port-0 clearnet, Tor v2, and non-CJDNS are not relayed"
+    );
+    let book = book.lock().unwrap_or_else(|e| e.into_inner());
+    let public_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 8333);
+    let lan_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8333);
+    assert!(book.entry(&public_sock).is_some());
+    assert!(
+        book.entry(&lan_sock).is_none(),
+        "learn_addrv2 does not store RFC1918"
+    );
 }
 
 fn hostile_addr(port: u16) -> AddrV2Message {

@@ -333,6 +333,9 @@ impl AddrMan {
 
     pub fn inject(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
         for a in addrs {
+            if crate::netaddr::clearnet_unroutable(a.ip()) {
+                continue;
+            }
             self.add(a);
         }
         self.sort_order_ipv4_first();
@@ -961,6 +964,9 @@ impl AddrMan {
                     )
                 })?
             };
+            if crate::netaddr::netaddr_unroutable_gossip(addr) {
+                continue;
+            }
             am.remember(addr, PeerFlags(flags_u));
         }
         if !saw_magic && am.is_empty() {
@@ -1004,10 +1010,91 @@ mod tests {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, o)), 8333)
     }
 
+    #[test]
+    fn inject_drops_unroutable_and_add_learned_keeps_it() {
+        use std::net::Ipv6Addr;
+        let mut book = AddrMan::new();
+        let public = addr(4);
+        book.inject([
+            "10.0.0.1:8333".parse().unwrap(),
+            "127.0.0.1:8333".parse().unwrap(),
+            "192.0.2.1:8333".parse().unwrap(),
+            "0.0.0.0:8333".parse().unwrap(),
+            "100.64.0.1:8333".parse().unwrap(),
+            "198.18.0.1:8333".parse().unwrap(),
+            "240.0.0.1:8333".parse().unwrap(),
+            "[2001:db8::1]:8333".parse().unwrap(),
+            "[2001:10::1]:8333".parse().unwrap(),
+            "[2001:20::1]:8333".parse().unwrap(),
+            "[100::1]:8333".parse().unwrap(),
+            "0.1.2.3:8333".parse().unwrap(),
+            "[2002:0a00:1::]:8333".parse().unwrap(),
+            "[2002:0102:0304::1]:8333".parse().unwrap(),
+            "[64:ff9b::a00:1]:8333".parse().unwrap(),
+            "[::a00:1]:8333".parse().unwrap(),
+            "[::ffff:0:a00:1]:8333".parse().unwrap(),
+            "[::ffff:a00:1]:8333".parse().unwrap(),
+            "[64:ff9b:1::a00:1]:8333".parse().unwrap(),
+            "[64:ff9b:1:1::102:304]:8333".parse().unwrap(),
+            "[2001:0:102:304::f5ff:fffe]:8333".parse().unwrap(),
+            "[3fff::1]:8333".parse().unwrap(),
+            "[2001:2::1]:8333".parse().unwrap(),
+            "[2001:2:0:ffff:ffff:ffff:ffff:ffff]:8333".parse().unwrap(),
+            public,
+        ]);
+        assert_eq!(book.len(), 1);
+        assert!(book.entry(&public).is_some());
+        let sixto4_public: SocketAddr = "[2002:0102:0304::]:8333".parse().unwrap();
+        let nat64_public: SocketAddr = "[64:ff9b::102:304]:8333".parse().unwrap();
+        let compatible_public: SocketAddr = "[::102:304]:8333".parse().unwrap();
+        let siit_public: SocketAddr = "[::ffff:0:102:304]:8333".parse().unwrap();
+        let nat64_local_public: SocketAddr = "[64:ff9b:1::102:304]:8333".parse().unwrap();
+        let mapped_public: SocketAddr = "[::ffff:102:304]:8333".parse().unwrap();
+        let bench_outside: SocketAddr = "[2001:2:1::1]:8333".parse().unwrap();
+        book.inject([
+            sixto4_public,
+            nat64_public,
+            compatible_public,
+            siit_public,
+            nat64_local_public,
+            mapped_public,
+            bench_outside,
+        ]);
+        assert!(
+            book.entry(&sixto4_public).is_some(),
+            "6to4 of a public IPv4 stays when the suffix is zero"
+        );
+        assert!(
+            book.entry(&nat64_public).is_some(),
+            "NAT64 of a public IPv4 stays"
+        );
+        assert!(book.entry(&compatible_public).is_some());
+        assert!(book.entry(&siit_public).is_some());
+        assert!(book.entry(&nat64_local_public).is_some());
+        assert!(book.entry(&mapped_public).is_some());
+        assert!(
+            book.entry(&bench_outside).is_some(),
+            "2001:2:1::/48 is outside the benchmarking prefix"
+        );
+        let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
+        assert!(book.add_learned(lan, 64));
+        assert!(book.entry(&lan).is_some());
+        let cjdns: SocketAddr =
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)), 8333);
+        book.set_cjdns_reachable(true);
+        book.inject([cjdns]);
+        assert!(
+            book.entries()
+                .iter()
+                .any(|e| matches!(e.addr, NetAddr::Cjdns { .. })),
+            "fc00::/8 is CJDNS, not a unique-local bogon"
+        );
+    }
+
     fn addr_n(i: u32) -> SocketAddr {
         SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(
-                10,
+                11,
                 ((i >> 16) & 0xff) as u8,
                 ((i >> 8) & 0xff) as u8,
                 (i & 0xff) as u8,
@@ -1710,6 +1797,53 @@ mod tests {
         let loaded = AddrMan::load(&path).unwrap();
         assert!(loaded.entry(&addr(4)).is_some());
         assert!(loaded.flags(&addr(4)).has_connected());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_drops_unroutable_clearnet_and_keeps_cjdns() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbitcoin-peers-bogon-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("peers");
+        std::fs::write(
+            &path,
+            "\
+rbitcoin-peers-v2
+1.2.3.4:8333 0x01
+10.0.0.1:8333 0x01
+100.64.0.1:8333 0x00
+[fc00::1]:8333 0x00
+",
+        )
+        .unwrap();
+        let loaded = AddrMan::load(&path).unwrap();
+        let public: SocketAddr = "1.2.3.4:8333".parse().unwrap();
+        assert!(
+            loaded.entry(&public).is_some(),
+            "a public address still loads"
+        );
+        assert!(loaded.flags(&public).has_connected());
+        let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
+        assert!(
+            loaded.entry(&lan).is_none(),
+            "a remembered RFC1918 address is not dialed again"
+        );
+        let cgnat: SocketAddr = "100.64.0.1:8333".parse().unwrap();
+        assert!(loaded.entry(&cgnat).is_none());
+        assert!(
+            loaded
+                .entries()
+                .iter()
+                .any(|e| matches!(e.addr, NetAddr::Cjdns { .. })),
+            "fc00::/8 stays a CJDNS row"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
