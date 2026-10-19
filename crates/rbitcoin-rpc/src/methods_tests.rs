@@ -3962,6 +3962,118 @@ fn submitblock_sibling_spend_is_not_cached_invalid() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A side-branch child may spend an output its held parent created. Core
+/// checks those inputs when the branch connects, so the child reorgs.
+#[test]
+fn submitblock_child_spends_its_side_parent_output() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let op_true = ScriptBuf::from_bytes(vec![0x51]);
+    let spend = |txid: Txid, sats: u64| Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint { txid, vout: 0 },
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: op_true.clone(),
+        }],
+    };
+    let mature = hub.query.reconstruct_block_at_height(Height(1)).unwrap();
+    let x = spend(mature.txdata[0].compute_txid(), 2);
+    let y = spend(x.compute_txid(), 1);
+    let height = hub.tip_height().unwrap();
+    let (_, fork) = hub
+        .query
+        .header_at_height(Height(height - 1))
+        .unwrap()
+        .unwrap();
+    let t0 = hub.tip_header().unwrap().time;
+    let b1 = rbitcoin_consensus::mine_regtest_paying(
+        bitcoin::BlockHash::from_byte_array(fork.hash),
+        t0 + 1,
+        height,
+        op_true.clone(),
+        vec![x],
+    );
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b1))]).unwrap();
+    assert_eq!(r, "inconclusive", "{r}");
+    let b2 = rbitcoin_consensus::mine_regtest_paying(
+        b1.block_hash(),
+        t0 + 2,
+        height + 1,
+        op_true.clone(),
+        vec![y],
+    );
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&b2))]).unwrap();
+    assert!(r.is_null(), "{r}");
+    assert_eq!(hub.tip_hash(), Some(b2.block_hash()));
+    assert!(!hub.is_block_invalid(&b2.block_hash()));
+
+    // A heavier side branch whose inputs fail at connect keeps Core's reason.
+    let coinbase_at = |h: u32| {
+        hub.query
+            .reconstruct_block_at_height(Height(h))
+            .unwrap()
+            .txdata[0]
+            .compute_txid()
+    };
+    let overspend = spend(coinbase_at(2), 50_0000_0001);
+    let first = spend(coinbase_at(3), 1);
+    let mut second = first.clone();
+    second.output[0].value = Amount::from_sat(2);
+    let immature = spend(coinbase_at(height - 1), 1);
+    // `None` spends the side parent's own coinbase.
+    for (i, (txs, reason)) in [
+        (Some(vec![overspend]), "bad-txns-in-belowout"),
+        (Some(vec![first, second]), "bad-txns-inputs-missingorspent"),
+        (Some(vec![immature]), "bad-txns-premature-spend-of-coinbase"),
+        (None, "bad-txns-premature-spend-of-coinbase"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let c1 = rbitcoin_consensus::mine_regtest_paying(
+            b1.block_hash(),
+            t0 + 10 + i as u32,
+            height + 1,
+            op_true.clone(),
+            vec![],
+        );
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&c1))]).unwrap();
+        assert_eq!(r, "inconclusive", "{r}");
+        let txs = txs.unwrap_or_else(|| vec![spend(c1.txdata[0].compute_txid(), 1)]);
+        let c2 = rbitcoin_consensus::mine_regtest_paying(
+            c1.block_hash(),
+            t0 + 20 + i as u32,
+            height + 2,
+            op_true.clone(),
+            txs,
+        );
+        let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&c2))]).unwrap();
+        assert_eq!(r, reason);
+        assert_eq!(hub.tip_hash(), Some(b2.block_hash()));
+        let again = dispatch(&ctx, "submitblock", vec![json!(block_hex(&c2))]).unwrap();
+        assert_eq!(again, "duplicate-invalid");
+    }
+
+    // A block on the tip still takes the early input check.
+    let on_tip = rbitcoin_consensus::mine_regtest_paying(
+        b2.block_hash(),
+        t0 + 30,
+        height + 2,
+        op_true.clone(),
+        vec![spend(coinbase_at(2), 50_0000_0001)],
+    );
+    let r = dispatch(&ctx, "submitblock", vec![json!(block_hex(&on_tip))]).unwrap();
+    assert_eq!(r, "bad-txns-in-belowout");
+    assert_eq!(hub.tip_hash(), Some(b2.block_hash()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Core `CheckTxInputs`: a confirmed txid with no output at `vout` is a
 /// missing input, not a store fault.
 #[test]

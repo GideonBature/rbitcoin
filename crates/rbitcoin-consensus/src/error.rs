@@ -71,6 +71,9 @@ pub fn block_reject_reason(err: &ConsensusError) -> String {
         ConsensusError::BadTx("no inputs") => "bad-txns-vin-empty".into(),
         ConsensusError::BadTx("no outputs") => "bad-txns-vout-empty".into(),
         ConsensusError::BadTx("coinbase immature") => "bad-txns-premature-spend-of-coinbase".into(),
+        ConsensusError::BadTx("in < out") => "bad-txns-in-belowout".into(),
+        // Core: the second spend finds the coin already spent.
+        ConsensusError::BadTx("double spend in block") => "bad-txns-inputs-missingorspent".into(),
         ConsensusError::BadTx(s) => (*s).into(),
         ConsensusError::BadBlock("no transactions" | "block stripped size too large") => {
             "bad-blk-length".into()
