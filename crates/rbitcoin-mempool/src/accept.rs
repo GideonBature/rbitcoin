@@ -1281,9 +1281,9 @@ impl ActiveMempool {
         })
     }
 
-    /// Unconfirmed inputs on a replacement must already be parents of the
-    /// direct conflicts, and there is only one direct conflict. Spending an
-    /// output of a direct conflict is `bad-txns-spends-conflicting-tx`.
+    /// An unconfirmed input on a replacement must be a parent of the direct
+    /// conflicts. Spending an output of a direct conflict is
+    /// `bad-txns-spends-conflicting-tx`.
     fn reject_new_unconfirmed(
         &self,
         tx: &Transaction,
@@ -1312,11 +1312,6 @@ impl ActiveMempool {
                     return Err(AcceptError::Policy("bad-txns-spends-conflicting-tx"));
                 }
                 return Err(AcceptError::Policy("adds unconfirmed input"));
-            }
-            if direct.len() > 1 {
-                return Err(AcceptError::Policy(
-                    "unconfirmed input has multiple conflicts",
-                ));
             }
         }
         Ok(())
@@ -1357,10 +1352,7 @@ impl ActiveMempool {
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 
         let conflict_set = if !scan.direct_conflicts.is_empty() {
-            // Libre HasNoNewUnconfirmed: parents of the direct conflicts only,
-            // not their ancestor closure. One direct conflict may be CPFPed.
-            self.reject_new_unconfirmed(tx, &scan.direct_conflicts)?;
-            let direct: Vec<Txid> = scan.direct_conflicts.into_iter().collect();
+            let direct: Vec<Txid> = scan.direct_conflicts.iter().copied().collect();
             let set = self.graph.conflict_set(&direct);
             let (old_fee, old_weight) = self.graph.set_fee_weight(&set);
             let (direct_fee, direct_weight) = self
@@ -1394,6 +1386,11 @@ impl ActiveMempool {
                 count: n_members + 1,
                 weight: combined_w,
             });
+        }
+        // Parents of the direct conflicts only, not their ancestor closure.
+        // After the cap, so an over-size cluster is `too-large-cluster`.
+        if !scan.direct_conflicts.is_empty() {
+            self.reject_new_unconfirmed(tx, &scan.direct_conflicts)?;
         }
         // Core `bad-txns-spends-conflicting-tx`. A parent in the conflict set
         // is evicted by this accept, and its outputs with it.
