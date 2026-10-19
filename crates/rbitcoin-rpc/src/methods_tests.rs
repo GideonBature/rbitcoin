@@ -645,6 +645,44 @@ fn relay_off_refuses_pool_listing_and_mines_coinbase_only() {
 }
 
 #[test]
+fn template_follows_the_stripped_tip() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let (_, genesis) = ctx
+        .query
+        .header_at_height(Height(0))
+        .unwrap()
+        .expect("genesis");
+    ctx.mempool
+        .as_ref()
+        .unwrap()
+        .note_template_prev(genesis.hash);
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let prev = gbt["previousblockhash"].as_str().unwrap();
+    assert_ne!(prev, tip.as_str().unwrap(), "{gbt}");
+    assert_eq!(gbt["height"].as_u64(), Some(1), "{gbt}");
+    assert!(
+        gbt["longpollid"].as_str().unwrap().starts_with(prev),
+        "{gbt}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn template_follows_the_fork_after_invalidate() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap();
+    let parent = blk["previousblockhash"].clone();
+    let height = blk["height"].as_u64().unwrap();
+    dispatch(&ctx, "invalidateblock", vec![tip]).unwrap();
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(gbt["previousblockhash"], parent, "{gbt}");
+    assert_eq!(gbt["height"].as_u64(), Some(height), "{gbt}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn template_follows_blocks_the_hub_connects() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
     dispatch(&ctx, "generate", vec![json!(2)]).unwrap();

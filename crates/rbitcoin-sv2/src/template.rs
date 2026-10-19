@@ -75,22 +75,33 @@ impl Template {
     }
 }
 
-/// Template on the current tip for one client's coinbase constraints. The
+/// Template on the stripped tip for one client's coinbase constraints. The
 /// client's sigops replace the default reserve (Core `BlockAssembler`).
-/// Takes the mempool lock and reads the store: blocking region only.
+/// `Ok(None)` when that tip has not been recorded, or is no longer the
+/// header at its height. Takes the mempool lock and reads the store:
+/// blocking region only.
 pub(crate) fn build(
     chain: &ChainHub,
     max_additional_size: u32,
     max_additional_sigops: u16,
-) -> io::Result<Template> {
-    let tip = chain
+) -> io::Result<Option<Template>> {
+    let Some(prev) = chain.mempool().and_then(|m| m.template_prev()) else {
+        return Ok(None);
+    };
+    let Some(tip) = chain
         .query
-        .tip_height()
-        .ok_or_else(|| io::Error::other("sv2: no tip"))?;
+        .height_of_hash(&prev)
+        .map_err(|e| io::Error::other(format!("sv2: template tip: {e}")))?
+    else {
+        return Ok(None);
+    };
     let header = chain
         .query
         .wire_header_at_height(tip)
         .map_err(|e| io::Error::other(format!("sv2: tip header: {e}")))?;
+    if header.block_hash().to_byte_array() != prev {
+        return Ok(None);
+    }
     let mtp = median_time_past(&chain.query, tip)
         .map_err(|e| io::Error::other(format!("sv2: tip MTP: {e}")))?;
     let height = tip.0 + 1;
@@ -125,7 +136,7 @@ pub(crate) fn build(
     };
     let mut leaves = vec![[0u8; 32]];
     leaves.extend(selected.iter().map(|(_, s)| s.txid.to_byte_array()));
-    Ok(Template {
+    Ok(Some(Template {
         version: chain.gbt_block_version() as u32,
         coinbase_prefix: bip34_height_script(height),
         value_remaining: (block_subsidy(height, &chain.params) as u64).saturating_add(fees),
@@ -136,5 +147,31 @@ pub(crate) fn build(
         n_bits: bits.to_consensus(),
         target: Target::from_compact(bits).to_le_bytes(),
         txs: selected.into_iter().map(|(tx, _)| tx).collect(),
-    })
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build;
+    use crate::test_chain::padded_chain;
+    use bitcoin::hashes::Hash;
+    use rbitcoin_primitives::Height;
+
+    #[test]
+    fn template_builds_on_the_stripped_tip() {
+        let tc = padded_chain("sv2-stripped-tip", 0);
+        let tip = tc.chain.query.tip_height().unwrap();
+        assert!(tip.0 > 0);
+        let (_, genesis) = tc
+            .chain
+            .query
+            .header_at_height(Height::GENESIS)
+            .unwrap()
+            .unwrap();
+        tc.mempool.note_template_prev(genesis.hash);
+        let built = build(&tc.chain, 0, 0).unwrap().expect("template");
+        assert_eq!(built.prev_hash, genesis.hash);
+        let best = tc.chain.query.wire_header_at_height(tip).unwrap();
+        assert_ne!(built.prev_hash, best.block_hash().to_byte_array());
+    }
 }

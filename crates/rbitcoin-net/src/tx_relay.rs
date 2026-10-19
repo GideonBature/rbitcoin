@@ -823,6 +823,30 @@ struct CommitOutcome {
     prevouts: Vec<TxOut>,
 }
 
+/// Lock held for the whole of a block connect. `commit` records the hash
+/// whose pool strip has finished; the drop writes it.
+pub(crate) struct TemplateHold<'a> {
+    updates: &'a AtomicU64,
+    slot: std::sync::MutexGuard<'a, Option<[u8; 32]>>,
+    commit: Option<[u8; 32]>,
+}
+
+impl TemplateHold<'_> {
+    pub(crate) fn commit(&mut self, hash: [u8; 32]) {
+        self.commit = Some(hash);
+    }
+}
+
+impl Drop for TemplateHold<'_> {
+    fn drop(&mut self) {
+        let Some(hash) = self.commit else {
+            return;
+        };
+        *self.slot = Some(hash);
+        self.updates.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 impl MempoolHub {
     /// Short-id walks that entered the mempool, including a `try_read` miss.
     #[cfg(test)]
@@ -1314,18 +1338,30 @@ impl MempoolHub {
     /// before relay.
     pub fn set_relay_enabled(&self, on: bool) {
         if on && !self.relay_enabled() {
+            // Same lock `connect_at` holds from before the query tip moves
+            // until the strip is recorded. Take it before the purge so the
+            // two never invert lock order with the mempool write lock.
+            let mut slot = self.template_prev.lock().unwrap();
             let n = self.purge_confirmed_on_chain();
             if n > 0 {
                 rbitcoin_log::info!(
                     "mempool: purged {n} leftover tx(s) at tip-mode entry (deferred during IBD)"
                 );
             }
-            if self.template_prev().is_none() {
-                if let Some(h) = self.query.tip_height() {
-                    if let Ok(Some((_, rec))) = self.query.header_at_height(h) {
-                        self.note_template_prev(rec.hash);
-                    }
+            let marked = if let Some(h) = self.query.tip_height() {
+                if let Ok(Some((_, rec))) = self.query.header_at_height(h) {
+                    let changed = *slot != Some(rec.hash);
+                    *slot = Some(rec.hash);
+                    changed
+                } else {
+                    false
                 }
+            } else {
+                false
+            };
+            drop(slot);
+            if marked {
+                self.note_template_update();
             }
         }
         self.relay_enabled.store(on, Ordering::SeqCst);
@@ -3487,6 +3523,17 @@ impl MempoolHub {
     pub fn note_template_prev(&self, hash: [u8; 32]) {
         *self.template_prev.lock().unwrap() = Some(hash);
         self.note_template_update();
+    }
+
+    /// Held across a block connect: from before the query tip moves until the
+    /// strip has been recorded. [`Self::note_template_prev`] takes the same
+    /// mutex, so callers must record the hash through [`TemplateHold::commit`].
+    pub(crate) fn template_hold(&self) -> TemplateHold<'_> {
+        TemplateHold {
+            updates: &self.template_updates,
+            slot: self.template_prev.lock().unwrap(),
+            commit: None,
+        }
     }
 
     pub fn template_prev(&self) -> Option<[u8; 32]> {

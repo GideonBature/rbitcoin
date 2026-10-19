@@ -1817,19 +1817,33 @@ impl ChainHub {
             .into_iter()
             .map(|(h, raw)| (h, BlockHash::from_byte_array(raw)))
             .collect();
+        // Held across the write so the chain tip cannot move while the
+        // relay-on purge is deciding which tip it stripped.
+        let mp_hold = self.mempool().cloned();
+        let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         confirm_write_phase(&self.query, &self.params, self.milestone, batch)
             .map_err(NetError::from_confirm)?;
-        self.note_confirmed_tip(&meta, &headers)?;
+        self.note_confirmed_tip_while(&meta, &headers, template_hold.as_mut())?;
         Ok(meta
             .iter()
             .map(|&(height, _)| AcceptOutcome::Accepted { height })
             .collect())
     }
 
+    #[cfg(test)]
     pub(crate) fn note_confirmed_tip(
         &self,
         need_meta: &[(u32, BlockHash)],
         headers: &[Header],
+    ) -> Result<(), NetError> {
+        self.note_confirmed_tip_while(need_meta, headers, None)
+    }
+
+    pub(crate) fn note_confirmed_tip_while(
+        &self,
+        need_meta: &[(u32, BlockHash)],
+        headers: &[Header],
+        mut hold: Option<&mut crate::tx_relay::TemplateHold<'_>>,
     ) -> Result<(), NetError> {
         if headers.len() != need_meta.len() {
             return Err(NetError::store(rbitcoin_store::StoreError::Corrupt(
@@ -1838,22 +1852,29 @@ impl ChainHub {
         }
         if let Some(mp) = self.mempool() {
             mp.clear_recent_rejects();
+            let mut stripped: Option<[u8; 32]> = None;
             if mp.relay_enabled() {
                 for &(height, hash) in need_meta {
                     mp.note_block_fee_history(Height(height));
-                    if let Ok(Some(block)) =
+                    let Ok(Some(block)) =
                         self.query.reconstruct_block_by_hash(&hash.to_byte_array())
-                    {
-                        mp.note_recent_confirmed(&block.txdata);
-                        let ids: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
-                        let spent = spent_outpoints(&block.txdata);
-                        let n = mp.remove_for_block_spent(&ids, &spent);
-                        rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ {hash}");
-                    }
+                    else {
+                        break;
+                    };
+                    mp.note_recent_confirmed(&block.txdata);
+                    let ids: Vec<_> = block.txdata.iter().map(|t| t.compute_txid()).collect();
+                    let spent = spent_outpoints(&block.txdata);
+                    let n = mp.remove_for_block_spent(&ids, &spent);
+                    rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ {hash}");
+                    stripped = Some(hash.to_byte_array());
                 }
             }
-            if let Some(&(_, hash)) = need_meta.last() {
-                mp.note_template_prev(hash.to_byte_array());
+            if let Some(hash) = stripped {
+                if let Some(hold) = hold.as_mut() {
+                    hold.commit(hash);
+                } else {
+                    mp.note_template_prev(hash);
+                }
             }
         }
         let mut confirmed = self.confirmed.write().unwrap();
@@ -3076,6 +3097,10 @@ impl ChainHub {
             crate::tip_accept::on_tip_accept_thread(),
             "connect_at must run on tip-accept"
         );
+        // Held until this connect returns, so a template cannot observe the
+        // new query tip before the pool strip is recorded.
+        let mp_hold = self.mempool().cloned();
+        let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let hash = block.block_hash();
         let header = block.header;
         tip_accept_stats_reset(&self.query);
@@ -3145,8 +3170,10 @@ impl ChainHub {
             rbitcoin_log::debug!("mempool: removed {n} confirmed tx(s) @ height {height}");
             if mp.relay_enabled() {
                 mp.note_block_fee_history(Height(height));
+                if let Some(hold) = template_hold.as_mut() {
+                    hold.commit(hash.to_byte_array());
+                }
             }
-            mp.note_template_prev(hash.to_byte_array());
         }
         let mp_strip_ns = t_mp.elapsed().as_nanos() as u64;
         let wall_ns = t_wall.elapsed().as_nanos() as u64;
@@ -3158,6 +3185,9 @@ impl ChainHub {
         // uses note_confirmed_tip without this line; IBD retains periodic status.
         info!("{}", log_update_tip_line(height, &hash, &header, tx_count));
         log_tip_accept_sh(&self.query, height, tx_count, wall_ns, mp_strip_ns, pres_ns);
+        // Record the stripped tip before the announcement, so a builder that
+        // wakes on this event already sees the new mark.
+        drop(template_hold);
         let event = TipEvent {
             height,
             hash,
@@ -3172,11 +3202,23 @@ impl ChainHub {
     }
 
     fn disconnect_to(&self, keep_height: u32) -> Result<(), NetError> {
+        // Before the commit lock: the relay-on purge takes this same mutex
+        // and then reads the query. The pool matches `keep_height` once the
+        // disconnected transactions are back in it.
+        let mp_hold = self.mempool().cloned();
+        let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
         let _commit = self
             .query
             .lock_tip_commit()
             .map_err(|e| NetError::Store(e.to_string()))?;
-        self.disconnect_to_in_commit(keep_height)
+        self.disconnect_to_in_commit(keep_height)?;
+        if let Some(hold) = template_hold.as_mut() {
+            if let Ok(Some((_, rec))) = self.query.header_at_height(Height(keep_height)) {
+                hold.commit(rec.hash);
+            }
+        }
+        drop(template_hold);
+        Ok(())
     }
 
     fn disconnect_to_in_commit(&self, keep_height: u32) -> Result<(), NetError> {

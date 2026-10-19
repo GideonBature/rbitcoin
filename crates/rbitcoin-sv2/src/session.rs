@@ -391,8 +391,10 @@ impl Session {
             }
             let started = std::time::Instant::now();
             let t = template::build(&c, size, sigops)?;
-            stats.builds.note(micros(started.elapsed()));
-            Ok::<_, io::Error>(Some(t))
+            if t.is_some() {
+                stats.builds.note(micros(started.elapsed()));
+            }
+            Ok::<_, io::Error>(t)
         })
         .await
         .map_err(io::Error::other)??;

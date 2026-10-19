@@ -1961,6 +1961,10 @@ pub(crate) fn spawn_confirm_engine(
                     .iter()
                     .map(|&(h, raw)| (h, BlockHash::from_byte_array(raw)))
                     .collect();
+                // Same lock as a block connect. The chain tip must not move
+                // while the relay-on purge is choosing the tip it stripped.
+                let mp_hold = hub_wb.mempool().cloned();
+                let mut template_hold = mp_hold.as_ref().map(|mp| mp.template_hold());
                 match rbitcoin_query::confirm_write_phase_or_return(
                     &hub_wb.query,
                     &hub_wb.params,
@@ -1968,7 +1972,9 @@ pub(crate) fn spawn_confirm_engine(
                     batch,
                 ) {
                     Ok(_fks) => {
-                        if let Err(e) = hub_wb.note_confirmed_tip(&meta, &headers) {
+                        if let Err(e) =
+                            hub_wb.note_confirmed_tip_while(&meta, &headers, template_hold.as_mut())
+                        {
                             warn!("ibd: confirm write note tip: {e}");
                         }
                         let t_deq = Instant::now();
@@ -2041,7 +2047,11 @@ pub(crate) fn spawn_confirm_engine(
                                     &heights_hashes,
                                 ) {
                                     Ok(()) => {
-                                        if let Err(e) = hub_wb.note_confirmed_tip(&meta, &headers) {
+                                        if let Err(e) = hub_wb.note_confirmed_tip_while(
+                                            &meta,
+                                            &headers,
+                                            template_hold.as_mut(),
+                                        ) {
                                             warn!("ibd: confirm write note tip: {e}");
                                         }
                                         for (h, raw) in &heights_hashes {
