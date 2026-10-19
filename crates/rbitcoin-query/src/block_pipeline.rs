@@ -262,7 +262,7 @@ fn assemble_prevout_guards(
     Ok(())
 }
 
-pub(crate) fn assemble_lock_time_cutoff(
+pub fn assemble_lock_time_cutoff(
     ctx: &rbitcoin_consensus::ValidationContext<'_>,
     block: &Block,
     prev_mtp: u32,
