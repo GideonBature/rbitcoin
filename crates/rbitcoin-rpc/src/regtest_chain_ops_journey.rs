@@ -439,7 +439,7 @@ fn chain_ops_network_identity(ctx: &RpcContext) {
         net["subversion"].as_str().unwrap(),
         rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &[] as &[&str]).unwrap()
     );
-    let flags = rbitcoin_net::local_service_flags();
+    let flags = rbitcoin_net::local_service_flags(false, None);
     let bits = flags.to_u64();
     let hex = format!("{bits:016x}");
     assert_eq!(net["localservices"].as_str(), Some(hex.as_str()));
@@ -2543,11 +2543,12 @@ fn chain_ops_invalidate_and_precious(
     dispatch(ctx, "invalidateblock", vec![tip.clone()]).unwrap();
     assert_eq!(tip_count(ctx), tip_h - 1);
     assert!(gettxout().is_null(), "a disconnected Class A row is not a UTXO");
-    let archived = tma(&hex);
-    assert_eq!(archived["allowed"], true, "{archived}");
+    let back = tma(&hex);
+    assert_eq!(back["reject-reason"], "txn-already-in-mempool", "{back}");
     dispatch(ctx, "reconsiderblock", vec![tip.clone()]).unwrap();
     assert_eq!(tip_count(ctx), tip_h);
     assert_eq!(best_hash(ctx), tip);
+    assert_eq!(tma(&hex)["reject-reason"], "txn-already-known");
 
     let (_, parent) = hub.query.header_at_height(Height(tip_h as u32 - 1)).unwrap().unwrap();
     let sibling = rbitcoin_consensus::mine_regtest_paying(

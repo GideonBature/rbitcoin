@@ -498,7 +498,7 @@ async fn spawn_wait_and_gbt_longpoll(rpc_addr: SocketAddr, want_height: u64) -> 
 }
 
 impl TipWaiters {
-    async fn assert_woke_on_new_tip(self, new_hash: &str, new_height: u64) {
+    async fn assert_woke_on_new_tip(self, new_hash: &str, new_height: u64) -> Value {
         assert_ne!(self.start_hash, new_hash);
         let waited = tokio::time::timeout(Duration::from_secs(10), self.wait_new)
             .await
@@ -521,6 +521,52 @@ impl TipWaiters {
             lp.starts_with(new_hash),
             "current longpollid must wake on generate: {gbt}"
         );
+        gbt
+    }
+}
+
+/// The longpoll template is for the next block. It must list `transactions`,
+/// and none of those txs may spend an outpoint the block that woke it spent.
+fn assert_template_spends_nothing_the_block_spent(gbt: &Value, block_txs: &[Value]) {
+    use bitcoin::consensus::encode::deserialize;
+    use bitcoin::hex::FromHex;
+    use std::collections::HashSet;
+
+    let rows = gbt["result"]["transactions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("longpoll template must list transactions: {gbt}"));
+    let mut spent = HashSet::new();
+    for tx in block_txs {
+        let Some(vin) = tx["vin"].as_array() else {
+            continue;
+        };
+        for inp in vin {
+            let Some(txid) = inp["txid"].as_str() else {
+                continue;
+            };
+            let vout = inp["vout"].as_u64().expect("mined vin vout");
+            spent.insert((txid.to_string(), vout));
+        }
+    }
+    for row in rows {
+        let id = row["txid"].as_str().unwrap_or("");
+        assert!(
+            !block_txs.iter().any(|t| t["txid"].as_str() == Some(id)),
+            "longpoll template republished confirmed {id}"
+        );
+        let data = row["data"]
+            .as_str()
+            .unwrap_or_else(|| panic!("template tx {id} has no data: {row}"));
+        let raw = Vec::<u8>::from_hex(data).unwrap_or_else(|e| panic!("template tx hex: {e}"));
+        let tx: Transaction = deserialize(&raw).unwrap_or_else(|e| panic!("template tx: {e}"));
+        for inp in &tx.input {
+            let prev = inp.previous_output;
+            let key = (prev.txid.to_string(), u64::from(prev.vout));
+            assert!(
+                !spent.contains(&key),
+                "longpoll template spends an outpoint the new tip already spent: {id} {key:?}"
+            );
+        }
     }
 }
 
@@ -603,7 +649,7 @@ async fn pin_esplora_block_txids_merkle_and_outspend(
     let (st, body) = http_get(esplora_addr, &format!("/tx/{cb_txid}/merkle-proof")).await;
     assert_eq!(st, 200, "GET merkle-proof: {body}");
     let mp: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(mp["block_height"], 107, "{body}");
+    assert_eq!(mp["block_height"], 108, "{body}");
     assert_eq!(mp["pos"], 0, "{body}");
     assert!(mp.get("merkle").is_some(), "{body}");
 
@@ -1543,6 +1589,25 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     assert_eq!(utxo["result"]["coinbase"], true, "{utxo}");
     assert_eq!(utxo["result"]["confirmations"], 106, "{utxo}");
 
+    // The pool is not listed or mined until relay is on. One fresh block
+    // clears the stale tip; the tip loop then purges and enables relay.
+    let caught_up = jsonrpc(rpc_addr, "generate", json!([1])).await;
+    assert!(
+        caught_up["result"].as_array().is_some_and(|h| h.len() == 1),
+        "{caught_up}"
+    );
+    let relay_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let info = jsonrpc(rpc_addr, "getmempoolinfo", json!([])).await;
+        if info["result"]["relay_enabled"] == true {
+            break;
+        }
+        if Instant::now() >= relay_deadline {
+            panic!("relay never enabled after the catch-up block: {info}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     let rpc_spk = ScriptBuf::from_bytes(vec![0x54]);
     let rpc_spend = acs_spend(rpc_cb, 50_0000_0000, 1_000, rpc_spk);
     let rpc_hex = encode_tx(&rpc_spend);
@@ -1925,11 +1990,8 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         json!([[encode_tx(&pkg_parent), encode_tx(&pkg_child)]]),
     )
     .await;
-    assert_eq!(submitted["error"]["code"], -1, "{submitted}");
-    assert_eq!(
-        submitted["error"]["message"], "mempool relay disabled (still in IBD or tip not ready)",
-        "{submitted}"
-    );
+    assert!(submitted["error"].is_null(), "{submitted}");
+    assert_eq!(submitted["result"]["package_msg"], "success", "{submitted}");
 
     let too_many = format!(
         "[{}]",
@@ -2155,16 +2217,16 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     );
     assert_eq!(cold_smart["result"]["blocks"], 2, "{cold_smart}");
 
-    let metrics_in_ibd = pin_metrics_equal_rpc(health_addr, rpc_addr, false).await;
+    let metrics_in_ibd = pin_metrics_equal_rpc(health_addr, rpc_addr, true).await;
     assert!(
         metrics_in_ibd["rbitcoin_mempool_transactions"] > 0.0,
         "{metrics_in_ibd:?}"
     );
     let tip_before = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
     let tip_hash = tip_before["result"].as_str().expect("tip hash").to_string();
-    pin_waitforblockheight_timeout_zero_behind(rpc_addr, 106, &tip_hash).await;
-    pin_getblock_hash_oob_unknown_and_raw(rpc_addr, 106, &tip_hash).await;
-    let waiters = spawn_wait_and_gbt_longpoll(rpc_addr, 107).await;
+    pin_waitforblockheight_timeout_zero_behind(rpc_addr, 107, &tip_hash).await;
+    pin_getblock_hash_oob_unknown_and_raw(rpc_addr, 107, &tip_hash).await;
+    let waiters = spawn_wait_and_gbt_longpoll(rpc_addr, 108).await;
 
     let mined = jsonrpc(rpc_addr, "generate", json!([1])).await;
     assert_eq!(
@@ -2173,12 +2235,12 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         "{mined}"
     );
     let count = jsonrpc(rpc_addr, "getblockcount", json!([])).await;
-    assert_eq!(count["result"], 107, "{count}");
+    assert_eq!(count["result"], 108, "{count}");
     let empty = jsonrpc(rpc_addr, "getrawmempool", json!([])).await;
     assert_eq!(empty["result"], json!([]), "{empty}");
     let tip = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
     let new_hash = tip["result"].as_str().expect("new tip");
-    waiters.assert_woke_on_new_tip(new_hash, 107).await;
+    let woken = waiters.assert_woke_on_new_tip(new_hash, 108).await;
     let (st, body) = http_get(esplora_addr, &format!("/tx/{pkg_parent_txid}/status")).await;
     assert_eq!(st, 200, "tx status: {body}");
     let status: Value = serde_json::from_str(&body).unwrap();
@@ -2186,14 +2248,15 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         status["confirmed"], true,
         "{pkg_parent_txid} confirms on generate: {body}"
     );
-    assert_eq!(status["block_height"], 107, "{body}");
+    assert_eq!(status["block_height"], 108, "{body}");
     let blk = jsonrpc(rpc_addr, "getblock", json!([tip["result"].clone(), 2])).await;
     let txs = blk["result"]["tx"].as_array().expect("mined tx array");
     assert!(
         txs.len() >= 30,
         "coinbase + RBF + esplora + packages: {blk}"
     );
-    pin_esplora_blocks_summaries(esplora_addr, 107, new_hash).await;
+    assert_template_spends_nothing_the_block_spent(&woken, txs);
+    pin_esplora_blocks_summaries(esplora_addr, 108, new_hash).await;
     pin_esplora_block_txs_pages(esplora_addr, new_hash, txs.len()).await;
     pin_internal_block_txs_and_outspends(esplora_addr, new_hash).await;
     // Core-shaped coinbase input: a `coinbase` hex script and no txid/vout,
@@ -2230,20 +2293,20 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     }
     pin_mined_parent_before_child(txs, &pkg_parent_txid, &pkg_child_txid);
     let cb_txid = txs[0]["txid"].as_str().expect("coinbase txid").to_string();
-    pin_rest_chaininfo_and_blockhash(rpc_addr, new_hash, 107).await;
+    pin_rest_chaininfo_and_blockhash(rpc_addr, new_hash, 108).await;
     pin_rest_headers(rpc_addr).await;
     pin_rest_block_and_tx(rpc_addr, new_hash, &cb_txid).await;
-    pin_rest_mempool_and_utxos(rpc_addr, 107, &cb_txid).await;
+    pin_rest_mempool_and_utxos(rpc_addr, 108, &cb_txid).await;
     pin_rest_deployment_and_filter(rpc_addr, new_hash).await;
     pin_esplora_block_txids_merkle_and_outspend(esplora_addr, new_hash, &cb_txid, txs.len()).await;
     let parent_hash = blk["result"]["previousblockhash"]
         .as_str()
         .expect("previousblockhash")
         .to_string();
-    pin_esplora_block_json_raw_status(esplora_addr, new_hash, &parent_hash, 107, txs.len()).await;
+    pin_esplora_block_json_raw_status(esplora_addr, new_hash, &parent_hash, 108, txs.len()).await;
     pin_esplora_txid_raw_hex_merkleblock(esplora_addr, new_hash, &cb_txid).await;
-    pin_esplora_block_height_and_header(esplora_addr, new_hash, 107).await;
-    pin_esplora_tx_status(esplora_addr, new_hash, &cb_txid, 107).await;
+    pin_esplora_block_height_and_header(esplora_addr, new_hash, 108).await;
+    pin_esplora_tx_status(esplora_addr, new_hash, &cb_txid, 108).await;
     pin_esplora_tx_json_unknown_coinbase(esplora_addr, &cb_txid).await;
     pin_esplora_script_classes(esplora_addr, &script_txid).await;
     let genesis_id = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)

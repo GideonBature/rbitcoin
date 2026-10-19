@@ -178,6 +178,7 @@ async fn start_rpc_listener(
                 .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
         ),
         alert_notify: config.alert_notify.clone(),
+        blocksonly: config.mempool.blocksonly,
     };
     let op_true_signet = config.network == Network::Signet
         && config
@@ -889,7 +890,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         sh_tip_ready,
         config.listen.esplora.clone(),
         config.network,
-        config.esplora_block_template,
+        config
+            .esplora_block_template
+            .then_some(config.mempool.blocksonly),
         &shutdown,
         Arc::clone(&node.hub),
         &mempool,
@@ -1139,7 +1142,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         true,
                         config.listen.esplora.clone(),
                         config.network,
-                        config.esplora_block_template,
+                        config
+                            .esplora_block_template
+                            .then_some(config.mempool.blocksonly),
                         &shutdown,
                         Arc::clone(&node.hub),
                         &mempool,
@@ -2050,7 +2055,8 @@ async fn start_esplora_if_ready(
     sh_tip_ready: bool,
     listen: Option<EsploraListen>,
     network: Network,
-    enable_block_template: bool,
+    // `Some(blocksonly)` turns on `/block-template`. `None` leaves it off.
+    block_template: Option<bool>,
     shutdown: &Shutdown,
     hub: Arc<ChainHub>,
     mempool: &std::sync::Arc<MempoolHub>,
@@ -2069,7 +2075,7 @@ async fn start_esplora_if_ready(
         rbitcoin_primitives::Network::Regtest => bitcoin::Network::Regtest,
     };
     let mut ecfg = EsploraConfig::with_listen(listen, btc_net);
-    if enable_block_template {
+    if let Some(blocksonly) = block_template {
         let q = Arc::clone(&hub.query);
         let mp = Arc::clone(mempool);
         let chain = Arc::clone(&hub);
@@ -2091,6 +2097,7 @@ async fn start_esplora_if_ready(
                 active: Arc::new(std::sync::Mutex::new(RpcActive::default())),
                 alert_notify: None,
                 alert_fired: Arc::new(AtomicBool::new(false)),
+                blocksonly,
             };
             gbt_template(&ctx).map_err(|v| {
                 v.get("message")

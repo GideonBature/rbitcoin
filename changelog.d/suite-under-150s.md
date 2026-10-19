@@ -6,6 +6,7 @@ Changed
 - **Test dependencies compile at opt-level 2.** Workspace crates stay unoptimized. Dev and test builds still keep line tables.
 - **The hub `OP_TRUE` signet generate test uses regtest difficulty.** Accept still requires the BIP325 solution. The real signet target stays covered by the consensus miner test.
 - **`NODE_COMPACT_FILTERS` lives on the peer hub.** Version, feeler, addr, and `getnetworkinfo` read that node's bit. There is no process-wide flag.
+- **`getblocktemplate`, `getrawmempool`, and `generate` stay off while the pool is not maintained.** Relay off (still catching up) returns `-10`. A node with no mempool still serves `getblocktemplate` on the chain tip and an empty `getrawmempool`. `-blocksonly` returns a permanent error so a miner does not retry. `generate` during catch-up mines the coinbase only.
 - **A node built with the journey `test-hooks` feature warns at startup.** That build uses the short reconnect and SV2 cooldown. Release, nix, and `cargo build -p rbitcoin-node` do not.
 - **`cargo llvm-cov` no longer builds the workspace twice.** The coverage script was compiling plain node and cli bins before the instrumented test build. The suite already builds the bins it execs.
 

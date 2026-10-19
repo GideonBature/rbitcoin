@@ -370,8 +370,9 @@ impl Session {
         Ok(())
     }
 
-    /// Template for the session's constraints. `None` before constraints or
-    /// while in IBD: leaving IBD always comes with a new tip, which publishes.
+    /// Template for the session's constraints. `None` before constraints, while
+    /// in IBD, or while relay is off (including `-blocksonly`). Leaving IBD
+    /// enables relay and publishes on the next tip.
     async fn build(&mut self) -> io::Result<Option<template::Template>> {
         let Some((size, sigops)) = self.constraints else {
             return Ok(None);
@@ -384,7 +385,8 @@ impl Session {
         let stats = Arc::clone(&self.stats);
         let t = tokio::task::spawn_blocking(move || {
             let _g = BlockingRegion::enter();
-            if c.in_ibd() {
+            let relay_off = c.mempool().is_none_or(|m| !m.relay_enabled());
+            if c.in_ibd() || relay_off {
                 return Ok(None);
             }
             let started = std::time::Instant::now();
@@ -398,7 +400,7 @@ impl Session {
         if t.is_none() {
             self.holding = true;
             if !self.held_logged {
-                rbitcoin_log::info!("sv2: holding templates until the node leaves IBD");
+                rbitcoin_log::info!("sv2: holding templates until the mempool is maintained");
                 self.held_logged = true;
             }
         }

@@ -206,6 +206,10 @@ pub(crate) fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight:
 }
 
 pub(crate) fn getrawmempool(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    let listing = ctx.pool_listing();
+    if !matches!(listing, PoolListing::Ready) {
+        return Err(pool_listing_unavailable(listing));
+    }
     params.reject_unknown(&["verbose", "mempool_sequence"])?;
     let verbose = params.opt_bool(0, "verbose")?.unwrap_or(false);
     let want_seq = params.opt_bool(1, "mempool_sequence")?.unwrap_or(false);

@@ -1852,6 +1852,9 @@ impl ChainHub {
                     }
                 }
             }
+            if let Some(&(_, hash)) = need_meta.last() {
+                mp.note_template_prev(hash.to_byte_array());
+            }
         }
         let mut confirmed = self.confirmed.write().unwrap();
         for (&(height, hash), header) in need_meta.iter().zip(headers.iter()) {
@@ -3143,6 +3146,7 @@ impl ChainHub {
             if mp.relay_enabled() {
                 mp.note_block_fee_history(Height(height));
             }
+            mp.note_template_prev(hash.to_byte_array());
         }
         let mp_strip_ns = t_mp.elapsed().as_nanos() as u64;
         let wall_ns = t_wall.elapsed().as_nanos() as u64;

@@ -149,10 +149,19 @@ pub(crate) fn generate_with_mempool(
     script: ScriptBuf,
 ) -> Result<Value, Value> {
     let miner = require_regtest_miner(ctx, "generate")?;
-    let extras: Vec<Transaction> = mempool_block_txs(ctx)
-        .into_iter()
-        .map(|(tx, _)| Transaction::clone(&tx))
-        .collect();
+    let listing = ctx.pool_listing();
+    if matches!(listing, PoolListing::Blocksonly) {
+        return Err(pool_listing_unavailable(listing));
+    }
+    // Catch-up leaves the pool unstripped. Mine the coinbase only.
+    let extras: Vec<Transaction> = if matches!(listing, PoolListing::Ready) {
+        mempool_block_txs(ctx)
+            .into_iter()
+            .map(|(tx, _)| Transaction::clone(&tx))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let hashes = miner
         .generate_to_script(nblocks, script, extras.clone())
         .map_err(|e| rpc_error(ERR_MISC, e))?;
@@ -540,6 +549,10 @@ pub(crate) fn gbt_rules(req: Option<&Value>) -> Result<Vec<String>, Value> {
 }
 
 pub(crate) fn getblocktemplate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    let listing = ctx.pool_listing();
+    if !matches!(listing, PoolListing::Ready) {
+        return Err(pool_listing_unavailable(listing));
+    }
     params.reject_unknown(&["template_request"])?;
     let req = params.get(0, "template_request");
     let _rules = gbt_rules(req)?;
@@ -589,17 +602,36 @@ pub(crate) fn gbt_longpoll_wait(ctx: &RpcContext, want: &str) {
     }
 }
 
+/// Height, display hash, timestamp, and bits of the tip a template may build on.
+///
+/// Prefers the tip the mempool has finished stripping. The query tip moves
+/// before that strip, and a template on it can still list confirmed txs.
+fn gbt_anchor(ctx: &RpcContext) -> Option<(u32, String, u32, u32)> {
+    let hash = ctx.mempool.as_ref().and_then(|m| m.template_prev())?;
+    let height = ctx.query.height_of_hash(&hash).ok().flatten()?;
+    let (_, rec) = ctx.query.header_at_height(height).ok().flatten()?;
+    if rec.hash != hash {
+        return None;
+    }
+    Some((
+        height.0,
+        hash_hex_display(&rec.hash),
+        rec.timestamp,
+        rec.bits,
+    ))
+}
+
+fn query_tip_anchor(ctx: &RpcContext) -> Option<(u32, String, u32, u32)> {
+    let h = ctx.query.tip_height()?;
+    let (_, rec) = ctx.query.header_at_height(h).ok().flatten()?;
+    Some((h.0, hash_hex_display(&rec.hash), rec.timestamp, rec.bits))
+}
+
 pub(crate) fn gbt_longpoll_id(ctx: &RpcContext) -> String {
-    let tip = if let Some(h) = ctx.query.tip_height() {
-        ctx.query
-            .header_at_height(h)
-            .ok()
-            .flatten()
-            .map(|(_, rec)| hash_hex_display(&rec.hash))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let tip = gbt_anchor(ctx)
+        .or_else(|| query_tip_anchor(ctx))
+        .map(|(_, hex, _, _)| hex)
+        .unwrap_or_default();
     let updates = ctx
         .mempool
         .as_ref()
@@ -609,18 +641,14 @@ pub(crate) fn gbt_longpoll_id(ctx: &RpcContext) -> String {
 }
 
 pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
-    let tip_h = ctx.query.tip_height().map(|h| h.0).unwrap_or(0);
+    let listing = ctx.pool_listing();
+    if !matches!(listing, PoolListing::Ready) {
+        return Err(pool_listing_unavailable(listing));
+    }
+    let (tip_h, prev_hex, tip_time, tip_bits) = gbt_anchor(ctx)
+        .or_else(|| query_tip_anchor(ctx))
+        .ok_or_else(|| rpc_error(ERR_MISC, "no tip"))?;
     let next_h = tip_h.saturating_add(1);
-    let (prev_hex, tip_time, tip_bits) = if let Some(h) = ctx.query.tip_height() {
-        let (_, rec) = ctx
-            .query
-            .header_at_height(h)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-            .ok_or_else(|| rpc_error(ERR_MISC, "tip header missing"))?;
-        (hash_hex_display(&rec.hash), rec.timestamp, rec.bits)
-    } else {
-        return Err(rpc_error(ERR_MISC, "no tip"));
-    };
     let params = ctx
         .chain
         .as_ref()

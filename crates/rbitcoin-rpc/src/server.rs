@@ -145,6 +145,8 @@ pub struct RpcConfig {
     pub rest: bool,
     /// `--alert-notify` (`%s` = warning text).
     pub alert_notify: Option<String>,
+    /// `-blocksonly`. Mining and raw-mempool listing stay off.
+    pub blocksonly: bool,
 }
 
 /// Live RPC server handle.
@@ -243,6 +245,7 @@ pub async fn run_rpc(
         active: Arc::clone(&active),
         alert_notify: config.alert_notify.clone(),
         alert_fired: Arc::new(AtomicBool::new(false)),
+        blocksonly: config.blocksonly,
     });
 
     let n = work_queue_permits(config.work_queue);
@@ -954,6 +957,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None)
             .await
@@ -994,6 +998,7 @@ mod tests {
             rest: true,
 
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
             .await
@@ -1094,6 +1099,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
@@ -1164,6 +1170,7 @@ mod tests {
             rest: false,
 
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
             .await
@@ -1246,6 +1253,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -1288,6 +1296,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -1356,6 +1365,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
             .await
@@ -1490,6 +1500,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
             .await
@@ -1555,6 +1566,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
             .await
@@ -1619,6 +1631,7 @@ mod tests {
                 work_queue: None,
                 rest: false,
                 alert_notify: None,
+            blocksonly: false,
             };
             let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
                 .await
@@ -1689,6 +1702,7 @@ mod tests {
             work_queue: Some(1),
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, query, None, None, None, Some(Arc::new(hub)), None)
             .await
@@ -1748,6 +1762,7 @@ mod tests {
             rest: false,
 
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
             .await
@@ -1832,6 +1847,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, Some(mp), None, None, None, None)
             .await
@@ -2013,6 +2029,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(
             without_cookie,
@@ -2055,6 +2072,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         // The cookie is TCP-only: a socket-only listener must not silently ignore it.
         std::fs::write(&cookie_path, "mempool:secret").unwrap();
@@ -2216,6 +2234,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let err = run_rpc(cfg, q, None, None, None, None, None)
             .await
@@ -2245,6 +2264,7 @@ mod tests {
             work_queue: None,
             rest: false,
             alert_notify: None,
+            blocksonly: false,
         };
         let handle = run_rpc(cfg, q, None, None, None, None, None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -2300,6 +2320,7 @@ mod tests {
             logpath: String::new(),
             active: Arc::new(std::sync::Mutex::new(crate::methods::RpcActive::default())),
             alert_notify: None,
+            blocksonly: false,
             alert_fired: Arc::new(AtomicBool::new(false)),
         });
         (ctx, dir)
