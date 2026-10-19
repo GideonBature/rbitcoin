@@ -173,8 +173,29 @@ pub fn resolve_rpc_auth(
 }
 
 pub fn read_token_file(path: &Path) -> Result<RpcAuth, String> {
-    let line =
-        fs::read_to_string(path).map_err(|e| format!("read token {}: {e}", path.display()))?;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("read token {}: {e}", path.display()))?;
+    // The node creates this file mode 0600. An existing token must stay
+    // owner-only. Windows has no mode bits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file
+            .metadata()
+            .map_err(|e| format!("stat token {}: {e}", path.display()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "RPC token {}: mode {mode:o} is wider than 0600",
+                path.display()
+            ));
+        }
+    }
+    let mut line = String::new();
+    file.read_to_string(&mut line)
+        .map_err(|e| format!("read token {}: {e}", path.display()))?;
     let token = line.trim();
     if token.is_empty() {
         return Err(format!("token file {}: empty", path.display()));
@@ -283,6 +304,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rpc.token");
         fs::write(&path, "fixed-token\n").unwrap();
+        // fs::write follows umask (0644 here). The node only reuses an owner-only token.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let (a, p) = resolve_rpc_auth(&dir, None).unwrap();
         assert_eq!(a.token, "fixed-token");
         assert_eq!(p, path);
@@ -350,7 +377,32 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rpc.token");
         fs::write(&path, "  \n").unwrap();
+        // Owner-only so the failure is the empty token, not the mode check.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let err = read_token_file(&path).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_file_refuses_group_or_world_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp();
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rpc.token");
+        fs::write(&path, "pass").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let err = read_token_file(&path).unwrap_err();
+        assert!(err.contains("0600"), "{err}");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(read_token_file(&path).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_token_file(&path).unwrap().token, "pass");
         let _ = fs::remove_dir_all(&dir);
     }
 

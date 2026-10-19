@@ -3039,6 +3039,15 @@ async fn node_run_p2p_short() {
         cfg.shindex = true;
         cfg.rpc.listen = Some(any_port());
         std::fs::write(node_dir.path().join("rpc.token"), "pass").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                node_dir.path().join("rpc.token"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
         cfg.max_run_secs = Some(60);
         cfg.mempool.blocksonly = true;
         cfg.max_tip_age_secs = Some(u64::MAX);

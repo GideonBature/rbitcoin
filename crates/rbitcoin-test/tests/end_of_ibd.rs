@@ -129,6 +129,15 @@ fn syncer_cfg_sh(dir: &Path, miner: SocketAddr, shindex: bool) -> NodeConfig {
     cfg.rpc.listen = Some(any_port());
     cfg.max_tip_age_secs = Some(u64::MAX);
     std::fs::write(dir.join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     cfg
 }
 
@@ -1062,6 +1071,15 @@ fn startup_cfg(dir: &Path, miner: SocketAddr, max_tip_age: u64) -> NodeConfig {
     cfg.rpc.listen = Some(any_port());
     cfg.max_tip_age_secs = Some(max_tip_age);
     std::fs::write(dir.join("rpc.token"), "pass").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("rpc.token"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     cfg
 }
 
