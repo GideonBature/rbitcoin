@@ -651,14 +651,15 @@ bits-widen / shadow-resize path. Module map: [`docs/heads.md`](./docs/heads.md).
 
 | Property | Current |
 |----------|---------|
-| Files | `tx.head/meta` + open `tx.head/NNNNNN`; sealed `NNNNNN.mphf` + `.fuse8` |
-| Default | **BITS=25**, **4 B relative** entries → **128 MiB** per segment (`2^25` slots) |
-| Env | `RBITCOIN_TX_HEAD_BITS` in **8..=34** (tests/tiny only); product default **25** |
-| Entry | LE **relative** create id; **0 = empty**; `fk = first_fk + rel − 1` |
+| Files | `tx.head/meta` (**v2**: per-segment `sealed` and `tagged` flags) + open `tx.head/NNNNNN`; sealed `NNNNNN.mphf` + `.fuse8` |
+| Default | **BITS=25**, **4 B** entries → **128 MiB** per segment (`2^25` slots) |
+| Env | `RBITCOIN_TX_HEAD_BITS` in **8..=32** (tests/tiny only); product default **25**. The entry is always 4 B; a footer that says 8 B **refuses** (`tx.head footer entry width`) |
+| Entry | LE u32 word `rel \| fp << bits`. Low `bits`: **relative** create id, **0 = empty**, `fk = first_fk + rel − 1`. Spare high bits: fingerprint of the mixed key, `1..=2^(32−bits)−1`; **0 = untagged**, matches every key. No fingerprint at bits 32 |
+| Meta v1 → v2 | A v1 meta **opens** (no refuse). Its unsealed OA slots carry fingerprint 0; open writes each slot's fingerprint from `txid.body` (one 4 B `pwrite` per row), flushes, then persists meta v2 with the segment `tagged`. A v1 binary refuses v2 meta (`tx.head.meta version`) and rebuilds `tx.head` from Class A |
 | Capacity | Segment ends at **80% of head slots** (`max_keys`) → open next OA, seal previous on a sidecar. Class A loc/body size does **not** cut `tx.head`. |
 | Seal filter | **Binary fuse8** (~9 bits/key, no false negatives, FP ≈ 0.39%) built **once on seal**; open segment has **no** filter |
 | Fuse file | `BF8R` + **version** + body. **v2** = in-tree LE layout (current). **v1** = historical xorf+bincode — **refused** (wipe `store/tx.head` and `store/scripthash*`; Class A kept) |
-| Probe | Open OA: page-local double-hash (1024 slots/page); one 4 KiB load. Sealed: RAM fuse skip, then unique 4 KiB packed BDZ `g` pages (not loaded into process heap); MPHF output is `rel−1` |
+| Probe | Open OA: page-local double-hash (1024 slots/page) through a read-only `MAP_SHARED` view of the slot file (no syscall); a slot whose fingerprint differs is skipped; `txid.body` verifies the rest. Sealed: RAM fuse skip, then unique 4 KiB packed BDZ `g` pages (not loaded into process heap); MPHF output is `rel−1` |
 | Insert | First empty in-page (or same relative id idempotent); second same-txid goes **deeper** |
 | Lookup | Pin by txid → **hot** (open + ages ≤3) → ID/idx → **cold** (ages ≥4) if needed; fuse-gate sealed; body-verify ([`docs/heads.md`](./docs/heads.md)) |
 | Legacy | Monolithic `tx.head` / `tx.head.new` / `tx.head.resize` / `tx.head.overflow` **refused on open** — reindex |

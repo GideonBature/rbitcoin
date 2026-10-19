@@ -25,7 +25,11 @@ pub struct ReadonlyMap {
     _file: File,
 }
 
-// SAFETY: mapping is read-only and immutable after [`ReadonlyMap::map_path`].
+// SAFETY: the mapping is `PROT_READ`; this process never writes through it.
+// A file mapped by `map_path` (sealed `.fuse8`, BDZ occupancy) does not change
+// after the map. The open `tx.head` OA mapped by `map_prefix` does: its sole
+// writer `pwrite`s the same inode through another fd. That caller reads the
+// map only by atomic loads from `as_ptr` and never forms `as_file_bytes`.
 unsafe impl Send for ReadonlyMap {}
 unsafe impl Sync for ReadonlyMap {}
 
@@ -73,9 +77,23 @@ impl ReadonlyMap {
         })
     }
 
+    /// The mapped bytes as a slice. Sealed files only: a shared slice freezes
+    /// the bytes, and a file another fd still writes is a data race through
+    /// it. The open `tx.head` OA reads `as_ptr` with atomic loads instead.
     pub fn as_file_bytes(&self) -> &[u8] {
         // SAFETY: ptr is a live mapping of map_len bytes for `_file`.
         unsafe { std::slice::from_raw_parts(self.ptr, self.map_len) }
+    }
+
+    /// Start of the mapping. For a file that changes under the map (the open
+    /// `tx.head` OA), read through this with atomic loads; see `as_file_bytes`.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Mapped length in bytes.
+    pub fn map_len(&self) -> usize {
+        self.map_len
     }
 
     pub fn set_fingerprint_range(&mut self, off: usize, len: usize) -> Result<(), StoreError> {

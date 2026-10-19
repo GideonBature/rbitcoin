@@ -167,10 +167,14 @@ pub fn fingerprint(mixed: &[u8; 32], bits: u32) -> u32 {
     (w % u64::from(mask)) as u32 + 1
 }
 
-/// Slot word: `rel | fp << bits`.
+/// Slot word `rel | fp << bits`, or `None` when `rel` does not fit in `bits`:
+/// a wider rel would fold into the fingerprint and its own probe would skip it.
 #[inline]
-fn tag_entry(rel: u64, fp: u32, bits: u32) -> u32 {
-    (rel | (u64::from(fp) << bits)) as u32
+fn tag_entry(rel: u64, fp: u32, bits: u32) -> Option<u32> {
+    if rel >> bits != 0 {
+        return None;
+    }
+    Some((rel | (u64::from(fp) << bits)) as u32)
 }
 
 /// First 8 bytes of txid as big-endian u64 (bit stream for page / h1).
@@ -392,10 +396,13 @@ pub fn insert_fk_into_page_buf(
     txid: &[u8; 32],
     new_fk: Fk,
 ) -> Result<InsertPageOutcome, StoreError> {
-    if new_fk.is_null() || new_fk.0 > u64::from(u32::MAX) {
+    if new_fk.is_null() {
         return Err(StoreError::InvalidFk);
     }
     let new_u = new_fk.0;
+    let Some(tagged) = tag_entry(new_u, fingerprint(txid, bits), bits) else {
+        return Err(StoreError::InvalidFk);
+    };
     let rel_mask = (1u64 << bits) - 1;
     let nslots = (page_buf.len() / ENTRY_BYTES as usize) as u64;
     let h1 = h1_in_page(txid, bits);
@@ -415,7 +422,6 @@ pub fn insert_fk_into_page_buf(
             "address head probe exhausted on insert",
         ));
     }
-    let tagged = tag_entry(new_u, fingerprint(txid, bits), bits);
     store_entry_in_page_buf(page_buf, scan.empty_local, tagged)?;
     Ok(InsertPageOutcome {
         wrote_new: true,
@@ -572,13 +578,22 @@ impl AddressHead {
         Ok(Self { file, layout, map })
     }
 
-    /// The mapped slot array. Loads only: the mapping is read-only.
+    /// The mapped slot array. The bytes are not frozen: the sole writer
+    /// publishes slots by `pwrite` through `file`, and the page cache changes
+    /// them under this view. So every read is an atomic load, and no `&[u8]`
+    /// of the map is ever formed (`as_file_bytes` is for sealed files).
     #[inline]
     fn slots(&self) -> &[AtomicU32] {
-        let b = self.map.as_file_bytes();
-        // SAFETY: a page-aligned live mapping whose length is a multiple of 4;
-        // nothing in this process writes through it.
-        unsafe { std::slice::from_raw_parts(b.as_ptr() as *const AtomicU32, b.len() / 4) }
+        // SAFETY: a page-aligned live `MAP_SHARED` mapping of `body_bytes()`
+        // bytes (a multiple of 4), held for `self`'s lifetime. Nothing in this
+        // process writes through the mapping; concurrent file writes are
+        // observed only by atomic loads, never by a plain reference.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.map.as_ptr() as *const AtomicU32,
+                self.map.map_len() / 4,
+            )
+        }
     }
 
     pub fn bits(&self) -> u32 {
@@ -587,7 +602,7 @@ impl AddressHead {
 
     /// Bytes of the mapped slot array (file-backed, reclaimable; not heap).
     pub fn map_bytes(&self) -> u64 {
-        self.map.as_file_bytes().len() as u64
+        self.map.map_len() as u64
     }
 
     /// Global slot at probe depth `d` of `mixed`.
@@ -661,7 +676,8 @@ impl AddressHead {
                 .find(|&&(_, r)| r == rel.0)
                 .map(|&(d, _)| d);
             if let Some(d) = depth {
-                let v = tag_entry(rel.0, fingerprint(mixed, bits), bits);
+                let v = tag_entry(rel.0, fingerprint(mixed, bits), bits)
+                    .ok_or(StoreError::Corrupt("tx.head rel wider than bits"))?;
                 let off = entry_file_off(self.slot_at(mixed, d) as u64);
                 self.file.write_at(off, &v.to_le_bytes())?;
             }
@@ -996,6 +1012,82 @@ mod tests {
             Ok(_) => panic!("expected open failure for meta v1"),
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn eight_byte_footer_is_refused_not_read_as_pairs() {
+        let path = tmp("footer8");
+        let h = head_bits(&path, 12).unwrap();
+        drop(h);
+        let mut raw = std::fs::read(&path).unwrap();
+        let n = raw.len();
+        // Footer layout ext at [n-16..n): entry width at byte 7 of ext.
+        raw[n - 16 + 7] = 8;
+        std::fs::write(&path, &raw).unwrap();
+        match AddressHead::open(&path) {
+            Err(StoreError::Corrupt(m)) => {
+                assert_eq!(m, "tx.head footer entry width (rebuild tx.head)")
+            }
+            Err(e) => panic!("expected footer entry width error, got {e}"),
+            Ok(_) => panic!("an 8-byte footer must not open as 4-byte slots"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A probe that races the sole writer's page `pwrite` sees the page
+    /// before or after that write, never a miss of a key inserted earlier.
+    #[test]
+    fn probe_during_page_pwrite_keeps_every_published_key() {
+        use std::sync::atomic::AtomicBool;
+        let path = tmp("race");
+        let h = head_bits(&path, 14).unwrap();
+        let n = 4000u64;
+        let key = |i: u64| {
+            let mut txid = [0u8; 32];
+            txid[0..8].copy_from_slice(&i.to_le_bytes());
+            txid[16..24].copy_from_slice(&(i * 11).to_le_bytes());
+            txid
+        };
+        let published = AtomicU64::new(0);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let h = &h;
+            let published = &published;
+            let done = &done;
+            s.spawn(move || {
+                let mut i = 1u64;
+                while i <= n {
+                    let end = (i + 7).min(n);
+                    let mut batch: Vec<_> = (i..=end).map(|k| (key(k), Fk(k))).collect();
+                    h.insert_many_in_place(&mut batch).unwrap();
+                    published.store(end, AtomicOrdering::Release);
+                    i = end + 1;
+                }
+                done.store(true, AtomicOrdering::Release);
+            });
+            let mut probes = 0u64;
+            loop {
+                let finished = done.load(AtomicOrdering::Acquire);
+                let p = published.load(AtomicOrdering::Acquire);
+                if p > 0 {
+                    let lo = p.saturating_sub(64).max(1);
+                    for k in lo..=p {
+                        let cands = probe_one(h, &key(k)).unwrap();
+                        assert!(cands.contains(&Fk(k)), "key {k} missing at published={p}");
+                        probes += 1;
+                    }
+                }
+                if finished {
+                    break;
+                }
+            }
+            assert!(probes > 0);
+        });
+        for k in 1..=n {
+            assert_eq!(probe_one(&h, &key(k)).unwrap(), vec![Fk(k)]);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(meta_path(&path));
     }
 
     #[test]
@@ -1453,6 +1545,15 @@ mod tests {
             insert_fk_into_page_buf(&mut page, 12, &txid, Fk(u64::from(u32::MAX) + 1)),
             Err(StoreError::InvalidFk)
         ));
+        // A rel that does not fit in `bits` would fold into the fingerprint.
+        assert!(matches!(
+            insert_fk_into_page_buf(&mut page, 12, &txid, Fk(1 << 12)),
+            Err(StoreError::InvalidFk)
+        ));
+        assert!(
+            !page.iter().any(|&b| b != 0),
+            "a rejected rel writes nothing"
+        );
         // Happy path insert + idempotent
         let r = insert_fk_into_page_buf(&mut page, 12, &txid, Fk(7)).unwrap();
         assert!(r.wrote_new);
