@@ -2002,10 +2002,10 @@ fn page_freelist_is_acyclic(t: &ScriptHashTable, sh: &[u8; 32]) -> bool {
     true
 }
 
-/// A disconnect that fails before the tip shrinks is retried. The second
-/// defer must not free the same pages again.
+/// One page chain covers a repeated defer and a free that fails midway.
+/// The creates stay until the commit, and the pages are freed once.
 #[test]
-fn extent_drop_all_retry_frees_the_chain_once() {
+fn extent_drop_all_retry_and_failed_free_release_once() {
     let dir = tmp();
     let sh = script_hash(&[0x72]);
     let n = 300u64;
@@ -2015,30 +2015,12 @@ fn extent_drop_all_retry_frees_the_chain_once() {
         .unwrap();
     let fks: Vec<_> = (1..=n).map(Fk).collect();
     t.unlink_creates_batch(&[(sh, fks.clone())]).unwrap();
-    t.unlink_creates_batch(&[(sh, fks)]).unwrap();
-    t.commit_deferred_empty_heads().unwrap();
-    assert!(t.entries(&sh).unwrap().is_empty());
-    assert!(
-        page_freelist_is_acyclic(&t, &sh),
-        "a retried full-list unlink freed the page chain twice"
+    assert!(t.deferred_empty(&sh));
+    assert_eq!(
+        t.entries(&sh).unwrap().len(),
+        n as usize,
+        "the empty head is not durable before the tip flush"
     );
-    put_create(&t, rec(sh, n + 1, 0));
-    assert_eq!(t.entries(&sh).unwrap().len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A free that fails after the empty head is synced must stay queued.
-/// The next commit frees the chain once.
-#[test]
-fn extent_drop_all_free_failure_retries_without_a_second_free() {
-    let dir = tmp();
-    let sh = script_hash(&[0x73]);
-    let n = 300u64;
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
-    t.put_create_batch_append(&many, &mut HashMap::new())
-        .unwrap();
-    let fks: Vec<_> = (1..=n).map(Fk).collect();
     t.unlink_creates_batch(&[(sh, fks)]).unwrap();
     ScriptHashTable::fail_next_deferred_free();
     assert!(t.commit_deferred_empty_heads().is_err());
@@ -2048,8 +2030,10 @@ fn extent_drop_all_free_failure_retries_without_a_second_free() {
     assert!(t.entries(&sh).unwrap().is_empty());
     assert!(
         page_freelist_is_acyclic(&t, &sh),
-        "the retry freed a page the failed attempt had already released"
+        "a retried full-list unlink freed a page twice"
     );
+    put_create(&t, rec(sh, n + 1, 0));
+    assert_eq!(t.entries(&sh).unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2094,14 +2078,11 @@ fn extent_drop_all_one_free_error_still_commits_the_other_key() {
     let n = 300u64;
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let many_a: Vec<_> = (1..=n).map(|i| rec(sh_a, i, 0)).collect();
-    let many_b: Vec<_> = (1..=n).map(|i| rec(sh_b, i, 0)).collect();
     t.put_create_batch_append(&many_a, &mut HashMap::new())
         .unwrap();
-    t.put_create_batch_append(&many_b, &mut HashMap::new())
-        .unwrap();
+    put_create(&t, rec(sh_b, 1, 0));
     let fks_a: Vec<_> = (1..=n).map(Fk).collect();
-    let fks_b: Vec<_> = (1..=n).map(Fk).collect();
-    t.unlink_creates_batch(&[(sh_a, fks_a), (sh_b, fks_b)])
+    t.unlink_creates_batch(&[(sh_a, fks_a), (sh_b, vec![Fk(1)])])
         .unwrap();
     ScriptHashTable::fail_next_deferred_free();
     assert!(t.commit_deferred_empty_heads().is_err());

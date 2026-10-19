@@ -432,12 +432,14 @@ fn history_window_wider_than_eight_weeks_is_refused() {
 
 /// A newest page whose creates sit more than eight weeks under the tip reads
 /// spend slots. It does not walk `input.body` across the gap.
+///
+/// One chain fills the page, checks that dormant page, then spends the
+/// create that falls below the page.
 #[test]
 fn newest_page_wide_gap_uses_spend_slots() {
     let sh = rbitcoin_store::script_hash(&[0x51]);
     let page = crate::scripthash::HistoryFilter::esplora_chain_page(None);
-
-    let (dir, q) = temp_query("newest-page-wide-dormant");
+    let (dir, q) = temp_query("newest-page-wide");
     q.set_spend_index(true);
     let mut prev = Fk::NULL;
     let mut parent = None;
@@ -459,19 +461,11 @@ fn newest_page_wide_gap_uses_spend_slots() {
     for txid in &txids {
         assert!(got.contains(txid), "page drops a create inside the limit");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 
-    let (dir, q) = temp_query("newest-page-wide-spend");
-    q.set_spend_index(true);
-    let mut prev = Fk::NULL;
-    let mut parent = None;
-    let mut txids = Vec::new();
-    for h in 0..26u32 {
-        let (header, ta) = coinbase_block(h, prev, parent);
-        txids.push(ta.tx.txid);
-        parent = Some(header.hash);
-        prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
-    }
+    let (header, ta) = coinbase_block(25, prev, parent);
+    txids.push(ta.tx.txid);
+    parent = Some(header.hash);
+    prev = q.connect_block(Height(25), &header, &[ta]).unwrap();
     let older = txids[0];
     let page_creates = txids[1..].to_vec();
     let create_fk = q.block_tx_fks(Height(0)).unwrap()[0];
