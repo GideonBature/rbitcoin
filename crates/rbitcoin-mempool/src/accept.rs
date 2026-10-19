@@ -1280,7 +1280,8 @@ impl ActiveMempool {
     }
 
     /// Unconfirmed inputs on a replacement must already be parents of the
-    /// direct conflicts, and there is only one direct conflict.
+    /// direct conflicts, and there is only one direct conflict. Spending an
+    /// output of a direct conflict is `bad-txns-spends-conflicting-tx`.
     fn reject_new_unconfirmed(
         &self,
         tx: &Transaction,
@@ -1302,6 +1303,12 @@ impl ActiveMempool {
                 continue;
             }
             if !parents_of_conflicts.contains(&parent) {
+                // Spending the output of a tx this replacement evicts. Core
+                // names that case; any other new unconfirmed parent is the
+                // broader Libre refusal.
+                if direct.contains(&parent) {
+                    return Err(AcceptError::Policy("bad-txns-spends-conflicting-tx"));
+                }
                 return Err(AcceptError::Policy("adds unconfirmed input"));
             }
             if direct.len() > 1 {

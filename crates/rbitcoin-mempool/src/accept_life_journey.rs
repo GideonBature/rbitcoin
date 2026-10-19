@@ -827,6 +827,17 @@ fn replacement_unconfirmed_inputs_follow_libre_rule() {
     assert!(life.live(&low));
     assert!(life.live(&extra_tx));
 
+    let own = life.chain.fund(100_000);
+    let victim = spend_tx(own, 90_000);
+    life.accept(&victim).unwrap();
+    let spends_victim = spend_all(&[own, out(victim.compute_txid(), 0)], 50_000);
+    let err = life.accept(&spends_victim).unwrap_err();
+    assert!(
+        matches!(err, AcceptError::Policy("bad-txns-spends-conflicting-tx")),
+        "{err}"
+    );
+    assert!(life.live(&victim));
+
     let wide_coin = life.chain.fund(300_000);
     let wide = fan_out(wide_coin, &[100_000, 100_000]);
     life.accept(&wide).unwrap();

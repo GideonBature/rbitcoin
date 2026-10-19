@@ -23,7 +23,8 @@ Fixed
   stopped sending. Tip and fee pushes do not refresh it.
 - **A replacement may spend an unconfirmed input only from its one
   direct conflict.** That parent stays a valid child-pays-for-parent.
-  Direct-set feerate is unchanged.
+  Spending the conflict's own output is refused as
+  `bad-txns-spends-conflicting-tx`. Direct-set feerate is unchanged.
 - **The invalid-txid set stops at 4,096.** A newer id does not clear
   the ones already stored.
 - **Onion and I2P misbehavior is remembered for a day.** The key is
