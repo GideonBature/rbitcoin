@@ -304,6 +304,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rpc.token");
         fs::write(&path, "fixed-token\n").unwrap();
+        // fs::write follows umask (0644 here). The node only reuses an owner-only token.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let (a, p) = resolve_rpc_auth(&dir, None).unwrap();
         assert_eq!(a.token, "fixed-token");
         assert_eq!(p, path);
@@ -371,7 +377,14 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rpc.token");
         fs::write(&path, "  \n").unwrap();
-        assert!(read_token_file(&path).is_err());
+        // Owner-only so the failure is the empty token, not the mode check.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let err = read_token_file(&path).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 
