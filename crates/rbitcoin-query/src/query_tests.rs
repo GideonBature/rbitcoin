@@ -430,6 +430,88 @@ fn history_window_wider_than_eight_weeks_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A newest page whose creates sit more than eight weeks under the tip reads
+/// spend slots. It does not walk `input.body` across the gap.
+#[test]
+fn newest_page_wide_gap_uses_spend_slots() {
+    let sh = rbitcoin_store::script_hash(&[0x51]);
+    let page = crate::scripthash::HistoryFilter::esplora_chain_page(None);
+
+    let (dir, q) = temp_query("newest-page-wide-dormant");
+    q.set_spend_index(true);
+    let mut prev = Fk::NULL;
+    let mut parent = None;
+    let mut txids = Vec::new();
+    for h in 0..25u32 {
+        let (header, ta) = coinbase_block(h, prev, parent);
+        txids.push(ta.tx.txid);
+        parent = Some(header.hash);
+        prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+    }
+    let mut view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    view.height = Height(view.height.0.saturating_add(8_065));
+    let rows = q
+        .scripthash_history_summary_filtered_in(&sh, &page, &view)
+        .expect("dormant page")
+        .rows;
+    let got: Vec<[u8; 32]> = rows.iter().map(|row| row.txid).collect();
+    assert_eq!(got.len(), txids.len());
+    for txid in &txids {
+        assert!(got.contains(txid), "page drops a create inside the limit");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let (dir, q) = temp_query("newest-page-wide-spend");
+    q.set_spend_index(true);
+    let mut prev = Fk::NULL;
+    let mut parent = None;
+    let mut txids = Vec::new();
+    for h in 0..26u32 {
+        let (header, ta) = coinbase_block(h, prev, parent);
+        txids.push(ta.tx.txid);
+        parent = Some(header.hash);
+        prev = q.connect_block(Height(h), &header, &[ta]).unwrap();
+    }
+    let older = txids[0];
+    let page_creates = txids[1..].to_vec();
+    let create_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+    let (header, mut spend) = coinbase_block(26, prev, parent);
+    spend.tx.txid[30] = 0x5e;
+    spend.outputs = vec![OutputRecord::unspent(49_0000_0000, vec![0x00])];
+    spend.inputs = vec![InputRecord {
+        prev_txid: older,
+        parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
+        sequence: u32::MAX,
+        script_sig: vec![],
+        witness: vec![],
+    }];
+    let spend_txid = spend.tx.txid;
+    q.connect_block(Height(26), &header, &[spend]).unwrap();
+    let mut view = q.pin_sh_chain_view().unwrap().expect("sh view");
+    view.height = Height(view.height.0.saturating_add(8_065));
+    let rows = q
+        .scripthash_history_summary_filtered_in(&sh, &page, &view)
+        .expect("page with an in-window spend")
+        .rows;
+    let got: Vec<[u8; 32]> = rows.iter().map(|row| row.txid).collect();
+    assert!(
+        got.contains(&spend_txid),
+        "a spend of an older coin inside the page window must be on the page"
+    );
+    assert!(
+        !got.contains(&older),
+        "the older create itself is below the page"
+    );
+    assert_eq!(got.len(), 25, "the spend takes one slot on the page");
+    for txid in &page_creates[1..] {
+        assert!(
+            got.contains(txid),
+            "page drops a create newer than the spend's slot"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Slow-pin log is only emitted when load work_ms > 2s — keep the formatter unit.
 #[test]
 fn format_slow_pin_omits_retired_tokens() {

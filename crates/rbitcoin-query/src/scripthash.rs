@@ -1317,6 +1317,10 @@ impl Query {
         if !self.spend_index_enabled() || members.is_empty() || low > high {
             return Ok(Vec::new());
         }
+        debug_assert!(
+            high.saturating_sub(low) <= MAX_HISTORY_WINDOW,
+            "block scan stays inside the history window"
+        );
         let mut hits = Vec::new();
         for height in (low..=high).rev() {
             let (first, n) = self.tx_fk_span_at_height(Height(height))?;
@@ -1390,6 +1394,53 @@ impl Query {
         Ok(matched)
     }
 
+    /// Spends that can land on a newest-first page.
+    ///
+    /// A gap inside [`MAX_HISTORY_WINDOW`] still scans those blocks. A wider
+    /// gap reads spend slots of the page's creates and of creates below the
+    /// page bound. A spender counts only at a height inside `[low, high]`.
+    fn spends_for_newest_page(
+        &self,
+        scripthash: &[u8; 32],
+        members: &[Fk],
+        window: &NewestWindow,
+        high: u32,
+        view: &ChainView,
+    ) -> Result<Vec<SpendHit>, QueryError> {
+        let Some(low) = window.bound else {
+            return self.spends_of_retained_creates(scripthash, &window.creates, high, view);
+        };
+        if high.saturating_sub(low) <= MAX_HISTORY_WINDOW {
+            return self.spends_of_members(members, low, high);
+        }
+        let mut creates = window.creates.clone();
+        let mut kept: Vec<u64> = window.creates.iter().map(|(_, fk)| fk.0).collect();
+        kept.sort_unstable();
+        let mut older = Vec::new();
+        for fk in members {
+            if kept.binary_search(&fk.0).is_err() {
+                older.push(*fk);
+            }
+        }
+        if !older.is_empty() {
+            let heights = self.store.tx_height_get_batch(&older)?;
+            if heights.len() != older.len() {
+                return Err(StoreError::Corrupt(
+                    "invariant: SH create height batch length",
+                ));
+            }
+            for (fk, h) in older.iter().zip(heights) {
+                let h = h.unwrap_or(0);
+                if h < low {
+                    creates.push((h, *fk));
+                }
+            }
+        }
+        let mut hits = self.spends_of_retained_creates(scripthash, &creates, high, view)?;
+        hits.retain(|hit| hit.height >= low);
+        Ok(hits)
+    }
+
     fn newest_limited_summaries(
         &self,
         scripthash: &[u8; 32],
@@ -1415,12 +1466,7 @@ impl Query {
         };
         let members = self.strong_sh_creates(scripthash, view)?;
         let window = self.newest_create_window(&members, k, scan.high, scan.strict)?;
-        let hits = match window.bound {
-            Some(low) => self.spends_of_members(&members, low, scan.high)?,
-            None => {
-                self.spends_of_retained_creates(scripthash, &window.creates, scan.high, view)?
-            }
-        };
+        let hits = self.spends_for_newest_page(scripthash, &members, &window, scan.high, view)?;
         let mut decode = window.creates.iter().map(|(_, fk)| *fk).collect::<Vec<_>>();
         for hit in &hits {
             decode.push(hit.parent);
@@ -1503,11 +1549,13 @@ impl Query {
     /// Confirmed history for a scripthash, filtered by height window / limit / cursor.
     ///
     /// A limited newest-first page walks the posting tail. When that walk
-    /// counts `limit` creates, it reads `input.body` from the cursor (or the
-    /// tip) down to that height so a spend of an older coin is included.
-    /// When the list is shorter, it reads the spend slots of the creates it
-    /// kept. Other filters assemble the confirmed history, then apply
-    /// [`apply_history_filter`].
+    /// counts `limit` creates and the height down to that create is inside
+    /// [`MAX_HISTORY_WINDOW`], it reads `input.body` for those blocks so a
+    /// spend of an older coin is included. A wider gap reads spend slots of
+    /// the page's creates and of creates below that height, and keeps a
+    /// spender only inside the page. When the list is shorter than the
+    /// limit, it reads the spend slots of the creates it kept. Other filters
+    /// assemble the confirmed history, then apply [`apply_history_filter`].
     /// Pins the SH watermark, not live tip.
     pub fn scripthash_history_filtered(
         &self,
