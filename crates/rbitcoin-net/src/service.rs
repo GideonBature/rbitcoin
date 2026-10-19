@@ -607,7 +607,14 @@ fn spawn_inbound_accept(
                     let _ = ah_tx.send(h.abort_handle());
                     push_session_task(&sessions, h);
                 }
-                Err(_) => break,
+                Err(e) => {
+                    if accept_error_ends_listen(&e) {
+                        rbitcoin_log::warn!("p2p: accept ended: {e}");
+                        break;
+                    }
+                    rbitcoin_log::warn!("p2p: accept retry: {e}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
         }
     })
@@ -630,11 +637,29 @@ struct PreparedOutbound {
     id: u64,
 }
 
-/// Bound on the TCP / SOCKS / SAM connect of an outbound dial, the same 8 s
-/// as the IBD and tip-follow dials ([`crate::connect_timeout_for`] gives I2P
-/// longer). Without it a proxy that accepts and never answers holds the
-/// dial, and its [`crate::peers::DialInFlight`] mark, for good, so the
-/// redial pass would never try that target again.
+/// True when this crate was compiled with the `test-hooks` feature.
+///
+/// Journeys turn that on. A workspace build unifies it into the node binary,
+/// which then uses the short redial and SAM retry. The node warns at startup.
+pub fn compiled_with_test_hooks() -> bool {
+    cfg!(feature = "test-hooks")
+}
+
+/// A transient accept error should not stop the listen loop.
+///
+/// `ConnectionAborted` is a peer that vanished during accept.
+/// `Interrupted` is a signal. `EMFILE` / `ENFILE` (24 / 23) clear once a
+/// socket is closed. Anything else, including a closed listener, ends accept.
+pub(crate) fn accept_error_ends_listen(err: &std::io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::Interrupted
+    ) {
+        return false;
+    }
+    !matches!(err.raw_os_error(), Some(23 | 24))
+}
+
 /// How often a down `--connect` / `addnode` target is tried again.
 #[cfg(not(any(test, feature = "test-hooks")))]
 const REDIAL_INTERVAL: Duration = Duration::from_secs(2);
@@ -642,6 +667,11 @@ const REDIAL_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(any(test, feature = "test-hooks"))]
 const REDIAL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Bound on the TCP / SOCKS / SAM connect of an outbound dial, the same 8 s
+/// as the IBD and tip-follow dials ([`crate::connect_timeout_for`] gives I2P
+/// longer). Without it a proxy that accepts and never answers holds the
+/// dial, and its [`crate::peers::DialInFlight`] mark, for good, so the
+/// redial pass would never try that target again.
 #[cfg(not(test))]
 const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(test)]
@@ -796,7 +826,16 @@ async fn run_outbound_session_with_abort(
         }
         let stream = dialer.connect_net(peer_net).await?;
         let height = hub.tip_height().map(|h| h as i32).unwrap_or(0);
-        return crate::peer::run_feeler(stream, magic, local, peer_addr, height, &user_agent).await;
+        return crate::peer::run_feeler(
+            stream,
+            magic,
+            local,
+            peer_addr,
+            height,
+            &user_agent,
+            peers.as_ref(),
+        )
+        .await;
     }
     let prepared = prepare_outbound_session(
         peer,
@@ -828,6 +867,20 @@ pub fn magic_for_params(params: &ChainParams) -> Magic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_retries_a_full_fd_table_and_stops_on_a_dead_listener() {
+        let aborted = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "reset");
+        let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "signal");
+        let emfile = std::io::Error::from_raw_os_error(24);
+        let enfile = std::io::Error::from_raw_os_error(23);
+        let dead = std::io::Error::new(std::io::ErrorKind::InvalidInput, "closed");
+        assert!(!accept_error_ends_listen(&aborted));
+        assert!(!accept_error_ends_listen(&interrupted));
+        assert!(!accept_error_ends_listen(&emfile));
+        assert!(!accept_error_ends_listen(&enfile));
+        assert!(accept_error_ends_listen(&dead));
+    }
 
     #[test]
     fn magic_for_all_networks() {

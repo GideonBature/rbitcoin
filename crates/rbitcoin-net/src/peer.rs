@@ -30,7 +30,7 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
@@ -328,34 +328,21 @@ fn stash_pending_block(pending: &mut PendingBlocks, hash: BlockHash, block: bitc
     pending.map.insert(hash, block);
 }
 
-/// Services we advertise once store-backed reconstruct serve is available.
-pub fn local_service_flags() -> ServiceFlags {
-    local_service_flags_pruned(false)
-}
-
-static COMPACT_FILTERS_ADVERTISED: AtomicBool = AtomicBool::new(false);
-
-/// Version messages include `NODE_COMPACT_FILTERS` while this is set.
+/// Service bits for one node.
 ///
-/// The node sets it once basic filters first reach the tip, so a peer never
-/// hears the bit from a node that would answer its requests with silence.
-/// A peer that handshook earlier does not learn of a later flip.
-pub fn set_compact_filters_service(on: bool) {
-    COMPACT_FILTERS_ADVERTISED.store(on, Ordering::Release);
-}
-
 /// BIP159: a pruned node offers `NETWORK_LIMITED`, not `NETWORK`.
-pub fn local_service_flags_pruned(pruned: bool) -> ServiceFlags {
+/// `NODE_COMPACT_FILTERS` is that hub's bit. No hub means this node has
+/// not caught filters up.
+pub fn local_service_flags(pruned: bool, peers: Option<&crate::peers::PeerHub>) -> ServiceFlags {
     let mut base = if pruned {
         ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2
     } else {
         crate::seeds::required_seed_services()
     };
-    if COMPACT_FILTERS_ADVERTISED.load(Ordering::Acquire) {
-        base.add(ServiceFlags::COMPACT_FILTERS)
-    } else {
-        base
+    if peers.is_some_and(|p| p.compact_filters_advertised()) {
+        base.add(ServiceFlags::COMPACT_FILTERS);
     }
+    base
 }
 
 /// NETWORK_LIMITED is enough when the tip is shallower than this (~24h at 10m).
@@ -514,7 +501,10 @@ fn queue_addr_list(
     addrs: Vec<(u32, crate::NetAddr)>,
     v2: bool,
 ) -> Result<(), NetError> {
-    let services = local_service_flags();
+    let services = session
+        .and_then(|s| s.peer_hub())
+        .map(|h| local_service_flags(h.is_pruned(), Some(&h)))
+        .unwrap_or_else(|| local_service_flags(false, None));
     if v2 {
         let list: Vec<AddrV2Message> = addrs
             .into_iter()
@@ -894,6 +884,7 @@ pub async fn run_feeler(
     their_addr: SocketAddr,
     start_height: i32,
     user_agent: &str,
+    peers: &crate::peers::PeerHub,
 ) -> Result<(), NetError> {
     run_feeler_timed(
         HANDSHAKE_TIMEOUT,
@@ -903,11 +894,13 @@ pub async fn run_feeler(
         their_addr,
         start_height,
         user_agent,
+        peers,
     )
     .await
 }
 
 /// Feeler handshake with an explicit timeout (production uses [`HANDSHAKE_TIMEOUT`]).
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub async fn run_feeler_timed(
     limit: Duration,
     stream: TcpStream,
@@ -916,6 +909,7 @@ pub async fn run_feeler_timed(
     their_addr: SocketAddr,
     start_height: i32,
     user_agent: &str,
+    peers: &crate::peers::PeerHub,
 ) -> Result<(), NetError> {
     tokio::time::timeout(
         limit,
@@ -926,6 +920,7 @@ pub async fn run_feeler_timed(
             their_addr,
             start_height,
             user_agent,
+            peers,
         ),
     )
     .await
@@ -939,9 +934,10 @@ async fn run_feeler_inner(
     their_addr: SocketAddr,
     start_height: i32,
     user_agent: &str,
+    peers: &crate::peers::PeerHub,
 ) -> Result<(), NetError> {
     let (mut reader, mut writer, _wire, _tcp_shutdown) = open_v2(stream, magic, false).await?;
-    let services = local_service_flags();
+    let services = local_service_flags(peers.is_pruned(), Some(peers));
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1031,7 +1027,7 @@ async fn application_handshake(
     policy: HandshakePolicy<'_>,
 ) -> Result<VersionMessage, NetError> {
     let pruned = policy.peers.map(|p| p.is_pruned()).unwrap_or(false);
-    let services = local_service_flags_pruned(pruned);
+    let services = local_service_flags(pruned, policy.peers);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

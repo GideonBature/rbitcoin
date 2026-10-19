@@ -466,8 +466,10 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
 
         let now = seed.peers.now_secs();
         seed.peers.set_mock_now(now + 40 * 60);
+        // The disconnect is requested on this call. Under llvm-cov the session
+        // task can take longer than a couple of seconds to leave the table.
         wait_ms_until(
-            3_000,
+            15_000,
             || {
                 !seed
                     .peers
@@ -1482,6 +1484,7 @@ async fn pin_feeler_handshake_timeout_after_silence() {
         peer,
         0,
         "/rbitcoin:test/",
+        rbitcoin_net::PeerHub::new().as_ref(),
     )
     .await
     {

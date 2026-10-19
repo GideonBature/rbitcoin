@@ -295,6 +295,12 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
 /// hold the process).
 #[allow(clippy::cognitive_complexity)] // node bring-up / P2P follow loop
 pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
+    if rbitcoin_net::compiled_with_test_hooks() || rbitcoin_sv2::compiled_with_test_hooks() {
+        warn!(
+            "node: built with test-hooks — connect redial, SAM retry, and the SV2 \
+             budget cooldown are the short test values, not the operator ones"
+        );
+    }
     let status = NodeStatus::new(config.network, config.shindex);
     let _health = match config.listen.health {
         Some(addr) => {
@@ -728,10 +734,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             let index_entry = rbitcoin_query::index_tip_entry(&node.hub.query);
             if index_entry.advertise_filters {
                 info!("blockfilter: already at tip; advertising NODE_COMPACT_FILTERS");
-                rbitcoin_net::set_compact_filters_service(true);
+                node.peers.set_compact_filters_service(true);
             }
             if index_entry.spawn {
                 let advertise_later = !index_entry.advertise_filters;
+                let filter_peers = Arc::clone(&node.peers);
                 index_writebehind = Some(rbitcoin_query::spawn_index_writebehind(
                     Arc::clone(&node.hub.query),
                     Arc::clone(&shutdown.flag),
@@ -743,7 +750,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     // when served filters reach the tip, not during materialize.
                     move || {
                         if advertise_later {
-                            rbitcoin_net::set_compact_filters_service(true);
+                            filter_peers.set_compact_filters_service(true);
                         }
                     },
                 ));

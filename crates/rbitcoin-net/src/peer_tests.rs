@@ -383,7 +383,7 @@ fn live_follow_dec_on_drop() {
 
 #[test]
 fn local_service_flags_include_network_witness_v2() {
-    let f = local_service_flags();
+    let f = local_service_flags(false, None);
     assert!(f.has(ServiceFlags::NETWORK));
     assert!(f.has(ServiceFlags::WITNESS));
     assert!(f.has(ServiceFlags::P2P_V2));
@@ -391,12 +391,28 @@ fn local_service_flags_include_network_witness_v2() {
 
 #[test]
 fn local_service_flags_pruned_are_limited_not_network() {
-    let f = local_service_flags_pruned(true);
+    let f = local_service_flags(true, None);
     assert!(f.has(ServiceFlags::NETWORK_LIMITED));
     assert!(!f.has(ServiceFlags::NETWORK));
     assert!(f.has(ServiceFlags::WITNESS));
     assert!(f.has(ServiceFlags::P2P_V2));
-    assert_eq!(local_service_flags_pruned(false), local_service_flags());
+}
+
+#[test]
+fn compact_filter_bit_stays_on_the_node_that_caught_up() {
+    use bitcoin::p2p::ServiceFlags;
+    let quiet = crate::peers::PeerHub::new();
+    let caught_up = crate::peers::PeerHub::new();
+    caught_up.set_compact_filters_service(true);
+    assert!(
+        !local_service_flags(false, Some(&quiet)).has(ServiceFlags::COMPACT_FILTERS),
+        "a neighbor catching up must not advertise filters for this node"
+    );
+    assert!(local_service_flags(false, Some(&caught_up)).has(ServiceFlags::COMPACT_FILTERS));
+    assert!(
+        !local_service_flags(false, None).has(ServiceFlags::COMPACT_FILTERS),
+        "no session table means this node has not caught filters up"
+    );
 }
 
 #[test]
@@ -3361,6 +3377,7 @@ async fn handshake_timeout_after_silence() {
                 addr,
                 0,
                 "/rbitcoin:test/",
+                crate::peers::PeerHub::new().as_ref(),
             )
             .await
         }),

@@ -293,7 +293,11 @@ pub(crate) fn getnodeaddresses(ctx: &RpcContext, params: &RpcParams) -> Result<V
         }
         out.push(json!({
             "time": now,
-            "services": rbitcoin_net::local_service_flags().to_u64(),
+            "services": rbitcoin_net::local_service_flags(
+                ctx.query.prune_seqsigwit(),
+                ctx.peers.as_deref(),
+            )
+            .to_u64(),
             "address": e.addr.host_str(),
             "port": e.addr.port(),
             "network": net,
@@ -349,7 +353,8 @@ pub(crate) fn getnetworkinfo(ctx: &RpcContext) -> Value {
     } else {
         (0, ctx.connections.load(Ordering::Relaxed), 0)
     };
-    let flags = rbitcoin_net::local_service_flags_pruned(ctx.query.prune_seqsigwit());
+    let flags =
+        rbitcoin_net::local_service_flags(ctx.query.prune_seqsigwit(), ctx.peers.as_deref());
     let svc_bits = flags.to_u64();
     json!({
         "version": RPC_COMPAT_VERSION,
