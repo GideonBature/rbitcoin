@@ -1026,7 +1026,7 @@ pub(crate) async fn spawn_peer(
 fn net_addrs_from_addr(list: &[(u32, bitcoin::p2p::address::Address)]) -> Vec<crate::NetAddr> {
     socket_addrs_from_addr(list)
         .into_iter()
-        .map(crate::NetAddr::Ip)
+        .map(crate::NetAddr::from_socket)
         .collect()
 }
 
@@ -1819,5 +1819,61 @@ mod tests {
         };
         let nets = net_addrs_from_addrv2(&[v2_onion]);
         assert_eq!(nets, vec![onion]);
+    }
+
+    /// Legacy `addr` has no BIP155 network id. `fc00::/8` is CJDNS, not a
+    /// clearnet socket the dial book can fill.
+    #[test]
+    fn v1_addr_fc00_is_cjdns_not_clearnet() {
+        use bitcoin::p2p::address::Address;
+        use bitcoin::p2p::ServiceFlags;
+
+        let fc_ip = Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1);
+        let fc = SocketAddr::new(IpAddr::V6(fc_ip), 8333);
+        let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
+        let flags = ServiceFlags::NETWORK | ServiceFlags::P2P_V2;
+        let rows =
+            net_addrs_from_addr(&[(1, Address::new(&fc, flags)), (2, Address::new(&v4, flags))]);
+        assert!(
+            rows.iter()
+                .any(|a| matches!(a, crate::NetAddr::Cjdns { ip, port: 8333 } if *ip == fc_ip)),
+            "fc00 must be CJDNS, got {rows:?}"
+        );
+        assert!(rows
+            .iter()
+            .any(|a| matches!(a, crate::NetAddr::Ip(s) if *s == v4)));
+        assert!(
+            !rows
+                .iter()
+                .any(|a| matches!(a, crate::NetAddr::Ip(s) if s.ip() == IpAddr::V6(fc_ip))),
+            "fc00 must not stay a clearnet Ip"
+        );
+
+        let local = SocketAddr::from(([127, 0, 0, 1], 18444));
+        let mut off = crate::seeds::AddrMan::new();
+        super::super::events::inject_learned_addrs(&mut off, &rows, local, 1);
+        assert!(
+            off.entries()
+                .iter()
+                .all(|e| !matches!(e.addr, crate::NetAddr::Cjdns { .. })),
+            "CJDNS stays out of the book until the overlay is reachable: {:?}",
+            off.entries()
+        );
+        assert!(off
+            .entries()
+            .iter()
+            .any(|e| e.addr == crate::NetAddr::Ip(v4)));
+
+        let mut on = crate::seeds::AddrMan::new();
+        on.set_cjdns_reachable(true);
+        super::super::events::inject_learned_addrs(&mut on, &rows, local, 1);
+        assert!(
+            on.entries().iter().any(|e| matches!(
+                e.addr,
+                crate::NetAddr::Cjdns { ip, port: 8333 } if ip == fc_ip
+            )),
+            "reachable CJDNS is learned as CJDNS: {:?}",
+            on.entries()
+        );
     }
 }
