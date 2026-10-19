@@ -77,6 +77,13 @@ impl BodyPresence {
         self.missing.insert(h);
     }
 
+    /// Stop asking for `h` without blacklisting it. A halted tip-child retry
+    /// must not stay on the missing set from the earlier attempts.
+    pub(crate) fn stop_reget(&mut self, h: BlockHash) {
+        self.missing.remove(&h);
+        self.pending_since.remove(&h);
+    }
+
     /// Drop optimistic Class A cache only — next [`Self::ready`] re-probes the store.
     pub(crate) fn demote_known(&mut self, h: BlockHash) {
         self.known.remove(&h);

@@ -1134,7 +1134,17 @@ fn apply_soft_wire_reject(
         // its own block, so it does not count toward the cascade halt. This
         // also clears a count for another hash: the tip+1 retry got a
         // verdict, so the pipeline is not stuck repeating that cascade.
-        st.cascade_at = None;
+        // A tip-child BadPrev is the exception: the same hash is fetched
+        // again, so it uses the cascade counter and stops on the third try.
+        if retry_tip_child {
+            apply_cascade_reject(st, height, hash, err, hub);
+            if st.halt.is_some() {
+                st.body.stop_reget(hash);
+                return;
+            }
+        } else {
+            st.cascade_at = None;
+        }
         st.body.mark_missing(hash);
         st.reopen_for_densify(&[hash]);
         st.body.demote_known(hash);
