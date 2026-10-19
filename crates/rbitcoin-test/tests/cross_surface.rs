@@ -10,6 +10,7 @@ use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_electrum::electrum_scripthash_hex;
 use rbitcoin_node::{run_p2p, NodeConfig, Sv2AuthoritySecret};
 use rbitcoin_primitives::{Height, Network};
+
 use rbitcoin_query::Query;
 use rbitcoin_query::{accept_and_connect_block, pad_empty_from};
 use rbitcoin_test::{open_mature_regtest_with_spend, TestDatadir};
@@ -807,10 +808,9 @@ async fn pin_esplora_tx_json_unknown_coinbase(esplora_addr: SocketAddr, cb_txid:
 
 #[allow(clippy::cognitive_complexity)] // one SH surface pin table
 async fn pin_esplora_scripthash_pages(esplora_addr: SocketAddr) {
-    use rbitcoin_primitives::display_hash_hex;
     use rbitcoin_store::script_hash;
 
-    let sh_hex = display_hash_hex(&script_hash(&[0x51]));
+    let sh_hex = rbitcoin_primitives::display_hash_hex(script_hash(&[0x51]));
     let (st, body) = http_get(esplora_addr, &format!("/scripthash/{sh_hex}")).await;
     assert_eq!(st, 200, "{body}");
     let info: Value = serde_json::from_str(&body).unwrap();
@@ -1004,7 +1004,7 @@ fn tx_wu(tx: &Transaction) -> u64 {
 }
 
 fn min_relay_fee_sat(weight: u64) -> u64 {
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
     vsize
         .saturating_mul(rbitcoin_consensus::policy::MIN_RELAY_FEE_RATE_SAT_PER_KVB)
         .saturating_add(999)
@@ -1070,7 +1070,7 @@ fn one_sat_vb_max_weight(prev: Txid, vout: u32, input_sat: u64, spk: ScriptBuf) 
         (390_000..=rbitcoin_consensus::policy::MAX_STANDARD_TX_WEIGHT).contains(&weight),
         "pad missed max standard weight: {weight}"
     );
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
     assert!(input_sat > vsize, "input {input_sat} cannot pay {vsize}");
     tx.output[0].value = Amount::from_sat(input_sat - vsize);
     let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(vsize, tx_wu(&tx));
@@ -2877,7 +2877,6 @@ async fn fake_tor_session(
     replies: Arc<Mutex<Vec<String>>>,
     minted: Arc<Mutex<Vec<String>>>,
 ) {
-    use bitcoin::hex::{DisplayHex, FromHex};
     let (r, mut w) = s.into_split();
     let mut lines = BufReader::new(r).lines();
     let mut client_hash: Option<[u8; 32]> = None;
@@ -2889,7 +2888,7 @@ async fn fake_tor_session(
         } else if let Some(nonce) = line.strip_prefix("AUTHCHALLENGE SAFECOOKIE ") {
             let server_nonce = [0x5a; 32];
             let mut mat = TOR_COOKIE.to_vec();
-            mat.extend(Vec::<u8>::from_hex(nonce).unwrap());
+            mat.extend(rbitcoin_primitives::hex_decode(nonce).unwrap());
             mat.extend(server_nonce);
             client_hash = Some(hmac_sha256(
                 b"Tor safe cookie authentication controller-to-server hash",
@@ -2901,12 +2900,12 @@ async fn fake_tor_session(
             );
             format!(
                 "250 AUTHCHALLENGE SERVERHASH={} SERVERNONCE={}\r\n",
-                server_hash.to_lower_hex_string(),
-                server_nonce.to_lower_hex_string()
+                rbitcoin_primitives::hex_encode(server_hash),
+                rbitcoin_primitives::hex_encode(server_nonce)
             )
         } else if let Some(auth) = line.strip_prefix("AUTHENTICATE ") {
             let ok = auth == format!("\"{TOR_PASSWORD}\"")
-                || client_hash.is_some_and(|h| auth == h.to_lower_hex_string());
+                || client_hash.is_some_and(|h| auth == rbitcoin_primitives::hex_encode(h));
             if ok {
                 "250 OK\r\n"
             } else {

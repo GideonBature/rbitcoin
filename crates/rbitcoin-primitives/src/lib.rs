@@ -17,7 +17,7 @@ pub use compact::{
 };
 pub use hex::{
     decode as hex_decode, display_hash_hex, encode as hex_encode, parse_display_hash32,
-    DisplayHashError, HexError,
+    HexToArrayError, HexToBytesError,
 };
 pub use loc_simd::{deinterleave_pairs_u8x8, inclusive_u8x8_times_8};
 pub use median_time::median_time_past_times;

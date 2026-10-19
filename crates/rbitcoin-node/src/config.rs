@@ -6,6 +6,7 @@ use rbitcoin_esplora::EsploraListen;
 use rbitcoin_primitives::{
     Network, DEFAULT_ELECTRUM_PORT, DEFAULT_ESPLORA_PORT, DEFAULT_HEALTH_PORT,
 };
+
 use rbitcoin_store::HeadScale;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

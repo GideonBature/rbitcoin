@@ -1,4 +1,5 @@
 use bitcoin::absolute::LockTime;
+use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
@@ -410,9 +411,9 @@ fn from_height_window_is_served_above_the_create_cap() {
         .iter()
         .filter_map(|r| r["tx_hash"].as_str())
         .collect();
-    let tip_hex = rbitcoin_primitives::display_hash_hex(&tip_cb);
-    let spend_hex = rbitcoin_primitives::display_hash_hex(&spend_txid);
-    let old_hex = rbitcoin_primitives::display_hash_hex(&oldest);
+    let tip_hex = rbitcoin_primitives::display_hash_hex(tip_cb);
+    let spend_hex = rbitcoin_primitives::display_hash_hex(spend_txid);
+    let old_hex = rbitcoin_primitives::display_hash_hex(oldest);
     assert!(hashes.contains(&tip_hex.as_str()), "{hashes:?}");
     assert!(hashes.contains(&spend_hex.as_str()), "{hashes:?}");
     assert!(!hashes.contains(&old_hex.as_str()), "{hashes:?}");
@@ -481,9 +482,9 @@ fn from_height_ignores_a_spend_of_another_output() {
             .filter_map(|r| r["tx_hash"].as_str().map(str::to_owned))
             .collect::<Vec<_>>()
     };
-    let foreign_hex = rbitcoin_primitives::display_hash_hex(&foreign_txid);
-    let real_hex = rbitcoin_primitives::display_hash_hex(&real_txid);
-    let tip_hex = rbitcoin_primitives::display_hash_hex(&tip_cb);
+    let foreign_hex = rbitcoin_primitives::display_hash_hex(foreign_txid);
+    let real_hex = rbitcoin_primitives::display_hash_hex(real_txid);
+    let tip_hex = rbitcoin_primitives::display_hash_hex(tip_cb);
     let other = hashes_of(3, 4);
     assert!(
         !other.iter().any(|h| h == &foreign_hex),

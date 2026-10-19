@@ -9,6 +9,7 @@ use rbitcoin_consensus::ChainParams;
 use rbitcoin_net::RequestMeter;
 use rbitcoin_net::{BlockingRegion, MempoolHub};
 use rbitcoin_primitives::{Fk, Height};
+
 use rbitcoin_query::{ChainView, ChainViewKind, HistoryFilter, Query, ShJoinSlot};
 use rbitcoin_store::{script_hash, StoreError};
 use serde_json::{json, Value};
@@ -139,7 +140,7 @@ impl ElectrumConfig {
             banner: "rbitcoin electrum — libre-relay-class (0.1 sat/vB, no dust ban, full RBF)"
                 .into(),
             donation_address: String::new(),
-            genesis_hash_hex: rbitcoin_primitives::display_hash_hex(&genesis),
+            genesis_hash_hex: rbitcoin_primitives::display_hash_hex(genesis),
             limits: ServeLimits::for_public_proxy(),
             max_scripthash_subs: DEFAULT_MAX_SCRIPTHASH_SUBS,
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
@@ -1704,7 +1705,7 @@ fn broadcast_raw_tx(
             config.max_broadcast_hex
         ));
     }
-    let raw = rbitcoin_primitives::hex_decode(raw_hex).map_err(|e| e.to_string())?;
+    let raw = decode_hex_bytes(raw_hex)?;
     if raw.len() > 4_000_000 {
         return Err("transaction too large".into());
     }
@@ -1743,7 +1744,7 @@ fn broadcast_package(
         if total_hex > config.max_broadcast_hex {
             return Err("package hex too large".into());
         }
-        let raw = rbitcoin_primitives::hex_decode(raw_hex).map_err(|e| e.to_string())?;
+        let raw = decode_hex_bytes(raw_hex)?;
         if raw.len() > 4_000_000 {
             return Err("transaction too large".into());
         }
@@ -2164,7 +2165,7 @@ fn tip_header_obj(query: &Query) -> Result<Value, String> {
 fn header_hex(hdr: &bitcoin::block::Header) -> String {
     let mut buf = Vec::new();
     hdr.consensus_encode(&mut buf).expect("header encode");
-    rbitcoin_primitives::hex_encode(buf)
+    rbitcoin_primitives::hex_encode(&(buf))
 }
 
 pub(crate) fn param_u32(params: &Value, idx: usize) -> Result<u32, String> {
@@ -2407,22 +2408,16 @@ pub(crate) fn param_str(params: &Value, idx: usize) -> Result<&str, String> {
 
 fn param_scripthash(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     let s = param_str(params, idx)?;
-    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| match e {
-        rbitcoin_primitives::DisplayHashError::WrongLength { .. } => {
-            "scripthash must be 32 bytes hex".into()
-        }
-        rbitcoin_primitives::DisplayHashError::Hex(h) => h.to_string(),
-    })
+    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| e.to_string())
 }
 
 fn param_txid(params: &Value, idx: usize) -> Result<[u8; 32], String> {
     let s = param_str(params, idx)?;
-    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| match e {
-        rbitcoin_primitives::DisplayHashError::WrongLength { .. } => {
-            "txid must be 32 bytes hex".into()
-        }
-        rbitcoin_primitives::DisplayHashError::Hex(h) => h.to_string(),
-    })
+    rbitcoin_primitives::parse_display_hash32(s).map_err(|e| e.to_string())
+}
+
+fn decode_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
+    rbitcoin_primitives::hex_decode(s).map_err(|e| e.to_string())
 }
 
 fn txid_hex(txid: &[u8; 32]) -> String {
@@ -2550,7 +2545,7 @@ fn verbose_vout(n: usize, out: &bitcoin::TxOut, network: bitcoin::Network) -> Va
 }
 
 fn hash_hex_rev(h: &[u8; 32]) -> String {
-    rbitcoin_primitives::display_hash_hex(h)
+    rbitcoin_primitives::display_hash_hex(*(h))
 }
 
 fn history_row_json(i: &rbitcoin_query::ScriptHashHistoryItem) -> Value {

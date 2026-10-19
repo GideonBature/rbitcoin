@@ -3,6 +3,7 @@ use bitcoin::consensus::{deserialize, Encodable};
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash, ScriptBuf, Txid};
 use rbitcoin_primitives::{median_time_past_times, Height};
+
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -123,7 +124,7 @@ pub(crate) fn signet_challenge_hex(ctx: &RpcContext) -> Option<String> {
         .as_ref()
         .and_then(|c| c.params.signet_challenge.clone())
         .unwrap_or_else(rbitcoin_consensus::default_signet_challenge);
-    Some(hex_encode(script.as_bytes()))
+    Some(rbitcoin_primitives::hex_encode(script.as_bytes()))
 }
 
 pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
@@ -155,7 +156,31 @@ pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
     w
 }
 
-pub(crate) use rbitcoin_consensus::difficulty_from_bits;
+/// Difficulty relative to the max target.
+///
+/// Matches Core `GetDifficulty` when every mantissa bit lands inside the
+/// 256-bit target. The mantissa is at most `0x7fffff`. Size `3..=32`
+/// qualifies. Size `33` qualifies at a mantissa of at most `0xffff`, and
+/// size `34` at most `0xff`. A smaller size qualifies when the shifted-off
+/// low bits are clear. Network pow limits are in that set, so a header
+/// that meets the limit matches too.
+///
+/// A zero target makes this function `+inf` and the old loop a finite
+/// ratio. That is the sign bit, size `0`, and a size of `1` or `2` that
+/// shifts every remaining bit off (`0x0100ffff` was `2^224`). A partial
+/// drop stays finite and larger than the old loop: `0x0200ffff` leaves
+/// target `255`, at `257/256` of the old `2^216`. Size `33` or `34` past
+/// the limits above drops high bits. Size `35` or more masks the shift
+/// with `0xff`. Size `35` is a shift of `0`, so the mantissa stays and
+/// the difficulty is huge where the old loop is small.
+///
+/// `format_core_double` prints a non-finite result as `0`. Block and chain
+/// RPCs use that. `getmininginfo` puts this float straight into JSON, which
+/// is `null` when it is non-finite. A connected tip cannot have a zero
+/// target.
+pub(crate) fn difficulty_from_bits(bits: u32) -> f64 {
+    bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).difficulty_float()
+}
 
 /// Compact-target bytes as Core `target` (64 hex chars).
 pub(crate) fn target_hex(bits: u32) -> String {
@@ -305,7 +330,7 @@ fn header_hex(hdr: &bitcoin::block::Header) -> Result<String, Value> {
     let mut raw = Vec::new();
     hdr.consensus_encode(&mut raw)
         .map_err(|_| rpc_error(ERR_MISC, "header encode"))?;
-    Ok(hex_encode(raw))
+    Ok(rbitcoin_primitives::hex_encode(&(raw)))
 }
 
 fn insert_previousblockhash(obj: &mut Value, prev: &str) {
@@ -357,7 +382,7 @@ fn off_chain_header(ctx: &RpcContext, hash: &[u8; 32]) -> Result<Option<OffChain
                 header_fk,
                 (works.len() as u32).saturating_sub(1),
                 None,
-                hex_encode(sum_header_work(works).to_be_bytes()),
+                rbitcoin_primitives::hex_encode(sum_header_work(works).to_be_bytes()),
                 &times,
             )?));
         }
@@ -391,7 +416,7 @@ fn off_chain_header(ctx: &RpcContext, hash: &[u8; 32]) -> Result<Option<OffChain
                 header_fk,
                 height,
                 immediate_prev,
-                hex_encode(cw.to_be_bytes()),
+                rbitcoin_primitives::hex_encode(cw.to_be_bytes()),
                 &times,
             )?));
         }
@@ -546,7 +571,7 @@ fn held_header_value(ctx: &RpcContext, block: &Block, verbose: bool) -> Result<V
         "nonce": block.header.nonce,
         "bits": format!("{:08x}", bits),
         "difficulty": core_f64_json(difficulty_from_bits(bits)),
-        "chainwork": hex_encode(block.header.work().to_be_bytes()),
+        "chainwork": rbitcoin_primitives::hex_encode(block.header.work().to_be_bytes() ),
         "nTx": block.txdata.len(),
         "target": target_hex(bits),
     });
@@ -563,7 +588,7 @@ pub(crate) fn chainwork_hex(ctx: &RpcContext, through: Option<Height>) -> String
     };
     if let Some(hub) = ctx.chain.as_ref() {
         if let Ok(w) = hub.work_through_height(tip.0) {
-            return hex_encode(w.to_be_bytes());
+            return rbitcoin_primitives::hex_encode(w.to_be_bytes());
         }
     }
     let mut works = Vec::new();
@@ -572,7 +597,7 @@ pub(crate) fn chainwork_hex(ctx: &RpcContext, through: Option<Height>) -> String
             works.push(hdr.work());
         }
     }
-    hex_encode(
+    rbitcoin_primitives::hex_encode(
         rbitcoin_net::sum_work(works.into_iter())
             .unwrap_or(bitcoin::Work::from_be_bytes([0xff; 32]))
             .to_be_bytes(),
@@ -628,11 +653,11 @@ fn held_chainwork_hex(ctx: &RpcContext, block: &Block) -> String {
     if let Ok(Some(h)) = ctx.query.height_of_hash(&prev) {
         if let Some(hub) = ctx.chain.as_ref() {
             if let Ok(w) = hub.work_through_height(h.0) {
-                return hex_encode((w + block.header.work()).to_be_bytes());
+                return rbitcoin_primitives::hex_encode((w + block.header.work()).to_be_bytes());
             }
         }
     }
-    hex_encode(block.header.work().to_be_bytes())
+    rbitcoin_primitives::hex_encode(block.header.work().to_be_bytes())
 }
 
 fn insert_block_size_fields(obj: &mut Value, block: &Block) {
@@ -741,7 +766,7 @@ pub(crate) fn getblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         block
             .consensus_encode(&mut raw)
             .map_err(|_| rpc_error(ERR_MISC, "block encode"))?;
-        return Ok(json!(hex_encode(raw)));
+        return Ok(json!(rbitcoin_primitives::hex_encode(&(raw))));
     }
     let txids: Vec<String> = block
         .txdata
@@ -789,7 +814,7 @@ fn disconnected_block_value(
         block
             .consensus_encode(&mut raw)
             .map_err(|_| rpc_error(ERR_MISC, "block encode"))?;
-        return Ok(json!(hex_encode(raw)));
+        return Ok(json!(rbitcoin_primitives::hex_encode(&(raw))));
     }
     let txids: Vec<String> = block
         .txdata
@@ -882,8 +907,8 @@ pub(crate) fn getblockfilter(ctx: &RpcContext, params: &RpcParams) -> Result<Val
         .ok_or_else(|| rpc_error(ERR_INVALID_ADDRESS_OR_KEY, "Block not found"))?;
     use bitcoin::hashes::Hash;
     Ok(json!({
-        "filter": hex_encode(&body),
-        "header": hex_encode(header.as_byte_array()),
+        "filter": rbitcoin_primitives::hex_encode(&body),
+        "header": rbitcoin_primitives::hex_encode(header.as_byte_array() ),
     }))
 }
 
@@ -911,7 +936,7 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
                         "confirmations": 0,
                         "value": out.value.to_btc(),
                         "scriptPubKey": {
-                            "hex": hex_encode(out.script_pubkey.as_bytes()),
+                            "hex": rbitcoin_primitives::hex_encode(out.script_pubkey.as_bytes() ),
                             "asm": out.script_pubkey.to_asm_string(),
                         },
                         "coinbase": false,
@@ -973,7 +998,7 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         "confirmations": confs,
         "value": Amount::from_sat(out.value).to_btc(),
         "scriptPubKey": {
-            "hex": hex_encode(&out.script),
+            "hex": rbitcoin_primitives::hex_encode(&out.script),
             "asm": ScriptBuf::from_bytes(out.script.clone()).to_asm_string(),
         },
         "coinbase": coinbase,
@@ -1184,7 +1209,7 @@ pub(crate) fn submitheader(ctx: &RpcContext, params: &RpcParams) -> Result<Value
 }
 
 pub(crate) fn decode_header_hex(hex: &str) -> Result<bitcoin::block::Header, Value> {
-    let raw = hex_decode(hex)
+    let raw = rbitcoin_primitives::hex_decode(hex)
         .map_err(|_| rpc_error(ERR_DESERIALIZATION, "Block header decode failed"))?;
     if raw.len() >= 80 {
         if let Ok(h) = deserialize::<bitcoin::block::Header>(&raw[..80]) {

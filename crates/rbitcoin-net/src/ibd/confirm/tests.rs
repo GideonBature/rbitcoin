@@ -829,7 +829,7 @@ fn stamp_reject_names_union_miss_txid() {
     assert!(msg.contains("pending=1"), "{msg}");
     assert!(msg.contains("miss_on=head"), "{msg}");
     assert!(msg.contains("miss_cands=0"), "{msg}");
-    let disp = bitcoin::Txid::from_byte_array(raw).to_string();
+    let disp = rbitcoin_primitives::display_hash_hex(raw);
     assert!(
         msg.contains(&disp),
         "operator line must name display txid {disp}: {msg}"

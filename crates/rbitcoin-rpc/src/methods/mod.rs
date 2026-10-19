@@ -2,9 +2,7 @@
 
 use bitcoin::{Block, BlockHash, ScriptBuf, Transaction};
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::{
-    display_hash_hex, hex_decode, hex_encode, parse_display_hash32, DisplayHashError, Network,
-};
+use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
 use serde_json::{json, Value};
 use std::cell::Cell;
@@ -39,17 +37,13 @@ pub(crate) fn sat_kvb_to_btc(sat_kvb: u64) -> f64 {
 }
 
 pub(crate) fn hash_hex_display(h: &[u8; 32]) -> String {
-    display_hash_hex(h)
+    rbitcoin_primitives::display_hash_hex(*h)
 }
 
 /// Parse Core display-order 32-byte hex → internal byte order.
 pub(crate) fn parse_hash32_display(hex: &str) -> Result<[u8; 32], Value> {
-    parse_display_hash32(hex).map_err(|e| match e {
-        DisplayHashError::WrongLength { .. } => {
-            rpc_error(ERR_INVALID_PARAMS, "hash/txid must be 32 bytes hex")
-        }
-        DisplayHashError::Hex(h) => rpc_error(ERR_INVALID_PARAMS, h.to_string()),
-    })
+    rbitcoin_primitives::parse_display_hash32(hex)
+        .map_err(|e| rpc_error(ERR_INVALID_PARAMS, e.to_string()))
 }
 
 /// Core's `ConnectBlock` returns before adding the genesis coinbase output

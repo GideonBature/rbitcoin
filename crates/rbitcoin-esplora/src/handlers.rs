@@ -20,6 +20,7 @@ use bitcoin::pow::{CompactTarget, Target};
 use bitcoin::{MerkleBlock, Network, OutPoint, Txid};
 use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::{median_time_past_times, Height};
+
 use rbitcoin_query::{
     ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary, ShJoinSlot,
 };
@@ -432,7 +433,7 @@ fn tx_merkleblock_proof_sync(st: AppState, txid_hex: String) -> Response {
     if mb.consensus_encode(&mut raw).is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, "merkleblock encode").into_response();
     }
-    plain_ok(rbitcoin_primitives::hex_encode(raw))
+    plain_ok(rbitcoin_primitives::hex_encode(&(raw)))
 }
 
 pub async fn tx_outspend(
@@ -1921,7 +1922,7 @@ fn fee_exceeds_sat_vb(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
     if max_sat_vb == 0 {
         return false;
     }
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let vsize = rbitcoin_consensus::policy::vbytes_ceil(weight);
     fee_sat > max_sat_vb.saturating_mul(vsize)
 }
 

@@ -1,6 +1,6 @@
 //! P2SH nested SegWit and legacy redeem scripts.
 
-use bitcoin::script::{Instruction, Script};
+use bitcoin::script::Script;
 use bitcoin::Transaction;
 
 use bitcoin::sighash::SighashCache;
@@ -59,7 +59,7 @@ pub(crate) fn try_p2sh_nested_segwit(
     if let Err(e) = check_p2sh_redeem_hash(outer, redeem) {
         return Some(Err(e));
     }
-    if !interpreter::cast_to_bool(program) {
+    if !bitcoin::script::read_scriptbool(program) {
         return Some(Err(ConsensusError::Script("EVAL_FALSE".into())));
     }
 
@@ -115,22 +115,6 @@ pub(crate) fn verify_p2sh_legacy(
     Ok(())
 }
 
-/// Push-only: every opcode ≤ OP_16 (includes OP_1NEGATE / OP_RESERVED).
-fn script_is_push_only(script: &Script) -> bool {
-    for ins in script.instructions() {
-        match ins {
-            Ok(Instruction::PushBytes(_)) => {}
-            Ok(Instruction::Op(op)) => {
-                if op.to_u8() > 0x60 {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
-    }
-    true
-}
-
 pub(crate) fn p2sh_script_sig_stack(
     job: &ScriptCheckJob,
     input_index: usize,
@@ -141,7 +125,7 @@ pub(crate) fn p2sh_script_sig_stack(
     let mut stack = Vec::new();
     let _ = interpreter::eval_script(script_sig, &mut stack, &ctx)?;
     require_room_for_p2sh_hash_push(&stack)?;
-    if !script_is_push_only(script_sig) {
+    if !script_sig.is_push_only() {
         return Err(ConsensusError::Script("p2sh scriptSig op".into()));
     }
     Ok(stack)
@@ -301,8 +285,8 @@ mod tests {
             format!("{err}").contains("p2sh scriptSig"),
             "shipped BIP16 push-only: {err}"
         );
-        assert!(!script_is_push_only(Script::from_bytes(&[0xac])));
-        assert!(script_is_push_only(Script::from_bytes(&[0x4f, 0x51])));
+        assert!(!Script::from_bytes(&[0xac]).is_push_only());
+        assert!(Script::from_bytes(&[0x4f, 0x51]).is_push_only());
 
         let mut items = stack_for(ScriptBuf::from_bytes(vec![0x00, 0x51, 0x01, 0xac])).unwrap();
         let redeem = items.pop().unwrap();
@@ -896,7 +880,7 @@ mod tests {
 
     #[test]
     fn push_only_scan_rejects_a_truncated_script() {
-        assert!(!script_is_push_only(Script::from_bytes(&[0x4e, 0x01])));
+        assert!(!Script::from_bytes(&[0x4e, 0x01]).is_push_only());
     }
 
     #[test]

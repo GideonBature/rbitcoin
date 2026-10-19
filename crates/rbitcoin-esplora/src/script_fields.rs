@@ -6,7 +6,6 @@
 use bitcoin::address::Address;
 use bitcoin::script::Script;
 use bitcoin::Network;
-use rbitcoin_primitives::hex_encode;
 
 /// Documented Esplora scriptpubkey / scriptsig projection fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,7 +20,7 @@ pub struct EsploraScriptFields {
 /// Project a scriptPubKey (or scriptSig) into Esplora JSON fields.
 pub fn esplora_script_fields(script: &[u8], network: Network) -> EsploraScriptFields {
     let s = Script::from_bytes(script);
-    let hex = hex_encode(script);
+    let hex = rbitcoin_primitives::hex_encode(script);
     let asm = s.to_asm_string();
     let script_type = classify_script(s);
     let address = Address::from_script(s, network).ok().map(|a| a.to_string());

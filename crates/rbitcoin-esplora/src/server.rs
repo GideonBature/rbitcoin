@@ -1047,13 +1047,13 @@ async fn tx_hex(State(st): State<AppState>, Path(txid_hex): Path<String>) -> Res
         };
         match st.query.get_tx_by_txid(&txid) {
             Ok(Some((fk, _))) => match st.query.tx_wire_bytes(fk) {
-                Ok(raw) => plain_ok(rbitcoin_primitives::hex_encode(raw)),
+                Ok(raw) => plain_ok(rbitcoin_primitives::hex_encode(&(raw))),
                 Err(e) => store_err(e),
             },
             Ok(None) => match mempool_wire(&st, &txid) {
                 Some(tx) => {
                     let raw = bitcoin::consensus::serialize(&tx);
-                    plain_ok(rbitcoin_primitives::hex_encode(raw))
+                    plain_ok(rbitcoin_primitives::hex_encode(&(raw)))
                 }
                 None => not_found(),
             },
@@ -1138,7 +1138,7 @@ pub(crate) fn store_err(e: rbitcoin_query::QueryError) -> Response {
 
 /// Esplora / Core display order (internal hash bytes reversed).
 pub(crate) fn block_hash_hex(hash: &[u8; 32]) -> String {
-    rbitcoin_primitives::display_hash_hex(hash)
+    rbitcoin_primitives::display_hash_hex(*hash)
 }
 
 /// Parse 32-byte hash/txid hex (display order) → internal byte order.
@@ -1156,7 +1156,7 @@ fn encode_header_hex(hdr: &bitcoin::block::Header) -> Result<String, String> {
     let mut buf = Vec::with_capacity(80);
     hdr.consensus_encode(&mut buf)
         .map_err(|_| "header encode".to_string())?;
-    Ok(rbitcoin_primitives::hex_encode(buf))
+    Ok(rbitcoin_primitives::hex_encode(&(buf)))
 }
 
 #[cfg(test)]
@@ -2014,8 +2014,7 @@ mod tests {
     }
 
     fn display_txid(txid: bitcoin::Txid) -> String {
-        use bitcoin::hashes::Hash;
-        rbitcoin_primitives::display_hash_hex(&txid.to_byte_array())
+        txid.to_string()
     }
 
     /// electrs: a start index at or past the last tx is 404, not an empty page.

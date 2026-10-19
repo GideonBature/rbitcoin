@@ -4,8 +4,9 @@ use crate::script_fields::esplora_script_fields;
 use bitcoin::hashes::Hash;
 use bitcoin::{Network, Transaction};
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::{display_hash_hex, hex_encode};
+
 use rbitcoin_primitives::{Fk, Height};
+
 use rbitcoin_query::{Query, QueryError, ScriptHashHistoryItem, ScriptHashUtxo};
 use rbitcoin_store::InputRecord;
 use serde::Serialize;
@@ -310,7 +311,10 @@ fn tx_json_from_wire(
 
         let wit_raw: Vec<Vec<u8>> = tin.witness.iter().map(|w| w.to_vec()).collect();
         if !wit_raw.is_empty() {
-            let wit: Vec<String> = wit_raw.iter().map(hex_encode).collect();
+            let wit: Vec<String> = wit_raw
+                .iter()
+                .map(rbitcoin_primitives::hex_encode)
+                .collect();
             vin_obj["witness"] = json!(wit);
         }
 
@@ -328,7 +332,14 @@ fn tx_json_from_wire(
             let spk = prev
                 .get("scriptpubkey")
                 .and_then(|x| x.as_str())
-                .and_then(|h| rbitcoin_primitives::hex_decode(h).ok())
+                .and_then(|h| {
+                    rbitcoin_primitives::hex_decode(
+                        h.strip_prefix("0x")
+                            .or_else(|| h.strip_prefix("0X"))
+                            .unwrap_or(h),
+                    )
+                    .ok()
+                })
                 .unwrap_or_default();
             spk_for_inner = Some(spk.clone());
             prev_spks.push(spk);
@@ -438,7 +449,7 @@ fn vout_fields(script: &[u8], value: u64, network: Network) -> Value {
 }
 
 fn block_hash_hex(hash: &[u8; 32]) -> String {
-    display_hash_hex(hash)
+    rbitcoin_primitives::display_hash_hex(*(hash))
 }
 
 /// electrs `get_innerscripts`: redeem only for P2SH; witness script only for

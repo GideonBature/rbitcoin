@@ -844,13 +844,13 @@ async fn electrum_server_version_history_balance() {
         "wrong height for known txid: {v}"
     );
 
-    let create_hex =
-        rbitcoin_primitives::display_hash_hex(&chain.matured_coinbase_txid.to_byte_array());
-    let spend_hex = rbitcoin_primitives::display_hash_hex(
-        &chain.blocks.last().unwrap().txdata[1]
+    let create_hex = chain.matured_coinbase_txid.to_string();
+    let spend_hex = bitcoin::Txid::from_byte_array(
+        chain.blocks.last().unwrap().txdata[1]
             .compute_txid()
             .to_byte_array(),
-    );
+    )
+    .to_string();
     let spend_h = chain.spend_height;
     let sh_hex = electrum_scripthash_hex(&[0x51]);
     let full = rpc(
@@ -1442,7 +1442,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
     .await
     .expect("electrum listen");
     let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
-    let want = rbitcoin_primitives::display_hash_hex(&parent.compute_txid().to_byte_array());
+    let want = parent.compute_txid().to_string();
     let bal = rpc(
         &mut stream,
         1,
@@ -1527,7 +1527,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
         "consensus-invalid broadcast with hub: {bad_tx}"
     );
 
-    let cb1 = rbitcoin_primitives::display_hash_hex(&coinbase_txids[0].to_byte_array());
+    let cb1 = coinbase_txids[0].to_string();
     let conf = rpc(
         &mut stream,
         8,
@@ -1598,7 +1598,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
         Some("success"),
         "{packed}"
     );
-    let cb = rbitcoin_primitives::display_hash_hex(&cb2.to_byte_array());
+    let cb = cb2.to_string();
     let spent = rpc(
         &mut stream,
         7,
@@ -1646,7 +1646,7 @@ async fn electrum_leftover_mempool_does_not_double_count() {
         "non-verbose package: {packed2}"
     );
 
-    let pkg_txid = rbitcoin_primitives::display_hash_hex(&pkg.compute_txid().to_byte_array());
+    let pkg_txid = pkg.compute_txid().to_string();
     let verbose = rpc(
         &mut stream,
         12,
@@ -1756,13 +1756,12 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
     );
 
     let sh = electrum_scripthash_hex(create_spk.as_bytes());
-    let asof_create =
-        rbitcoin_primitives::display_hash_hex(&create_blk.block_hash().to_byte_array());
-    let asof_spend = rbitcoin_primitives::display_hash_hex(&spend_blk.block_hash().to_byte_array());
+    let asof_create = create_blk.block_hash().to_string();
+    let asof_spend = spend_blk.block_hash().to_string();
     let tag_create = format!("asof:{asof_create}");
     let tag_spend = format!("asof:{asof_spend}");
-    let create_hex = rbitcoin_primitives::display_hash_hex(&create.compute_txid().to_byte_array());
-    let spend_hex = rbitcoin_primitives::display_hash_hex(&spend.compute_txid().to_byte_array());
+    let create_hex = create.compute_txid().to_string();
+    let spend_hex = spend.compute_txid().to_string();
 
     let q = Arc::new(q);
     let esplora_cfg = rbitcoin_esplora::EsploraConfig::with_network(
@@ -1932,7 +1931,7 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         q.pin_sh_chain_view_at(&lag_hash).unwrap().is_none(),
         "asof of a confirmed hash ahead of visible SH must not pin"
     );
-    let asof_lag = rbitcoin_primitives::display_hash_hex(&lag_hash);
+    let asof_lag = rbitcoin_primitives::display_hash_hex(lag_hash);
     let at_wm = rpc(
         &mut stream,
         13,
@@ -2035,7 +2034,7 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         json!([sh.clone()]),
     )
     .await;
-    let tip_b = rbitcoin_primitives::display_hash_hex(&spend_blk_b.block_hash().to_byte_array());
+    let tip_b = spend_blk_b.block_hash().to_string();
     assert_eq!(
         live_b["chain_tip"].as_str(),
         Some(tip_b.as_str()),

@@ -12,6 +12,9 @@ mutants = []
 
 [dependencies]
 bitcoin_hashes = { workspace = true }
+# Same crate `bitcoin::hex` re-exports. Not the `bitcoin` crate: store depends
+# on primitives and stays hashes-only.
+hex-conservative = { version = "0.2.2", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true

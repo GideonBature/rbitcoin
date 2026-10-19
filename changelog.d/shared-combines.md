@@ -8,5 +8,5 @@ Changed
   client, differential fuzz setup, and contract-test asserts each have one
   owner. Electrum rejects a non-string parameter with `param {idx} expected
   string`. Core script-test hex uses the primitives decoder, including a
-  `0x` prefix and the `odd hex length` error. Operator consensus, RPC, and
+  `0x` prefix. Operator consensus, RPC, and
   IBD behavior otherwise stay the same.

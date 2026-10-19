@@ -4,6 +4,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::{Address, Amount, Network as BtcNetwork, Transaction, Txid};
 use rbitcoin_primitives::{Height, Network};
+
 use rbitcoin_store::testutil::TempDir;
 use std::str::FromStr;
 use std::time::Duration;
@@ -691,7 +692,7 @@ fn hash_hex_display_matches_blockhash_display_and_reverses_parse() {
         *b = i as u8;
     }
     let disp = hash_hex_display(&internal);
-    let via_type = bitcoin::BlockHash::from_byte_array(internal).to_string();
+    let via_type = rbitcoin_primitives::display_hash_hex(internal);
     assert_eq!(disp, via_type);
     let back = parse_hash32_display(&disp).unwrap();
     assert_eq!(back, internal);
@@ -1008,7 +1009,6 @@ fn getmempoolentry_vsize_ceils_weight() {
     use bitcoin::script::ScriptBuf;
     use bitcoin::transaction::Version as TxVersion;
     use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-    use rbitcoin_consensus::policy::get_virtual_size;
 
     let (ctx, dir, coinbase_txids) = ctx_from_empty_102();
     let mp = ctx.mempool.as_ref().expect("mempool");
@@ -1057,8 +1057,8 @@ fn getmempoolentry_vsize_ceils_weight() {
         0,
         "witness remainder distinguishes floor vs ceil"
     );
-    let want = get_virtual_size(weight);
-    let fund_v = get_virtual_size(fund.weight().to_wu());
+    let want = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
+    let fund_v = bitcoin::Weight::from_wu(fund.weight().to_wu()).to_vbytes_ceil();
     let hex = hash_hex_display(&spend.compute_txid().to_byte_array());
     let entry = dispatch(&ctx, "getmempoolentry", vec![json!(hex.clone())]).unwrap();
     assert_eq!(entry["vsize"], want);
@@ -1598,7 +1598,7 @@ fn spend_generated_coinbase(
             script_pubkey: script,
         }],
     };
-    (hex_encode(serialize(&spend)), spend)
+    (rbitcoin_primitives::hex_encode(serialize(&spend)), spend)
 }
 
 fn mature_coinbase_spend_hex(ctx: &RpcContext, keep_sat: u64) -> (String, Transaction) {
@@ -1612,7 +1612,7 @@ fn generated_coinbase_value(ctx: &RpcContext, height: u32) -> u64 {
 }
 
 fn default_max_raw_fee_sat(weight: u64) -> u64 {
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(weight);
+    let vsize = bitcoin::Weight::from_wu(weight).to_vbytes_ceil();
     10_000u64.saturating_mul(vsize)
 }
 
@@ -1836,7 +1836,7 @@ fn submitpackage_child_fail_keeps_parent() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let bad_hex = hex_encode(serialize(&bad));
+    let bad_hex = rbitcoin_primitives::hex_encode(serialize(&bad));
     let pkg = dispatch(
         &ctx,
         "submitpackage",
@@ -1908,8 +1908,8 @@ fn submitpackage_maxfeerate_skips_package_eval_and_reports_replacements() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x52]),
         }],
     };
-    let parent_vb = rbitcoin_consensus::policy::get_virtual_size(parent.weight().to_wu());
-    let child_vb = rbitcoin_consensus::policy::get_virtual_size(child.weight().to_wu());
+    let parent_vb = bitcoin::Weight::from_wu(parent.weight().to_wu()).to_vbytes_ceil();
+    let child_vb = bitcoin::Weight::from_wu(child.weight().to_wu()).to_vbytes_ceil();
     let parent_fee = 2_000u64;
     let child_fee = 10_000u64;
     let max_feerate = parent_fee.div_ceil(parent_vb.max(1));
@@ -1926,8 +1926,8 @@ fn submitpackage_maxfeerate_skips_package_eval_and_reports_replacements() {
         "submitpackage",
         vec![
             json!([
-                hex_encode(serialize(&parent)),
-                hex_encode(serialize(&child))
+                rbitcoin_primitives::hex_encode(serialize(&parent)),
+                rbitcoin_primitives::hex_encode(serialize(&child))
             ]),
             json!(max_feerate),
         ],
@@ -1982,7 +1982,7 @@ fn rpc_submit_nonstandard_version_is_version() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let child_hex = hex_encode(serialize(&child));
+    let child_hex = rbitcoin_primitives::hex_encode(serialize(&child));
     let send = dispatch(&ctx, "sendrawtransaction", vec![json!(child_hex.clone())]).unwrap_err();
     assert_eq!(send["code"], ERR_VERIFY_REJECTED, "{send}");
     assert_eq!(send["message"], json!("version"), "{send}");
@@ -2045,7 +2045,7 @@ fn mempool_under_pressure() {
     let spk = ScriptBuf::from_bytes(vec![0x51]);
     let (parent_hex, parent) = spend_generated_coinbase(&ctx, 1, 50_0000_0000 - 1_000, spk.clone());
     let child = child_of(&parent, 1_000);
-    let child_hex = hex_encode(serialize(&child));
+    let child_hex = rbitcoin_primitives::hex_encode(serialize(&child));
 
     let unsorted = dispatch(
         &ctx,
@@ -2085,7 +2085,10 @@ fn mempool_under_pressure() {
     let missing = dispatch(
         &ctx,
         "testmempoolaccept",
-        vec![json!([parent_hex.clone(), hex_encode(serialize(&garbage))])],
+        vec![json!([
+            parent_hex.clone(),
+            rbitcoin_primitives::hex_encode(serialize(&garbage))
+        ])],
     )
     .unwrap();
     assert_eq!(missing.as_array().map(|a| a.len()), Some(2), "{missing}");
@@ -2117,7 +2120,7 @@ fn mempool_under_pressure() {
             script_pubkey: spk.clone(),
         }],
     };
-    let conflict_hex = hex_encode(serialize(&conflict_b));
+    let conflict_hex = rbitcoin_primitives::hex_encode(serialize(&conflict_b));
     let tma = dispatch(
         &ctx,
         "testmempoolaccept",
@@ -2154,7 +2157,7 @@ fn mempool_under_pressure() {
     // two members used to evict the parent and answer `mempool full`.
     let (low_hex, low_parent) = spend_generated_coinbase(&ctx, 3, 50_0000_0000 - 1, spk.clone());
     let low_child = child_of(&low_parent, 80_000);
-    let low_child_hex = hex_encode(serialize(&low_child));
+    let low_child_hex = rbitcoin_primitives::hex_encode(serialize(&low_child));
     let mp = ctx.mempool.as_ref().unwrap();
     mp.set_max_weight(low_parent.weight().to_wu() + low_child.weight().to_wu());
     let kept = dispatch(&ctx, "submitpackage", vec![json!([low_hex, low_child_hex])]).unwrap();
@@ -2263,7 +2266,7 @@ fn p2wsh_item_lens(target_vsize: u64) -> Vec<usize> {
     let mut lens = Vec::new();
     loop {
         let tx = p2wsh_with_lens(bitcoin::OutPoint::null(), 1_000_000, 1, 1, &lens);
-        let vsize = rbitcoin_consensus::policy::get_virtual_size(tx.weight().to_wu());
+        let vsize = bitcoin::Weight::from_wu(tx.weight().to_wu()).to_vbytes_ceil();
         if vsize == target_vsize {
             return lens;
         }
@@ -2357,7 +2360,7 @@ fn pressure_tiny_weight() {
     );
     let cb = generated_coinbase_value(&fee_ctx, 1);
     let probe = spend_generated_coinbase(&fee_ctx, 1, cb - 1, spk.clone()).1;
-    let vsize = rbitcoin_consensus::policy::get_virtual_size(probe.weight().to_wu());
+    let vsize = bitcoin::Weight::from_wu(probe.weight().to_wu()).to_vbytes_ceil();
     let minrelay_fee = vsize.div_ceil(10);
     let (low_hex, low) = spend_generated_coinbase(&fee_ctx, 1, cb - minrelay_fee, spk.clone());
     // Child fee stays under the default 10_000 sat/vB `maxfeerate`. A 1 sat
@@ -2380,7 +2383,7 @@ fn pressure_tiny_weight() {
             script_pubkey: spk,
         }],
     };
-    let child_vb = rbitcoin_consensus::policy::get_virtual_size(low_child.weight().to_wu());
+    let child_vb = bitcoin::Weight::from_wu(low_child.weight().to_wu()).to_vbytes_ceil();
     assert!(
         child_fee <= 10_000u64.saturating_mul(child_vb),
         "child fee {child_fee} must stay within default maxfeerate, vsize {child_vb}"
@@ -2388,7 +2391,10 @@ fn pressure_tiny_weight() {
     let pkg = dispatch(
         &fee_ctx,
         "submitpackage",
-        vec![json!([low_hex, hex_encode(serialize(&low_child))])],
+        vec![json!([
+            low_hex,
+            rbitcoin_primitives::hex_encode(serialize(&low_child))
+        ])],
     )
     .unwrap();
     assert_eq!(pkg["package_msg"], "success", "{pkg}");
@@ -2420,14 +2426,14 @@ fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
     let (chain_hex, chain_parent) = spend_generated_coinbase(ctx, 2, 50_0000_0000 - 1, spk.clone());
     let chain_child = child_of(&chain_parent, 1);
     let chain_grand = child_of(&chain_child, 80_000);
-    let chain_child_hex = hex_encode(serialize(&chain_child));
+    let chain_child_hex = rbitcoin_primitives::hex_encode(serialize(&chain_child));
     let chain = dispatch(
         ctx,
         "submitpackage",
         vec![json!([
             chain_hex.clone(),
             chain_child_hex.clone(),
-            hex_encode(serialize(&chain_grand))
+            rbitcoin_primitives::hex_encode(serialize(&chain_grand))
         ])],
     )
     .unwrap();
@@ -2454,8 +2460,8 @@ fn pressure_admit_then_cluster(ctx: &RpcContext, spk: &ScriptBuf) {
         ctx,
         "testmempoolaccept",
         vec![json!([
-            hex_encode(serialize(&cluster_child)),
-            hex_encode(serialize(&cluster_grand))
+            rbitcoin_primitives::hex_encode(serialize(&cluster_child)),
+            rbitcoin_primitives::hex_encode(serialize(&cluster_grand))
         ])],
     )
     .unwrap();
@@ -2496,7 +2502,7 @@ fn submitpackage_oversized_spk_is_scriptpubkey() {
             script_pubkey: ScriptBuf::from_bytes(vec![b'a'; 10_001]),
         }],
     };
-    let child_hex = hex_encode(serialize(&child));
+    let child_hex = rbitcoin_primitives::hex_encode(serialize(&child));
     let pkg = dispatch(
         &ctx,
         "submitpackage",
@@ -2564,7 +2570,7 @@ fn generate_selects_chained_mempool_parent_first() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let parent_hex = hex_encode(serialize(&parent));
+    let parent_hex = rbitcoin_primitives::hex_encode(serialize(&parent));
     let parent_id = dispatch(&ctx, "sendrawtransaction", vec![json!(parent_hex)]).unwrap();
     let child = Transaction {
         version: TxVersion::TWO,
@@ -2586,7 +2592,7 @@ fn generate_selects_chained_mempool_parent_first() {
     let child_id = dispatch(
         &ctx,
         "sendrawtransaction",
-        vec![json!(hex_encode(serialize(&child)))],
+        vec![json!(rbitcoin_primitives::hex_encode(serialize(&child)))],
     )
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
@@ -2624,7 +2630,7 @@ fn generate_selects_chained_mempool_parent_first() {
     let e = dispatch(
         &ctx,
         "sendrawtransaction",
-        vec![json!(hex_encode(serialize(&bad)))],
+        vec![json!(rbitcoin_primitives::hex_encode(serialize(&bad)))],
     )
     .unwrap_err();
     assert_eq!(e["code"], ERR_VERIFY_REJECTED);
@@ -2708,7 +2714,7 @@ fn getblockstats_coinbase_only_and_op_return_match_helper() {
     dispatch(
         &ctx,
         "sendrawtransaction",
-        vec![json!(hex_encode(serialize(&spend)))],
+        vec![json!(rbitcoin_primitives::hex_encode(serialize(&spend)))],
     )
     .unwrap();
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
@@ -3601,7 +3607,7 @@ fn testmempoolaccept_rbf_does_not_evict_conflict() {
             script_pubkey: spk,
         }],
     };
-    let high_hex = hex_encode(serialize(&high));
+    let high_hex = rbitcoin_primitives::hex_encode(serialize(&high));
     let row = dispatch(&ctx, "testmempoolaccept", vec![json!([high_hex])]).unwrap();
     assert_eq!(row[0]["allowed"], json!(true), "{row}");
     assert!(
@@ -3641,7 +3647,7 @@ fn testmempoolaccept_missing_inputs_is_missing_inputs() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    let hex = hex_encode(serialize(&tx));
+    let hex = rbitcoin_primitives::hex_encode(serialize(&tx));
     let row = dispatch(&ctx, "testmempoolaccept", vec![json!([hex])]).unwrap();
     assert_eq!(row[0]["allowed"], json!(false), "{row}");
     assert_eq!(row[0]["reject-reason"], json!("missing-inputs"), "{row}");
@@ -5023,7 +5029,7 @@ fn spend_coinbase_two_outputs(ctx: &RpcContext, height: u32, value: u64) -> (Str
             },
         ],
     };
-    (hex_encode(serialize(&spend)), spend)
+    (rbitcoin_primitives::hex_encode(serialize(&spend)), spend)
 }
 
 include!("regtest_chain_ops_journey.rs");

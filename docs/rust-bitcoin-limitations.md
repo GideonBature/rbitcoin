@@ -364,8 +364,7 @@ the helper after the bugs above are in.
   targets.** Both compute `(0xffff / mantissa) * 256^(29 - exponent)`.
   Their constant `TARGET_MAX_F64` is the expanded genesis target
   `0x1d00ffff`. A compact target's 24-bit mantissa is exact in `f64`.
-  `difficulty_from_bits` is a local convenience over a stored `u32`. It
-  is not a workaround.
+  RPC difficulty calls this helper. It is not a workaround.
 - **`TapSighashType::from_consensus_u8(0x00) → Default`.** Correct name
   for the type. The consensus reject is "65-byte signature whose last
   byte is `0x00`", which is the caller's length check (RB-019).
@@ -393,8 +392,30 @@ the helper after the bugs above are in.
 - **Local codecs.** `read_compact_size` / `write_compact_size` exist
   because store and mempool records are not rust-bitcoin values. The IBD
   input walk applies the same non-minimal refusal as `VarInt`
-  (`NonMinimalVarInt`) without allocating a `Block`. Display-order hex
-  replaces the `hex` crate. Neither is an upstream gap.
+  (`NonMinimalVarInt`) without allocating a `Block`. That compact-size
+  codec is not an upstream gap. Hex encode, decode, and display-order
+  32-byte ids live in `rbitcoin-primitives`. The bodies and the errors
+  are hex-conservative, the crate behind `bitcoin::hex`. `0x` / `0X` is
+  stripped there. A 32-byte id whose hex is not 64 characters is that
+  crate's length error, which does not look at the digits.
+- **Non-canonical compact difficulty.** `difficulty_float` matches Core
+  `GetDifficulty` when every mantissa bit lands inside the 256-bit target.
+  The mantissa is at most `0x7fffff`. Size `3..=32` qualifies. Size `33`
+  qualifies at a mantissa of at most `0xffff`, and size `34` at most
+  `0xff`. A smaller size qualifies when the shifted-off low bits are
+  clear. Network pow limits are in that set. A zero target makes
+  `difficulty_float` `+inf` and the old loop a finite ratio: the sign
+  bit, size `0`, and a size of `1` or `2` that shifts every remaining bit
+  off (`0x0100ffff` was `2^224`). A partial drop stays finite and larger
+  than the old loop (`0x0200ffff` leaves target `255`, at `257/256` of
+  the old `2^216`). Size `33` or `34` past those mantissa limits drops
+  high bits. Size `35` or more masks the shift with `0xff`. Size `35` is
+  a shift of `0`, so the mantissa stays and the difficulty is huge where
+  the old loop is small.
+  `format_core_double` prints a non-finite result as `0`, which is what
+  `getblock`, `getblockheader`, and `getblockchaininfo` return.
+  `getmininginfo` puts the raw float in JSON, which is `null` when the
+  value is non-finite. A connected tip cannot have a zero target.
 - **RB-008 as an upstream port.** Do not send the interpreter.
 
 ## Related

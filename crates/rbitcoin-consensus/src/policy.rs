@@ -10,7 +10,7 @@
 //! min relay, **no dust limit** (1-sat OK; 0-value spendable is dust), full
 //! RBF, Libre annex.
 
-use bitcoin::Transaction;
+use bitcoin::{Transaction, Weight};
 
 /// Minimum relay feerate: **0.1 sat/vB** = 100 sat/kvB.
 pub const MIN_RELAY_FEE_RATE_SAT_PER_KVB: u64 = 100;
@@ -35,10 +35,18 @@ impl PolicyResult {
     }
 }
 
-/// Virtual size in vbytes: `(weight + 3) / 4`.
-#[inline]
-pub fn get_virtual_size(weight: u64) -> u64 {
-    weight.saturating_add(3) / 4
+/// `(weight + 3) / 4`.
+///
+/// `Weight::to_vbytes_ceil` is `(wu + 4) - 1`, and the `+ 4` panics in
+/// debug and wraps in release when `wu > u64::MAX - 4`. Sigop adjustment
+/// saturates at `u64::MAX` (unknown cost until recompute), which would
+/// become a tiny vsize. That range takes `u64::MAX / 4`, the same result
+/// as `saturating_add(3) / 4`.
+pub fn vbytes_ceil(weight: u64) -> u64 {
+    if weight > u64::MAX - 4 {
+        return u64::MAX / 4;
+    }
+    Weight::from_wu(weight).to_vbytes_ceil()
 }
 
 /// True if `fee_sat` meets the minimum relay feerate for `weight` (WU).
@@ -53,7 +61,7 @@ pub fn meets_min_relay_fee_at(fee_sat: u64, weight: u64, sat_kvb: u64) -> bool {
     if sat_kvb == 0 {
         return true;
     }
-    let vsize = get_virtual_size(weight);
+    let vsize = vbytes_ceil(weight);
     if vsize == 0 {
         return false;
     }
@@ -62,7 +70,7 @@ pub fn meets_min_relay_fee_at(fee_sat: u64, weight: u64, sat_kvb: u64) -> bool {
 
 /// Feerate in sat/kvB for diagnostics (floors).
 pub fn fee_rate_sat_per_kvb(fee_sat: u64, weight: u64) -> u64 {
-    let vsize = get_virtual_size(weight);
+    let vsize = vbytes_ceil(weight);
     if vsize == 0 {
         return 0;
     }
@@ -306,10 +314,21 @@ mod tests {
     }
 
     #[test]
+    fn saturated_weight_stays_a_huge_vsize() {
+        assert_eq!(vbytes_ceil(u64::MAX), u64::MAX / 4);
+        assert_eq!(vbytes_ceil(u64::MAX - 3), u64::MAX / 4);
+        assert_eq!(
+            vbytes_ceil(u64::MAX - 4),
+            Weight::from_wu(u64::MAX - 4).to_vbytes_ceil()
+        );
+        assert_eq!(fee_rate_sat_per_kvb(1_000, u64::MAX), 0);
+    }
+
+    #[test]
     fn vsize_fee_zero_and_libre_gates() {
         assert!(!meets_min_relay_fee(1, 0));
         assert_eq!(fee_rate_sat_per_kvb(100, 0), 0);
-        assert_eq!(get_virtual_size(1), 1);
+        assert_eq!(Weight::from_wu(1).to_vbytes_ceil(), 1);
 
         // Coinbase rejected.
         let cb = Transaction {

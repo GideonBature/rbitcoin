@@ -343,12 +343,7 @@ impl ChainParams {
 }
 
 fn block_hash_from_display_hex(hex: &str) -> BlockHash {
-    let bytes = rbitcoin_primitives::hex_decode(hex).expect("block hash hex");
-    let arr: [u8; 32] = bytes.try_into().expect("32 bytes");
-    // Bitcoin displays hashes internal-byte-order reversed in hex.
-    let mut rev = arr;
-    rev.reverse();
-    BlockHash::from_byte_array(rev)
+    hex.parse().expect("block hash hex")
 }
 
 /// Mainnet assumeutxo block at height 840_000 (Core `kernel/chainparams.cpp`,
@@ -417,10 +412,10 @@ pub fn default_min_chain_work_be(network: rbitcoin_primitives::Network) -> Optio
 }
 
 fn min_work_from_display_hex(hex: &str) -> [u8; 32] {
-    let raw = rbitcoin_primitives::hex_decode(hex).expect("min chain work hex");
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&raw);
-    out
+    rbitcoin_primitives::hex_decode(hex)
+        .expect("min chain work hex")
+        .try_into()
+        .expect("min chain work hex")
 }
 
 /// Verify height-0 block hash matches params genesis.

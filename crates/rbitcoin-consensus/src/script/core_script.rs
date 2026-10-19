@@ -519,8 +519,18 @@ mod tests {
     fn decode_hex_strips_0x_and_names_odd_length() {
         assert_eq!(decode_hex("0x0a").unwrap(), vec![0x0a]);
         assert_eq!(decode_hex("0Xff").unwrap(), vec![0xff]);
-        assert_eq!(decode_hex("abc").unwrap_err(), "odd hex length");
-        assert_eq!(decode_hex("zz").unwrap_err(), "invalid hex digit");
+        assert_eq!(decode_hex("abc").unwrap_err(), {
+            use bitcoin::hex::FromHex;
+            <Vec<u8> as FromHex>::from_hex("abc")
+                .unwrap_err()
+                .to_string()
+        });
+        assert_eq!(decode_hex("zz").unwrap_err(), {
+            use bitcoin::hex::FromHex;
+            <Vec<u8> as FromHex>::from_hex("zz")
+                .unwrap_err()
+                .to_string()
+        });
     }
 
     #[test]

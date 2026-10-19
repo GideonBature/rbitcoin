@@ -210,7 +210,7 @@ fn headers(ctx: &RpcContext, fmt: RestFmt, rest: &str) -> Result<RestReply, Rest
     }
     match fmt {
         RestFmt::Bin => Ok(bin_body(raw)),
-        RestFmt::Hex => Ok(hex_body(&hex_encode(&raw))),
+        RestFmt::Hex => Ok(hex_body(&rbitcoin_primitives::hex_encode(&raw))),
         RestFmt::Json => Ok(json_body(json!(json_headers))),
     }
 }
@@ -254,7 +254,7 @@ fn block(
     })?;
     match wire {
         RestWire::Bin => Ok(bin_body(raw)),
-        RestWire::Hex => Ok(hex_body(&hex_encode(&raw))),
+        RestWire::Hex => Ok(hex_body(&rbitcoin_primitives::hex_encode(&raw))),
     }
 }
 
@@ -280,7 +280,7 @@ fn tx(ctx: &RpcContext, fmt: RestFmt, txid: &str) -> Result<RestReply, RestReply
             &format!("{txid} not found"),
         )
     })?;
-    let raw = hex_decode(hex)
+    let raw = rbitcoin_primitives::hex_decode(hex)
         .map_err(|_| err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "tx hex"))?;
     match wire {
         RestWire::Bin => Ok(bin_body(raw)),
@@ -424,13 +424,15 @@ fn blockfilter(ctx: &RpcContext, fmt: RestFmt, rest: &str) -> Result<RestReply, 
             )
         })?;
     match fmt {
-        RestFmt::Json => Ok(json_body(json!({ "filter": hex_encode(&body) }))),
+        RestFmt::Json => Ok(json_body(
+            json!({ "filter": rbitcoin_primitives::hex_encode(&body) }),
+        )),
         RestFmt::Bin | RestFmt::Hex => {
             let raw = serialize_rest_filter(&parsed, &body);
             if fmt == RestFmt::Bin {
                 Ok(bin_body(raw))
             } else {
-                Ok(hex_body(&hex_encode(&raw)))
+                Ok(hex_body(&rbitcoin_primitives::hex_encode(&raw)))
             }
         }
     }
