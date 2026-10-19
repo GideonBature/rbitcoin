@@ -560,6 +560,7 @@ fn held_header_value(ctx: &RpcContext, block: &Block, verbose: bool) -> Result<V
     let version = block.header.version.to_consensus();
     let prev = block.header.prev_blockhash.to_byte_array();
     let mediantime = median_time_from_wire(ctx, block.header.time, prev)?;
+    let (height, chainwork) = held_height_and_work_hex(ctx, block);
     let mut obj = json!({
         "hash": hash_hex_display(&block.block_hash().to_byte_array()),
         "confirmations": -1,
@@ -571,10 +572,13 @@ fn held_header_value(ctx: &RpcContext, block: &Block, verbose: bool) -> Result<V
         "nonce": block.header.nonce,
         "bits": format!("{:08x}", bits),
         "difficulty": core_f64_json(difficulty_from_bits(bits)),
-        "chainwork": rbitcoin_primitives::hex_encode(block.header.work().to_be_bytes() ),
+        "chainwork": chainwork,
         "nTx": block.txdata.len(),
         "target": target_hex(bits),
     });
+    if let Some(h) = height {
+        obj["height"] = json!(h);
+    }
     if prev != [0u8; 32] {
         insert_previousblockhash(&mut obj, &hash_hex_display(&prev));
     }
@@ -648,16 +652,43 @@ fn enrich_block_header_json(
     }
 }
 
-fn held_chainwork_hex(ctx: &RpcContext, block: &Block) -> String {
-    let prev = block.header.prev_blockhash.to_byte_array();
-    if let Ok(Some(h)) = ctx.query.height_of_hash(&prev) {
-        if let Some(hub) = ctx.chain.as_ref() {
-            if let Ok(w) = hub.work_through_height(h.0) {
-                return rbitcoin_primitives::hex_encode((w + block.header.work()).to_be_bytes());
-            }
+/// Height and chain work of a held body: its parent's plus this block. The
+/// parent is on the active chain, a stored header, or another held body.
+fn held_height_and_work(ctx: &RpcContext, block: &Block) -> Option<(u32, bitcoin::Work)> {
+    let hub = ctx.chain.as_ref()?;
+    let mut work = block.header.work();
+    let mut prev = block.header.prev_blockhash;
+    for depth in 1..=OFF_CHAIN_WALK_MAX {
+        let p = prev.to_byte_array();
+        if let Ok(Some(h)) = ctx.query.height_of_hash(&p) {
+            let base = hub.work_through_height(h.0).ok()?;
+            return Some((h.0 + depth, base + work));
         }
+        if let Ok(Some(loc)) = off_chain_header(ctx, &p) {
+            let base: [u8; 32] = rbitcoin_primitives::hex_decode(&loc.chainwork)
+                .ok()?
+                .try_into()
+                .ok()?;
+            return Some((
+                loc.height + depth,
+                bitcoin::Work::from_be_bytes(base) + work,
+            ));
+        }
+        let parent = hub.held_body(&prev)?;
+        work = work + parent.header.work();
+        prev = parent.header.prev_blockhash;
     }
-    rbitcoin_primitives::hex_encode(block.header.work().to_be_bytes())
+    None
+}
+
+/// [`held_height_and_work`] for JSON. Without a known parent, only this
+/// block's work and no height.
+fn held_height_and_work_hex(ctx: &RpcContext, block: &Block) -> (Option<u32>, String) {
+    let (height, work) = match held_height_and_work(ctx, block) {
+        Some((h, w)) => (Some(h), w),
+        None => (None, block.header.work()),
+    };
+    (height, rbitcoin_primitives::hex_encode(work.to_be_bytes()))
 }
 
 fn insert_block_size_fields(obj: &mut Value, block: &Block) {
@@ -825,10 +856,10 @@ fn disconnected_block_value(
     let version = block.header.version.to_consensus();
     let prev = block.header.prev_blockhash.to_byte_array();
     let loc = off_chain_header(ctx, hash)?;
-    let chainwork = loc
-        .as_ref()
-        .map(|l| l.chainwork.clone())
-        .unwrap_or_else(|| held_chainwork_hex(ctx, block));
+    let (height, chainwork) = match &loc {
+        Some(l) => (Some(l.height), l.chainwork.clone()),
+        None => held_height_and_work_hex(ctx, block),
+    };
     let mediantime = match &loc {
         Some(loc) => loc.mediantime,
         None => median_time_from_wire(ctx, block.header.time, prev)?,
@@ -845,8 +876,8 @@ fn disconnected_block_value(
         "nTx": block.txdata.len(),
         "tx": txids,
     });
-    if let Some(loc) = loc {
-        obj["height"] = json!(loc.height);
+    if let Some(h) = height {
+        obj["height"] = json!(h);
     }
     if prev != [0u8; 32] {
         insert_previousblockhash(&mut obj, &hash_hex_display(&prev));
