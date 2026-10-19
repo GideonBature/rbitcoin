@@ -15,7 +15,8 @@ Fixed
   it.** A disconnect of that peer drops the orphan.
 - **A reorg that removes every create for a scripthash waits to publish the
   empty head until the shorter tip is durable.** A crash before that still
-  has the creates. A one-key unlink publishes only that key.
+  has the creates. A one-key unlink is refused while any empty head is still
+  queued.
 - **A package that fails puts a lifted orphan back without peers that
   disconnected while it was out.** If that was the only peer, the orphan
   is dropped. A package that admits the orphan drops that in-flight record.

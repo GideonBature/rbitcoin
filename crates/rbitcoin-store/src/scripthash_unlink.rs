@@ -104,23 +104,32 @@ impl ScriptHashTable {
     /// `Ok(true)` when at least one fk was stored. A pure suffix of an extent
     /// rewrites the tail pages. Any other shape rewrites the key once, and the
     /// previous pages stay readable until the head names the replacement.
-    pub fn unlink_creates(
+    ///
+    /// Refused while any empty head is still queued. Disconnect publishes
+    /// those through [`Self::commit_deferred_empty_heads`] after the tip flush.
+    #[cfg(test)]
+    pub(super) fn unlink_creates(
         &self,
         scripthash: &[u8; 32],
         create_tx_fks: &[Fk],
     ) -> Result<bool, StoreError> {
+        if !self.pending_empty.lock().unwrap().is_empty() {
+            return Err(StoreError::Rejected(
+                "scripthash unlink while an empty head is still queued",
+            ));
+        }
         let mut batch = UnlinkBatch::default();
         let changed = self.unlink_one(scripthash, create_tx_fks, &mut batch)?;
         self.finish_unlink_batch(batch)?;
-        // Only this key. Other empty heads are waiting for their own tip flush.
+        // The queue was empty on entry, so this publishes only a full drop
+        // this call just deferred.
         self.commit_deferred_for(scripthash)?;
         Ok(changed)
     }
 
     /// Unlink every group, then sync the new chains and heads once before any
     /// replaced page is freed. A full-list drop stays in memory until
-    /// [`Self::commit_deferred_empty_heads`]. [`Self::unlink_creates`] publishes
-    /// only the key it was given.
+    /// [`Self::commit_deferred_empty_heads`].
     pub fn unlink_creates_batch(&self, groups: &[([u8; 32], Vec<Fk>)]) -> Result<(), StoreError> {
         let mut batch = UnlinkBatch::default();
         for (scripthash, fks) in groups {
@@ -161,9 +170,10 @@ impl ScriptHashTable {
         }
     }
 
-    /// Unlink one create_tx_fk (disconnect tip). One tx pays a scripthash once,
-    /// however many outputs share that script.
-    pub fn unlink_create(
+    /// Unlink one create_tx_fk. One tx pays a scripthash once, however many
+    /// outputs share that script. Disconnect uses [`Self::unlink_creates_batch`].
+    #[cfg(test)]
+    pub(super) fn unlink_create(
         &self,
         scripthash: &[u8; 32],
         create_tx_fk: Fk,
@@ -423,6 +433,7 @@ impl ScriptHashTable {
     }
 
     /// Publish empty heads for `scripthash` only. Jobs for other keys stay queued.
+    #[cfg(test)]
     fn commit_deferred_for(&self, scripthash: &[u8; 32]) -> Result<(), StoreError> {
         let mine = {
             let mut q = self.pending_empty.lock().unwrap();

@@ -2124,10 +2124,10 @@ fn extent_drop_all_one_free_error_still_commits_the_other_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A one-key unlink finishes that key only. Other empty heads stay queued
-/// until the tip flush commits them.
+/// A one-key unlink is refused while any empty head is still queued.
+/// Neither key is edited. The tip flush still publishes the waiting key.
 #[test]
-fn single_key_unlink_leaves_other_deferred_heads() {
+fn single_key_unlink_refuses_while_an_empty_head_is_queued() {
     let dir = tmp();
     let a = script_hash(&[0x81]);
     let b = script_hash(&[0x82]);
@@ -2137,20 +2137,29 @@ fn single_key_unlink_leaves_other_deferred_heads() {
     t.unlink_creates_batch(&[(a, vec![Fk(1)])]).unwrap();
     assert!(t.deferred_empty(&a));
     assert_eq!(t.entries(&a).unwrap().len(), 1);
-    assert!(t.unlink_creates(&b, &[Fk(2)]).unwrap());
+    let err = t.unlink_creates(&b, &[Fk(2)]).unwrap_err();
+    assert!(
+        matches!(err, StoreError::Rejected(_)),
+        "a one-key unlink ran while an empty head was queued, got {err}"
+    );
     assert!(
         t.deferred_empty(&a),
-        "a one-key unlink published another key's empty head"
+        "the refused call published the waiting empty head"
     );
     assert_eq!(
         t.entries(&a).unwrap().len(),
         1,
         "the waiting key lost its creates before the tip flush"
     );
-    assert!(t.entries(&b).unwrap().is_empty());
+    assert_eq!(
+        t.entries(&b).unwrap().len(),
+        1,
+        "the refused call unlinked the key it was given"
+    );
     t.commit_deferred_empty_heads().unwrap();
     assert!(!t.deferred_empty(&a));
     assert!(t.entries(&a).unwrap().is_empty());
+    assert_eq!(t.entries(&b).unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
