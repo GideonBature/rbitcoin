@@ -188,7 +188,7 @@ pub fn read_token_file(path: &Path) -> Result<RpcAuth, String> {
             & 0o777;
         if mode & 0o077 != 0 {
             return Err(format!(
-                "RPC token {}: mode {mode:o} is wider than 0600",
+                "RPC token {}: mode {mode:o} is wider than 0600. Delete the file and start again so the node mints a new token. chmod 0600 would keep this secret, and it may already have been readable",
                 path.display()
             ));
         }
@@ -399,6 +399,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         let err = read_token_file(&path).unwrap_err();
         assert!(err.contains("0600"), "{err}");
+        assert!(err.contains("Delete the file"), "{err}");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         assert!(read_token_file(&path).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
