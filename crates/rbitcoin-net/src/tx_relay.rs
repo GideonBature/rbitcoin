@@ -2518,8 +2518,9 @@ impl MempoolHub {
         while let Some(child) = queue.pop_front() {
             let txid = child.tx.compute_txid();
             let _ = self.accept_with_utxo(&child.tx, utxo, None, false, &child.announcers);
-            // Admitted, rejected, or dropped. A repark already consumed the record.
-            self.forget_taken_orphan(txid);
+            // Admitted or rejected without a repark. A repark already consumed
+            // this generation. A newer take of the same txid keeps its own.
+            self.forget_taken_orphan(txid, child.taken_gen);
             self.enqueue_noted_orphans(&mut queue);
         }
     }
@@ -3093,8 +3094,8 @@ impl MempoolHub {
             .unwrap_or(false)
     }
 
-    fn forget_taken_orphan(&self, txid: Txid) {
-        let _ = self.orphan_write(|g| g.orphanage.forget_taken(&txid));
+    fn forget_taken_orphan(&self, txid: Txid, gen: u64) {
+        let _ = self.orphan_write(|g| g.orphanage.forget_taken_gen(&txid, gen));
     }
 
     pub fn erase_orphans_for_peer(&self, peer: u64) {

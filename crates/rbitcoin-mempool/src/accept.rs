@@ -1429,14 +1429,16 @@ impl ActiveMempool {
         while let Some(child) = queue.pop_front() {
             match self.accept_tx_with(&child.tx, utxos, tip, 0, true, None) {
                 Ok(r) => {
-                    self.orphanage.forget_taken(&child.tx.compute_txid());
+                    self.orphanage
+                        .forget_taken_gen(&child.tx.compute_txid(), child.taken_gen);
                     self.push_orphan_children(r.txid, &mut queue);
                 }
                 Err(e) => {
                     if let AcceptError::Orphaned { missing, .. } = e {
                         let _ = self.park_announced(&child.tx, missing, &child.announcers);
                     } else {
-                        self.orphanage.forget_taken(&child.tx.compute_txid());
+                        self.orphanage
+                            .forget_taken_gen(&child.tx.compute_txid(), child.taken_gen);
                     }
                     for id in self.restore_conflicts(utxos, tip, RestoreOrphans::Defer) {
                         self.push_orphan_children(id, &mut queue);
@@ -4089,6 +4091,68 @@ mod tests {
         assert!(
             !mp.orphanage.contains(&child_id),
             "the last live announcer disconnecting while the orphan is out drops it on repark"
+        );
+        let _ = utxos;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Promote A reparks the child, then promote B takes it. A's later forget
+    /// must not delete B's record, or a disconnect during B's gap is lost.
+    #[test]
+    fn older_promote_forget_does_not_clear_a_newer_take() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent_a = spend_tx(ops[0], 99_000);
+        let parent_b = spend_tx(ops[1], 99_000);
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_a.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_b.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(197_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let child_id = child.compute_txid();
+        let mut missing = BTreeSet::new();
+        missing.insert(parent_a.compute_txid());
+        missing.insert(parent_b.compute_txid());
+        mp.park_orphan_from(&child, missing.clone(), Some(4));
+        let first = mp.orphanage.take_children_of(&parent_a.compute_txid());
+        let old_gen = first[0].taken_gen;
+        let _ = mp.park_announced(&child, missing.clone(), &[4]);
+        let second = mp.orphanage.take_children_of(&parent_b.compute_txid());
+        assert_eq!(
+            second.len(),
+            1,
+            "the second promote took the reparked child"
+        );
+        mp.orphanage.forget_taken_gen(&child_id, old_gen);
+        mp.orphanage.erase_for_peer(4);
+        let _ = mp.park_announced(&child, missing, &[4]);
+        assert!(
+            !mp.orphanage.contains(&child_id),
+            "a forget from the first promote must not drop the second promote's disconnect"
         );
         let _ = utxos;
         let _ = std::fs::remove_dir_all(&dir);

@@ -38,6 +38,8 @@ struct OrphanEntry {
 pub struct OrphanSnapshot {
     pub tx: Transaction,
     pub announcers: Vec<u64>,
+    /// In-flight generation from `take_children_of`. Zero for any other snapshot.
+    pub taken_gen: u64,
 }
 
 /// Side pool of not-yet-acceptable txs waiting on parent(s).
@@ -58,6 +60,8 @@ pub struct Orphanage {
     /// A disconnect in that gap cannot see `by_txid`. It edits this map, and
     /// the repark uses the result instead of the announcer list from the take.
     taken: HashMap<Txid, TakenOrphan>,
+    /// Next generation for [`Self::taken`]. Zero is never assigned.
+    next_taken_gen: u64,
 }
 
 /// Announcers copied at take time. `drop` means a disconnect removed the last one.
@@ -65,6 +69,7 @@ pub struct Orphanage {
 struct TakenOrphan {
     announcers: BTreeSet<u64>,
     drop: bool,
+    gen: u64,
 }
 
 /// What the repark should do with an orphan that was taken.
@@ -91,6 +96,7 @@ impl Orphanage {
             max_weight: max_weight.max(MAX_ORPHAN_TX_WEIGHT),
             max_count: max_count.max(1),
             taken: HashMap::new(),
+            next_taken_gen: 0,
         }
     }
 
@@ -384,16 +390,23 @@ impl Orphanage {
                     }
                 }
                 let announcers = e.announcers;
+                self.next_taken_gen = self.next_taken_gen.wrapping_add(1);
+                if self.next_taken_gen == 0 {
+                    self.next_taken_gen = 1;
+                }
+                let gen = self.next_taken_gen;
                 self.taken.insert(
                     cid,
                     TakenOrphan {
                         announcers: announcers.clone(),
                         drop: false,
+                        gen,
                     },
                 );
                 out.push(OrphanSnapshot {
                     tx: e.tx,
                     announcers: announcers.into_iter().collect(),
+                    taken_gen: gen,
                 });
             }
         }
@@ -410,9 +423,17 @@ impl Orphanage {
         }
     }
 
-    /// The orphan was admitted, or it will not be parked. Drop the in-flight record.
-    pub fn forget_taken(&mut self, txid: &Txid) {
-        self.taken.remove(txid);
+    /// Drop the in-flight record when it is still the one `gen` inserted.
+    ///
+    /// A newer take of the same txid must survive. The repark already consumed
+    /// its own record, so this only clears an admit or a reject that did not park.
+    pub fn forget_taken_gen(&mut self, txid: &Txid, gen: u64) {
+        if gen == 0 {
+            return;
+        }
+        if self.taken.get(txid).is_some_and(|t| t.gen == gen) {
+            self.taken.remove(txid);
+        }
     }
 
     pub fn announcers_of(&self, txid: &Txid) -> Vec<u64> {
@@ -494,6 +515,7 @@ impl Orphanage {
                 out.push(OrphanSnapshot {
                     tx: e.tx.clone(),
                     announcers: e.announcers.iter().copied().collect(),
+                    taken_gen: 0,
                 });
             }
         }

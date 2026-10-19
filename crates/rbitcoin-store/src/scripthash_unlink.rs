@@ -348,15 +348,17 @@ impl ScriptHashTable {
         removed: u64,
     ) {
         let mut q = self.pending_empty.lock().unwrap();
-        if let Some(job) = q.iter_mut().find(|job| &job.scripthash == scripthash) {
-            // The tip did not shrink, so this is the same chain again.
-            // Replacing a job whose head is already empty would free twice.
-            if !job.head_synced {
-                job.home = home;
-                job.old = old;
-                job.removed = removed;
-                job.pages_left = None;
-            }
+        // A retry before the empty head is durable is the same chain. A later
+        // chain, queued after that head synced, has to sit beside it or the
+        // new pages are never freed.
+        if let Some(job) = q
+            .iter_mut()
+            .find(|job| &job.scripthash == scripthash && !job.head_synced)
+        {
+            job.home = home;
+            job.old = old;
+            job.removed = removed;
+            job.pages_left = None;
             return;
         }
         q.push(PendingEmpty {
@@ -372,8 +374,9 @@ impl ScriptHashTable {
 
     /// True while a full-list unlink is waiting for the tip shrink.
     ///
-    /// The disk head is still the previous value. Callers that refresh a
-    /// RAM cache must treat this as empty.
+    /// The disk head may still be the previous value, or it may already be
+    /// empty while a free is still queued. Callers that refresh a RAM cache
+    /// must treat this as empty.
     pub fn deferred_empty(&self, scripthash: &[u8; 32]) -> bool {
         self.pending_empty
             .lock()
@@ -388,14 +391,33 @@ impl ScriptHashTable {
     /// A free that fails after the head sync stays queued. The retry frees
     /// only the pages that are still on the list.
     pub fn commit_deferred_empty_heads(&self) -> Result<(), StoreError> {
+        // One free error used to stop the loop and sit at the end, so the
+        // next pop retried it before any key that had not been tried. Drain
+        // the jobs already queued. Failures go back after that pass.
+        let mut failed = Vec::new();
+        let mut first_err = None;
         loop {
             let Some(mut job) = self.pending_empty.lock().unwrap().pop() else {
-                return Ok(());
+                break;
             };
             if let Err(e) = self.commit_one_empty(&mut job) {
-                self.pending_empty.lock().unwrap().push(job);
-                return Err(e);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                failed.push(job);
             }
+        }
+        if !failed.is_empty() {
+            let mut q = self.pending_empty.lock().unwrap();
+            // Jobs deferred while this pass ran stay at the end, so the next
+            // pop sees them before these retries.
+            for job in failed.into_iter().rev() {
+                q.insert(0, job);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 
