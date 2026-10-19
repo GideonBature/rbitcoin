@@ -404,10 +404,23 @@ the helper after the bugs above are in.
   hex` / `txid must be 32 bytes hex` on Electrum), not `invalid hex
   digit`. Odd length is still reported first. A full 64 characters of
   non-hex is still `invalid hex digit`.
-- **Negative compact difficulty.** `Target::from_compact` is zero when
-  the mantissa is greater than `0x7fffff`. `difficulty_float` is then
-  `+inf`. The previous `GetDifficulty` loop returned a finite ratio for
-  that encoding. Canonical headers do not set the sign bit.
+- **Non-canonical compact difficulty.** `difficulty_float` matches Core
+  `GetDifficulty` when every mantissa bit lands inside the 256-bit target.
+  The mantissa is at most `0x7fffff`. Size `3..=32` qualifies. Size `33`
+  qualifies at a mantissa of at most `0xffff`, and size `34` at most
+  `0xff`. A smaller size qualifies when the shifted-off low bits are
+  clear. Network pow limits are in that set. A zero target makes
+  `difficulty_float` `+inf` and the old loop a finite ratio: the sign
+  bit, size `0`, and a size of `1` or `2` that shifts every remaining bit
+  off (`0x0100ffff` was `2^224`). A partial drop stays finite and larger
+  than the old loop (`0x0200ffff` leaves target `255`, at `257/256` of
+  the old `2^216`). Size `33` or `34` past those mantissa limits, and
+  size `35` or more, drop high bits. Size `35` wraps the shift count to
+  its low 8 bits, so the difficulty is huge where the old loop is small.
+  `format_core_double` prints a non-finite result as `0`, which is what
+  `getblock`, `getblockheader`, and `getblockchaininfo` return.
+  `getmininginfo` puts the raw float in JSON, which is `null` when the
+  value is non-finite. A connected tip cannot have a zero target.
 - **Esplora hex errors.** Transaction and package broadcast return
   hex-conservative's own sentence after the `invalid hex:` prefix
   (`invalid char, failed to create bytes from hex`, `odd length, failed

@@ -160,10 +160,26 @@ pub(crate) fn rpc_warnings(ctx: &RpcContext) -> Vec<String> {
 
 /// Difficulty relative to the max target.
 ///
-/// Canonical compacts match Core `GetDifficulty`: a positive 24-bit
-/// mantissa is exact in `f64`. A mantissa above `0x7fffff` makes
-/// `Target::from_compact` zero, so this is `+inf`. The old loop returned
-/// a finite ratio for that non-canonical encoding.
+/// Matches Core `GetDifficulty` when every mantissa bit lands inside the
+/// 256-bit target. The mantissa is at most `0x7fffff`. Size `3..=32`
+/// qualifies. Size `33` qualifies at a mantissa of at most `0xffff`, and
+/// size `34` at most `0xff`. A smaller size qualifies when the shifted-off
+/// low bits are clear. Network pow limits are in that set, so a header
+/// that meets the limit matches too.
+///
+/// A zero target makes this function `+inf` and the old loop a finite
+/// ratio. That is the sign bit, size `0`, and a size of `1` or `2` that
+/// shifts every remaining bit off (`0x0100ffff` was `2^224`). A partial
+/// drop stays finite and larger than the old loop: `0x0200ffff` leaves
+/// target `255`, at `257/256` of the old `2^216`. Size `33` or `34` past
+/// the limits above, and size `35` or more, drop high bits. Size `35`
+/// wraps the shift count to its low 8 bits, so the difficulty is huge
+/// where the old loop is small.
+///
+/// `format_core_double` prints a non-finite result as `0`. Block and chain
+/// RPCs use that. `getmininginfo` puts this float straight into JSON, which
+/// is `null` when it is non-finite. A connected tip cannot have a zero
+/// target.
 pub(crate) fn difficulty_from_bits(bits: u32) -> f64 {
     bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).difficulty_float()
 }
