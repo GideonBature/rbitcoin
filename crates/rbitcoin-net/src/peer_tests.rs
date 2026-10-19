@@ -4054,6 +4054,76 @@ fn misbehavior_disconnect_does_not_refuse_loopback() {
     );
 }
 
+/// An onion session's VERSION socket is `0.0.0.0`. The refusal is the
+/// `NetAddr`, and a later session with that net is discouraged.
+#[test]
+fn overlay_misbehavior_discourages_that_net() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_000);
+    let onion = crate::NetAddr::Onion {
+        pk: [9; 32],
+        port: 8333,
+    };
+    let sock = std::net::SocketAddr::from(([0, 0, 0, 0], 8333));
+    let ver = bitcoin::p2p::message_network::VersionMessage {
+        version: 70016,
+        services: bitcoin::p2p::ServiceFlags::NETWORK,
+        timestamp: 0,
+        receiver: bitcoin::p2p::address::Address::new(&sock, bitcoin::p2p::ServiceFlags::NONE),
+        sender: bitcoin::p2p::address::Address::new(&sock, bitcoin::p2p::ServiceFlags::NONE),
+        nonce: 9,
+        user_agent: "/rbitcoin:test/".into(),
+        start_height: 0,
+        relay: true,
+    };
+    let peer = peers.register_net(
+        sock,
+        onion,
+        sock,
+        &ver,
+        true,
+        crate::peers::PeerConnType::Inbound,
+    );
+    let mut score = 0u32;
+    punish_disconnect(&mut score, Some(peer.as_ref()));
+    assert!(
+        peers.net_discouraged(onion),
+        "a misbehavior disconnect refuses that overlay net"
+    );
+    assert!(
+        !peers.inbound_discouraged(sock),
+        "0.0.0.0 must not become a clearnet refusal"
+    );
+}
+
+/// The refusal is the onion or I2P identity. Another port is the same peer.
+#[test]
+fn overlay_refusal_ignores_the_port() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_700_000_000);
+    let onion = |port| crate::NetAddr::Onion { pk: [9; 32], port };
+    let key = crate::peers::DiscourageKey::from_net(onion(8333)).unwrap();
+    peers.note_misbehavior_key(key);
+    assert!(peers.net_discouraged(onion(8333)));
+    assert!(
+        peers.net_discouraged(onion(9735)),
+        "the same onion on another port is still refused"
+    );
+    assert!(!peers.net_discouraged(crate::NetAddr::Onion {
+        pk: [8; 32],
+        port: 9735,
+    }));
+    let i2p = |port| crate::NetAddr::I2p {
+        dest: [7; 32],
+        port,
+    };
+    peers.note_misbehavior_key(crate::peers::DiscourageKey::from_net(i2p(0)).unwrap());
+    assert!(
+        peers.net_discouraged(i2p(8333)),
+        "the same I2P destination on another port is still refused"
+    );
+}
+
 #[test]
 fn threshold_exit_refuses_the_address_without_punish_disconnect() {
     let peers = crate::peers::PeerHub::new();
@@ -4278,6 +4348,44 @@ fn evicted_netgroup_waits_less_than_a_day_and_the_set_is_capped() {
     assert!(
         peers.inbound_discouraged(first),
         "rows already stored stay until they expire"
+    );
+}
+
+/// A full inbound table evicts one peer and pauses that netgroup. The pause
+/// must not refuse outbound dials to the rest of the prefix.
+#[test]
+fn slot_evict_does_not_block_an_outbound_dial() {
+    let peers = crate::peers::PeerHub::new();
+    peers.set_mock_now(1_800_000_000);
+    let evicted = "8.8.1.1:8333".parse().unwrap();
+    peers.note_slot_evict(crate::eviction::eviction_netgroup(evicted));
+    let neighbor: std::net::SocketAddr = "8.8.9.9:8333".parse().unwrap();
+    assert!(
+        peers.inbound_discouraged(neighbor),
+        "the slot wait still refuses another inbound from that /16"
+    );
+    assert!(
+        !peers.net_discouraged(crate::NetAddr::Ip(neighbor)),
+        "the slot wait must not refuse an outbound dial in that /16"
+    );
+    let cjdns_ip = std::net::Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1);
+    let cjdns_sock = std::net::SocketAddr::from((cjdns_ip, 8333));
+    peers.note_slot_evict(crate::eviction::eviction_netgroup(cjdns_sock));
+    assert!(
+        peers.inbound_discouraged(cjdns_sock),
+        "the slot wait still refuses another inbound from that cjdns group"
+    );
+    assert!(
+        !peers.net_discouraged(crate::NetAddr::Cjdns {
+            ip: cjdns_ip,
+            port: 8333,
+        }),
+        "the slot wait must not refuse an outbound cjdns dial in that group"
+    );
+    peers.note_misbehavior_addr(neighbor.ip());
+    assert!(
+        peers.net_discouraged(crate::NetAddr::Ip(neighbor)),
+        "a misbehavior key still refuses an outbound dial to that address"
     );
 }
 

@@ -4,7 +4,7 @@ use rbitcoin_query::testutil::FixtureChain;
 
 use rbitcoin_query::Query;
 use std::collections::{HashMap, HashSet};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
@@ -381,20 +381,31 @@ fn negotiate_protocol_intersection_and_asof_dialect() {
         .contains("unsupported"));
 }
 
+/// One line, one byte at a time. A `BufReader` can pull the next server line
+/// into its buffer and drop it, so a later read sees the wrong message.
+async fn read_exact_line(stream: &mut TcpStream) -> String {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut byte))
+            .await
+            .expect("timeout")
+            .unwrap();
+        assert_ne!(n, 0, "electrum peer closed");
+        buf.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    String::from_utf8(buf).unwrap()
+}
+
 async fn electrum_tcp_rpc(stream: &mut TcpStream, id: u32, method: &str, params: Value) -> Value {
     let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
     let mut line = serde_json::to_string(&req).unwrap();
     line.push('\n');
     stream.write_all(line.as_bytes()).await.unwrap();
-    let mut reader = BufReader::new(&mut *stream);
-    let mut resp = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        reader.read_line(&mut resp),
-    )
-    .await
-    .expect("timeout")
-    .unwrap();
+    let resp = read_exact_line(stream).await;
     serde_json::from_str(&resp).unwrap()
 }
 
@@ -461,6 +472,9 @@ async fn accept_client_ping_and_shutdown() {
     )
     .await;
     assert_eq!(probe["result"], json!({"0": {}}));
+    let done: Value = serde_json::from_str(&read_exact_line(&mut stream).await).unwrap();
+    assert_eq!(done["method"], "blockchain.tweaks.subscribe");
+    assert_eq!(done["params"][0]["message"], "done");
 
     let banner_v = electrum_tcp_rpc(&mut stream, 5, "server.banner", json!([])).await;
     assert_eq!(banner_v["result"].as_str().unwrap(), banner);
@@ -1734,4 +1748,233 @@ async fn sp_scan_stops_when_the_client_hangs_up() {
     );
 }
 
-include!("electrum_sh_journey.rs");
+/// A client that never reads must not hold the request. The write itself
+/// returns; the connection task drops on that error.
+#[tokio::test]
+async fn stalled_electrum_write_is_closed() {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
+
+    struct PendingWriter;
+    impl AsyncWrite for PendingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let mut writer = PendingWriter;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::write_line(
+            &mut writer,
+            &json!({"jsonrpc":"2.0","id": 1, "result": null}),
+            std::time::Duration::from_millis(40),
+        ),
+    )
+    .await
+    .expect("a stalled write returns before the test bound");
+    let err = result.expect_err("stalled write is an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
+/// A scripthash status push that the client never reads ends the connection.
+/// The push is the only write after subscribe: the chain height does not move,
+/// so the periodic rescan has nothing new to send.
+#[tokio::test]
+async fn stalled_scripthash_push_ends_the_connection() {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    struct ScriptedRead {
+        data: Vec<u8>,
+        pos: usize,
+    }
+    impl AsyncRead for ScriptedRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if this.pos >= this.data.len() {
+                return Poll::Pending;
+            }
+            let n = (this.data.len() - this.pos).min(buf.remaining());
+            buf.put_slice(&this.data[this.pos..this.pos + n]);
+            this.pos += n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct StallWriter {
+        got: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        stall: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl AsyncWrite for StallWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.stall.load(std::sync::atomic::Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            self.got.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct Pair<R, W> {
+        reader: R,
+        writer: W,
+    }
+    impl<R: AsyncRead + Unpin, W: Unpin> AsyncRead for Pair<R, W> {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().reader).poll_read(cx, buf)
+        }
+    }
+    impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for Pair<R, W> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.get_mut().writer).poll_write(cx, buf)
+        }
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().writer).poll_flush(cx)
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().writer).poll_shutdown(cx)
+        }
+    }
+
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    rbitcoin_query::accept_and_connect_block(
+        &q,
+        &params,
+        rbitcoin_primitives::Height::GENESIS,
+        &genesis,
+        rbitcoin_consensus::Milestone::NONE,
+    )
+    .unwrap();
+    let last = 1 + params.coinbase_maturity();
+    let (_tip, _time, cbs) = rbitcoin_query::pad_empty_from(
+        &q,
+        &params,
+        genesis.block_hash(),
+        genesis.header.time,
+        1,
+        last,
+        1,
+    );
+    let q = std::sync::Arc::new(q);
+    let hub = std::sync::Arc::new(
+        MempoolHub::open(dir.join("mempool"), std::sync::Arc::clone(&q)).unwrap(),
+    );
+    hub.set_relay_enabled(true);
+
+    let sh = electrum_scripthash_hex(&[0x51]);
+    let line = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"blockchain.scripthash.subscribe\",\"params\":[\"{sh}\"]}}\n"
+    );
+    let stall = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stream = Pair {
+        reader: ScriptedRead {
+            data: line.into_bytes(),
+            pos: 0,
+        },
+        writer: StallWriter {
+            got: std::sync::Arc::clone(&got),
+            stall: std::sync::Arc::clone(&stall),
+        },
+    };
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.limits.idle_timeout = std::time::Duration::from_millis(80);
+    let (tip_tx, tip_rx) = tokio::sync::broadcast::channel(1);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task = tokio::spawn(handle_client(
+        stream,
+        "127.0.0.1:9".parse().unwrap(),
+        std::sync::Arc::clone(&q),
+        std::sync::Arc::new(cfg),
+        std::sync::Arc::new(params),
+        tip_rx,
+        Some(std::sync::Arc::clone(&hub)),
+        stop,
+    ));
+    let _tip_tx = tip_tx;
+
+    let mut saw_reply = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let buf = got.lock().unwrap().clone();
+        if String::from_utf8_lossy(&buf).contains("\"id\":1") {
+            saw_reply = true;
+            break;
+        }
+    }
+    assert!(
+        saw_reply,
+        "subscribe reply must land before the push stalls"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    stall.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint {
+                txid: cbs[0],
+                vout: 0,
+            },
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(50_0000_0000 - 10_000),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    hub.accept_tx(&tx)
+        .expect("mempool spend of the subscribed script");
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("stalled push ends the connection task");
+    let err = joined
+        .expect("connection task")
+        .expect_err("stalled push is an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        err.to_string().contains("write timeout"),
+        "the push timeout must end the task, got {err}"
+    );
+    let _ = dir;
+}

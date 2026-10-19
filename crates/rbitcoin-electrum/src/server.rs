@@ -404,7 +404,7 @@ where
                                 "method": "blockchain.headers.subscribe",
                                 "params": [{ "hex": t.header_hex, "height": t.height }]
                             });
-                            write_line(&mut writer, &msg).await?;
+                            write_line(&mut writer, &msg, idle).await?;
                         }
                         if !conn.outpoint_subs.is_empty() {
                             emit_outpoint_notes(
@@ -412,6 +412,7 @@ where
                                 &query,
                                 mempool.clone(),
                                 &conn.outpoint_subs,
+                                idle,
                             )
                             .await?;
                         }
@@ -422,6 +423,7 @@ where
                                 &params,
                                 sub,
                                 t.height,
+                                idle,
                             )
                             .await?;
                         }
@@ -438,6 +440,7 @@ where
                                 &conn.sh_subs,
                                 &mut last_sent_status,
                                 heights,
+                                idle,
                             )
                             .await?;
                         }
@@ -451,6 +454,7 @@ where
                                 &conn.sh_subs,
                                 &mut last_sent_status,
                                 None,
+                                idle,
                             )
                             .await?;
                         }
@@ -481,6 +485,7 @@ where
                     &conn.sh_subs,
                     &mut last_sent_status,
                     scan,
+                    idle,
                 )
                 .await?;
             }
@@ -547,7 +552,7 @@ where
                                 "method": "blockchain.scripthash.subscribe",
                                 "params": [hash_hex_rev(&sh), status_json(status)]
                             });
-                            let _ = write_line(&mut writer, &msg).await;
+                            write_line(&mut writer, &msg, idle).await?;
                         }
                     }
                 }
@@ -564,7 +569,7 @@ where
                                 "jsonrpc":"2.0","id": null,
                                 "error": {"code": -32600, "message": "request line too long"}
                             });
-                            let _ = write_line(&mut writer, &resp).await;
+                            let _ = write_line(&mut writer, &resp, idle).await;
                             return Err(e);
                         }
                         return Err(e);
@@ -595,6 +600,7 @@ where
                         &peer,
                         id,
                         &params_v,
+                        idle,
                         &mut conn,
                     )
                     .await?;
@@ -742,7 +748,7 @@ where
                         json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}})
                     }
                 };
-                write_line(&mut writer, &resp).await?;
+                write_line(&mut writer, &resp, idle).await?;
                 let _ = &notify;
             }
         }
@@ -762,6 +768,7 @@ async fn serve_sp_subscribe<R, W>(
     peer: &SocketAddr,
     id: Value,
     params_v: &Value,
+    idle: Duration,
     conn: &mut ElectrumConn,
 ) -> Result<(), std::io::Error>
 where
@@ -775,6 +782,7 @@ where
             write_line(
                 writer,
                 &json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}),
+                idle,
             )
             .await?;
             return Ok(());
@@ -784,6 +792,7 @@ where
         write_line(
             writer,
             &json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": "silent payment scan already running"}}),
+            idle,
         )
         .await?;
         return Ok(());
@@ -797,7 +806,7 @@ where
         0,
         None,
     );
-    write_line(writer, &rpc_result(&id, &result, None)).await?;
+    write_line(writer, &rpc_result(&id, &result, None), idle).await?;
     conn.sp_scan_busy = true;
     let last = tip.unwrap_or(sub.start);
     let scanned = scan_sp_off_connection(reader, query, chain, &sub, last).await;
@@ -816,7 +825,7 @@ where
             "history": hits,
         }
     });
-    write_line(writer, &note).await?;
+    write_line(writer, &note, idle).await?;
     conn.sp_sub = Some(sub);
     Ok(())
 }
@@ -845,6 +854,7 @@ async fn emit_sp_tip<W: AsyncWrite + Unpin>(
     chain: &ChainParams,
     sub: &crate::silent_scan::SpSub,
     height: u32,
+    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let hits = crate::silent_scan::scan_hits(query, chain, sub, height, height).unwrap_or_default();
     if hits.is_empty() {
@@ -859,7 +869,7 @@ async fn emit_sp_tip<W: AsyncWrite + Unpin>(
             "history": hits,
         }
     });
-    write_line(writer, &note).await
+    write_line(writer, &note, idle).await
 }
 
 async fn emit_outpoint_notes<W: AsyncWrite + Unpin>(
@@ -867,6 +877,7 @@ async fn emit_outpoint_notes<W: AsyncWrite + Unpin>(
     query: &Arc<Query>,
     mempool: Option<Arc<MempoolHub>>,
     subs: &HashSet<([u8; 32], u32)>,
+    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let keys: Vec<([u8; 32], u32)> = subs.iter().copied().collect();
     let q = Arc::clone(query);
@@ -889,7 +900,7 @@ async fn emit_outpoint_notes<W: AsyncWrite + Unpin>(
             "method": "blockchain.outpoint.subscribe",
             "params": [txid_hex(&txid), vout, status],
         });
-        write_line(writer, &note).await?;
+        write_line(writer, &note, idle).await?;
     }
     Ok(())
 }
@@ -998,7 +1009,7 @@ where
     let req = match crate::tweaks::parse_req(params_v) {
         Ok(r) => r,
         Err(e) => {
-            tweaks_sub_err(writer, peer, &id, params_v, 0, &e).await?;
+            tweaks_sub_err(writer, peer, &id, params_v, 0, &e, idle).await?;
             return Ok(());
         }
     };
@@ -1007,7 +1018,7 @@ where
     let t0 = Instant::now();
     let Some(last) = last else {
         return serve_tweaks_empty_last(
-            writer, query, chain, peer, &id, params_v, req, t0, min_dust,
+            writer, query, chain, peer, &id, params_v, req, t0, min_dust, idle,
         )
         .await;
     };
@@ -1032,6 +1043,7 @@ where
                 params_v,
                 t0.elapsed().as_millis() as u64,
                 &e,
+                idle,
             )
             .await?;
             return Ok(());
@@ -1040,8 +1052,8 @@ where
     let wall_ms = t0.elapsed().as_millis() as u64;
     meter_dispatch_wall(t0.elapsed().as_micros() as u64);
     tweaks_sub_ok_log(peer, params_v, wall_ms);
-    write_rpc_result(writer, &id, &wave.result_json).await?;
-    write_raw_lines(writer, &wave.rest_notifies).await?;
+    write_rpc_result(writer, &id, &wave.result_json, idle).await?;
+    write_raw_lines(writer, &wave.rest_notifies, idle).await?;
     let mut next = req.start.saturating_add(wave.consumed.max(1));
     let limits = crate::tweaks::subscribe_serve_limits(req.historical);
     serve_tweaks_rest(
@@ -1077,7 +1089,7 @@ where
         )
         .await?;
     }
-    write_line(writer, &crate::tweaks::done_notify()).await?;
+    write_line(writer, &crate::tweaks::done_notify(), idle).await?;
     Ok(())
 }
 
@@ -1088,6 +1100,7 @@ async fn tweaks_sub_err<W: AsyncWrite + Unpin>(
     params_v: &Value,
     wall_ms: u64,
     e: &str,
+    idle: Duration,
 ) -> Result<(), std::io::Error> {
     rbitcoin_log::api_call(
         "electrum",
@@ -1100,6 +1113,7 @@ async fn tweaks_sub_err<W: AsyncWrite + Unpin>(
     write_line(
         writer,
         &json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}}),
+        idle,
     )
     .await
 }
@@ -1126,6 +1140,7 @@ async fn serve_tweaks_empty_last<W: AsyncWrite + Unpin>(
     req: crate::tweaks::TweakReq,
     t0: Instant,
     min_dust: u64,
+    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let first =
         match crate::tweaks::height_map_json(query, chain, req.start, !req.historical, min_dust) {
@@ -1138,12 +1153,13 @@ async fn serve_tweaks_empty_last<W: AsyncWrite + Unpin>(
                     params_v,
                     t0.elapsed().as_millis() as u64,
                     &e,
+                    idle,
                 )
                 .await?;
                 return Ok(());
             }
         };
-    serve_tweaks_empty_ok(writer, peer, id, params_v, t0, &first).await
+    serve_tweaks_empty_ok(writer, peer, id, params_v, t0, &first, idle).await
 }
 
 async fn serve_tweaks_empty_ok<W: AsyncWrite + Unpin>(
@@ -1153,12 +1169,13 @@ async fn serve_tweaks_empty_ok<W: AsyncWrite + Unpin>(
     params_v: &Value,
     t0: Instant,
     first: &str,
+    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let wall_ms = t0.elapsed().as_millis() as u64;
     meter_dispatch_wall(t0.elapsed().as_micros() as u64);
     tweaks_sub_ok_log(peer, params_v, wall_ms);
-    write_rpc_result(writer, id, first).await?;
-    write_line(writer, &crate::tweaks::done_notify()).await
+    write_rpc_result(writer, id, first, idle).await?;
+    write_line(writer, &crate::tweaks::done_notify(), idle).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1220,7 +1237,7 @@ where
         if open {
             handle = spawn_wave(*next);
         }
-        write_raw_lines(writer, &batch.lines).await?;
+        write_raw_lines(writer, &batch.lines, idle).await?;
         if !open {
             break;
         }
@@ -1258,6 +1275,7 @@ where
                                 write_line(
                                     writer,
                                     &json!({"jsonrpc":"2.0","id": ping_id, "result": null}),
+                                    idle,
                                 )
                                 .await?;
                             }
@@ -1279,15 +1297,33 @@ where
     }
 }
 
+async fn write_bytes_within<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    deadline: Duration,
+) -> Result<(), std::io::Error> {
+    let write = async {
+        writer.write_all(bytes).await?;
+        writer.flush().await?;
+        Ok(())
+    };
+    match tokio::time::timeout(deadline, write).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "write timeout",
+        )),
+    }
+}
+
 async fn write_line<W: AsyncWrite + Unpin>(
     writer: &mut W,
     msg: &Value,
+    deadline: Duration,
 ) -> Result<(), std::io::Error> {
     let mut s = serde_json::to_string(msg).unwrap_or_else(|_| "{}".into());
     s.push('\n');
-    writer.write_all(s.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
+    write_bytes_within(writer, s.as_bytes(), deadline).await
 }
 
 fn restatus_notes(
@@ -1419,6 +1455,7 @@ async fn emit_sh_notes<W: AsyncWrite + Unpin>(
     sh_subs: &HashSet<[u8; 32]>,
     last_sent: &mut HashMap<[u8; 32], String>,
     heights: Option<Vec<u32>>,
+    idle: Duration,
 ) -> Result<(), std::io::Error> {
     let q = Arc::clone(query);
     let subs: Vec<[u8; 32]> = sh_subs.iter().copied().collect();
@@ -1437,7 +1474,7 @@ async fn emit_sh_notes<W: AsyncWrite + Unpin>(
             "method": "blockchain.scripthash.subscribe",
             "params": [hash_hex_rev(&sh), status_json(status)]
         });
-        write_line(writer, &msg).await?;
+        write_line(writer, &msg, idle).await?;
     }
     Ok(())
 }
@@ -1445,16 +1482,18 @@ async fn emit_sh_notes<W: AsyncWrite + Unpin>(
 async fn write_raw_line<W: AsyncWrite + Unpin>(
     writer: &mut W,
     msg: &str,
+    deadline: Duration,
 ) -> Result<(), std::io::Error> {
-    writer.write_all(msg.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
-    Ok(())
+    let mut bytes = Vec::with_capacity(msg.len() + 1);
+    bytes.extend_from_slice(msg.as_bytes());
+    bytes.push(b'\n');
+    write_bytes_within(writer, &bytes, deadline).await
 }
 
 async fn write_raw_lines<W: AsyncWrite + Unpin>(
     writer: &mut W,
     lines: &[String],
+    deadline: Duration,
 ) -> Result<(), std::io::Error> {
     if lines.is_empty() {
         return Ok(());
@@ -1468,15 +1507,14 @@ async fn write_raw_lines<W: AsyncWrite + Unpin>(
         buf.extend_from_slice(l.as_bytes());
         buf.push(b'\n');
     }
-    writer.write_all(&buf).await?;
-    writer.flush().await?;
-    Ok(())
+    write_bytes_within(writer, &buf, deadline).await
 }
 
 async fn write_rpc_result<W: AsyncWrite + Unpin>(
     writer: &mut W,
     id: &Value,
     result_json: &str,
+    deadline: Duration,
 ) -> Result<(), std::io::Error> {
     let mut s = String::with_capacity(result_json.len() + 48);
     s.push_str("{\"jsonrpc\":\"2.0\",\"id\":");
@@ -1484,7 +1522,7 @@ async fn write_rpc_result<W: AsyncWrite + Unpin>(
     s.push_str(",\"result\":");
     s.push_str(result_json);
     s.push('}');
-    write_raw_line(writer, &s).await
+    write_raw_line(writer, &s, deadline).await
 }
 
 /// Instant methods that must stay on the connection task so a 1-worker runtime

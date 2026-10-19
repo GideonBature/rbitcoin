@@ -552,7 +552,7 @@ scrape_configs:
 | Min relay | **0.1 sat/vB** (100 sat/kvB) |
 | Dust | **not enforced** |
 | Script templates | allow if consensus-valid (within weight/CPU) |
-| RBF | **full RBF** (no BIP125 signaling required) |
+| RBF | **full RBF** (no BIP125 signaling required). An unconfirmed input is allowed only when it is a parent of the one direct conflict |
 | Annex | empty OK; non-empty only if first data byte after `0x50` is `0x00` |
 | Cluster caps | 64 txs / 101 kvB (404 kWU) |
 | Eviction | worst linearization **chunk** when over weight budget |

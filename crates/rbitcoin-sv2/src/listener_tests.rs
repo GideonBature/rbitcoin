@@ -217,13 +217,35 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
     ok.recv().await.expect("setup reply");
     ok.coinbase_output_constraints(1, 1).await.unwrap();
 
+    // Same-budget constraints do not rebuild. They do refresh the idle
+    // deadline, so this session can outlive the original setup deadline.
+    let since_constraints = Instant::now();
     let closed = tokio::time::timeout(setup_timeout * 10, async {
-        while idle.recv().await.is_ok() {}
+        loop {
+            tokio::select! {
+                biased;
+                r = idle.recv() => {
+                    if r.is_err() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(setup_timeout / 3) => {
+                    ok.coinbase_output_constraints(1, 1)
+                        .await
+                        .expect("same budget keeps the session");
+                }
+            }
+        }
     })
     .await;
     assert!(closed.is_ok(), "session without constraints must be closed");
 
-    tokio::time::sleep(setup_timeout * 2).await;
+    while since_constraints.elapsed() < setup_timeout * 2 {
+        tokio::time::sleep(setup_timeout / 3).await;
+        ok.coinbase_output_constraints(1, 1)
+            .await
+            .expect("same budget keeps the session");
+    }
     ok.request_transaction_data(u64::MAX).await.unwrap();
     loop {
         let f = ok
@@ -234,6 +256,44 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
             break;
         }
     }
+    tp.shutdown().await;
+}
+
+/// One `CoinbaseOutputConstraints` then silence. The setup deadline has
+/// already passed, so only a post-setup idle deadline frees the slot.
+#[tokio::test]
+async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
+    let tc = shared_regtest(0);
+    let chain = Arc::clone(&tc.chain);
+    let setup_timeout = Duration::from_millis(300);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain,
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout,
+        write_timeout: WRITE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: TEMPLATE_INTERVAL,
+    })
+    .await
+    .expect("listen");
+    let (addr, pk) = (tp.local_addr, tp.authority_pubkey);
+
+    let mut c = TpClient::connect(addr, pk).await.expect("handshake");
+    c.setup_connection(TDP, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+    c.coinbase_output_constraints(1, 1).await.unwrap();
+
+    let closed = tokio::time::timeout(setup_timeout * 10, async {
+        while c.recv().await.is_ok() {}
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "session silent after constraints must be closed"
+    );
     tp.shutdown().await;
 }
 

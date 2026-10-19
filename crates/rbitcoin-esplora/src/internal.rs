@@ -552,14 +552,13 @@ mod tests {
         (handle, sock)
     }
 
-    /// `/txs/test` dry-runs; `GET /broadcast` and `POST /tx` admit.
+    /// `/txs/test` dry-runs; `POST /tx` admits. `GET /broadcast` is gone.
     async fn test_then_broadcast(sock: &std::path::Path, pad: &Pad, txs: &[Transaction]) {
         use bitcoin::consensus::encode::serialize_hex;
 
         let hex = serialize_hex(&txs[0]);
         let (st, body) = http_get_unix(sock, "/broadcast").await;
-        assert_eq!(st, 400, "{body}");
-        assert!(body.contains("Missing tx"), "{body}");
+        assert_eq!(st, 404, "{body}");
 
         let body = serde_json::to_vec(&json!([&hex])).unwrap();
         let (st, resp) = http_post_unix(sock, "/txs/test", &body).await;
@@ -582,6 +581,8 @@ mod tests {
         assert!(resp.contains("Exceeded maximum of 25"), "{resp}");
 
         let (st, resp) = http_get_unix(sock, &format!("/broadcast?tx={hex}")).await;
+        assert_eq!(st, 404, "{resp}");
+        let (st, resp) = http_post_unix(sock, "/tx", hex.as_bytes()).await;
         assert_eq!(st, 200, "{resp}");
         assert_eq!(resp, txs[0].compute_txid().to_string());
         for tx in &txs[1..] {

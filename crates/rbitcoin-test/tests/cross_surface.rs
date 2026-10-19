@@ -1627,8 +1627,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     assert_eq!(st, 200, "POST /tx: {body}");
     assert_eq!(body, txid_hex);
     let (st, body) = http_get(esplora_addr, &format!("/broadcast?tx={hex}")).await;
-    assert_eq!(st, 400, "GET /broadcast of live tx: {body}");
-    assert!(body.contains("duplicate"), "{body}");
+    assert_eq!(st, 404, "GET /broadcast is not served: {body}");
     let (st, body) = http_get(esplora_addr, &format!("/txs/outspends?txids={cb_hex}")).await;
     assert_eq!(st, 200, "GET /txs/outspends: {body}");
     let outspends: Value = serde_json::from_str(&body).unwrap();

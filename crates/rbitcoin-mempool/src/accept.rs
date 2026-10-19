@@ -452,6 +452,15 @@ enum EvictUntil {
     WeightBudget,
 }
 
+/// What to do with orphans of a conflict that was just put back.
+#[derive(Clone, Copy)]
+enum RestoreOrphans {
+    /// No walk is running. Start one for each restored tx.
+    Promote,
+    /// A walk is already running. Hand the restored txids back to it.
+    Defer,
+}
+
 struct IngestedLive {
     graph: TxGraph,
     bodies: std::collections::HashMap<Txid, Arc<Transaction>>,
@@ -501,6 +510,15 @@ pub struct ActiveMempool {
     node_clock: Arc<AtomicU64>,
     /// Accept times of the records loaded at open, until the hub takes them.
     loaded_accept: Vec<(Txid, Wtxid, u64)>,
+}
+
+/// A parked package member, taken out before admit.
+///
+/// `announcers` are the peers who announced it. The missing-parent set is
+/// not kept: it is resolved again if the package puts the tx back.
+pub struct LiftedOrphan {
+    pub tx: Transaction,
+    pub announcers: Vec<u64>,
 }
 
 impl ActiveMempool {
@@ -1261,6 +1279,47 @@ impl ActiveMempool {
         })
     }
 
+    /// Unconfirmed inputs on a replacement must already be parents of the
+    /// direct conflicts, and there is only one direct conflict. Spending an
+    /// output of a direct conflict is `bad-txns-spends-conflicting-tx`.
+    fn reject_new_unconfirmed(
+        &self,
+        tx: &Transaction,
+        direct: &BTreeSet<Txid>,
+    ) -> Result<(), AcceptError> {
+        let mut parents_of_conflicts = BTreeSet::new();
+        for id in direct {
+            let conflict = self
+                .bodies
+                .get(id)
+                .ok_or_else(|| AcceptError::Durable("conflict body missing".into()))?;
+            for inp in &conflict.input {
+                parents_of_conflicts.insert(inp.previous_output.txid);
+            }
+        }
+        for inp in &tx.input {
+            let parent = inp.previous_output.txid;
+            if !self.bodies.contains_key(&parent) {
+                continue;
+            }
+            if !parents_of_conflicts.contains(&parent) {
+                // Spending the output of a tx this replacement evicts. Core
+                // names that case; any other new unconfirmed parent is the
+                // broader Libre refusal.
+                if direct.contains(&parent) {
+                    return Err(AcceptError::Policy("bad-txns-spends-conflicting-tx"));
+                }
+                return Err(AcceptError::Policy("adds unconfirmed input"));
+            }
+            if direct.len() > 1 {
+                return Err(AcceptError::Policy(
+                    "unconfirmed input has multiple conflicts",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns (conflict set, fee, sigop-adjusted weight).
     fn plan_after_script(
         &self,
@@ -1296,6 +1355,9 @@ impl ActiveMempool {
             (i128::from(fee_sat).saturating_add(i128::from(prep.fee_delta))).max(0) as u64;
 
         let conflict_set = if !scan.direct_conflicts.is_empty() {
+            // Libre HasNoNewUnconfirmed: parents of the direct conflicts only,
+            // not their ancestor closure. One direct conflict may be CPFPed.
+            self.reject_new_unconfirmed(tx, &scan.direct_conflicts)?;
             let direct: Vec<Txid> = scan.direct_conflicts.into_iter().collect();
             let set = self.graph.conflict_set(&direct);
             let (old_fee, old_weight) = self.graph.set_fee_weight(&set);
@@ -1346,23 +1408,43 @@ impl ActiveMempool {
         *sha256::Hash::hash(script).as_byte_array()
     }
 
-    /// Re-try orphans that listed `parent` as missing (recursive via accept_tx_with).
+    /// Re-try orphans that listed `parent` as missing.
     ///
     /// Uses `accept_tx_with` (not top-level accept_tx) so stage timers accumulate
     /// on the parent admit that unlocked the orphan chain. Public for hub staged commit.
+    ///
+    /// A worklist, so a parked chain does not keep one frame per descendant.
+    /// The first child is admitted, then its descendants, then the next sibling.
+    ///
+    /// A child that still misses another parent goes back to the orphanage.
+    /// Conflicts put back by that failure join this same list.
     pub fn promote_orphans_of(
         &mut self,
         parent: Txid,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) {
-        let children = self.orphanage.take_children_of(&parent);
-        for child in children {
-            if let Ok(r) = self.accept_tx_with(&child, utxos, tip, 0, true, None) {
-                self.promote_orphans_of(r.txid, utxos, tip);
-            } else {
-                self.restore_undone(utxos, tip);
+        let mut queue = VecDeque::new();
+        self.push_orphan_children(parent, &mut queue);
+        while let Some(child) = queue.pop_front() {
+            match self.accept_tx_with(&child, utxos, tip, 0, true, None) {
+                Ok(r) => self.push_orphan_children(r.txid, &mut queue),
+                Err(e) => {
+                    if let AcceptError::Orphaned { missing, .. } = e {
+                        let _ = self.park_orphan(&child, missing);
+                    }
+                    for id in self.restore_conflicts(utxos, tip, RestoreOrphans::Defer) {
+                        self.push_orphan_children(id, &mut queue);
+                    }
+                }
             }
+        }
+    }
+
+    /// Orphans of `parent`, earlier children still ahead of later ones.
+    fn push_orphan_children(&mut self, parent: Txid, queue: &mut VecDeque<Transaction>) {
+        for child in self.orphanage.take_children_of(&parent).into_iter().rev() {
+            queue.push_front(child);
         }
     }
 
@@ -1592,21 +1674,101 @@ impl ActiveMempool {
             None
         };
         let mut accepted: Vec<AcceptResult> = Vec::with_capacity(txs.len());
+        // Members already parked are lifted so the short-circuit for a
+        // re-announced orphan does not reject them. Promote waits until
+        // every member is committed, so this walk cannot admit a later
+        // member and then roll it back as a duplicate.
+        let mut lifted: Vec<LiftedOrphan> = Vec::new();
         for tx in txs {
-            // accept_tx_with + promote (not top-level accept_tx) so stages are not reset per member.
+            if let Some(parked) = self.lift_parked_member(tx) {
+                lifted.push(parked);
+            }
+            // accept_tx_with (not top-level accept_tx) so stages are not reset per member.
             match self.accept_tx_with(tx, utxos, tip, 0, true, member_min) {
-                Ok(r) => {
-                    self.promote_orphans_of(r.txid, utxos, tip);
-                    accepted.push(r);
-                }
+                Ok(r) => accepted.push(r),
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
+                    for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0) {
+                        match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None) {
+                            Ok(r) => self.promote_orphans_of(r.txid, utxos, tip),
+                            Err(AcceptError::Orphaned { missing, .. }) => {
+                                self.park_announced(&item.tx, missing, &item.announcers);
+                            }
+                            Err(_) => self.restore_undone(utxos, tip),
+                        }
+                    }
                     return Err(e);
                 }
             }
         }
+        let ids: Vec<Txid> = accepted.iter().map(|r| r.txid).collect();
+        for id in ids {
+            self.promote_orphans_of(id, utxos, tip);
+        }
         Ok(accepted)
+    }
+
+    /// Take `tx` out of the orphanage so a package can admit it.
+    ///
+    /// `prepare_admit` and `plan_after_script` both refuse a tx that is
+    /// still parked, even when its parents are already in the mempool.
+    /// The announcing peers come along so a failed package can put them back.
+    pub fn lift_parked_member(&mut self, tx: &Transaction) -> Option<LiftedOrphan> {
+        let id = tx.compute_txid();
+        self.orphanage.missing_of(&id)?;
+        let announcers = self.orphanage.announcers_of(&id);
+        let parked = self.orphanage.take_txid(&id)?;
+        Some(LiftedOrphan {
+            tx: parked,
+            announcers,
+        })
+    }
+
+    /// Put lifted members back, or hand back the ones that can be admitted.
+    ///
+    /// The missing set saved at the lift is not used. A parent can arrive
+    /// while the child is out of the orphanage, and parking under that parent
+    /// leaves the child with nobody left to wake it. Parents still absent are
+    /// resolved again here. `fee_delta` is the caller's `prioritisetransaction`
+    /// map: a child under the raw relay floor is still returned when that
+    /// delta clears it. Announcers are kept on either path.
+    pub fn repark_lifted(
+        &mut self,
+        lifted: &[LiftedOrphan],
+        utxos: &impl UtxoProvider,
+        tip: ChainTipCtx,
+        fee_delta: &impl Fn(&Txid) -> i64,
+    ) -> Vec<LiftedOrphan> {
+        let mut ready = Vec::new();
+        for item in lifted {
+            let txid = item.tx.compute_txid();
+            if self.graph.contains(&txid) {
+                continue;
+            }
+            match self.prepare_admit(&item.tx, utxos, tip, fee_delta(&txid), true, None) {
+                Err(AcceptError::Orphaned { missing, .. }) => {
+                    self.park_announced(&item.tx, missing, &item.announcers);
+                }
+                Err(AcceptError::Duplicate(_)) => {}
+                Ok(_) => ready.push(LiftedOrphan {
+                    tx: item.tx.clone(),
+                    announcers: item.announcers.clone(),
+                }),
+                Err(_) => {}
+            }
+        }
+        ready
+    }
+
+    /// Park `tx` under `missing` and restore every announcing peer.
+    fn park_announced(&mut self, tx: &Transaction, missing: BTreeSet<Txid>, announcers: &[u64]) {
+        let txid = tx.compute_txid();
+        let first = announcers.first().copied();
+        let _ = self.park_orphan_from(tx, missing, first);
+        for peer in announcers.iter().skip(1) {
+            self.orphanage.add_announcer(&txid, *peer);
+        }
     }
 
     fn rollback_accepted_package(
@@ -1627,7 +1789,7 @@ impl ActiveMempool {
             let _ = self.unlink_tree(&r.txid);
         }
         let _ = self.store.sync_deaths();
-        self.restore_victims(&victims, &accept_secs, utxos, tip);
+        let _ = self.restore_victims(&victims, &accept_secs, utxos, tip, RestoreOrphans::Promote);
     }
 
     /// Parents before children, so a restored descendant can see its in-set parent.
@@ -1697,25 +1859,42 @@ impl ActiveMempool {
         accept_secs: &std::collections::HashMap<Txid, u64>,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
-    ) {
+        orphans: RestoreOrphans,
+    ) -> Vec<Txid> {
+        let mut noted = Vec::new();
         for i in Self::ancestor_first_order(victims) {
             let at = accept_secs.get(&victims[i].compute_txid()).copied();
             match self.reaccept_already_admitted(&victims[i], at, utxos, tip) {
-                Ok(r) => self.promote_orphans_of(r.txid, utxos, tip),
+                Ok(r) => match orphans {
+                    RestoreOrphans::Promote => self.promote_orphans_of(r.txid, utxos, tip),
+                    RestoreOrphans::Defer => noted.push(r.txid),
+                },
                 Err(_) => {
                     if !self.undone_replacements.is_empty() {
-                        self.restore_undone(utxos, tip);
+                        noted.extend(self.restore_conflicts(utxos, tip, orphans));
                     }
                 }
             }
         }
+        noted
     }
 
     /// Re-accept conflicts a failed commit already removed.
     fn restore_undone(&mut self, utxos: &impl UtxoProvider, tip: ChainTipCtx) {
+        let _ = self.restore_conflicts(utxos, tip, RestoreOrphans::Promote);
+    }
+
+    /// Like [`Self::restore_undone`]. `Defer` returns the restored txids
+    /// instead of starting another orphan walk.
+    fn restore_conflicts(
+        &mut self,
+        utxos: &impl UtxoProvider,
+        tip: ChainTipCtx,
+        orphans: RestoreOrphans,
+    ) -> Vec<Txid> {
         let victims = std::mem::take(&mut self.undone_replacements);
         let accept_secs = std::mem::take(&mut self.undone_accept_secs);
-        self.restore_victims(&victims, &accept_secs, utxos, tip);
+        self.restore_victims(&victims, &accept_secs, utxos, tip, orphans)
     }
 
     /// Drop one live tx from the graph and `pwrite` its slot DEAD. No `fdatasync`.
@@ -1926,7 +2105,7 @@ impl ActiveMempool {
 
     fn note_invalid(&mut self, txid: Txid) {
         if self.recent_invalid.len() >= RECENT_INVALID_CAP {
-            self.recent_invalid.clear();
+            return;
         }
         self.recent_invalid.insert(txid);
     }
@@ -3616,9 +3795,164 @@ mod tests {
         (parent, child)
     }
 
-    /// Conflicts removed by a replacement that does not stay come back even
-    /// when the rolling floor now prices them out, including a CPFP parent
-    /// that cannot pay min relay alone.
+    /// A parent-then-child package must admit a child that was already parked
+    /// on that parent, and a failed package must leave that child parked.
+    #[test]
+    fn package_admits_its_parked_child() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: ops[0],
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(40_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+                TxOut {
+                    value: Amount::from_sat(40_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+            ],
+        };
+        let parent_id = parent.compute_txid();
+        let child = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 0,
+            },
+            39_000,
+        );
+        let sibling = spend_tx(
+            OutPoint {
+                txid: parent_id,
+                vout: 1,
+            },
+            39_000,
+        );
+        let child_id = child.compute_txid();
+        let sibling_id = sibling.compute_txid();
+        for tx in [&child, &sibling] {
+            let err = mp.accept_tx(tx, &utxos, TIP_OK).unwrap_err();
+            assert!(
+                matches!(err, AcceptError::Orphaned { .. }),
+                "spend of the missing parent must park, got {err}"
+            );
+        }
+        let accepted = mp
+            .accept_package(&[parent.clone(), child.clone()], &utxos, TIP_OK)
+            .expect("package contains the parked child");
+        assert_eq!(accepted.len(), 2);
+        assert!(mp.graph.contains(&parent_id));
+        assert!(mp.graph.contains(&child_id));
+        assert!(
+            mp.graph.contains(&sibling_id),
+            "a parked sibling that is not in the package must still be admitted"
+        );
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent = spend_tx(ops[1], 99_000);
+        let child = spend_tx(
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            98_000,
+        );
+        let child_id = child.compute_txid();
+        let err = mp.accept_tx(&child, &utxos, TIP_OK).unwrap_err();
+        assert!(matches!(err, AcceptError::Orphaned { .. }), "{err}");
+        let bad = spend_tx(ops[1], 100_000);
+        let err = mp
+            .accept_package(&[parent, bad], &utxos, TIP_OK)
+            .expect_err("second member overspends");
+        assert!(
+            !matches!(err, AcceptError::Duplicate(id) if id == child_id),
+            "a failed package must not report the parked child as a duplicate, got {err}"
+        );
+        assert!(
+            mp.orphanage.contains(&child_id),
+            "a failed package must leave the parked child in the orphanage"
+        );
+        assert!(!mp.graph.contains(&child_id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One parent arriving must leave an orphan that still misses the other.
+    #[test]
+    fn promote_keeps_orphan_that_still_misses_a_parent() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent_a = spend_tx(ops[0], 99_000);
+        let parent_b = spend_tx(ops[1], 99_000);
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_a.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_b.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(197_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let child_id = child.compute_txid();
+        let err = mp.accept_tx(&child, &utxos, TIP_OK).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Orphaned { .. }),
+            "child waits on both parents, got {err}"
+        );
+        mp.accept_tx(&parent_a, &utxos, TIP_OK)
+            .expect("first parent");
+        assert!(
+            mp.orphanage.contains(&child_id),
+            "child still missing the second parent must stay parked"
+        );
+        assert!(!mp.graph.contains(&child_id));
+        mp.accept_tx(&parent_b, &utxos, TIP_OK)
+            .expect("second parent");
+        assert!(
+            mp.graph.contains(&child_id),
+            "both parents present must admit the parked child"
+        );
+        assert_eq!(mp.orphan_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Conflicts removed by a replacement come back after that replacement's
+    /// package child is evicted, even when the rolling floor now prices them
+    /// out. Includes a CPFP parent that cannot pay min relay alone.
+    ///
+    /// The child spends the low-fee anchor. The replacement does not: the
+    /// anchor is not a parent of the conflict.
     #[test]
     fn failed_replacement_restores_below_floor_and_cpfp_set() {
         let value = 50_000_000u64;
@@ -3645,26 +3979,24 @@ mod tests {
         mp.accept_tx(&anchor, &utxos, TIP_OK).expect("anchor");
         mp.accept_tx(&victim, &utxos, TIP_OK)
             .expect("victim at the pre-eviction floor");
-        let replacement = heavy_conflict(
-            low_op,
-            OutPoint {
-                txid: anchor.compute_txid(),
-                vout: 0,
-            },
-            value + anchor.output[0].value.to_sat(),
-            30_000,
-            victim_wu + 500,
+        let replacement = spend_tx_fee(low_op, value, 30_000);
+        let replacement_id = replacement.compute_txid();
+        let held = anchor_wu + replacement.weight().to_wu();
+        assert!(
+            held <= mp.max_weight,
+            "replacement must fit beside the anchor"
         );
+        let child = child_evicted_with_anchor(&replacement, &anchor, 50_000, mp.max_weight - held);
         let err = mp
-            .accept_tx(&replacement, &utxos, TIP_OK)
-            .expect_err("replacement over budget");
+            .accept_package(&[replacement, child], &utxos, TIP_OK)
+            .expect_err("child over budget");
         assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
         let enforced = mp.mempool_min_fee_sat_kvb();
         assert!(
             enforced > victim_rate,
             "eviction must price out the victim ({victim_rate} vs {enforced})"
         );
-        assert!(!mp.graph.contains(&replacement.compute_txid()));
+        assert!(!mp.graph.contains(&replacement_id));
         assert!(
             mp.graph.contains(&victim_id),
             "below-floor conflict must stay"
@@ -3692,19 +4024,16 @@ mod tests {
         mp.accept_tx(&anchor, &utxos, TIP_OK).expect("anchor");
         mp.accept_package(&[parent.clone(), child.clone()], &utxos, TIP_OK)
             .expect("CPFP package");
-        let replacement = heavy_conflict(
-            parent_op,
-            OutPoint {
-                txid: anchor.compute_txid(),
-                vout: 0,
-            },
-            value + anchor.output[0].value.to_sat(),
-            90_000,
-            parent.weight().to_wu() + child.weight().to_wu() + 500,
+        let replacement = spend_tx_fee(parent_op, value, 90_000);
+        let held = anchor.weight().to_wu() + replacement.weight().to_wu();
+        assert!(
+            held <= mp.max_weight,
+            "replacement must fit beside the anchor"
         );
+        let over = child_evicted_with_anchor(&replacement, &anchor, 50_000, mp.max_weight - held);
         let err = mp
-            .accept_tx(&replacement, &utxos, TIP_OK)
-            .expect_err("replacement over budget");
+            .accept_package(&[replacement, over], &utxos, TIP_OK)
+            .expect_err("child over budget");
         assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
         assert!(
             mp.graph.contains(&parent.compute_txid()),
@@ -3748,19 +4077,16 @@ mod tests {
         mp.accept_tx(&anchor, &utxos, TIP_OK).expect("anchor");
         mp.accept_tx(&victim, &utxos, TIP_OK).expect("victim");
         clock.store(t0 + 600, Ordering::Relaxed);
-        let replacement = heavy_conflict(
-            low_op,
-            OutPoint {
-                txid: anchor.compute_txid(),
-                vout: 0,
-            },
-            value + anchor.output[0].value.to_sat(),
-            30_000,
-            victim_wu + 500,
+        let replacement = spend_tx_fee(low_op, value, 30_000);
+        let held = anchor_wu + replacement.weight().to_wu();
+        assert!(
+            held <= mp.max_weight,
+            "replacement must fit beside the anchor"
         );
+        let child = child_evicted_with_anchor(&replacement, &anchor, 50_000, mp.max_weight - held);
         let err = mp
-            .accept_tx(&replacement, &utxos, TIP_OK)
-            .expect_err("replacement over budget");
+            .accept_package(&[replacement, child], &utxos, TIP_OK)
+            .expect_err("child over budget");
         assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
         assert!(mp.graph.contains(&victim_id), "conflict restored");
         mp.store.flush().unwrap();
@@ -3862,27 +4188,37 @@ mod tests {
         vsize.saturating_mul(sat_kvb).div_ceil(1000).max(1)
     }
 
-    fn heavy_conflict(
-        conflict: OutPoint,
-        anchor: OutPoint,
-        input_value: u64,
+    /// Package child of `replacement` that also spends `anchor`.
+    ///
+    /// Weight above `over_wu` (the room left after the replacement sits beside
+    /// the anchor) makes eviction drop this child with the anchor.
+    fn child_evicted_with_anchor(
+        replacement: &Transaction,
+        anchor: &Transaction,
         fee: u64,
-        min_wu: u64,
+        over_wu: u64,
     ) -> Transaction {
-        let mut n = 64usize;
+        let input_value = replacement.output[0].value.to_sat() + anchor.output[0].value.to_sat();
+        let mut n = 1usize;
         loop {
             let tx = Transaction {
                 version: Version::TWO,
                 lock_time: LockTime::ZERO,
                 input: vec![
                     TxIn {
-                        previous_output: conflict,
+                        previous_output: OutPoint {
+                            txid: replacement.compute_txid(),
+                            vout: 0,
+                        },
                         script_sig: ScriptBuf::new(),
                         sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                         witness: Witness::new(),
                     },
                     TxIn {
-                        previous_output: anchor,
+                        previous_output: OutPoint {
+                            txid: anchor.compute_txid(),
+                            vout: 0,
+                        },
                         script_sig: ScriptBuf::new(),
                         sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                         witness: Witness::new(),
@@ -3893,11 +4229,11 @@ mod tests {
                     script_pubkey: ScriptBuf::from_bytes(vec![0x51; n]),
                 }],
             };
-            if tx.weight().to_wu() > min_wu {
+            if tx.weight().to_wu() > over_wu {
                 return tx;
             }
             n += 32;
-            assert!(n < 20_000, "conflict replacement never got heavy enough");
+            assert!(n < 10_000, "package child never got heavy enough");
         }
     }
 
@@ -4117,6 +4453,32 @@ mod tests {
         mp.note_extra(&t2);
         assert!(mp.extra_by_txid(t1.compute_txid()).is_some());
         assert!(mp.extra_by_txid(t2.compute_txid()).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Filling the invalid set must not erase the oldest id. A new id past
+    /// the cap is not stored.
+    #[test]
+    fn recent_invalid_keeps_the_oldest() {
+        let dir = tmp_dir();
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let first = Txid::from_byte_array({
+            let mut b = [0u8; 32];
+            b[0] = 1;
+            b
+        });
+        mp.note_invalid(first);
+        // 2..4097 is 4095 ids and does not collide with `first`.
+        for i in 2..4_097u32 {
+            let mut b = [0u8; 32];
+            b[0..4].copy_from_slice(&i.to_le_bytes());
+            mp.note_invalid(Txid::from_byte_array(b));
+        }
+        let extra = Txid::from_byte_array([0xff; 32]);
+        mp.note_invalid(extra);
+        assert!(mp.recent_invalid.contains(&first));
+        assert!(!mp.recent_invalid.contains(&extra));
+        assert_eq!(mp.recent_invalid.len(), RECENT_INVALID_CAP);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

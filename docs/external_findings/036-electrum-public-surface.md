@@ -7,7 +7,8 @@
 An unpaged scripthash join above `--max-sh-creates` is refused. The
 default is 10000. **0** is unlimited. A history request that names a page
 is served even above the cap, and Class A expand stops once that page is
-full.
+full. A `from_height` of 1 or more scans that window and does not use the
+create cap. The clipped span is refused above 8,064 blocks.
 
 Silent-payment subscribe does not write the scan secret to the API log.
 The log file is owner-only. A start of 0 is the last 256 blocks. The

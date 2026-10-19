@@ -1087,6 +1087,9 @@ fn apply_soft_wire_reject(
     sender: Option<usize>,
 ) {
     let bad_prev = super::reorg::is_bad_prev_err(err);
+    // A BadPrev whose parent is the current tip is a missing header slot,
+    // not a competing fork. Keep the hash so densify asks for it again.
+    let retry_tip_child = bad_prev && prev_is_hub_tip(st, hub, hash);
     if bad_prev {
         st.headers_done = false;
         if let Some(h) = hub {
@@ -1096,7 +1099,7 @@ fn apply_soft_wire_reject(
             if rewound {
                 return;
             }
-            if st.height_to_hash.get(&height) == Some(&hash) {
+            if !retry_tip_child && st.height_to_hash.get(&height) == Some(&hash) {
                 st.height_to_hash.remove(&height);
                 remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
             }
@@ -1118,11 +1121,11 @@ fn apply_soft_wire_reject(
             }
         }
     }
-    if !bad_prev {
+    if !bad_prev || retry_tip_child {
         // `isolate_if_batched` leaves SoftWire only for a one-block wave, so
         // `hash` is the block that failed and `sender` sent that copy. The
         // live pending sender may be a replacement's.
-        if crate::chain::reject_is_mutated(err) {
+        if !retry_tip_child && crate::chain::reject_is_mutated(err) {
             if let Some(peer) = sender {
                 punish_mutated_sender(st, peer, hash);
             }
@@ -1136,12 +1139,37 @@ fn apply_soft_wire_reject(
         st.reopen_for_densify(&[hash]);
         st.body.demote_known(hash);
         st.reopen_for_densify(&[hash]);
-        warn!("ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)");
+        if retry_tip_child {
+            warn!(
+                "ibd: confirm reject BadPrev @{height} {hash}: {err} (parent is tip, re-getdata)"
+            );
+        } else {
+            warn!("ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)");
+        }
     } else {
         warn!(
             "ibd: confirm reject BadPrev @{height} {hash}: {err} (slot evicted, not re-get same hash)"
         );
     }
+}
+
+/// True when `hash` chains directly off the hub tip.
+fn prev_is_hub_tip(
+    st: &IbdWorkState,
+    hub: Option<&crate::chain::ChainHub>,
+    hash: BlockHash,
+) -> bool {
+    let Some(h) = hub else {
+        return false;
+    };
+    let Some(tip) = h.tip_hash() else {
+        return false;
+    };
+    st.path_prev
+        .get(&hash)
+        .copied()
+        .or_else(|| h.prev_of(&hash))
+        == Some(tip)
 }
 
 /// Core `MaybePunishNodeForBlock` (`BLOCK_MUTATED`): drop the sender and

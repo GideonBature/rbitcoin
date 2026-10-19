@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 /// Class A expand / spend-join wave. Bounds decoded `txout` pages in RAM.
 const SH_JOIN_WAVE: usize = 4096;
+/// Electrum Cash catch-up. About eight weeks at 144 blocks a day.
+const MAX_HISTORY_WINDOW: u32 = 8_064;
 /// Strong creates read from the posting tail while the page bound is open.
 const NEWEST_TAIL_CHUNK: usize = 256;
 
@@ -1542,6 +1544,10 @@ impl Query {
         let from = filter.from_height;
         if from > high {
             return Ok(apply_history_filter(&[], filter));
+        }
+        let span = high.saturating_sub(from).saturating_add(1);
+        if span > MAX_HISTORY_WINDOW {
+            return Err(StoreError::Rejected("history window too wide"));
         }
         let members = self.strong_sh_creates(scripthash, view)?;
         let heights = self.store.tx_height_get_batch(&members)?;

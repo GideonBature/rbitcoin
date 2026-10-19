@@ -265,6 +265,7 @@ pub(crate) async fn dial_batch(
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     dialer: crate::socks::Dialer,
     clock: &rbitcoin_consensus::NodeClock,
+    perms: Option<Arc<crate::peers::PeerHub>>,
 ) -> DialBatchResult {
     let mut out = DialBatchResult {
         slots: Vec::new(),
@@ -303,8 +304,11 @@ pub(crate) async fn dial_batch(
         );
         let dialer = dialer.clone();
         let to = connect_timeout_for(addr, connect_timeout);
+        let dial_perms = perms.clone();
         handles.push(tokio::spawn(async move {
-            let fut = spawn_peer(id, addr, magic, local_addr, tip_h, sinks, dialer);
+            let fut = spawn_peer(
+                id, addr, magic, local_addr, tip_h, sinks, dialer, dial_perms,
+            );
             match tokio::time::timeout(to, fut).await {
                 Ok(Ok(slot)) => Ok(slot),
                 Ok(Err(e)) => {
@@ -1399,6 +1403,7 @@ mod tests {
             None,
             crate::socks::Dialer::Direct,
             &rbitcoin_consensus::NodeClock::new(),
+            None,
         ));
         assert!(r.slots.is_empty() && r.failed.is_empty());
         let r2 = rt.block_on(dial_batch(
@@ -1414,8 +1419,54 @@ mod tests {
             None,
             crate::socks::Dialer::Direct,
             &rbitcoin_consensus::NodeClock::new(),
+            None,
         ));
         assert!(r2.slots.is_empty() && r2.failed.is_empty());
+    }
+
+    /// IBD dials do not go through `prepare_outbound_session`.
+    #[tokio::test]
+    async fn ibd_dial_refuses_a_discouraged_net() {
+        let peers = crate::peers::PeerHub::new();
+        peers.set_mock_now(1_700_000_000);
+        let onion = crate::NetAddr::Onion {
+            pk: [4; 32],
+            port: 8333,
+        };
+        peers.note_misbehavior_key(crate::peers::DiscourageKey::from_net(onion).unwrap());
+        let other_port = crate::NetAddr::Onion {
+            pk: [4; 32],
+            port: 9735,
+        };
+        let (body_tx, _body_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sinks = PeerEventSinks {
+            body: body_tx,
+            ctrl: ctrl_tx,
+            header_fks: super::super::peer_io::empty_header_fk_bus(),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            super::super::peer_io::spawn_peer(
+                1,
+                other_port,
+                Magic::REGTEST,
+                addr(1),
+                Some(0),
+                sinks,
+                crate::socks::Dialer::Direct,
+                Some(peers),
+            ),
+        )
+        .await;
+        let err = match result.expect("a refused IBD dial returns before the connect") {
+            Err(e) => e,
+            Ok(_) => panic!("IBD dial connected to a discouraged onion"),
+        };
+        assert!(
+            matches!(err, NetError::Protocol("discouraged")),
+            "IBD dialed a discouraged onion on another port, got {err}"
+        );
     }
 
     #[test]

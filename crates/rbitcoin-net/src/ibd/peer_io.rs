@@ -895,6 +895,7 @@ async fn write_ibd_peer(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub(crate) async fn spawn_peer(
     id: usize,
     addr: crate::NetAddr,
@@ -903,7 +904,11 @@ pub(crate) async fn spawn_peer(
     tip_h: Option<u32>,
     sinks: PeerEventSinks,
     dialer: crate::socks::Dialer,
+    perms: Option<Arc<crate::peers::PeerHub>>,
 ) -> Result<PeerSlot, NetError> {
+    if perms.as_ref().is_some_and(|p| p.net_discouraged(addr)) {
+        return Err(NetError::Protocol("discouraged"));
+    }
     let stream = dialer.connect_net(addr).await?;
     let version_socket = addr
         .socket_addr()

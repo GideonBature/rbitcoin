@@ -71,31 +71,30 @@ impl Wave {
         unpark_script_publisher();
     }
 
-    fn claim_chunk(&self) -> Option<Range<usize>> {
-        if self.failed.load(Ordering::Acquire) {
+    fn claim_chunk(wave: &Arc<Wave>) -> Option<(Range<usize>, InWave)> {
+        if wave.failed.load(Ordering::Acquire) {
             return None;
         }
         // `in_wave` before `next`: a last-chunk claimer is visible to
         // `is_complete` before `next >= n`, so the publisher cannot free ctx
         // under a worker about to `apply`.
-        self.in_wave.fetch_add(1, Ordering::AcqRel);
-        if self.failed.load(Ordering::Acquire) {
-            self.in_wave.fetch_sub(1, Ordering::AcqRel);
-            self.notify_if_complete();
+        wave.in_wave.fetch_add(1, Ordering::AcqRel);
+        let hold = InWave {
+            wave: Arc::clone(wave),
+        };
+        if wave.failed.load(Ordering::Acquire) {
             return None;
         }
-        let chunk = self.chunk.max(1);
-        let i = self.next.fetch_add(chunk, Ordering::Relaxed);
-        if i >= self.n {
-            self.in_wave.fetch_sub(1, Ordering::AcqRel);
-            self.notify_if_complete();
+        let chunk = wave.chunk.max(1);
+        let i = wave.next.fetch_add(chunk, Ordering::Relaxed);
+        if i >= wave.n {
             return None;
         }
         #[cfg(test)]
         if STEAL_CLAIMS_ON.load(Ordering::Relaxed) {
             STEAL_CLAIMS.fetch_add(1, Ordering::Relaxed);
         }
-        Some(i..self.n.min(i.saturating_add(chunk)))
+        Some((i..wave.n.min(i.saturating_add(chunk)), hold))
     }
 
     fn is_complete(&self) -> bool {
@@ -121,8 +120,6 @@ impl Wave {
                 break;
             }
         }
-        self.in_wave.fetch_sub(1, Ordering::AcqRel);
-        self.notify_if_complete();
     }
 
     fn has_unclaimed(&self) -> bool {
@@ -191,17 +188,43 @@ fn publish_waves(waves: &[Arc<Wave>]) {
     waves_snap().store(Arc::new(waves.to_vec()));
 }
 
+/// Drops `in_wave` on the success path and on a panic inside the chunk.
+struct InWave {
+    wave: Arc<Wave>,
+}
+
+impl Drop for InWave {
+    fn drop(&mut self) {
+        self.wave.in_wave.fetch_sub(1, Ordering::AcqRel);
+        self.wave.notify_if_complete();
+    }
+}
+
 /// Lock-free claim: load the published wave list. Must not lock [`WAVES`].
-fn steal_chunk() -> Option<(Arc<Wave>, Range<usize>)> {
-    let claimed = waves_snap()
-        .load()
-        .iter()
-        .find_map(|w| w.claim_chunk().map(|range| (Arc::clone(w), range)));
+fn steal_chunk() -> Option<(Range<usize>, InWave)> {
+    let claimed = waves_snap().load().iter().find_map(Wave::claim_chunk);
     #[cfg(test)]
     if claimed.is_some() {
         maybe_delay_claim();
     }
     claimed
+}
+
+fn run_held(range: Range<usize>, hold: InWave) {
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hold.wave.run_chunk(range);
+    }));
+    if panicked.is_err() {
+        hold.wave.failed.store(true, Ordering::Release);
+        let mut g = hold
+            .wave
+            .first_err
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if g.is_none() {
+            *g = Some(ConsensusError::Internal("script worker panic"));
+        }
+    }
 }
 
 /// True when steal workers can still claim a foreground job.
@@ -217,10 +240,10 @@ pub fn help_steal() -> bool {
     if on_steal_worker() {
         return false;
     }
-    let Some((w, range)) = steal_chunk() else {
+    let Some((range, hold)) = steal_chunk() else {
         return false;
     };
-    w.run_chunk(range);
+    run_held(range, hold);
     true
 }
 
@@ -385,16 +408,16 @@ fn take_detached_job(pool: &ScriptWorkers) -> Option<Job> {
 }
 
 fn steal_or_job(pool: &ScriptWorkers) -> bool {
-    if let Some((w, range)) = steal_chunk() {
-        w.run_chunk(range);
+    if let Some((range, hold)) = steal_chunk() {
+        run_held(range, hold);
         return true;
     }
     if let Some(job) = take_detached_job(pool) {
         job();
         return true;
     }
-    if let Some((w, range)) = steal_chunk() {
-        w.run_chunk(range);
+    if let Some((range, hold)) = steal_chunk() {
+        run_held(range, hold);
         return true;
     }
     false
@@ -1056,6 +1079,28 @@ mod tests {
             DELAY_CLAIM_GO.store(true, Ordering::SeqCst);
             DELAY_CLAIM_CV.notify_all();
         }
+    }
+
+    /// A panicking chunk must not leave `in_wave` elevated. `wait_done` returns
+    /// inside the test's own bound.
+    #[test]
+    fn chunk_panic_releases_the_wave() {
+        let _gate = STEAL_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        fn boom(_: &u32) -> Result<(), ConsensusError> {
+            panic!("chunk panic");
+        }
+        let wave = start_for_each_owned((0..64u32).collect(), boom)
+            .unwrap()
+            .expect("wave");
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let failed = wave.finish().is_err();
+            let _ = tx.send(failed);
+        });
+        let failed = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("wait_done after a chunk panic");
+        assert!(failed, "chunk panic is an error");
     }
 
     /// After `in_wave++` and before `next += chunk`, `is_complete` must be

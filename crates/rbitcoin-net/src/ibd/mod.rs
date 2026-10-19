@@ -360,6 +360,7 @@ pub async fn ibd_cancellable(
         cancel.as_ref().map(Arc::clone),
         cfg.dialer.clone(),
         &hub.clock,
+        perms.clone(),
     )
     .await;
     let mut boot_cooldown = HashMap::new();
@@ -849,10 +850,11 @@ pub async fn ibd_cancellable(
                 let cancel_c = cancel.as_ref().map(Arc::clone);
                 let dialer_c = cfg.dialer.clone();
                 let clock_c = Arc::clone(&hub.clock);
+                let perms_c = st.perms.clone();
                 redial_handle = Some(tokio::spawn(async move {
                     dial_batch(
                         &book, want, already, &occupied, magic, local_addr, tip_h, sinks_r, cto,
-                        cancel_c, dialer_c, &clock_c,
+                        cancel_c, dialer_c, &clock_c, perms_c,
                     )
                     .await
                 }));

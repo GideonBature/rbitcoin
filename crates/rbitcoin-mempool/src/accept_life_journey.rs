@@ -248,9 +248,8 @@ fn full_rbf_and_staged_commit(life: &mut Life) -> (OutPoint, Txid) {
 }
 
 /// Pure RBFR: fee 1,500 loses BIP125's absolute fee to the 2,000 parent and
-/// child, but pays 1.25x the direct conflict and unpins both. Then a merger
-/// of 32 parents replaces their 32 children: 33 members fit the 64 cap only
-/// because replaced txs leave the count.
+/// child, but pays 1.25x the direct conflict and unpins both. A merger that
+/// spends two unconfirmed parents is rejected: more than one direct conflict.
 fn replacements_unpin_and_leave_the_cluster_count(life: &mut Life) {
     let f = life.chain.fund(1_000_000);
     let pinned = spend_tx(f, 999_000);
@@ -261,21 +260,39 @@ fn replacements_unpin_and_leave_the_cluster_count(life: &mut Life) {
     assert_eq!(r.replaced.len(), 2);
     assert!(!life.live(&pin_child));
 
-    let mut parent_outs = Vec::new();
-    let mut kids = Vec::new();
-    for _ in 0..MAX_CLUSTER_COUNT / 2 {
-        let p = spend_tx(life.chain.fund(100_000), 90_000);
+    let mut pairs = Vec::new();
+    for _ in 0..2 {
+        let coin = life.chain.fund(100_000);
+        let p = spend_tx(coin, 90_000);
         let k = spend_tx(out(p.compute_txid(), 0), 80_000);
         life.accept(&p).unwrap();
         life.accept(&k).unwrap();
-        parent_outs.push(out(p.compute_txid(), 0));
-        kids.push(k);
+        pairs.push((coin, p, k));
     }
+    let parent_outs: Vec<OutPoint> = pairs
+        .iter()
+        .map(|(_, p, _)| out(p.compute_txid(), 0))
+        .collect();
     let merger = spend_all(&parent_outs, 10_000);
-    life.accept(&merger)
-        .expect("replaced children must not count toward the cluster cap");
-    assert_eq!(life.cluster_len(&merger), MAX_CLUSTER_COUNT / 2 + 1);
-    assert!(kids.iter().all(|k| !life.live(k)));
+    let err = life.accept(&merger).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AcceptError::Policy("unconfirmed input has multiple conflicts")
+        ),
+        "{err}"
+    );
+    for (coin, p, k) in &pairs {
+        assert!(life.live(k));
+        let bump = spend_tx(out(p.compute_txid(), 0), 10_000);
+        life.accept(&bump)
+            .expect("one conflict may spend that conflict's parent");
+        assert!(!life.live(k));
+        let gone = spend_tx(*coin, 1);
+        life.accept(&gone).expect("confirmed-input RBF");
+        assert!(!life.live(p));
+        assert!(!life.live(&bump));
+    }
 }
 
 /// 3,000 outputs is ~30 kvB: over the old 101 kWU bug, under the 101 kvB
@@ -390,8 +407,8 @@ fn reorg_readmits_and_evicts_nonfinal(life: &mut Life) {
 /// With -minrelaytxfee at 50 sat/vB a parent below it goes to the extra
 /// pool. A one-sat child does not carry it; a paying child with a confirmed
 /// second input does. An unrelated low-fee tx does not ride a package's
-/// waiver. A child that fails after its waived parent promoted a parked
-/// spender takes the spender down with the parent.
+/// waiver. A child that fails after its parent was admitted leaves a
+/// parked spender of that parent in the orphanage.
 fn raised_min_relay_one_parent_one_child(life: &mut Life) {
     life.mp.set_min_relay_sat_kvb(50_000);
     let lp = fan_out(life.chain.fund(100_000), &[49_900, 49_900]);
@@ -430,7 +447,8 @@ fn raised_min_relay_one_parent_one_child(life: &mut Life) {
     let bad = with_annex(spend_tx(out(two.compute_txid(), 1), 1_000));
     let err = life.package(&[two, bad]).unwrap_err();
     assert!(matches!(err, AcceptError::Policy("libre annex")), "{err}");
-    assert_eq!((life.mp.live_count(), life.mp.orphan_count()), (0, 0));
+    assert_eq!((life.mp.live_count(), life.mp.orphan_count()), (0, 1));
+    assert!(life.mp.orphanage.contains(&spender.compute_txid()));
 }
 
 /// Room for three 61 vB txs. Over budget with the new tx as the worst
@@ -725,6 +743,121 @@ fn sigop_adjusted_size_budget_and_reopen() {
     sigop_rbf_package_and_cluster(&mut life);
     sigop_block_budget(&mut life);
     sigop_reopen_and_compact(&mut life, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A parked chain that fills the cluster cap promotes when the root is
+/// admitted. Every descendant is live, in one cluster.
+#[test]
+fn orphan_chain_promotes_to_the_cluster_cap() {
+    let dir = tmp_dir();
+    let mut life = Life {
+        mp: ActiveMempool::open_or_create(&dir).unwrap(),
+        chain: LifeChain::default(),
+        tip: ChainTipCtx {
+            height: 200,
+            mtp: u32::MAX,
+        },
+    };
+    let descendants = MAX_CLUSTER_COUNT - 1;
+    let mut value = 100_000 + (descendants as u64) * 1_000;
+    let root = spend_tx(life.chain.fund(value + 1_000), value);
+    let mut parent = root.compute_txid();
+    let mut parked = Vec::with_capacity(descendants);
+    for _ in 0..descendants {
+        value -= 1_000;
+        let child = spend_tx(out(parent, 0), value);
+        parent = child.compute_txid();
+        parked.push(child);
+    }
+    for child in parked.iter().rev() {
+        let err = life.accept(child).unwrap_err();
+        assert!(
+            matches!(err, AcceptError::Orphaned { fresh: true, .. }),
+            "{err}"
+        );
+    }
+    assert_eq!(life.mp.orphan_count(), descendants);
+    life.accept(&root).expect("root promotes the chain");
+    assert_eq!(life.mp.orphan_count(), 0);
+    assert_eq!(life.mp.live_count(), MAX_CLUSTER_COUNT);
+    assert_eq!(life.cluster_len(&root), MAX_CLUSTER_COUNT);
+    assert!(life.live(parked.last().unwrap()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Libre `HasNoNewUnconfirmed`: an unconfirmed input must already be a parent
+/// of the direct conflicts, and there is only one direct conflict. A
+/// single-conflict CPFP of that parent stays allowed.
+#[test]
+fn replacement_unconfirmed_inputs_follow_libre_rule() {
+    let dir = tmp_dir();
+    let mut life = Life {
+        mp: ActiveMempool::open_or_create(&dir).unwrap(),
+        chain: LifeChain::default(),
+        tip: ChainTipCtx {
+            height: 200,
+            mtp: u32::MAX,
+        },
+    };
+
+    let coin = life.chain.fund(200_000);
+    let parent = spend_tx(coin, 190_000);
+    life.accept(&parent).unwrap();
+    let child = spend_tx(out(parent.compute_txid(), 0), 180_000);
+    life.accept(&child).unwrap();
+    let bump = spend_tx(out(parent.compute_txid(), 0), 100_000);
+    life.accept(&bump)
+        .expect("one conflict may spend that conflict's parent");
+    assert!(!life.live(&child));
+    assert!(life.live(&parent));
+
+    let c = life.chain.fund(100_000);
+    let extra = life.chain.fund(100_000);
+    let extra_tx = spend_tx(extra, 90_000);
+    life.accept(&extra_tx).unwrap();
+    let low = spend_tx(c, 90_000);
+    life.accept(&low).unwrap();
+    let high = spend_all(&[c, out(extra_tx.compute_txid(), 0)], 50_000);
+    let err = life.accept(&high).unwrap_err();
+    assert!(
+        matches!(err, AcceptError::Policy("adds unconfirmed input")),
+        "{err}"
+    );
+    assert!(life.live(&low));
+    assert!(life.live(&extra_tx));
+
+    let own = life.chain.fund(100_000);
+    let victim = spend_tx(own, 90_000);
+    life.accept(&victim).unwrap();
+    let spends_victim = spend_all(&[own, out(victim.compute_txid(), 0)], 50_000);
+    let err = life.accept(&spends_victim).unwrap_err();
+    assert!(
+        matches!(err, AcceptError::Policy("bad-txns-spends-conflicting-tx")),
+        "{err}"
+    );
+    assert!(life.live(&victim));
+
+    let wide_coin = life.chain.fund(300_000);
+    let wide = fan_out(wide_coin, &[100_000, 100_000]);
+    life.accept(&wide).unwrap();
+    let k0 = spend_tx(out(wide.compute_txid(), 0), 90_000);
+    let k1 = spend_tx(out(wide.compute_txid(), 1), 90_000);
+    life.accept(&k0).unwrap();
+    life.accept(&k1).unwrap();
+    let merger = spend_all(
+        &[out(wide.compute_txid(), 0), out(wide.compute_txid(), 1)],
+        50_000,
+    );
+    let err = life.accept(&merger).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AcceptError::Policy("unconfirmed input has multiple conflicts")
+        ),
+        "{err}"
+    );
+    assert!(life.live(&k0) && life.live(&k1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1879,28 +1879,6 @@ async fn admit_broadcast(st: AppState, tx: bitcoin::Transaction) -> Response {
     }
 }
 
-#[derive(Deserialize, Default)]
-pub struct BroadcastQuery {
-    tx: Option<String>,
-}
-
-pub async fn get_broadcast(
-    State(st): State<AppState>,
-    AxumQuery(q): AxumQuery<BroadcastQuery>,
-) -> Response {
-    if st.mempool.is_none() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();
-    }
-    let Some(hex) = q.tx.filter(|s| !s.is_empty()) else {
-        return (StatusCode::BAD_REQUEST, "Missing tx").into_response();
-    };
-    let tx = match decode_tx_hex_str(&hex) {
-        Ok(t) => t,
-        Err(r) => return r,
-    };
-    admit_broadcast(st, tx).await
-}
-
 pub async fn post_tx(State(st): State<AppState>, body: Bytes) -> Response {
     if st.mempool.is_none() {
         return (StatusCode::SERVICE_UNAVAILABLE, "mempool not available").into_response();

@@ -234,6 +234,39 @@ fn missing_header_consensus_reject_is_not_blacklisted() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// BadPrev on the block that spends the current tip is a missing parent
+/// slot, not a fork. The same hash stays on the path and densify walks
+/// back to it. Dropping it leaves `asked` empty until the pump deadline.
+#[test]
+fn bad_prev_on_the_tip_child_is_fetched_again() {
+    let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("bad-prev-tip-child");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let t = hub.tip_height().unwrap();
+    let hash = h(0x44);
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(t));
+    st.record_height(hash, t + 1);
+    st.note_path_prev(hash, tip);
+    st.densify_scan_lo = t + 5;
+    st.densify_ready_through = t + 5;
+    apply_confirm_reject(
+        &mut st,
+        t + 1,
+        hash,
+        "consensus: unexpected previous header",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    assert_eq!(st.height_to_hash.get(&(t + 1)), Some(&hash));
+    assert!(st.body.is_missing(&hash));
+    assert!(
+        st.densify_scan_lo <= t + 1,
+        "scan_lo={}",
+        st.densify_scan_lo
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `body.rejected ⊆ consensus-invalid set` — Cascade / SoftWire / EngineFault
 /// / Cancelled never blacklist.
 #[test]

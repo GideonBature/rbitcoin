@@ -145,31 +145,22 @@ async fn accept_received_from_peer(
     })
 }
 
-/// The hub and address a misbehavior exit may record. Noban and manual peers
-/// are not recorded. A loopback address is every local connection, so Core
-/// disconnects that peer and does not discourage the address.
+/// The hub and key a misbehavior exit may record. Noban and manual peers
+/// are not recorded. A loopback or `0.0.0.0` identity is every local
+/// connection, so Core disconnects that peer and does not discourage it.
+/// Onion and I2P use [`crate::peers::LivePeer::net`], not that socket.
 fn refusable_addr(
     session: Option<&crate::peers::LivePeer>,
-) -> Option<(Arc<crate::peers::PeerHub>, std::net::IpAddr)> {
+) -> Option<(Arc<crate::peers::PeerHub>, crate::peers::DiscourageKey)> {
     let s = session.filter(|s| !misbehavior_exempt(s))?;
-    let ip = s.addr.ip();
-    if local_addr_skips_discourage(ip) {
-        return None;
-    }
-    Some((s.peer_hub()?, ip))
+    let key = crate::peers::DiscourageKey::from_net(s.net)?;
+    Some((s.peer_hub()?, key))
 }
 
 /// One-day in-memory refusal.
 fn note_threshold_refusal(session: Option<&crate::peers::LivePeer>) {
-    if let Some((hub, ip)) = refusable_addr(session) {
-        hub.note_misbehavior_addr(ip);
-    }
-}
-
-fn local_addr_skips_discourage(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v) => v.is_loopback() || v.octets()[0] == 0,
-        std::net::IpAddr::V6(v) => v.is_loopback(),
+    if let Some((hub, key)) = refusable_addr(session) {
+        hub.note_misbehavior_key(key);
     }
 }
 
@@ -184,7 +175,7 @@ fn threshold_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
 /// second one within [`crate::peers::PeerHub::RATE_STRIKE_SECS`] is a
 /// threshold exit, as two overflows in one session were.
 fn rate_limit_disconnect(session: Option<&crate::peers::LivePeer>) -> NetError {
-    if refusable_addr(session).is_some_and(|(hub, ip)| hub.note_rate_strike(ip)) {
+    if refusable_addr(session).is_some_and(|(hub, key)| hub.note_rate_strike(key)) {
         return threshold_disconnect(session);
     }
     NetError::Protocol("peer rate limit")

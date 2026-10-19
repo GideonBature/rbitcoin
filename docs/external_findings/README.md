@@ -95,6 +95,16 @@ rbitcoin reference, or redteam static analysis). Numbered reports live beside th
 | [088](./088-tip-chain-selection.md) | high | Tip-follow chain selection: total-work ranking, failed-branch prefix, sibling header check, reorg depth | partial (F3 reorg depth open) | `held_branch_with_more_total_work_beats_an_earlier_local_tie`, `failed_branch_tip_keeps_the_heavier_valid_prefix`, `sibling_claiming_more_work_with_wrong_bits_keeps_the_tip` |
 | [089](./089-missing-parent-verdict.md) | high | IBD halted on a block that spends an unknown txid; no verdict | fixed | `ibd_spend_of_an_unknown_txid_is_invalid`, `spend_of_a_create_the_head_lost_is_not_invalid`, `spend_of_an_unknown_txid_after_restart_is_invalid` |
 | [090](./090-getdata-serve-pause.md) | medium | Served getdata past the writer queue was dropped | fixed | `getdata_past_serve_cap_waits_for_writer`, `paused_session_still_times_out_a_silent_peer`, `paused_getdata_tail_is_served_before_the_next_getdata`, `uncounted_bodies_do_not_open_serve_slots` |
+| [092](./092-orphan-promote-stack.md) | medium | Orphan promotion recurses down the parked chain | fixed | `orphan_chain_promotes_to_the_cluster_cap`, `parked_chain_promotes_in_one_frame`, `package_inside_promote_admits_parent_orphans` |
+| [093](./093-history-window.md) | high | History catch-up scans every block in the window | fixed | `history_window_wider_than_eight_weeks_is_refused` |
+| [094](./094-electrum-write-deadline.md) | high | Electrum writes have no deadline | fixed | `stalled_electrum_write_is_closed`, `stalled_scripthash_push_ends_the_connection` |
+| [095](./095-sv2-idle-deadline.md) | high | SV2 session has no idle deadline after setup | fixed | `session_silent_after_constraints_is_dropped_at_the_idle_deadline` |
+| [096](./096-unconfirmed-rbf-input.md) | medium | Replacement may add an unconfirmed input | fixed | `replacement_unconfirmed_inputs_follow_libre_rule` |
+| [097](./097-recent-invalid-cap.md) | low | Invalid-txid set clears at 4096 | fixed | `recent_invalid_keeps_the_oldest` |
+| [098](./098-overlay-discourage.md) | medium | Overlay misbehavior is not remembered | fixed | `overlay_misbehavior_discourages_that_net`, `overlay_refusal_ignores_the_port`, `slot_evict_does_not_block_an_outbound_dial`, `feeler_does_not_dial_a_discouraged_address`, `ibd_dial_refuses_a_discouraged_net` |
+| [099](./099-esplora-get-broadcast.md) | medium | GET /broadcast has no Origin check | fixed | `esplora_unix_internal` |
+| [100](./100-script-pool-panic.md) | medium | Script-pool panic sticks the wave | fixed | `chunk_panic_releases_the_wave` |
+| [101](./101-bobberb-remote-index.md) | — | Remote-limit review index | — | — |
 | [102](./102-fuse8-body-length.md) | high | fuse8 body length cannot wrap the size check | fixed | `fuse8_wrapped_body_length_is_corrupt` |
 | [103](./103-fuse8-segment-multiple.md) | high | fuse8 segment count must divide the array | fixed | `fuse8_segment_count_must_be_a_multiple_of_segment_length` |
 | [104](./104-body-read-cap.md) | high | A body read is capped before it allocates | fixed | `body_read_above_the_cap_is_refused`, `index_read_above_the_cap_is_refused` |
