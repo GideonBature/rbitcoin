@@ -519,6 +519,8 @@ pub struct ActiveMempool {
 pub struct LiftedOrphan {
     pub tx: Transaction,
     pub announcers: Vec<u64>,
+    /// In-flight generation from the lift. Zero when the orphan was not taken.
+    pub taken_gen: u64,
 }
 
 impl ActiveMempool {
@@ -1726,9 +1728,11 @@ impl ActiveMempool {
         self.orphanage.missing_of(&id)?;
         let announcers = self.orphanage.announcers_of(&id);
         let parked = self.orphanage.take_txid(&id)?;
+        let taken_gen = self.orphanage.note_taken(id, &announcers);
         Some(LiftedOrphan {
             tx: parked,
             announcers,
+            taken_gen,
         })
     }
 
@@ -1751,18 +1755,19 @@ impl ActiveMempool {
         for item in lifted {
             let txid = item.tx.compute_txid();
             if self.graph.contains(&txid) {
+                self.orphanage.forget_taken_gen(&txid, item.taken_gen);
                 continue;
             }
             match self.prepare_admit(&item.tx, utxos, tip, fee_delta(&txid), true, None) {
                 Err(AcceptError::Orphaned { missing, .. }) => {
                     self.park_announced(&item.tx, missing, &item.announcers);
                 }
-                Err(AcceptError::Duplicate(_)) => {}
                 Ok(_) => ready.push(LiftedOrphan {
                     tx: item.tx.clone(),
                     announcers: item.announcers.clone(),
+                    taken_gen: item.taken_gen,
                 }),
-                Err(_) => {}
+                Err(_) => self.orphanage.forget_taken_gen(&txid, item.taken_gen),
             }
         }
         ready
@@ -4153,6 +4158,68 @@ mod tests {
         assert!(
             !mp.orphanage.contains(&child_id),
             "a forget from the first promote must not drop the second promote's disconnect"
+        );
+        let _ = utxos;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A package lifts the orphan without the promote take. A disconnect
+    /// while it is out must still drop that peer on the way back.
+    #[test]
+    fn package_lift_disconnect_is_not_reparked() {
+        let dir = tmp_dir();
+        let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+        let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+        let parent_a = spend_tx(ops[0], 99_000);
+        let parent_b = spend_tx(ops[1], 99_000);
+        let child = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_a.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_b.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(197_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let child_id = child.compute_txid();
+        let mut missing = BTreeSet::new();
+        missing.insert(parent_a.compute_txid());
+        missing.insert(parent_b.compute_txid());
+        mp.park_orphan_from(&child, missing.clone(), Some(4));
+        mp.orphanage.add_announcer(&child_id, 8);
+        let lifted = mp.lift_parked_member(&child).unwrap();
+        mp.orphanage.erase_for_peer(4);
+        let _ = mp.park_announced(&lifted.tx, missing.clone(), &lifted.announcers);
+        assert_eq!(
+            mp.orphanage.announcers_of(&child_id),
+            vec![8],
+            "a disconnect during a package lift drops that peer"
+        );
+        let lifted = mp.lift_parked_member(&child).unwrap();
+        mp.orphanage.erase_for_peer(8);
+        let _ = mp.park_announced(&lifted.tx, missing, &lifted.announcers);
+        assert!(
+            !mp.orphanage.contains(&child_id),
+            "the last announcer disconnecting during a package lift drops the orphan"
         );
         let _ = utxos;
         let _ = std::fs::remove_dir_all(&dir);

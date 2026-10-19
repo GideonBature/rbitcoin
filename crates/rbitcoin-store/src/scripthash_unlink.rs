@@ -112,14 +112,15 @@ impl ScriptHashTable {
         let mut batch = UnlinkBatch::default();
         let changed = self.unlink_one(scripthash, create_tx_fks, &mut batch)?;
         self.finish_unlink_batch(batch)?;
-        self.commit_deferred_empty_heads()?;
+        // Only this key. Other empty heads are waiting for their own tip flush.
+        self.commit_deferred_for(scripthash)?;
         Ok(changed)
     }
 
     /// Unlink every group, then sync the new chains and heads once before any
     /// replaced page is freed. A full-list drop stays in memory until
-    /// [`Self::commit_deferred_empty_heads`]. One scripthash uses
-    /// [`Self::unlink_creates`].
+    /// [`Self::commit_deferred_empty_heads`]. [`Self::unlink_creates`] publishes
+    /// only the key it was given.
     pub fn unlink_creates_batch(&self, groups: &[([u8; 32], Vec<Fk>)]) -> Result<(), StoreError> {
         let mut batch = UnlinkBatch::default();
         for (scripthash, fks) in groups {
@@ -411,6 +412,44 @@ impl ScriptHashTable {
             let mut q = self.pending_empty.lock().unwrap();
             // Jobs deferred while this pass ran stay at the end, so the next
             // pop sees them before these retries.
+            for job in failed.into_iter().rev() {
+                q.insert(0, job);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Publish empty heads for `scripthash` only. Jobs for other keys stay queued.
+    fn commit_deferred_for(&self, scripthash: &[u8; 32]) -> Result<(), StoreError> {
+        let mine = {
+            let mut q = self.pending_empty.lock().unwrap();
+            let mut mine = Vec::new();
+            let mut keep = Vec::new();
+            for job in q.drain(..) {
+                if &job.scripthash == scripthash {
+                    mine.push(job);
+                } else {
+                    keep.push(job);
+                }
+            }
+            *q = keep;
+            mine
+        };
+        let mut failed = Vec::new();
+        let mut first_err = None;
+        for mut job in mine {
+            if let Err(e) = self.commit_one_empty(&mut job) {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                failed.push(job);
+            }
+        }
+        if !failed.is_empty() {
+            let mut q = self.pending_empty.lock().unwrap();
             for job in failed.into_iter().rev() {
                 q.insert(0, job);
             }

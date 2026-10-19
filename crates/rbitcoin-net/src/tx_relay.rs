@@ -2333,15 +2333,17 @@ impl MempoolHub {
             })
         };
         for item in ready {
-            let from = item.announcers.first().copied();
-            if let Err(AcceptError::Orphaned { .. }) =
-                self.accept_with_utxo(&item.tx, &utxo, from, false, &[])
-            {
-                let id = item.tx.compute_txid();
-                for peer in item.announcers.iter().skip(1) {
-                    self.add_orphan_announcer(&id, *peer);
-                }
-            }
+            let id = item.tx.compute_txid();
+            // Every announcer is restored under the accept lock. A disconnect
+            // during the lift already edited the in-flight record.
+            let _ = self.accept_with_utxo(
+                &item.tx,
+                &utxo,
+                item.announcers.first().copied(),
+                false,
+                &item.announcers,
+            );
+            self.forget_taken_orphan(id, item.taken_gen);
         }
     }
 

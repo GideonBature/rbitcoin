@@ -390,11 +390,7 @@ impl Orphanage {
                     }
                 }
                 let announcers = e.announcers;
-                self.next_taken_gen = self.next_taken_gen.wrapping_add(1);
-                if self.next_taken_gen == 0 {
-                    self.next_taken_gen = 1;
-                }
-                let gen = self.next_taken_gen;
+                let gen = self.alloc_taken_gen();
                 self.taken.insert(
                     cid,
                     TakenOrphan {
@@ -411,6 +407,29 @@ impl Orphanage {
             }
         }
         out
+    }
+
+    fn alloc_taken_gen(&mut self) -> u64 {
+        self.next_taken_gen = self.next_taken_gen.wrapping_add(1);
+        if self.next_taken_gen == 0 {
+            self.next_taken_gen = 1;
+        }
+        self.next_taken_gen
+    }
+
+    /// Remember `txid` as out of the pool. A package lift uses this; promote
+    /// records the same way inside `take_children_of`.
+    pub fn note_taken(&mut self, txid: Txid, announcers: &[u64]) -> u64 {
+        let gen = self.alloc_taken_gen();
+        self.taken.insert(
+            txid,
+            TakenOrphan {
+                announcers: announcers.iter().copied().collect(),
+                drop: false,
+                gen,
+            },
+        );
+        gen
     }
 
     /// Consume the in-flight record. `None` when this tx was not taken.

@@ -2124,6 +2124,36 @@ fn extent_drop_all_one_free_error_still_commits_the_other_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A one-key unlink finishes that key only. Other empty heads stay queued
+/// until the tip flush commits them.
+#[test]
+fn single_key_unlink_leaves_other_deferred_heads() {
+    let dir = tmp();
+    let a = script_hash(&[0x81]);
+    let b = script_hash(&[0x82]);
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    put_create(&t, rec(a, 1, 0));
+    put_create(&t, rec(b, 2, 0));
+    t.unlink_creates_batch(&[(a, vec![Fk(1)])]).unwrap();
+    assert!(t.deferred_empty(&a));
+    assert_eq!(t.entries(&a).unwrap().len(), 1);
+    assert!(t.unlink_creates(&b, &[Fk(2)]).unwrap());
+    assert!(
+        t.deferred_empty(&a),
+        "a one-key unlink published another key's empty head"
+    );
+    assert_eq!(
+        t.entries(&a).unwrap().len(),
+        1,
+        "the waiting key lost its creates before the tip flush"
+    );
+    assert!(t.entries(&b).unwrap().is_empty());
+    t.commit_deferred_empty_heads().unwrap();
+    assert!(!t.deferred_empty(&a));
+    assert!(t.entries(&a).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A whole-extent unlink that has not reached the tip flush leaves the
 /// creates on disk. Open has no undo record to apply, and it must not
 /// invent an empty head.
