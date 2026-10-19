@@ -582,6 +582,7 @@ fn rpc_regtest_mature_chain_ops() {
     chain_ops_maxfeerate(&ctx, &mut cbs);
     chain_ops_invalidate_and_precious(&ctx, &hub, &mut cbs, &p2wpkh);
     chain_ops_reconsider_most_work(&ctx, &hub, &p2wpkh);
+    chain_ops_held_height_and_work(&ctx, &hub, &p2wpkh);
 
     // Two networks cannot be one chain: the same hub behind a mainnet RPC view.
     ctx.network = Network::Mainnet;
@@ -2701,6 +2702,56 @@ fn chain_ops_reconsider_most_work(
     call("invalidateblock", bad.block_hash());
     call("invalidateblock", i[0]);
     assert_eq!(best(), h[3]);
+}
+
+/// A held body reports the height and chain work Core gives it, whether its
+/// parent is on the active chain, held, or a stored side header. Each one
+/// here ties the tip, so all are held.
+fn chain_ops_held_height_and_work(
+    ctx: &RpcContext,
+    hub: &rbitcoin_net::ChainHub,
+    p2wpkh: &ScriptBuf,
+) {
+    let tip = best_hash(ctx);
+    let tip_h = tip_count(ctx) as u32;
+    let at = |h: u32| hub.query.header_at_height(Height(h)).unwrap().unwrap().1;
+    let mine = |prev: [u8; 32], time: u32, height: u32| {
+        let prev = BlockHash::from_byte_array(prev);
+        rbitcoin_consensus::mine_regtest_paying(prev, time, height, p2wpkh.clone(), vec![])
+    };
+    let submit = |b: &Block| dispatch(ctx, "submitblock", vec![json!(block_hex(b))]).unwrap();
+    let (parent, base) = (at(tip_h - 1), at(tip_h - 2));
+    let on_active = mine(parent.hash, parent.timestamp + 1000, tip_h);
+    let held_parent = mine(base.hash, base.timestamp + 1001, tip_h - 1);
+    let on_held = mine(held_parent.block_hash().to_byte_array(), base.timestamp + 1002, tip_h);
+    let header_parent = mine(base.hash, base.timestamp + 1003, tip_h - 1);
+    let on_header = mine(header_parent.block_hash().to_byte_array(), base.timestamp + 1004, tip_h);
+    for b in [&on_active, &held_parent, &on_held] {
+        assert_eq!(submit(b), "inconclusive");
+    }
+    let header = rbitcoin_primitives::hex_encode(bitcoin::consensus::encode::serialize(&header_parent.header));
+    dispatch(ctx, "submitheader", vec![json!(header)]).unwrap();
+    assert_eq!(submit(&on_header), "inconclusive");
+    assert_eq!(best_hash(ctx), tip);
+    let header_of = |h: BlockHash| {
+        dispatch(ctx, "getblockheader", vec![json!(h.to_string())]).unwrap()
+    };
+    let at_tip = dispatch(ctx, "getblockheader", vec![tip]).unwrap();
+    let below_tip = header_of(BlockHash::from_byte_array(parent.hash));
+    for (b, want) in [
+        (&on_active, &at_tip),
+        (&held_parent, &below_tip),
+        (&on_held, &at_tip),
+        (&on_header, &at_tip),
+    ] {
+        let hash = json!(b.block_hash().to_string());
+        let block = dispatch(ctx, "getblock", vec![hash, json!(1)]).unwrap();
+        for got in [&header_of(b.block_hash()), &block] {
+            assert_eq!(got["confirmations"], -1, "{got}");
+            assert_eq!(got["height"], want["height"], "{got}");
+            assert_eq!(got["chainwork"], want["chainwork"], "{got}");
+        }
+    }
 }
 
 /// Last beat, because it corrupts the store: a connected spend whose parent
