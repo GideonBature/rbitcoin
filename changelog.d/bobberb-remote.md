@@ -38,3 +38,6 @@ Fixed
 - **IBD plants a stored sibling of an invalid tip block.** The header
   store supplies the parent when the work path has not recorded it yet,
   so download continues onto that sibling.
+- **IBD retries a tip child after BadPrev.** A block whose parent is the
+  current tip is fetched again when confirm reports a missing previous
+  header.
