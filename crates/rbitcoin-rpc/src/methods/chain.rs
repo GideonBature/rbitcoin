@@ -656,32 +656,31 @@ fn enrich_block_header_json(
 /// parent is on the active chain, a stored header, or another held body.
 fn held_height_and_work(ctx: &RpcContext, block: &Block) -> Option<(u32, bitcoin::Work)> {
     let hub = ctx.chain.as_ref()?;
-    let mut work = block.header.work();
+    let mut works = vec![block.header.work()];
     let mut prev = block.header.prev_blockhash;
     for depth in 1..=OFF_CHAIN_WALK_MAX {
         let p = prev.to_byte_array();
-        if let Ok(Some(h)) = ctx.query.height_of_hash(&p) {
-            let base = hub.work_through_height(h.0).ok()?;
-            return Some((h.0 + depth, base + work));
-        }
-        if let Ok(Some(loc)) = off_chain_header(ctx, &p) {
+        let (height, base) = if let Ok(Some(h)) = ctx.query.height_of_hash(&p) {
+            (h.0, hub.work_through_height(h.0).ok()?)
+        } else if let Some(loc) = off_chain_header(ctx, &p).ok()? {
             let base: [u8; 32] = rbitcoin_primitives::hex_decode(&loc.chainwork)
                 .ok()?
                 .try_into()
                 .ok()?;
-            return Some((
-                loc.height + depth,
-                bitcoin::Work::from_be_bytes(base) + work,
-            ));
-        }
-        let parent = hub.held_body(&prev)?;
-        work = work + parent.header.work();
-        prev = parent.header.prev_blockhash;
+            (loc.height, bitcoin::Work::from_be_bytes(base))
+        } else {
+            let parent = hub.held_body(&prev)?;
+            works.push(parent.header.work());
+            prev = parent.header.prev_blockhash;
+            continue;
+        };
+        let work = rbitcoin_net::sum_work(std::iter::once(base).chain(works)).ok()?;
+        return Some((height.checked_add(depth)?, work));
     }
     None
 }
 
-/// [`held_height_and_work`] for JSON. Without a known parent, only this
+/// [`held_height_and_work`] for JSON. Without a known ancestry, only this
 /// block's work and no height.
 fn held_height_and_work_hex(ctx: &RpcContext, block: &Block) -> (Option<u32>, String) {
     let (height, work) = match held_height_and_work(ctx, block) {

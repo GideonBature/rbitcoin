@@ -5,4 +5,5 @@ Fixed
   reported only that block's own work as `chainwork`, and so did
   `getblock` when the parent was not on the active chain. Both still need
   the block's ancestors to be held or stored. Once a held ancestor is
-  evicted from the held-body cache, they stay unknown, as before.
+  evicted from the held-body cache, `height` is left out and `chainwork`
+  is that block's own work, as before.

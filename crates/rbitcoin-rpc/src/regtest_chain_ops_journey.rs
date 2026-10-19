@@ -2733,12 +2733,21 @@ fn chain_ops_held_height_and_work(
     dispatch(ctx, "submitheader", vec![json!(header)]).unwrap();
     assert_eq!(submit(&on_header), "inconclusive");
     assert_eq!(best_hash(ctx), tip);
-    let want = dispatch(ctx, "getblockheader", vec![tip]).unwrap();
-    for b in [&on_active, &on_held, &on_header] {
+    let header_of = |h: BlockHash| {
+        dispatch(ctx, "getblockheader", vec![json!(h.to_string())]).unwrap()
+    };
+    let at_tip = dispatch(ctx, "getblockheader", vec![tip]).unwrap();
+    let below_tip = header_of(BlockHash::from_byte_array(parent.hash));
+    for (b, want) in [
+        (&on_active, &at_tip),
+        (&held_parent, &below_tip),
+        (&on_held, &at_tip),
+        (&on_header, &at_tip),
+    ] {
         let hash = json!(b.block_hash().to_string());
-        let header = dispatch(ctx, "getblockheader", vec![hash.clone()]).unwrap();
         let block = dispatch(ctx, "getblock", vec![hash, json!(1)]).unwrap();
-        for got in [&header, &block] {
+        for got in [&header_of(b.block_hash()), &block] {
+            assert_eq!(got["confirmations"], -1, "{got}");
             assert_eq!(got["height"], want["height"], "{got}");
             assert_eq!(got["chainwork"], want["chainwork"], "{got}");
         }
