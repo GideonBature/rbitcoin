@@ -19,7 +19,7 @@ use rbitcoin_test::{
     assert_reconstruct_eq, build_mature_regtest_with_spend, pad_empty_from, TestDatadir,
 };
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 /// This toolchain's `ExitCode` lacks `PartialEq`; compare via Debug.
 fn exit_success(c: ExitCode) -> bool {
@@ -565,34 +565,6 @@ fn node_cli_and_surface_smoke() {
         ])));
         std::env::remove_var("RBITCOIN_TEST_DROP_STORE");
     }
-
-    let node = workspace_bin("rbitcoin-node");
-    if node.exists() {
-        assert!(Command::new(&node)
-            .args([
-                "--datadir",
-                td.path().join("bin-smoke").to_str().unwrap(),
-                "--network",
-                "regtest",
-                "--smoke",
-            ])
-            .status()
-            .unwrap()
-            .success());
-    }
-}
-
-fn workspace_bin(name: &str) -> std::path::PathBuf {
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("../../target");
-    p.push(profile);
-    p.push(name);
-    p
 }
 
 // ─── Store error / corrupt paths (not hit by happy-path chain tests) ────────
@@ -2006,7 +1978,7 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
         .unwrap();
     assert_eq!(from_zero.len(), 5);
 
-    let flags = local_service_flags();
+    let flags = local_service_flags(false, None);
     assert!(flags.has(ServiceFlags::NETWORK));
     assert!(flags.has(ServiceFlags::WITNESS));
 

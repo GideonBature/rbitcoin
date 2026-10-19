@@ -744,6 +744,9 @@ pub struct MempoolHub {
     fee_deltas: Mutex<HashMap<Txid, i64>>,
     /// Monotonic template generation (admit / remove / prioritise). GBT longpoll.
     template_updates: AtomicU64,
+    /// Tip whose mempool strip has finished. Block templates build on this.
+    /// The query tip is visible earlier, before `remove_for_block_spent`.
+    template_prev: Mutex<Option<[u8; 32]>>,
     /// INV immediately instead of waiting on mocktime.
     immediate_relay: AtomicBool,
     /// Last `setmocktime` (0 = wall). Used to age mempool txs for delayed INV.
@@ -818,6 +821,30 @@ struct CommitOutcome {
     failed_evict: Vec<Txid>,
     undone: Vec<Transaction>,
     prevouts: Vec<TxOut>,
+}
+
+/// Lock held for the whole of a block connect. `commit` records the hash
+/// whose pool strip has finished; the drop writes it.
+pub(crate) struct TemplateHold<'a> {
+    updates: &'a AtomicU64,
+    slot: std::sync::MutexGuard<'a, Option<[u8; 32]>>,
+    commit: Option<[u8; 32]>,
+}
+
+impl TemplateHold<'_> {
+    pub(crate) fn commit(&mut self, hash: [u8; 32]) {
+        self.commit = Some(hash);
+    }
+}
+
+impl Drop for TemplateHold<'_> {
+    fn drop(&mut self) {
+        let Some(hash) = self.commit else {
+            return;
+        };
+        *self.slot = Some(hash);
+        self.updates.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl MempoolHub {
@@ -956,6 +983,7 @@ impl MempoolHub {
             ),
             fee_deltas: Mutex::new(HashMap::new()),
             template_updates: AtomicU64::new(0),
+            template_prev: Mutex::new(None),
             age_inv: Mutex::new(BTreeMap::new()),
             min_live_accept_at: AtomicU64::new(u64::MAX),
             tip_ctx: Mutex::new(None),
@@ -1309,15 +1337,34 @@ impl MempoolHub {
     /// (mainnet: 40k+ live after offline). One purge at tip-mode entry is enough
     /// before relay.
     pub fn set_relay_enabled(&self, on: bool) {
-        let was = self.relay_enabled.swap(on, Ordering::SeqCst);
-        if on && !was {
+        if on && !self.relay_enabled() {
+            // Same lock `connect_at` holds from before the query tip moves
+            // until the strip is recorded. Take it before the purge so the
+            // two never invert lock order with the mempool write lock.
+            let mut slot = self.template_prev.lock().unwrap();
             let n = self.purge_confirmed_on_chain();
             if n > 0 {
                 rbitcoin_log::info!(
                     "mempool: purged {n} leftover tx(s) at tip-mode entry (deferred during IBD)"
                 );
             }
+            let marked = if let Some(h) = self.query.tip_height() {
+                if let Ok(Some((_, rec))) = self.query.header_at_height(h) {
+                    let changed = *slot != Some(rec.hash);
+                    *slot = Some(rec.hash);
+                    changed
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            drop(slot);
+            if marked {
+                self.note_template_update();
+            }
         }
+        self.relay_enabled.store(on, Ordering::SeqCst);
     }
 
     pub fn relay_enabled(&self) -> bool {
@@ -1535,7 +1582,7 @@ impl MempoolHub {
         if live.is_empty() {
             return 0;
         }
-        let to_drop = self.live_confirmed_strong(&live);
+        let to_drop = self.live_confirmed_strong(&live).unwrap_or_default();
         let mut g = self.lock_write();
         let drop_set: HashSet<Txid> = to_drop
             .iter()
@@ -1548,7 +1595,9 @@ impl MempoolHub {
             .map(|(t, _)| *t)
             .filter(|t| !drop_set.contains(t))
             .collect();
-        let spent_ops = self.spent_chain_prevouts(&g, &remain);
+        let spent_ops = self
+            .spent_chain_prevouts(&g, &remain, &drop_set)
+            .unwrap_or_default();
         let confirmed: Vec<Txid> = drop_set.into_iter().collect();
         let (_, conflicts) = g
             .remove_block_txids(&confirmed, &spent_ops)
@@ -1572,27 +1621,32 @@ impl MempoolHub {
         gone.len()
     }
 
-    fn live_confirmed_strong(&self, live: &[Txid]) -> Vec<Txid> {
+    fn live_confirmed_strong(&self, live: &[Txid]) -> Result<Vec<Txid>, ()> {
         let tid_bytes: Vec<[u8; 32]> = live.iter().map(|t| t.to_byte_array()).collect();
         let hits = self
             .query
             .store()
             .get_fk_by_txid_batch(&tid_bytes)
-            .unwrap_or_default();
+            .map_err(|_| ())?;
         let mut to_drop = Vec::new();
         for (tid_b, row) in hits {
             let Some((fk, _)) = row else { continue };
-            if self.query.store().is_confirmed_strong(fk).unwrap_or(false) {
+            if self.query.store().is_confirmed_strong(fk).map_err(|_| ())? {
                 to_drop.push(Txid::from_byte_array(tid_b));
             }
         }
-        to_drop
+        Ok(to_drop)
     }
 
-    fn spent_chain_prevouts(&self, g: &ActiveMempool, remain: &[Txid]) -> Vec<OutPoint> {
-        let op_fk = self.chain_create_fks(g, remain);
+    fn spent_chain_prevouts(
+        &self,
+        g: &ActiveMempool,
+        remain: &[Txid],
+        confirmed_resident: &HashSet<Txid>,
+    ) -> Result<Vec<OutPoint>, ()> {
+        let op_fk = self.chain_create_fks(g, remain, confirmed_resident)?;
         if op_fk.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut fk_vouts: HashMap<Fk, Vec<u32>> = HashMap::new();
         for (op, fk) in &op_fk {
@@ -1606,9 +1660,10 @@ impl MempoolHub {
                 (fk, v)
             })
             .collect();
-        let Ok(unspent) = self.query.unspent_create_vouts_batch(&items) else {
-            return Vec::new();
-        };
+        let unspent = self
+            .query
+            .unspent_create_vouts_batch(&items)
+            .map_err(|_| ())?;
         let mut spent_pair: HashSet<(u64, u32)> = HashSet::new();
         for ((fk, vouts), keep) in items.iter().zip(unspent.iter()) {
             let keep_set: HashSet<u32> = keep.iter().copied().collect();
@@ -1618,14 +1673,19 @@ impl MempoolHub {
                 }
             }
         }
-        op_fk
+        Ok(op_fk
             .into_iter()
             .filter(|(op, fk)| spent_pair.contains(&(fk.0, op.vout)))
             .map(|(op, _)| op)
-            .collect()
+            .collect())
     }
 
-    fn chain_create_fks(&self, g: &ActiveMempool, remain: &[Txid]) -> HashMap<OutPoint, Fk> {
+    fn chain_create_fks(
+        &self,
+        g: &ActiveMempool,
+        remain: &[Txid],
+        confirmed_resident: &HashSet<Txid>,
+    ) -> Result<HashMap<OutPoint, Fk>, ()> {
         let mut op_fk: HashMap<OutPoint, Fk> = HashMap::new();
         let mut need_id: Vec<[u8; 32]> = Vec::new();
         for tid in remain {
@@ -1633,7 +1693,10 @@ impl MempoolHub {
             let aux = g.vin_aux(tid);
             for (i, inp) in tx.input.iter().enumerate() {
                 let op = inp.previous_output;
-                if g.graph.contains(&op.txid) {
+                // Still-unconfirmed parents are mempool dependencies, not chain
+                // outputs. A parent this call already knows is confirmed is on
+                // chain even while it sits in the pool, so its output may be spent.
+                if g.graph.contains(&op.txid) && !confirmed_resident.contains(&op.txid) {
                     continue;
                 }
                 if let Some(fk) = aux.get(i).and_then(|a| a.create_fk) {
@@ -1644,13 +1707,15 @@ impl MempoolHub {
             }
         }
         if need_id.is_empty() {
-            return op_fk;
+            return Ok(op_fk);
         }
         need_id.sort_unstable();
         need_id.dedup();
-        let Ok(rows) = self.query.store().get_fk_by_txid_batch(&need_id) else {
-            return op_fk;
-        };
+        let rows = self
+            .query
+            .store()
+            .get_fk_by_txid_batch(&need_id)
+            .map_err(|_| ())?;
         let mut fk_of: HashMap<[u8; 32], Fk> = HashMap::new();
         for (tid, row) in rows {
             if let Some((fk, _)) = row {
@@ -1661,7 +1726,9 @@ impl MempoolHub {
             let Some(tx) = g.get_tx(tid) else { continue };
             for inp in &tx.input {
                 let op = inp.previous_output;
-                if op_fk.contains_key(&op) || g.graph.contains(&op.txid) {
+                if op_fk.contains_key(&op)
+                    || (g.graph.contains(&op.txid) && !confirmed_resident.contains(&op.txid))
+                {
                     continue;
                 }
                 if let Some(&fk) = fk_of.get(&op.txid.to_byte_array()) {
@@ -1669,7 +1736,7 @@ impl MempoolHub {
                 }
             }
         }
-        op_fk
+        Ok(op_fk)
     }
 
     pub fn subscribe_announces(&self) -> broadcast::Receiver<MempoolAnnounce> {
@@ -3450,6 +3517,27 @@ impl MempoolHub {
 
     fn note_template_update(&self) {
         self.template_updates.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The pool has been stripped for `hash`. Templates build on this tip.
+    pub fn note_template_prev(&self, hash: [u8; 32]) {
+        *self.template_prev.lock().unwrap() = Some(hash);
+        self.note_template_update();
+    }
+
+    /// Held across a block connect: from before the query tip moves until the
+    /// strip has been recorded. [`Self::note_template_prev`] takes the same
+    /// mutex, so callers must record the hash through [`TemplateHold::commit`].
+    pub(crate) fn template_hold(&self) -> TemplateHold<'_> {
+        TemplateHold {
+            updates: &self.template_updates,
+            slot: self.template_prev.lock().unwrap(),
+            commit: None,
+        }
+    }
+
+    pub fn template_prev(&self) -> Option<[u8; 32]> {
+        *self.template_prev.lock().unwrap()
     }
 
     /// Generation for `getblocktemplate.longpollid`.

@@ -190,6 +190,10 @@ pub struct IbdConfig {
     pub peers: Option<std::sync::Arc<std::sync::Mutex<crate::seeds::AddrMan>>>,
     /// Outbound TCP: direct or SOCKS5.
     pub dialer: crate::socks::Dialer,
+    /// Densify assign-stop in bytes. `u64::MAX` is unlimited.
+    /// Production copies [`rbitcoin_query::bq_assign_stop_bytes`] once at
+    /// startup. Tests pass the cap here instead of mutating process env.
+    pub assign_stop_bytes: u64,
 }
 
 impl Default for IbdConfig {
@@ -203,6 +207,7 @@ impl Default for IbdConfig {
             connect_timeout: Duration::from_secs(8),
             peers: None,
             dialer: crate::socks::Dialer::Direct,
+            assign_stop_bytes: rbitcoin_query::bq_assign_stop_bytes(),
         }
     }
 }
@@ -219,6 +224,7 @@ impl IbdConfig {
             connect_timeout: Duration::from_millis(400),
             peers: None,
             dialer: crate::socks::Dialer::Direct,
+            assign_stop_bytes: rbitcoin_query::BQ_ASSIGN_STOP_BYTES,
         }
     }
 }
@@ -576,7 +582,7 @@ pub async fn ibd_cancellable(
             if cadence.assign_due(now_cadence, st.inflight.is_empty()) {
                 let tip_rate_opt = tip_rate_tracker.eta_rate(now_cadence);
                 let _ = hub.query.block_queue_update_soft_pressure(tip_rate_opt);
-                let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
+                let (bq_bytes, bq_count) = hub.query.block_queue_stats();
                 let bq_window_covered = rbitcoin_query::soft_confirm_window_covered(
                     bq_count as u32,
                     bq_bytes,
@@ -886,7 +892,7 @@ pub async fn ibd_cancellable(
                     g.inflight.clone()
                 };
                 let ready_n = confirm::confirm_ready_count(&hub.query, path_lo, &inflight_h);
-                let (_bq_budget, bq_bytes, bq_count) = hub.query.block_queue_stats();
+                let (bq_bytes, bq_count) = hub.query.block_queue_stats();
 
                 tip_rate_tracker.push(now, prog.tip);
                 let eta_rate = tip_rate_tracker.eta_rate(now);

@@ -18,6 +18,9 @@ mutants = []
 default = []
 cli = []
 
+[lib]
+doctest = false
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 bitcoin = { workspace = true }

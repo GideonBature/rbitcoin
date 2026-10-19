@@ -9,6 +9,14 @@ use std::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Pause before a SAM retry. Thirty-two session attempts are about 16s, so a
+/// router that is not accepting yet still comes up.
+#[cfg(not(any(test, feature = "test-hooks")))]
+const SAM_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+/// Crate tests and journeys. The node binary keeps 500ms.
+#[cfg(any(test, feature = "test-hooks"))]
+const SAM_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+
 static INSTALLED: Mutex<Option<Installed>> = Mutex::new(None);
 
 struct Installed {
@@ -193,7 +201,7 @@ impl I2pSam {
                 Ok(v) => return Ok(v),
                 Err(e) if sam_retry(&e) => {
                     last = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(SAM_RETRY).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -274,7 +282,7 @@ impl I2pSam {
                 }
                 Err(e) if stream_retry(&e) => {
                     last = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(SAM_RETRY).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -312,7 +320,7 @@ impl I2pDialer {
                 Err(e) if stream_socket_dead(&e) => return Err(e),
                 Err(e) if stream_retry(&e) => {
                     last = Some(e);
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(SAM_RETRY).await;
                 }
                 Err(e) => return Err(e),
             }

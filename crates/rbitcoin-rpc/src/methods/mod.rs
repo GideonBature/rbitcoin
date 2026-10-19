@@ -99,6 +99,9 @@ pub struct RpcContext {
     pub alert_notify: Option<String>,
     /// Latches after the first alertnotify invocation.
     pub alert_fired: Arc<AtomicBool>,
+    /// `-blocksonly`: the pool accepts local transactions and does not relay
+    /// them. Mining and raw-mempool listing stay off for the life of the node.
+    pub blocksonly: bool,
     /// In-flight RPC methods for `getrpcinfo.active_commands`.
     pub active: Arc<std::sync::Mutex<RpcActive>>,
 }
@@ -205,9 +208,47 @@ impl RpcRegtest for HubRegtest {
     }
 }
 
+/// Whether `getblocktemplate`, `getrawmempool`, and pool-reading `generate`
+/// may use the live pool.
+pub(crate) enum PoolListing {
+    /// Relay is on. The pool is stripped before each tip announcement.
+    Ready,
+    /// Relay is still off because catch-up has not finished the purge.
+    Downloading,
+    /// `-blocksonly`. Relay never turns on.
+    Blocksonly,
+}
+
 impl RpcContext {
     pub fn uptime_secs(&self) -> u64 {
         self.start.elapsed().as_secs()
+    }
+
+    /// Blocksonly wins over catch-up so a miner does not retry forever.
+    /// No pool is not catch-up: there is nothing to strip.
+    pub(crate) fn pool_listing(&self) -> PoolListing {
+        if self.blocksonly {
+            return PoolListing::Blocksonly;
+        }
+        if self.mempool.as_ref().is_none_or(|m| m.relay_enabled()) {
+            PoolListing::Ready
+        } else {
+            PoolListing::Downloading
+        }
+    }
+}
+
+pub(crate) fn pool_listing_unavailable(listing: PoolListing) -> Value {
+    match listing {
+        PoolListing::Blocksonly => rpc_error(
+            ERR_MISC,
+            "blocksonly: this node does not serve a block template or the raw mempool",
+        ),
+        PoolListing::Downloading => rpc_error(
+            ERR_CLIENT_IN_INITIAL_DOWNLOAD,
+            "Bitcoin is downloading blocks...",
+        ),
+        PoolListing::Ready => rpc_error(ERR_MISC, "pool listing is available"),
     }
 }
 
@@ -217,6 +258,8 @@ pub fn rpc_error(code: i64, message: impl Into<String>) -> Value {
 }
 
 pub const ERR_MISC: i64 = -1;
+/// Core `RPC_CLIENT_IN_INITIAL_DOWNLOAD`.
+pub const ERR_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
 /// Core `RPC_TYPE_ERROR`.
 pub const ERR_TYPE_ERROR: i64 = -3;
 /// Core `RPC_INVALID_ADDRESS_OR_KEY`.

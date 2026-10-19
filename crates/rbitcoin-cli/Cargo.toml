@@ -10,6 +10,10 @@ description = "rbitcoin RPC CLI client"
 [[bin]]
 name = "rbitcoin-cli"
 path = "src/main.rs"
+test = false
+
+[lib]
+doctest = false
 
 [features]
 mutants = []

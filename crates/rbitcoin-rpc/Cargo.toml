@@ -10,6 +10,9 @@ description = "Core-class JSON-RPC HTTP server (subset; not full Core parity)"
 [features]
 mutants = []
 
+[lib]
+doctest = false
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-log = { workspace = true }

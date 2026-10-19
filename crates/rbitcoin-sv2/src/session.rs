@@ -178,6 +178,7 @@ pub(crate) async fn serve(
         superseded: 0,
         holding: false,
         held_logged: false,
+        hold_check_at: None,
         fee_check_at: None,
         seen_updates: 0,
     };
@@ -207,10 +208,13 @@ struct Session {
     rebuild_at: Option<Instant>,
     /// Budgets that replaced a queued rebuild's since the last build.
     superseded: u32,
-    /// Last `publish` returned without a template because the node was in IBD.
-    /// Cleared when a template is sent.
+    /// Last `publish` returned without a template because the node was in IBD
+    /// or relay was off. Cleared when a template is sent.
     holding: bool,
     held_logged: bool,
+    /// While `holding`, the next time to try again. Relay turns on after the
+    /// catch-up tip, so that tip's event can run before the pool is ready.
+    hold_check_at: Option<Instant>,
     /// Next fee check: one interval after the last push or check.
     fee_check_at: Option<Instant>,
     /// `MempoolHub::template_updates` read before the last build.
@@ -264,6 +268,14 @@ impl Session {
                 {
                     self.check_fees().await?;
                 }
+                // Same interval, only while no template has been sent. The
+                // counter the fee check watches is not armed until then, and
+                // relay can turn on without another tip.
+                _ = tokio::time::sleep_until(self.hold_check_at.unwrap_or_else(Instant::now)),
+                    if self.hold_check_at.is_some() =>
+                {
+                    self.publish().await?;
+                }
                 _ = tokio::time::sleep_until(setup_deadline), if self.constraints.is_none() => {
                     return Err(missed_setup_deadline());
                 }
@@ -288,9 +300,8 @@ impl Session {
                     c.coinbase_output_max_additional_sigops,
                 ));
                 // Same budget: the last publish already applied it. A new
-                // budget while holding for IBD waits for the tip that leaves
-                // IBD; that tip calls `publish` and must not find a queued
-                // rebuild or a flood close in its place.
+                // budget while holding is applied on the next hold check.
+                // Publishing here would queue a rebuild that the check drops.
                 let same = c == self.constraints;
                 self.constraints = c;
                 if same || self.holding {
@@ -328,8 +339,16 @@ impl Session {
         self.rebuild_at = None;
         self.superseded = 0;
         match self.build().await? {
-            Some(t) => self.send(t).await,
-            None => Ok(()),
+            Some(t) => {
+                self.hold_check_at = None;
+                self.send(t).await
+            }
+            None => {
+                if self.holding {
+                    self.hold_check_at = Some(Instant::now() + self.fee_push.interval);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -370,8 +389,10 @@ impl Session {
         Ok(())
     }
 
-    /// Template for the session's constraints. `None` before constraints or
-    /// while in IBD: leaving IBD always comes with a new tip, which publishes.
+    /// Template for the session's constraints. `None` before constraints, while
+    /// in IBD, or while relay is off (including `-blocksonly`). A holding
+    /// session tries again on the template interval, so relay turning on
+    /// after the catch-up tip still publishes.
     async fn build(&mut self) -> io::Result<Option<template::Template>> {
         let Some((size, sigops)) = self.constraints else {
             return Ok(None);
@@ -384,13 +405,16 @@ impl Session {
         let stats = Arc::clone(&self.stats);
         let t = tokio::task::spawn_blocking(move || {
             let _g = BlockingRegion::enter();
-            if c.in_ibd() {
+            let relay_off = c.mempool().is_none_or(|m| !m.relay_enabled());
+            if c.in_ibd() || relay_off {
                 return Ok(None);
             }
             let started = std::time::Instant::now();
             let t = template::build(&c, size, sigops)?;
-            stats.builds.note(micros(started.elapsed()));
-            Ok::<_, io::Error>(Some(t))
+            if t.is_some() {
+                stats.builds.note(micros(started.elapsed()));
+            }
+            Ok::<_, io::Error>(t)
         })
         .await
         .map_err(io::Error::other)??;
@@ -398,7 +422,7 @@ impl Session {
         if t.is_none() {
             self.holding = true;
             if !self.held_logged {
-                rbitcoin_log::info!("sv2: holding templates until the node leaves IBD");
+                rbitcoin_log::info!("sv2: holding templates until the mempool is maintained");
                 self.held_logged = true;
             }
         }
@@ -632,14 +656,14 @@ mod tests {
     use tokio::time::Instant;
 
     #[test]
-    fn constraints_rebuild_at_uses_the_one_second_cooldown() {
+    fn constraints_rebuild_at_uses_the_cooldown() {
         let built_at = Instant::now();
-        let soon = built_at + Duration::from_millis(999);
+        let soon = built_at + crate::CONSTRAINTS_COOLDOWN - Duration::from_millis(1);
         assert_eq!(
             constraints_rebuild_at(built_at, soon),
-            Some(built_at + Duration::from_secs(1))
+            Some(built_at + crate::CONSTRAINTS_COOLDOWN)
         );
-        let due = built_at + Duration::from_secs(1);
+        let due = built_at + crate::CONSTRAINTS_COOLDOWN;
         assert_eq!(constraints_rebuild_at(built_at, due), None);
     }
 

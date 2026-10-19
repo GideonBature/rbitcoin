@@ -7,6 +7,9 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Relational archive store (Class A/B/C; fd-only bulk IO)"
 
+[lib]
+doctest = false
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-log = { workspace = true }

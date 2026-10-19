@@ -7,17 +7,21 @@ rust-version.workspace = true
 repository.workspace = true
 description = "High-level functional and integration tests for rbitcoin"
 publish = false
+autotests = false
+
+[lib]
+doctest = false
 
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-store = { workspace = true }
 rbitcoin-query = { workspace = true }
 rbitcoin-consensus = { workspace = true }
-rbitcoin-net = { workspace = true }
+rbitcoin-net = { workspace = true, features = ["test-hooks"] }
 rbitcoin-rpc = { workspace = true }
 rbitcoin-electrum = { workspace = true }
 rbitcoin-esplora = { workspace = true }
-rbitcoin-sv2 = { workspace = true }
+rbitcoin-sv2 = { workspace = true, features = ["test-hooks"] }
 rbitcoin-cli = { workspace = true }
 rbitcoin-node = { workspace = true }
 rbitcoin-log = { workspace = true }
@@ -31,37 +35,16 @@ template_distribution_sv2 = { workspace = true }
 # Tip-flush journeys hold or fail the IBD flush thread. Dependents do not.
 rbitcoin-query = { workspace = true, features = ["test-hooks"] }
 
-[[test]]
-name = "scenarios"
-path = "tests/scenarios.rs"
+[[bin]]
+name = "journey-node"
+path = "src/bin/journey-node.rs"
+test = false
 
+# One harness: the default journeys link once and share pads. `overlay`
+# stays its own target because it is feature-gated.
 [[test]]
-name = "integration_multinode"
-path = "tests/integration_multinode.rs"
-
-[[test]]
-name = "electrum_protocol"
-path = "tests/electrum_protocol.rs"
-
-[[test]]
-name = "consensus_rules"
-path = "tests/consensus_rules.rs"
-
-[[test]]
-name = "core_analogs"
-path = "tests/core_analogs.rs"
-
-[[test]]
-name = "cross_surface"
-path = "tests/cross_surface.rs"
-
-[[test]]
-name = "end_of_ibd"
-path = "tests/end_of_ibd.rs"
-
-[[test]]
-name = "asmap_journey"
-path = "tests/asmap_journey.rs"
+name = "journeys"
+path = "tests/journeys.rs"
 
 [features]
 mutants = []

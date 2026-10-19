@@ -221,6 +221,52 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
     tp.shutdown().await;
 }
 
+/// Relay turns on after the catch-up tip has already been consumed. The
+/// session must publish on the template interval, not wait for another block.
+#[tokio::test(flavor = "multi_thread")]
+async fn holding_session_publishes_when_relay_turns_on() {
+    let tc = shared_regtest(0);
+    assert!(tc.chain.in_ibd(), "stale pad starts in IBD");
+    tc.mempool.set_relay_enabled(false);
+    let interval = Duration::from_millis(100);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [9; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: Duration::from_secs(30),
+        write_timeout: WRITE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: interval,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let recv = c.recv();
+    tokio::pin!(recv);
+    let held = tokio::time::timeout(Duration::from_millis(150), &mut recv).await;
+    assert!(
+        held.is_err(),
+        "no template while the pool is not maintained"
+    );
+
+    mock_live_tip(&tc);
+    assert!(!tc.chain.in_ibd(), "mocked tip leaves IBD");
+    tc.mempool.set_relay_enabled(true);
+    let frame = tokio::time::timeout(interval * 4, recv)
+        .await
+        .expect("template after relay turns on")
+        .expect("sv2 message");
+    assert_eq!(frame.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    tp.shutdown().await;
+}
+
 /// A later budget is published once [`CONSTRAINTS_COOLDOWN`] has elapsed.
 /// The heavy output is counted out under `u16::MAX`.
 #[tokio::test(flavor = "multi_thread")]

@@ -178,6 +178,7 @@ async fn start_rpc_listener(
                 .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION"))),
         ),
         alert_notify: config.alert_notify.clone(),
+        blocksonly: config.mempool.blocksonly,
     };
     let op_true_signet = config.network == Network::Signet
         && config
@@ -295,6 +296,12 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
 /// hold the process).
 #[allow(clippy::cognitive_complexity)] // node bring-up / P2P follow loop
 pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
+    if rbitcoin_net::compiled_with_test_hooks() || rbitcoin_sv2::compiled_with_test_hooks() {
+        warn!(
+            "node: built with test-hooks — connect redial, SAM retry, and the SV2 \
+             budget cooldown are the short test values, not the operator ones"
+        );
+    }
     let status = NodeStatus::new(config.network, config.shindex);
     let _health = match config.listen.health {
         Some(addr) => {
@@ -728,10 +735,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             let index_entry = rbitcoin_query::index_tip_entry(&node.hub.query);
             if index_entry.advertise_filters {
                 info!("blockfilter: already at tip; advertising NODE_COMPACT_FILTERS");
-                rbitcoin_net::set_compact_filters_service(true);
+                node.peers.set_compact_filters_service(true);
             }
             if index_entry.spawn {
                 let advertise_later = !index_entry.advertise_filters;
+                let filter_peers = Arc::clone(&node.peers);
                 index_writebehind = Some(rbitcoin_query::spawn_index_writebehind(
                     Arc::clone(&node.hub.query),
                     Arc::clone(&shutdown.flag),
@@ -743,7 +751,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     // when served filters reach the tip, not during materialize.
                     move || {
                         if advertise_later {
-                            rbitcoin_net::set_compact_filters_service(true);
+                            filter_peers.set_compact_filters_service(true);
                         }
                     },
                 ));
@@ -882,7 +890,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         sh_tip_ready,
         config.listen.esplora.clone(),
         config.network,
-        config.esplora_block_template,
+        config
+            .esplora_block_template
+            .then_some(config.mempool.blocksonly),
         &shutdown,
         Arc::clone(&node.hub),
         &mempool,
@@ -1132,7 +1142,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         true,
                         config.listen.esplora.clone(),
                         config.network,
-                        config.esplora_block_template,
+                        config
+                            .esplora_block_template
+                            .then_some(config.mempool.blocksonly),
                         &shutdown,
                         Arc::clone(&node.hub),
                         &mempool,
@@ -1192,6 +1204,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 &mut perf_tick,
                 &mut tip_rx,
                 &mut stale_poll,
+                deadline,
             )
             .await;
             if let Some(ref h) = rpc_handle {
@@ -2042,7 +2055,8 @@ async fn start_esplora_if_ready(
     sh_tip_ready: bool,
     listen: Option<EsploraListen>,
     network: Network,
-    enable_block_template: bool,
+    // `Some(blocksonly)` turns on `/block-template`. `None` leaves it off.
+    block_template: Option<bool>,
     shutdown: &Shutdown,
     hub: Arc<ChainHub>,
     mempool: &std::sync::Arc<MempoolHub>,
@@ -2061,7 +2075,7 @@ async fn start_esplora_if_ready(
         rbitcoin_primitives::Network::Regtest => bitcoin::Network::Regtest,
     };
     let mut ecfg = EsploraConfig::with_listen(listen, btc_net);
-    if enable_block_template {
+    if let Some(blocksonly) = block_template {
         let q = Arc::clone(&hub.query);
         let mp = Arc::clone(mempool);
         let chain = Arc::clone(&hub);
@@ -2083,6 +2097,7 @@ async fn start_esplora_if_ready(
                 active: Arc::new(std::sync::Mutex::new(RpcActive::default())),
                 alert_notify: None,
                 alert_fired: Arc::new(AtomicBool::new(false)),
+                blocksonly,
             };
             gbt_template(&ctx).map_err(|v| {
                 v.get("message")
@@ -2122,11 +2137,11 @@ async fn start_sv2_tp(config: &NodeConfig, hub: &Arc<ChainHub>) -> Option<Sv2TpH
         chain: Arc::clone(hub),
         authority_secret,
         cert_validity: Duration::from_secs(config.sv2_tp_cert_validity_secs),
-        stale_grace: Duration::from_secs(config.sv2_tp_stale_grace_secs),
+        stale_grace: config.sv2_tp_stale_grace,
         setup_timeout: rbitcoin_sv2::SETUP_TIMEOUT,
         write_timeout: rbitcoin_sv2::WRITE_TIMEOUT,
         fee_delta: config.sv2_tp_fee_delta,
-        template_interval: Duration::from_secs(config.sv2_tp_template_interval_secs),
+        template_interval: config.sv2_tp_template_interval,
     };
     match run_sv2_tp(cfg).await {
         Ok(h) => {
@@ -2468,10 +2483,17 @@ pub(crate) async fn tip_follow_next_wake(
     perf: &mut tokio::time::Interval,
     tip_rx: &mut broadcast::Receiver<TipEvent>,
     stale: &mut tokio::time::Interval,
+    run_deadline: Option<Instant>,
 ) -> TipFollowWake {
     tokio::select! {
         biased;
         _ = shutdown => TipFollowWake::Stop,
+        _ = async {
+            match run_deadline {
+                Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                None => std::future::pending::<()>().await,
+            }
+        } => TipFollowWake::Stop,
         _ = async {
             match rpc_stop {
                 Some(tick) => {
@@ -2724,6 +2746,7 @@ mod tests {
                     &mut perf,
                     &mut tip_rx,
                     &mut stale,
+                    None,
                 ),
             )
             .await
@@ -2737,6 +2760,34 @@ mod tests {
             saw_poll,
             "stale interval must produce Poll while perf ticks every 15ms"
         );
+    }
+
+    /// `--max-run-secs` is a deadline, not "exit on the next 5s perf tick".
+    #[tokio::test]
+    async fn max_run_deadline_wakes_without_the_perf_tick() {
+        let mut perf = tokio::time::interval(Duration::from_secs(30));
+        perf.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        perf.tick().await;
+        let mut stale = tokio::time::interval(Duration::from_secs(30));
+        stale.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        stale.tick().await;
+        let (_tx, mut tip_rx) = broadcast::channel::<TipEvent>(8);
+        let start = Instant::now();
+        let wake = tokio::time::timeout(
+            Duration::from_millis(500),
+            tip_follow_next_wake(
+                std::future::pending(),
+                None,
+                &mut perf,
+                &mut tip_rx,
+                &mut stale,
+                Some(Instant::now() + Duration::from_millis(40)),
+            ),
+        )
+        .await
+        .expect("deadline must wake before the perf tick");
+        assert!(matches!(wake, TipFollowWake::Stop));
+        assert!(start.elapsed() < Duration::from_millis(200));
     }
 
     #[test]

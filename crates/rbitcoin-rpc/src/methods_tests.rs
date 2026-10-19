@@ -43,6 +43,7 @@ fn open_ctx(dir: &TempDir) -> RpcContext {
 
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        blocksonly: false,
     }
 }
 
@@ -622,6 +623,123 @@ fn blocksonly_sendraw_admits_valid_tx() {
 }
 
 #[test]
+fn relay_off_refuses_pool_listing_and_mines_coinbase_only() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let hash = hashes[0].as_str().unwrap();
+    let block = dispatch(&ctx, "getblock", vec![json!(hash)]).unwrap();
+    assert_eq!(block["nTx"].as_u64(), Some(1), "{block}");
+    assert!(ctx
+        .mempool
+        .as_ref()
+        .unwrap()
+        .contains(&spend.compute_txid()));
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap_err();
+    assert_eq!(gbt["code"], -10, "{gbt}");
+    let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap_err();
+    assert_eq!(raw["code"], -10, "{raw}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn template_follows_the_stripped_tip() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let (_, genesis) = ctx
+        .query
+        .header_at_height(Height(0))
+        .unwrap()
+        .expect("genesis");
+    ctx.mempool
+        .as_ref()
+        .unwrap()
+        .note_template_prev(genesis.hash);
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let prev = gbt["previousblockhash"].as_str().unwrap();
+    assert_ne!(prev, tip.as_str().unwrap(), "{gbt}");
+    assert_eq!(gbt["height"].as_u64(), Some(1), "{gbt}");
+    assert!(
+        gbt["longpollid"].as_str().unwrap().starts_with(prev),
+        "{gbt}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn template_follows_the_fork_after_invalidate() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap();
+    let parent = blk["previousblockhash"].clone();
+    let height = blk["height"].as_u64().unwrap();
+    dispatch(&ctx, "invalidateblock", vec![tip]).unwrap();
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(gbt["previousblockhash"], parent, "{gbt}");
+    assert_eq!(gbt["height"].as_u64(), Some(height), "{gbt}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn template_follows_the_fork_after_header_rewind() {
+    let (ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let blk = dispatch(&ctx, "getblock", vec![tip, json!(1)]).unwrap();
+    let parent = blk["previousblockhash"].clone();
+    let height = blk["height"].as_u64().unwrap();
+    hub.rewind_to_height(u32::try_from(height - 1).unwrap())
+        .unwrap();
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(gbt["previousblockhash"], parent, "{gbt}");
+    assert_eq!(gbt["height"].as_u64(), Some(height), "{gbt}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn template_follows_blocks_the_hub_connects() {
+    let (ctx, dir, _hub) = ctx_regtest_hub();
+    dispatch(&ctx, "generate", vec![json!(2)]).unwrap();
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert_eq!(gbt["height"].as_u64(), Some(3), "{gbt}");
+    let mut bare = ctx_without_chain(&ctx);
+    bare.mempool = None;
+    let bare_gbt = dispatch(
+        &bare,
+        "getblocktemplate",
+        vec![json!({"rules": ["segwit"]})],
+    )
+    .unwrap();
+    assert_eq!(bare_gbt["height"].as_u64(), Some(3), "{bare_gbt}");
+    assert_eq!(dispatch(&bare, "getrawmempool", vec![]).unwrap(), json!([]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn blocksonly_refuses_template_mempool_and_generate() {
+    let (mut ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    ctx.blocksonly = true;
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(true);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let ok = dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    assert_eq!(ok.as_str().unwrap(), &spend.compute_txid().to_string());
+    for (method, params) in [
+        ("getblocktemplate", vec![json!({"rules": ["segwit"]})]),
+        ("getrawmempool", vec![]),
+        ("generate", vec![json!(1)]),
+    ] {
+        let err = dispatch(&ctx, method, params).unwrap_err();
+        assert_ne!(err["code"], -10, "{method}: {err}");
+        assert!(
+            err["message"].as_str().unwrap_or("").contains("blocksonly"),
+            "{method}: {err}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn parse_wrapped_multi_sh_wsh_and_wsh() {
     let pk = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     let spk = parse_wrapped_multi(&format!("sh(wsh(multi(1,{pk})))")).expect("wrapped");
@@ -777,10 +895,23 @@ fn all_methods_callable_empty_or_error() {
 
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        blocksonly: false,
     };
     let mem2 = dispatch(&ctx2, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(mem2["loaded"], true);
-    let _ = dispatch(&ctx2, "getrawmempool", vec![json!(true)]).unwrap();
+    let raw = dispatch(&ctx2, "getrawmempool", vec![json!(true)]).unwrap();
+    assert_eq!(raw, json!({}));
+    let gbt = dispatch(
+        &ctx2,
+        "getblocktemplate",
+        vec![json!({"rules": ["segwit"]})],
+    )
+    .unwrap_err();
+    assert!(
+        gbt["message"].as_str().unwrap_or("").contains("no tip"),
+        "{gbt}"
+    );
+    assert_ne!(gbt["code"], -10, "{gbt}");
     let _ = dispatch(&ctx2, "estimatesmartfee", vec![json!(1)]).unwrap();
     let _ = dispatch(&ctx2, "sendrawtransaction", vec![json!("00")]);
     let info = dispatch(&ctx2, "getblockchaininfo", vec![]).unwrap();
@@ -1167,6 +1298,9 @@ fn regtest_ctx(
     max_wu: u64,
 ) -> (RpcContext, TempDir, Arc<rbitcoin_net::ChainHub>) {
     let mp = MempoolHub::open_with_weight(dir.join("mempool"), hub.query.clone(), max_wu).unwrap();
+    // The node attaches this pool before it serves RPC. Connects and
+    // disconnects move the template mark on that same pool.
+    assert!(hub.attach_mempool(Arc::clone(&mp)).is_ok());
     mp.set_relay_enabled(true);
     let ctx = RpcContext {
         query: hub.query.clone(),
@@ -1191,6 +1325,7 @@ fn regtest_ctx(
 
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        blocksonly: false,
     };
     (ctx, dir, hub)
 }
@@ -1540,14 +1675,23 @@ fn gettxout_leftover_is_connected_not_unconfirmed() {
     .unwrap();
     assert_eq!(shown["coinbase"], true, "{shown}");
     assert!(shown["confirmations"].as_u64().unwrap() >= 1, "{shown}");
-    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
     dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
     let tid = spend.compute_txid();
-    assert!(
-        ctx.mempool.as_ref().unwrap().contains(&tid),
-        "relay off must leave the confirmed tx in the hub"
-    );
     let txid = hash_hex_display(&tid.to_byte_array());
+    assert!(
+        !ctx.mempool.as_ref().unwrap().contains(&tid),
+        "generate must drop a tx it just confirmed"
+    );
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    let republished = gbt["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["txid"].as_str() == Some(txid.as_str()));
+    assert!(
+        !republished,
+        "template must not contain a tx the new tip already confirmed: {gbt}"
+    );
     let utxo = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
     assert_ne!(
         utxo["confirmations"], 0,
@@ -4293,6 +4437,7 @@ fn ctx_without_chain(src: &RpcContext) -> RpcContext {
         active: Arc::clone(&src.active),
         alert_notify: src.alert_notify.clone(),
         alert_fired: Arc::clone(&src.alert_fired),
+        blocksonly: src.blocksonly,
     }
 }
 

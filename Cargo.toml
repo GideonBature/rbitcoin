@@ -100,4 +100,8 @@ debug = "line-tables-only"
 debug = false
 
 [profile.test.package."*"]
+# `*` is dependencies only (workspace crates keep the profile above).
+# Optimized crypto and codec crates make block hashing in tests cheap.
+# rust-cache holds the dep build across CI runs.
+opt-level = 2
 debug = false

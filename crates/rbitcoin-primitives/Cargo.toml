@@ -10,6 +10,9 @@ description = "Shared types for the rbitcoin node"
 [features]
 mutants = []
 
+[lib]
+doctest = false
+
 [dependencies]
 bitcoin_hashes = { workspace = true }
 # Same crate `bitcoin::hex` re-exports. Not the `bitcoin` crate: store depends

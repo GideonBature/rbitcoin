@@ -13,6 +13,9 @@ corpus = ["dep:serde_json"]
 # Nightly cargo-mutants only. Off for the node build.
 mutants = ["dep:mutants"]
 
+[lib]
+doctest = false
+
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 arc-swap = { workspace = true }

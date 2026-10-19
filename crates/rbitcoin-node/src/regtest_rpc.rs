@@ -36,6 +36,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `OP_TRUE` signet generation on regtest difficulty. Parent bits are
+    /// `0x207fffff`, so the grind is a handful of nonces. Accept still checks
+    /// the BIP325 solution, which the regtest miner does not attach.
     #[test]
     fn hub_op_true_signet_generate_one() {
         let n = SystemTime::now()
@@ -44,8 +47,8 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("rbitcoin-node-signet-gen-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let params =
-            ChainParams::custom_signet(ScriptBuf::from_bytes(vec![0x51]), 10 * 60).unwrap();
+        let mut params = ChainParams::regtest();
+        params.signet_challenge = Some(ScriptBuf::from_bytes(vec![0x51]));
         let hub = Arc::new(ChainHub::new(
             Query::open_or_create_tiny(dir.join("store")).unwrap(),
             params,
@@ -57,6 +60,12 @@ mod tests {
             .unwrap();
         assert_eq!(hashes.len(), 1);
         assert_eq!(miner.0.tip_height(), Some(1));
+        let bits = miner.0.tip_header().expect("tip").bits;
+        assert_eq!(
+            bits.to_consensus(),
+            rbitcoin_consensus::REGTEST_POW_BITS,
+            "the signet miner must grind the parent target, which is regtest here"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -149,10 +149,19 @@ pub(crate) fn generate_with_mempool(
     script: ScriptBuf,
 ) -> Result<Value, Value> {
     let miner = require_regtest_miner(ctx, "generate")?;
-    let extras: Vec<Transaction> = mempool_block_txs(ctx)
-        .into_iter()
-        .map(|(tx, _)| Transaction::clone(&tx))
-        .collect();
+    let listing = ctx.pool_listing();
+    if matches!(listing, PoolListing::Blocksonly) {
+        return Err(pool_listing_unavailable(listing));
+    }
+    // Catch-up leaves the pool unstripped. Mine the coinbase only.
+    let extras: Vec<Transaction> = if matches!(listing, PoolListing::Ready) {
+        mempool_block_txs(ctx)
+            .into_iter()
+            .map(|(tx, _)| Transaction::clone(&tx))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let hashes = miner
         .generate_to_script(nblocks, script, extras.clone())
         .map_err(|e| rpc_error(ERR_MISC, e))?;
@@ -540,6 +549,10 @@ pub(crate) fn gbt_rules(req: Option<&Value>) -> Result<Vec<String>, Value> {
 }
 
 pub(crate) fn getblocktemplate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
+    let listing = ctx.pool_listing();
+    if !matches!(listing, PoolListing::Ready) {
+        return Err(pool_listing_unavailable(listing));
+    }
     params.reject_unknown(&["template_request"])?;
     let req = params.get(0, "template_request");
     let _rules = gbt_rules(req)?;
@@ -570,9 +583,6 @@ pub(crate) fn getblocktemplate(ctx: &RpcContext, params: &RpcParams) -> Result<V
 /// Core GBT longpoll: block while `longpollid` still matches the live tip +
 /// mempool update counter. Tip change (P2P / generate) wakes within one poll
 /// tick. A new mempool tx or `prioritisetransaction` does too.
-/// Core GBT longpoll: block while `longpollid` still matches the live tip +
-/// mempool update counter. Tip change (P2P / generate) wakes within one poll
-/// tick. A new mempool tx or `prioritisetransaction` does too.
 pub(crate) fn gbt_longpoll_wait(ctx: &RpcContext, want: &str) {
     const TICK: std::time::Duration = std::time::Duration::from_millis(50);
     if super::http_wait_satisfied() {
@@ -589,38 +599,77 @@ pub(crate) fn gbt_longpoll_wait(ctx: &RpcContext, want: &str) {
     }
 }
 
+/// Where a template may build. The stripped tip wins. The query tip is only
+/// a stand-in before any strip has been recorded.
+enum GbtTip {
+    /// `(height, display hash, time, bits)`.
+    Ready(u32, String, u32, u32),
+    /// `template_prev` names a block that is not the header at its height.
+    Stale,
+}
+
+fn anchor_of(height: u32, hash: [u8; 32], time: u32, bits: u32) -> GbtTip {
+    GbtTip::Ready(height, hash_hex_display(&hash), time, bits)
+}
+
+fn gbt_tip(ctx: &RpcContext) -> Result<GbtTip, Value> {
+    if let Some(hash) = ctx.mempool.as_ref().and_then(|m| m.template_prev()) {
+        let Some(height) = ctx
+            .query
+            .height_of_hash(&hash)
+            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+        else {
+            return Ok(GbtTip::Stale);
+        };
+        let Some((_, rec)) = ctx
+            .query
+            .header_at_height(height)
+            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+        else {
+            return Ok(GbtTip::Stale);
+        };
+        if rec.hash != hash {
+            return Ok(GbtTip::Stale);
+        }
+        return Ok(anchor_of(height.0, rec.hash, rec.timestamp, rec.bits));
+    }
+    let Some(h) = ctx.query.tip_height() else {
+        return Err(rpc_error(ERR_MISC, "no tip"));
+    };
+    let (_, rec) = ctx
+        .query
+        .header_at_height(h)
+        .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
+        .ok_or_else(|| rpc_error(ERR_MISC, "tip header missing"))?;
+    Ok(anchor_of(h.0, rec.hash, rec.timestamp, rec.bits))
+}
+
 pub(crate) fn gbt_longpoll_id(ctx: &RpcContext) -> String {
-    let tip = if let Some(h) = ctx.query.tip_height() {
-        ctx.query
-            .header_at_height(h)
-            .ok()
-            .flatten()
-            .map(|(_, rec)| hash_hex_display(&rec.hash))
-            .unwrap_or_default()
-    } else {
-        String::new()
+    let updates = ctx
+        .mempool
+        .as_ref()
+        .map(|m| m.template_updates())
+        .unwrap_or(0);
+    match gbt_tip(ctx) {
+        Ok(GbtTip::Ready(_, hex, _, _)) => format!("{hex}{updates}"),
+        _ => format!("stale{updates}"),
+    }
+}
+
+pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
+    let listing = ctx.pool_listing();
+    if !matches!(listing, PoolListing::Ready) {
+        return Err(pool_listing_unavailable(listing));
+    }
+    let GbtTip::Ready(tip_h, prev_hex, tip_time, tip_bits) = gbt_tip(ctx)? else {
+        return Err(rpc_error(ERR_MISC, "template tip is not on the best chain"));
     };
     let updates = ctx
         .mempool
         .as_ref()
         .map(|m| m.template_updates())
         .unwrap_or(0);
-    format!("{tip}{updates}")
-}
-
-pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
-    let tip_h = ctx.query.tip_height().map(|h| h.0).unwrap_or(0);
     let next_h = tip_h.saturating_add(1);
-    let (prev_hex, tip_time, tip_bits) = if let Some(h) = ctx.query.tip_height() {
-        let (_, rec) = ctx
-            .query
-            .header_at_height(h)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-            .ok_or_else(|| rpc_error(ERR_MISC, "tip header missing"))?;
-        (hash_hex_display(&rec.hash), rec.timestamp, rec.bits)
-    } else {
-        return Err(rpc_error(ERR_MISC, "no tip"));
-    };
     let params = ctx
         .chain
         .as_ref()
@@ -677,7 +726,7 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         }));
     }
     let subsidy = rbitcoin_consensus::block_subsidy(next_h, &params) as u64;
-    let longpollid = gbt_longpoll_id(ctx);
+    let longpollid = format!("{prev_hex}{updates}");
     let target = bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits));
     if let Some(c) = ctx.chain.as_ref() {
         c.note_gbt_assembled();

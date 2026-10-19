@@ -99,6 +99,8 @@ jobs:
         run: ./scripts/tmpfs-test-runner.test.sh
       - name: overlay-functional runner self-test
         run: ./scripts/overlay-functional/run.sh.test.sh
+      - name: journeys manifest
+        run: ./scripts/journeys-manifest.test.sh
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: ci-clippy

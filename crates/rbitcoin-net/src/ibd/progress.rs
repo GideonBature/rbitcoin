@@ -473,7 +473,7 @@ pub(crate) fn spawn_status_thread(
                 let mut snap = board.snap.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 snap.hole = board.hole.load(std::sync::atomic::Ordering::Relaxed);
                 let published = read_progress_published(&query);
-                let (_budget, bq_bytes, bq_count) = query.block_queue_stats();
+                let (bq_bytes, bq_count) = query.block_queue_stats();
                 let now = Instant::now();
                 log_progress_tick(
                     &mut clock,

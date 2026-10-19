@@ -241,7 +241,8 @@ pub(crate) fn assign_work_ordered(
         return;
     }
 
-    let (bq_stop, bq_bytes, bq_count) = hub.query.block_queue_stats();
+    let (bq_bytes, bq_count) = hub.query.block_queue_stats();
+    let bq_stop = cfg.assign_stop_bytes;
     st.intake_stop = bq_stop;
     st.intake_queued = bq_bytes;
 
@@ -443,7 +444,7 @@ fn assign_densify(
     }
 
     let densify_hi = path_lo.saturating_add(CONTIG_DENSIFY_AHEAD);
-    let depth_bytes = hub.query.block_queue_stats().1;
+    let depth_bytes = hub.query.block_queue_stats().0;
     let fetched_hi = hub
         .query
         .block_queue_max_height()
@@ -455,7 +456,7 @@ fn assign_densify(
         densify_hi,
         depth_bytes,
         tip_rate_blocks_per_s,
-        rbitcoin_query::bq_assign_stop_bytes(),
+        cfg.assign_stop_bytes,
         fetched_hi,
     );
 
@@ -1642,7 +1643,6 @@ pub(in crate::ibd) mod tests {
 
     #[test]
     fn download_gate_stops_getdata_when_tip_plus_one_unconfirmable() {
-        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let mut st = IbdWorkState::new(vec![dummy_slot(0)], hub.tip_hash(), hub.tip_height());
@@ -1662,7 +1662,6 @@ pub(in crate::ibd) mod tests {
 
     #[test]
     fn clear_inflight_add_peer_pop_need_and_tip_holes() {
-        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         let mut st = IbdWorkState::new(vec![dummy_slot(0), dummy_slot(1)], None, Some(0));
         let hash = h(10);
@@ -1992,8 +1991,8 @@ pub(in crate::ibd) mod tests {
         // Quarter of the configured assign-stop. One new hash reserves 4 MiB,
         // so the stop must still fit that reserve on top of the queued quarter.
         let stop: u64 = 8 * 1024 * 1024;
-        std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", stop.to_string());
-        let (mut st, cfg, stats) = gap_work(hub);
+        let (mut st, mut cfg, stats) = gap_work(hub);
+        cfg.assign_stop_bytes = stop;
         plant_work_path(&mut st, path_lo, path_lo.saturating_add(80));
         let n = (stop / 4) as usize;
         let payload = vec![0u8; n];
@@ -2016,7 +2015,6 @@ pub(in crate::ibd) mod tests {
                 .contains_key(&h(path_lo.saturating_add(TIP_HOLE_MAX as u32))),
             "densify stays off at the byte quarter"
         );
-        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
         drain_block_queue(hub);
 
         let (mut st, cfg, stats) = gap_work(hub);
@@ -2050,7 +2048,6 @@ pub(in crate::ibd) mod tests {
     fn ibd_cover_tip_holes() {
         use super::super::peer_io::ibd_mono_ms;
         use super::super::progress::claim_ready;
-        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let (slots, mut wire) = wired_slots(6);
@@ -2538,42 +2535,6 @@ pub(in crate::ibd) mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Serialize env mutators — parallel suite races `bq_assign_stop_bytes`.
-    static BQ_ASSIGN_STOP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    pub(in crate::ibd) struct AssignStopEnvRestore(
-        Option<std::ffi::OsString>,
-        Option<std::ffi::OsString>,
-    );
-    impl Drop for AssignStopEnvRestore {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
-                None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
-            }
-            match self.1.take() {
-                Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
-                None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
-            }
-        }
-    }
-
-    /// Tuple fields drop in order: the env is restored before the lock is
-    /// released, so the next holder's own setting survives.
-    pub(in crate::ibd) fn lock_default_assign_stop(
-    ) -> (AssignStopEnvRestore, std::sync::MutexGuard<'static, ()>) {
-        let g = BQ_ASSIGN_STOP_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let restore = AssignStopEnvRestore(
-            std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES"),
-            std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB"),
-        );
-        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
-        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
-        (restore, g)
-    }
-
     /// Densify on one hub at genesis across IBD restarts: assign depth, the
     /// tip batch, band limits from the body queue, per-peer caps, hung
     /// owners, and reorg need.
@@ -2583,7 +2544,6 @@ pub(in crate::ibd) mod tests {
         use super::super::dial::release_peer_block_work;
         use super::super::peer_io::ibd_mono_ms;
         use rbitcoin_query::{soft_confirm_window_n, BQ_SOFT_FREE_BYTES};
-        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let (slots, mut wire) = wired_slots(3);
@@ -2725,7 +2685,7 @@ pub(in crate::ibd) mod tests {
         for ht in 1u32..=10 {
             enqueue(&mut st, ht, b"x");
         }
-        assert!(hub.query.block_queue_stats().1 < BQ_SOFT_FREE_BYTES);
+        assert!(hub.query.block_queue_stats().0 < BQ_SOFT_FREE_BYTES);
         hub.query.set_lookup_taken_hi(Some(20));
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, Some(0.1));
         hub.query.set_lookup_taken_hi(None);
@@ -2782,7 +2742,7 @@ pub(in crate::ibd) mod tests {
         enqueue(&mut st, 1, &chunk);
         enqueue(&mut st, 2, &chunk);
         drop(chunk);
-        assert!(hub.query.block_queue_stats().1 > BQ_SOFT_FREE_BYTES);
+        assert!(hub.query.block_queue_stats().0 > BQ_SOFT_FREE_BYTES);
         assert_eq!(soft_confirm_window_n(Some(0.1)), 6);
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, Some(0.1));
         let issued = issued_heights(&st);
@@ -2795,21 +2755,21 @@ pub(in crate::ibd) mod tests {
         restart_on(&mut st, &hub, &mut wire, &[0, 1]);
         cfg.window = 128;
         cfg.per_peer = 64;
-        std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", "2048");
+        cfg.assign_stop_bytes = 2048;
         plant_work_path(&mut st, 1, 500);
         for ht in 1u32..=TIP_HOLE_MAX as u32 {
             enqueue(&mut st, ht, b"x");
         }
         enqueue(&mut st, 500, &[0u8; 4096]);
-        assert!(hub.query.block_queue_stats().1 >= 2048);
+        assert!(hub.query.block_queue_stats().0 >= 2048);
         assert_eq!(hub.query.block_queue_max_height(), Some(500));
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, Some(5.0));
-        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
         assert!(
             st.inflight.is_empty(),
             "queue already at the assign-stop: no new getdata; issued={:?}",
             issued_heights(&st)
         );
+        cfg.assign_stop_bytes = rbitcoin_query::BQ_ASSIGN_STOP_BYTES;
 
         // Tip+1 in hand and tip+2 the pre-hole. Past it, densify re-gets a
         // zombie pending (no wire) and a wrong first-wins body by path hash.
@@ -3178,16 +3138,6 @@ pub(in crate::ibd) mod tests {
 
     #[test]
     fn hostile_peer_session() {
-        let _g = BQ_ASSIGN_STOP_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let _restore = AssignStopEnvRestore(
-            std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES"),
-            std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB"),
-        );
-        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
-        std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
-
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let four_mib = GETDATA_RESERVE_BYTES;
@@ -3216,15 +3166,15 @@ pub(in crate::ibd) mod tests {
         assert_eq!(st.inflight.len(), before);
         assert!(!st.inflight.contains_key(&h(33)));
 
-        std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", "1000");
         plant_work_path(&mut st, 1, 2);
         let queued = vec![0u8; 1000];
         hub.query
             .block_queue_enqueue(50, h(50).to_byte_array(), 50, &queued)
             .unwrap();
-        assert!(hub.query.block_queue_stats().1 >= 1000);
+        assert!(hub.query.block_queue_stats().0 >= 1000);
         let stats = LoopStats::default();
-        let cfg = IbdConfig::for_test();
+        let mut cfg = IbdConfig::for_test();
+        cfg.assign_stop_bytes = 1000;
         assign_work_ordered(&mut st, &hub, &cfg, &stats, AssignDepth::Full, None);
         assert!(
             !st.inflight.contains_key(&h(1)) && !st.inflight.contains_key(&h(2)),
@@ -3239,7 +3189,6 @@ pub(in crate::ibd) mod tests {
     /// cursor has moved past it. A holder whose peer is gone does not cover it.
     #[test]
     fn tip_hole_in_front_of_queued_bodies_is_requested() {
-        let _env = lock_default_assign_stop();
         let (dir, hub) = tmp_hub();
         hub.ensure_genesis().unwrap();
         let (slots, mut wire) = wired_slots(2);
