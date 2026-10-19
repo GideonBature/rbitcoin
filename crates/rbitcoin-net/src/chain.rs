@@ -208,7 +208,15 @@ impl ForkTips {
 /// Uncapped. Forgetting an invalid hash would make that block acceptable again.
 struct Invalidated {
     set: RwLock<HashSet<BlockHash>>,
-    paths: RwLock<Vec<Vec<BlockHash>>>,
+    paths: RwLock<Vec<InvalidPath>>,
+}
+
+/// The hashes one `invalidateblock` marked, in height order. `connected` when
+/// they came off the active chain, so every one passed full validation.
+#[derive(Clone)]
+struct InvalidPath {
+    hashes: Vec<BlockHash>,
+    connected: bool,
 }
 
 impl Invalidated {
@@ -1088,7 +1096,7 @@ impl ChainHub {
             }
         }
         for path in self.invalidated.paths.read().unwrap().iter() {
-            if let Some(h) = path.last().copied() {
+            if let Some(h) = path.hashes.last().copied() {
                 record(&mut out, h, "invalid");
             }
         }
@@ -2094,7 +2102,10 @@ impl ChainHub {
                 }
             }
             if !path.is_empty() {
-                self.invalidated.paths.write().unwrap().push(path);
+                self.invalidated.paths.write().unwrap().push(InvalidPath {
+                    hashes: path,
+                    connected: true,
+                });
             }
             let keep = h.0.saturating_sub(1);
             self.disconnect_to(keep)?;
@@ -2104,7 +2115,10 @@ impl ChainHub {
             // invalid without a tip disconnect.
             self.invalidated.set.write().unwrap().insert(hash);
             self.drop_held(hash);
-            self.invalidated.paths.write().unwrap().push(vec![hash]);
+            self.invalidated.paths.write().unwrap().push(InvalidPath {
+                hashes: vec![hash],
+                connected: false,
+            });
         } else {
             return Err(NetError::Consensus("Block not found".into()));
         }
@@ -2119,41 +2133,9 @@ impl ChainHub {
     /// the most total chain work. Equal work prefers precious, then the
     /// first-seen held tip.
     fn try_apply_after_invalidate(&self) -> Result<Option<AcceptOutcome>, NetError> {
-        let inv = self.invalidated.set.read().unwrap().clone();
-        let precious = *self.precious.read().unwrap();
-        let mut starts: Vec<BlockHash> = self.fork_tips.read().unwrap().iter().collect();
-        starts.extend(self.held_bodies.read().unwrap().keys());
-        if let Some(p) = precious {
-            if !starts.contains(&p) {
-                starts.push(p);
-            }
-        }
-        let mut best: Option<(bitcoin::Work, bool, u64, Vec<Block>)> = None;
-        for start in starts {
-            if inv.contains(&start) {
-                continue;
-            }
-            let Some(branch) = self.assemble_side_branch(start) else {
-                continue;
-            };
-            if branch.iter().any(|b| inv.contains(&b.block_hash())) {
-                continue;
-            }
-            let tip = branch.last().map(|b| b.block_hash()).unwrap_or(start);
-            let Ok(w) = self.branch_chain_work(&branch) else {
-                continue;
-            };
-            let is_p = Some(tip) == precious;
-            let seq = self.held_bodies.read().unwrap().seq(tip);
-            let take = match &best {
-                None => true,
-                Some((bw, was_p, bseq, _)) => held_branch_beats(w, is_p, seq, *bw, *was_p, *bseq),
-            };
-            if take {
-                best = Some((w, is_p, seq, branch));
-            }
-        }
-        let Some((_, _, _, branch)) = best else {
+        let none = HashSet::new();
+        let Some(branch) = self.most_work_branch(self.side_branches(&[], &none, &none), &mut None)
+        else {
             return Ok(None);
         };
         match self.accept_branch_inner(&branch) {
@@ -2165,8 +2147,9 @@ impl ChainHub {
         }
     }
 
-    /// Clear the invalid mark on `hash`, its invalidated path, and ancestors;
-    /// re-apply bodies from archive. Header-only descendants stay header tips.
+    /// Clear the invalid mark on `hash`, its invalidated paths, and ancestors,
+    /// then activate the most-work chain. Header-only descendants stay header
+    /// tips.
     pub fn reconsider_block(&self, hash: BlockHash) -> Result<(), NetError> {
         crate::tip_accept::run_on_tip_accept(|| self.reconsider_block_inner(hash))
     }
@@ -2205,7 +2188,7 @@ impl ChainHub {
         {
             let mut inv = self.invalidated.set.write().unwrap();
             for path in &paths {
-                for h in path {
+                for h in &path.hashes {
                     inv.remove(h);
                 }
             }
@@ -2214,42 +2197,164 @@ impl ChainHub {
             }
         }
 
-        for path in paths {
-            let mut branch = Vec::new();
-            for h in &path {
-                if self.is_connected(h) {
+        let restored: HashSet<BlockHash> = paths
+            .iter()
+            .flat_map(|p| p.hashes.iter().copied())
+            .collect();
+        let validated: HashSet<BlockHash> = paths
+            .iter()
+            .filter(|p| p.connected)
+            .flat_map(|p| p.hashes.iter().copied())
+            .collect();
+        let mut leaves: Vec<BlockHash> = paths
+            .iter()
+            .filter_map(|p| p.hashes.last().copied())
+            .collect();
+        leaves.push(hash);
+        self.apply_after_reconsider(&leaves, &restored, &validated)
+    }
+
+    /// Core `ActivateBestChain` after `reconsiderblock`: connect the most-work
+    /// side branch, and try the next one when a block fails. Then keep the
+    /// restored leaves that lost as fork tips.
+    fn apply_after_reconsider(
+        &self,
+        leaves: &[BlockHash],
+        restored: &HashSet<BlockHash>,
+        validated: &HashSet<BlockHash>,
+    ) -> Result<(), NetError> {
+        // A failed tip may stay a candidate (a time reject is not a mark), so
+        // each tip is tried once.
+        let mut tried = HashSet::new();
+        let mut fault = None;
+        loop {
+            let untried = self.side_branches(leaves, restored, &tried);
+            let Some(branch) = self.most_work_branch(untried, &mut fault) else {
+                break;
+            };
+            let branch_tip = branch[branch.len() - 1].block_hash();
+            tried.insert(branch_tip);
+            let attempt = {
+                let _guard = self.connect_lock.lock().unwrap_or_else(|e| e.into_inner());
+                self.accept_branch_prefix(&branch)
+            };
+            match attempt {
+                Ok((AcceptOutcome::Accepted { .. }, Some(_))) => {}
+                Ok(_) => break,
+                Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
+                Err(e) if e.is_local_fault() => {
+                    fault.get_or_insert(e);
+                    break;
+                }
+                Err(e) => self.remember_failed_accept(branch_tip, &e),
+            }
+        }
+        // The paths that named these leaves are gone, so park before a fault
+        // is returned.
+        self.park_restored_leaves(leaves, restored, validated);
+        fault.map_or(Ok(()), Err)
+    }
+
+    /// Keep each restored leaf that is still a side tip as a fork tip, so a
+    /// later `invalidateblock` can return to it. Every block to it must have
+    /// been connected before: it came off the active chain, or it is at or
+    /// under a fork tip. A leaf under a fork tip or another kept leaf is not a
+    /// tip. A held child that never connected does not hide it.
+    fn park_restored_leaves(
+        &self,
+        leaves: &[BlockHash],
+        restored: &HashSet<BlockHash>,
+        validated: &HashSet<BlockHash>,
+    ) {
+        let forks: HashSet<BlockHash> = self.fork_tips.read().unwrap().iter().collect();
+        let mut under_valid = HashSet::new();
+        let mut kept = Vec::new();
+        for branch in self.side_branches(leaves, restored, &HashSet::new()) {
+            let hashes: Vec<BlockHash> = branch.iter().map(Block::block_hash).collect();
+            let (tip, below) = hashes.split_last().expect("a side branch is not empty");
+            let was_connected = hashes
+                .iter()
+                .rev()
+                .take_while(|h| !forks.contains(*h))
+                .all(|h| validated.contains(h));
+            let keep = leaves.contains(tip) && was_connected;
+            if keep {
+                kept.push(*tip);
+            }
+            if keep || forks.contains(tip) {
+                under_valid.extend(below.iter().copied());
+            }
+        }
+        let mut forks = self.fork_tips.write().unwrap();
+        for tip in kept {
+            if !under_valid.contains(&tip) {
+                forks.insert(tip);
+            }
+        }
+    }
+
+    /// Side branches to fork tips, held bodies, precious, and `leaves`, built
+    /// one at a time. A branch through an invalid block is left out, and so
+    /// is a tip in `skip`.
+    fn side_branches<'a>(
+        &'a self,
+        leaves: &[BlockHash],
+        restored: &'a HashSet<BlockHash>,
+        skip: &HashSet<BlockHash>,
+    ) -> impl Iterator<Item = Vec<Block>> + 'a {
+        let inv = self.invalidated.set.read().unwrap().clone();
+        let mut starts: Vec<BlockHash> = self.fork_tips.read().unwrap().iter().collect();
+        starts.extend(self.held_bodies.read().unwrap().keys());
+        starts.extend(*self.precious.read().unwrap());
+        starts.extend(leaves.iter().copied());
+        let mut seen = HashSet::new();
+        starts.retain(|s| seen.insert(*s) && !inv.contains(s) && !skip.contains(s));
+        starts
+            .into_iter()
+            .filter_map(move |s| self.assemble_side_branch(s, restored))
+            .filter(move |br| !br.iter().any(|b| inv.contains(&b.block_hash())))
+    }
+
+    /// The branch with the most total chain work, as in Core's
+    /// `CBlockIndexWorkComparator`. Equal work prefers the precious tip, then
+    /// the first-seen held tip. A branch whose work cannot be summed is
+    /// skipped. The first store fault among those is kept in `fault`.
+    fn most_work_branch(
+        &self,
+        branches: impl Iterator<Item = Vec<Block>>,
+        fault: &mut Option<NetError>,
+    ) -> Option<Vec<Block>> {
+        let precious = *self.precious.read().unwrap();
+        let mut best: Option<(Work, bool, u64, Vec<Block>)> = None;
+        for branch in branches {
+            let w = match self.branch_chain_work(&branch) {
+                Ok(w) => w,
+                Err(e) => {
+                    if e.is_local_fault() && fault.is_none() {
+                        *fault = Some(e);
+                    }
                     continue;
                 }
-                let Some(b) = self.load_side_body(h) else {
-                    break;
-                };
-                branch.push(b);
-            }
-            if !branch.is_empty() {
-                match self.accept_branch_inner(&branch) {
-                    Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
-                    Err(e) => return Err(e),
-                    Ok(_) => {}
-                }
-            }
-        }
-        if !self.is_connected(&hash) {
-            if let Some(branch) = self.assemble_side_branch(hash) {
-                match self.accept_branch_inner(&branch) {
-                    Err(NetError::Protocol(s)) if s.contains("branch parent not on chain") => {}
-                    Err(e) => return Err(e),
-                    Ok(_) => {}
-                }
+            };
+            let tip = branch[branch.len() - 1].block_hash();
+            let is_p = Some(tip) == precious;
+            let seq = self.held_bodies.read().unwrap().seq(tip);
+            let take = match &best {
+                None => true,
+                Some((bw, was_p, bseq, _)) => held_branch_beats(w, is_p, seq, *bw, *was_p, *bseq),
+            };
+            if take {
+                best = Some((w, is_p, seq, branch));
             }
         }
-        Ok(())
+        best.map(|(_, _, _, branch)| branch)
     }
 
     fn take_related_invalidated_paths(
         &self,
         hash: BlockHash,
         related: &HashSet<BlockHash>,
-    ) -> Vec<Vec<BlockHash>> {
+    ) -> Vec<InvalidPath> {
         let mut g = self.invalidated.paths.write().unwrap();
         let mut taken = Vec::new();
         let mut seeds = related.clone();
@@ -2257,11 +2362,12 @@ impl ChainHub {
         loop {
             let before = taken.len();
             g.retain(|p| {
-                let hit = p.iter().any(|h| seeds.contains(h))
-                    || p.first()
+                let hit = p.hashes.iter().any(|h| seeds.contains(h))
+                    || p.hashes
+                        .first()
                         .is_some_and(|h| self.prev_of(h).is_some_and(|prev| seeds.contains(&prev)));
                 if hit {
-                    for h in p {
+                    for h in &p.hashes {
                         seeds.insert(*h);
                     }
                     taken.push(p.clone());
@@ -2286,7 +2392,7 @@ impl ChainHub {
         if self.is_block_invalid(&hash) {
             return Ok(());
         }
-        let branch = self.assemble_side_branch(hash);
+        let branch = self.assemble_side_branch(hash, &HashSet::new());
         if branch.is_none() && !self.is_connected(&hash) {
             return Err(NetError::Consensus("Block not found".into()));
         }
@@ -2945,14 +3051,27 @@ impl ChainHub {
             .flatten()
     }
 
-    /// Walk hold + archive from `tip` back to a best-chain parent.
-    fn assemble_side_branch(&self, tip: BlockHash) -> Option<Vec<Block>> {
+    /// Walk hold + archive from `tip` back to a best-chain parent. The walk
+    /// gives up after 10,000 blocks outside `restored`. `invalidateblock`
+    /// recorded the restored ones, so any number of those is walked.
+    fn assemble_side_branch(
+        &self,
+        tip: BlockHash,
+        restored: &HashSet<BlockHash>,
+    ) -> Option<Vec<Block>> {
         if self.is_connected(&tip) {
             return None;
         }
         let mut rev = Vec::new();
         let mut h = tip;
-        for _ in 0..10_000 {
+        let mut unrecorded = 0u32;
+        loop {
+            if !restored.contains(&h) {
+                unrecorded += 1;
+                if unrecorded > 10_000 {
+                    return None;
+                }
+            }
             let b = self.load_side_body(&h)?;
             let prev = b.header.prev_blockhash;
             rev.push(b);
@@ -2966,7 +3085,6 @@ impl ChainHub {
             }
             h = prev;
         }
-        None
     }
 
     /// The held (or archived) branch with the most total chain work, as in
@@ -2985,7 +3103,7 @@ impl ChainHub {
             if self.is_block_invalid(&start) {
                 continue;
             }
-            let Some(branch) = self.assemble_side_branch(start) else {
+            let Some(branch) = self.assemble_side_branch(start, &HashSet::new()) else {
                 continue;
             };
             if branch
@@ -4330,6 +4448,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A peer's held side branch with an invalid block ties the restored
+    /// a2..a4 and ranks first. Reconsider marks it and connects a4, as
+    /// Core's `ActivateBestChain` moves on to the next candidate. Blocks
+    /// that fail are never kept as valid forks.
+    #[test]
+    fn reconsider_skips_a_branch_that_fails() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let gen = hub.tip_hash().unwrap();
+        let t0 = hub.tip_header().unwrap().time;
+        let mut a = Vec::new();
+        let mut prev = gen;
+        for h in 1..=4u32 {
+            let b = mine(prev, t0 + h, h);
+            prev = b.block_hash();
+            a.push(prev);
+            hub.accept_block(b).unwrap();
+        }
+        let mut bad = mine(a[0], t0 + 20, 2);
+        let cb = &mut bad.txdata[0].output[0].value;
+        *cb = Amount::from_sat(cb.to_sat() + 1);
+        bad.header.merkle_root = bad.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut bad.header);
+        let bad_hash = bad.block_hash();
+        let b3 = mine(bad_hash, t0 + 21, 3);
+        let b4 = mine(b3.block_hash(), t0 + 22, 4);
+        for b in [bad, b3, b4] {
+            let _ = hub.accept_received_block(b);
+        }
+        assert_eq!(hub.tip_hash(), Some(a[3]));
+        let _ = hub.invalidate_block(a[1]);
+        assert_eq!(hub.tip_hash(), Some(a[0]));
+        hub.reconsider_block(a[1]).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[3]));
+        assert!(hub.is_block_invalid(&bad_hash));
+
+        // A held child of a4 whose time is below the median fails its header
+        // check. That is not a mark, and a4 under it still connects.
+        hub.invalidate_block(a[3]).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[2]));
+        let late = mine(a[3], t0, 5);
+        let _ = hub.accept_received_block(late);
+        hub.reconsider_block(a[3]).unwrap();
+        assert_eq!(hub.tip_hash(), Some(a[3]));
+
+        // A tip child that failed connect keeps its archived body. It was
+        // never connected, so reconsider does not make it a valid fork.
+        let mut bad5 = mine(a[3], t0 + 30, 5);
+        let cb = &mut bad5.txdata[0].output[0].value;
+        *cb = Amount::from_sat(cb.to_sat() + 1);
+        bad5.header.merkle_root = bad5.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut bad5.header);
+        let bad5_hash = bad5.block_hash();
+        assert!(hub.accept_received_block(bad5).is_err());
+        let a5 = mine_distinct(a[3], t0 + 31, 5, &[bad5_hash]);
+        let a6 = mine(a5.block_hash(), t0 + 32, 6);
+        hub.accept_block(a5).unwrap();
+        hub.accept_block(a6).unwrap();
+        hub.invalidate_block(bad5_hash).unwrap();
+        hub.reconsider_block(bad5_hash).unwrap();
+        assert!(
+            !hub.fork_tips.read().unwrap().iter().any(|h| h == bad5_hash),
+            "a block that never connected is not kept as a fork tip"
+        );
+
+        // Last, because it truncates the store: a fault reading chain work
+        // while ranking is an error. Its invalidate path is gone, so the
+        // restored tip is still kept as a fork tip to return to.
+        let tip = hub.tip_hash().unwrap();
+        let tip_body = hub
+            .block_at_height(hub.tip_height().unwrap())
+            .unwrap()
+            .unwrap();
+        hub.invalidate_block(tip).unwrap();
+        hub.hold_unconnected_body(tip_body);
+        hub.chain_work_prefix.write().unwrap().clear();
+        let header_body = dir.path().join("header.body");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&header_body)
+            .unwrap()
+            .set_len(16)
+            .unwrap();
+        let err = hub.reconsider_block(tip).unwrap_err();
+        assert!(err.is_local_fault(), "{err}");
+        assert!(hub.fork_tips.read().unwrap().iter().any(|h| h == tip));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn invalid_child_missing_parent_and_linked_reconsider() {
         let (dir, hub) = tmp_hub();
@@ -5296,6 +5503,12 @@ mod tests {
             side_status(&hub).as_deref(),
             Some("valid-headers"),
             "a held side block outranks a header-only label"
+        );
+        hub.reconsider_block(side.block_hash()).unwrap();
+        assert_eq!(
+            side_status(&hub).as_deref(),
+            Some("valid-headers"),
+            "a block that never connected is not a valid fork after reconsider"
         );
         hub.invalidate_block(side.block_hash()).unwrap();
         assert_eq!(
