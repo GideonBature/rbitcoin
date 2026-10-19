@@ -1,7 +1,7 @@
 //! Store-backed BIP-352 tweak readers. Pure tweak math stays in consensus.
 use bitcoin::hashes::Hash;
 use bitcoin::{OutPoint, Transaction, TxOut, Witness};
-use rbitcoin_consensus::silent_payments::{is_p2tr, tweak_from_tx, TaprootOut, TxTweak};
+use rbitcoin_consensus::silent_payments::{tweak_from_tx, TaprootOut, TxTweak};
 use rbitcoin_consensus::ChainParams;
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_store::{IndexWindow, InputRecord, LoadedTweakTx, OutputRecord, StoreError};
@@ -150,7 +150,7 @@ pub fn tweaks_from_thin_and_body(
 fn taproot_outs_from_records(outputs: &[OutputRecord]) -> Vec<TaprootOut> {
     let mut out = Vec::new();
     for (i, o) in outputs.iter().enumerate() {
-        if !is_p2tr(&o.script) {
+        if !bitcoin::Script::from_bytes(&o.script).is_p2tr() {
             continue;
         }
         let mut xonly = [0u8; 32];

@@ -17,7 +17,7 @@ use bitcoin::{Amount, Block, ScriptBuf, Transaction, TxOut};
 use rbitcoin_primitives::{Fk, Height};
 
 use crate::index_rows::{self, IndexRows};
-use rbitcoin_consensus::silent_payments::{is_p2tr, tweak_from_tx};
+use rbitcoin_consensus::silent_payments::tweak_from_tx;
 use rbitcoin_consensus::ConsensusError;
 use rbitcoin_store::StoreError;
 
@@ -246,9 +246,7 @@ pub(super) fn rows_from_heights(slots: &[HeightSlots]) -> Result<IndexRows, Conf
 }
 
 fn tx_has_taproot_out(tx: &Transaction) -> bool {
-    tx.output
-        .iter()
-        .any(|out| is_p2tr(out.script_pubkey.as_bytes()))
+    tx.output.iter().any(|out| out.script_pubkey.is_p2tr())
 }
 
 fn group_spends(prep: &Prepared, n_tx: usize) -> Result<Vec<Vec<SpendRef>>, ConfirmError> {

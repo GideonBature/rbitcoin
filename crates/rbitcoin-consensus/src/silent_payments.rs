@@ -54,7 +54,7 @@ pub fn tweak_from_tx(tx: &Transaction, prevouts: &[TxOut]) -> Option<TxTweak> {
     }
     if prevouts
         .iter()
-        .any(|p| witness_version(p.script_pubkey.as_bytes()) > Some(1))
+        .any(|p| p.script_pubkey.witness_version().map(|v| v.to_num()) > Some(1))
     {
         return None;
     }
@@ -149,12 +149,11 @@ fn outpoint_bytes(op: &OutPoint) -> [u8; 36] {
 fn taproot_outs(tx: &Transaction) -> Vec<TaprootOut> {
     let mut out = Vec::new();
     for (i, o) in tx.output.iter().enumerate() {
-        let spk = o.script_pubkey.as_bytes();
-        if !is_p2tr(spk) {
+        if !o.script_pubkey.is_p2tr() {
             continue;
         }
         let mut xonly = [0u8; 32];
-        xonly.copy_from_slice(&spk[2..34]);
+        xonly.copy_from_slice(&o.script_pubkey.as_bytes()[2..34]);
         out.push(TaprootOut {
             vout: i as u32,
             xonly,
@@ -164,63 +163,25 @@ fn taproot_outs(tx: &Transaction) -> Vec<TaprootOut> {
     out
 }
 
-pub fn is_p2tr(spk: &[u8]) -> bool {
-    spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20
-}
-
-fn is_p2wpkh(spk: &[u8]) -> bool {
-    spk.len() == 22 && spk[0] == 0x00 && spk[1] == 0x14
-}
-
-fn is_p2pkh(spk: &[u8]) -> bool {
-    spk.len() == 25
-        && spk[0] == 0x76
-        && spk[1] == 0xa9
-        && spk[2] == 0x14
-        && spk[23] == 0x88
-        && spk[24] == 0xac
-}
-
-fn is_p2sh(spk: &[u8]) -> bool {
-    spk.len() == 23 && spk[0] == 0xa9 && spk[1] == 0x14 && spk[22] == 0x87
-}
-
-fn witness_version(spk: &[u8]) -> Option<u8> {
-    if spk.len() < 2 {
-        return None;
-    }
-    let version = match spk[0] {
-        0x00 => 0u8,
-        v @ 0x51..=0x60 => v - 0x50,
-        _ => return None,
-    };
-    let n = spk[1] as usize;
-    if !(2..=40).contains(&n) || spk.len() != 2 + n {
-        return None;
-    }
-    Some(version)
-}
-
 fn extract_input_pubkey(
     prev: &Script,
     script_sig: &Script,
     witness: &Witness,
 ) -> Option<PublicKey> {
-    let spk = prev.as_bytes();
-    if is_p2tr(spk) {
-        return extract_p2tr(spk, witness);
+    if prev.is_p2tr() {
+        return extract_p2tr(prev.as_bytes(), witness);
     }
-    if is_p2wpkh(spk) {
+    if prev.is_p2wpkh() {
         return last_compressed_witness_pubkey(witness);
     }
-    if is_p2sh(spk) {
+    if prev.is_p2sh() {
         if !is_p2sh_p2wpkh_redeem(script_sig) {
             return None;
         }
         return last_compressed_witness_pubkey(witness);
     }
-    if is_p2pkh(spk) {
-        return p2pkh_script_pubkey(spk, script_sig);
+    if prev.is_p2pkh() {
+        return p2pkh_script_pubkey(prev.as_bytes(), script_sig);
     }
     None
 }
@@ -335,16 +296,21 @@ mod tests {
             v.extend(std::iter::repeat_n(0x11, 20));
             v
         };
-        assert_eq!(witness_version(&p2wpkh), Some(0));
-        assert_eq!(witness_version(&[0x00, 0x02, 0xaa, 0xbb]), Some(0));
-        assert_eq!(witness_version(&[0x00, 0x14, 0x11, 0x11, 0x11]), None);
-        assert_eq!(witness_version(&[0x00, 40, 0x22]), None);
+        let ver = |spk: &[u8]| {
+            Script::from_bytes(spk)
+                .witness_version()
+                .map(|v| v.to_num())
+        };
+        assert_eq!(ver(&p2wpkh), Some(0));
+        assert_eq!(ver(&[0x00, 0x02, 0xaa, 0xbb]), Some(0));
+        assert_eq!(ver(&[0x00, 0x14, 0x11, 0x11, 0x11]), None);
+        assert_eq!(ver(&[0x00, 40, 0x22]), None);
         let mut v1 = vec![0x51, 0x20];
         v1.extend(std::iter::repeat_n(0x33, 32));
-        assert_eq!(witness_version(&v1), Some(1));
+        assert_eq!(ver(&v1), Some(1));
         let mut v2 = vec![0x52, 0x20];
         v2.extend(std::iter::repeat_n(0x33, 32));
-        assert_eq!(witness_version(&v2), Some(2));
+        assert_eq!(ver(&v2), Some(2));
 
         let mut short_cb = vec![0x01];
         short_cb.extend(std::iter::repeat_n(0x44, 31));
