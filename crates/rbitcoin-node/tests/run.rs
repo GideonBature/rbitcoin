@@ -695,39 +695,24 @@ async fn max_run_deadline_wakes_without_the_perf_tick() {
     assert!(start.elapsed() < Duration::from_millis(200));
 }
 
-/// A fresh `--proxy` datadir has no targets until a seed answers the
-/// addr-fetch. Catch-up waits for that answer and re-queues the seeds.
+/// A fresh `--proxy` datadir has no targets until a seed's `getaddr`
+/// reply is learned. The wait re-queues the seeds while no addr-fetch
+/// session is live, ignores a book filled only by a self-announce, and
+/// ends on that reply, shutdown, or its deadline.
 #[tokio::test]
-async fn proxy_seed_wait_requeues_until_an_answer_fills_the_book() {
+async fn proxy_seed_wait_ends_on_a_learned_reply_shutdown_or_deadline() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     let peers = rbitcoin_net::PeerHub::new();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<rbitcoin_net::DialRequest>();
     peers.set_dialer(tx);
+    let signet = rbitcoin_primitives::Network::Signet;
     let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
-    let answered: rbitcoin_net::NetAddr = "1.2.3.4:38333".parse().unwrap();
-    let seed = {
-        let shared = Arc::clone(&shared);
-        tokio::spawn(async move {
-            let req = rx.recv().await.expect("seed addr-fetch re-queued");
-            assert_eq!(req.typ, PeerConnType::AddrFetch);
-            shared.lock().unwrap().add_addr(answered);
-        })
-    };
+    let announced: rbitcoin_net::NetAddr = "1.2.3.4:38333".parse().unwrap();
+    shared.lock().unwrap().add_addr(announced);
+    let replies = Arc::new(AtomicU64::new(0));
     let sd = Shutdown::new();
-    let book = tokio::time::timeout(
-        Duration::from_secs(5),
-        await_proxy_seed_book(
-            &peers,
-            rbitcoin_primitives::Network::Signet,
-            &shared,
-            &sd,
-            Duration::from_millis(50),
-        ),
-    )
-    .await
-    .expect("the wait ends once a seed answers")
-    .expect("no shutdown was requested");
-    seed.await.unwrap();
-    assert_eq!(book.len(), 1);
+    let short = Duration::from_millis(50);
 
     let at = std::net::SocketAddr::from(([127, 0, 0, 1], 38333));
     let ver = bitcoin::p2p::message_network::VersionMessage {
@@ -742,37 +727,67 @@ async fn proxy_seed_wait_requeues_until_an_answer_fills_the_book() {
         relay: true,
     };
     let answering = peers.register(at, at, &ver, false, PeerConnType::AddrFetch);
-    let held = tokio::time::timeout(
-        Duration::from_millis(600),
+    let counted = Arc::clone(&replies);
+    let timed_out = await_proxy_seed_book(
+        &peers,
+        signet,
+        &shared,
+        &sd,
+        move || counted.load(Ordering::SeqCst),
+        short,
+        Duration::from_millis(400),
+    )
+    .await;
+    assert!(
+        timed_out.is_none(),
+        "a self-announce alone is not the reply"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a live addr-fetch session is not re-queued"
+    );
+    peers.unregister(answering.id);
+
+    let seed = {
+        let (shared, replies) = (Arc::clone(&shared), Arc::clone(&replies));
+        tokio::spawn(async move {
+            let req = rx.recv().await.expect("seed addr-fetch re-queued");
+            assert_eq!(req.typ, PeerConnType::AddrFetch);
+            shared
+                .lock()
+                .unwrap()
+                .add_addr("5.6.7.8:38333".parse().unwrap());
+            replies.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let counted = Arc::clone(&replies);
+    let book = tokio::time::timeout(
+        Duration::from_secs(5),
         await_proxy_seed_book(
             &peers,
-            rbitcoin_primitives::Network::Signet,
+            signet,
             &shared,
             &sd,
+            move || counted.load(Ordering::SeqCst),
+            short,
             Duration::from_secs(60),
         ),
     )
-    .await;
-    assert!(held.is_err(), "a seed still answering holds the wait");
-    peers.unregister(answering.id);
+    .await
+    .expect("the wait ends once a reply is learned")
+    .expect("no shutdown and no deadline");
+    seed.await.unwrap();
+    assert_eq!(book.len(), 2);
+
+    sd.request();
+    let counted = Arc::clone(&replies);
     let book = await_proxy_seed_book(
         &peers,
-        rbitcoin_primitives::Network::Signet,
+        signet,
         &shared,
         &sd,
+        move || counted.load(Ordering::SeqCst),
         Duration::from_secs(60),
-    )
-    .await
-    .expect("the answer is complete once the seed session ends");
-    assert_eq!(book.len(), 1);
-
-    let empty = Arc::new(std::sync::Mutex::new(AddrMan::new()));
-    sd.request();
-    let book = await_proxy_seed_book(
-        &peers,
-        rbitcoin_primitives::Network::Signet,
-        &empty,
-        &sd,
         Duration::from_secs(60),
     )
     .await;
