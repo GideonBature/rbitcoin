@@ -148,7 +148,7 @@ PY
   fi
   SHA="${GITHUB_SHA:-$(git rev-parse HEAD)}"
   python3 "$ROOT/scripts/coverage-badge.py" \
-    --lh "$LCOV_HIT" --lf "$LCOV_TOT" --gate 89 \
+    --lh "$LCOV_HIT" --lf "$LCOV_TOT" --gate 91 \
     --sha "$SHA" --scope production \
     --lcov "$ROOT/coverage/lcov.info" \
     --out "$ROOT/coverage/badge.json"

@@ -23,22 +23,22 @@ python3 - "$IGNORE" <<'PY' || exit 1
 import re, sys
 rx = re.compile(sys.argv[1])
 excluded = [
-    "/repo/crates/rbitcoin-store/src/scripthash_tests.rs",
-    "/repo/crates/rbitcoin-net/src/ibd/confirm/tests.rs",
-    "/repo/crates/rbitcoin-net/src/peer_tests.rs",
-    "/repo/crates/rbitcoin-net/tests/ibd_smoke.rs",
+    "/repo/crates/rbitcoin-store/tests/scripthash.rs",
+    "/repo/crates/rbitcoin-ibd/tests/ibd/confirm.rs",
+    "/repo/crates/rbitcoin-net/tests/peer/mod.rs",
+    "/repo/crates/rbitcoin-ibd/tests/ibd_smoke.rs",
     "/repo/crates/rbitcoin-test/src/lib.rs",
     "/repo/crates/rbitcoin-test/tests/integration_multinode.rs",
     "/repo/crates/rbitcoin-bench/src/suite.rs",
     "/repo/crates/rbitcoin-store/src/testutil.rs",
     "/repo/crates/rbitcoin-query/src/testutil.rs",
-    "/repo/crates/rbitcoin-consensus/src/script/tests_verify.rs",
+    "/repo/crates/rbitcoin-consensus/tests/script/tests_verify.rs",
     "/repo/crates/rbitcoin-node/src/main.rs",
 ]
 kept = [
     "/repo/crates/rbitcoin-store/src/scripthash.rs",
     "/repo/crates/rbitcoin-net/src/peer.rs",
-    "/repo/crates/rbitcoin-net/src/ibd/mod.rs",
+    "/repo/crates/rbitcoin-ibd/src/ibd/mod.rs",
     "/repo/crates/rbitcoin-node/src/regtest_rpc.rs",
     "/repo/crates/rbitcoin-consensus/src/regtest_pad.rs",
     "/repo/crates/rbitcoin-node/src/run.rs",
@@ -79,6 +79,11 @@ assert_ok "required test job still pins the bench scripthash" \
   grep -q 'cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a' "$ROOT/.github/workflows/ci.yml"
 # Suites link cfg(debug_assertions) hooks, so release is check-only. Without
 # this step a debug-only import on a production path ships uncompiled.
+FLOOR="$(python3 -c 'import re,sys; print(re.search(r"^FLOOR_PCT = (\d+)", open(sys.argv[1]).read(), re.M).group(1))' "$ROOT/scripts/coverage-gate.py")"
+assert_ok "coverage.sh passes the gate floor ($FLOOR) to the badge" \
+  grep -q -- "--gate $FLOOR " "$COV"
+assert_ok "coverage-badge.py defaults to the gate floor ($FLOOR)" \
+  grep -q "\"--gate\", type=int, default=$FLOOR)" "$ROOT/scripts/coverage-badge.py"
 assert_ok "qc checks the release profile compiles" \
   grep -q 'cargo check --release --workspace --exclude rbitcoin-bench' "$ROOT/.github/workflows/ci.yml"
 assert_ok "gitignore ignores apilog jsonl" \

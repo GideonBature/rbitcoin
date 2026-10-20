@@ -2306,7 +2306,7 @@ pub fn sh_tip_ready_gates(query: &Query) -> TipModeGates {
 /// max tip age with no heavier local header chain.
 ///
 /// **SH methods (exactly two):**
-/// - Durable head: stay/flip [`IndexMode::Tip`], discard leftover runs;
+/// - Durable head: stay/flip `IndexMode::Tip`, discard leftover runs;
 ///   catch-up / follow use write-behind. `sh_tip_ready` only when inclusion
 ///   already covers the tip.
 /// - No head: Class A collect + unsorted pack **while Direct** (write-behind
