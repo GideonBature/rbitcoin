@@ -5,8 +5,8 @@
 //! remain readable.
 //!
 //! References:
-//! - https://arxiv.org/abs/1907.04749
-//! - https://github.com/ayazhafiz/xorf (MIT)
+//! - <https://arxiv.org/abs/1907.04749>
+//! - <https://github.com/ayazhafiz/xorf> (MIT)
 
 use crate::readonly_map::ReadonlyMap;
 

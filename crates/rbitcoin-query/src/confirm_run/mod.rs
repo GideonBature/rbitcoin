@@ -175,7 +175,7 @@ pub struct WireLoadPipeline<'a> {
 ///
 /// `Send` so IBD can hand off load → scripts threads.
 /// Sparse spent-filtered parents ride on the batch (not tip-GCed).
-/// When [`archive_plan`] is `Some`, commit stage appends Class A before
+/// When `archive_plan` is `Some`, commit stage appends Class A before
 /// structural / annotate (single ordered commit era).
 pub struct LoadedBatch {
     pub prepared: Vec<Prepared>,

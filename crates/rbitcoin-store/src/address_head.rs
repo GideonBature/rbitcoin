@@ -5,7 +5,7 @@
 //! Callers verify identity via Class A body txid on **lookup**. The spare high
 //! bits of each slot hold a fingerprint of the mixed key, so a probe skips most
 //! foreign occupants before identity. Probes read the slots through a read-only
-//! `MAP_SHARED` map ([`AddressHead::slots`]); the page cache keeps it coherent
+//! `MAP_SHARED` map (`AddressHead::slots`); the page cache keeps it coherent
 //! with the sole writer's `pwrite`s.
 //!
 //! **Insert (sole writer):** probe until the **same fk** is already present

@@ -5,7 +5,7 @@
 //! for P2TR creates.
 //!
 //! Writes are **not** this machine: consecutive heights go through
-//! [`SpTweaksTable::put_blocks`] (one body pwrite + one idx pwrite).
+//! `SpTweaksTable::put_blocks` (one body pwrite + one idx pwrite).
 
 use crate::error::StoreError;
 use crate::io_handle::IoHandle;
@@ -178,7 +178,7 @@ pub fn empty_rec(txid: [u8; 32]) -> TxRecord {
 
 /// Load outs for `fks`; seqsigwit + extra parents only for P2TR creates.
 ///
-/// Idx resolve ([`crate::var_table::VarTable::record_range_batch`]) runs
+/// Idx resolve (`crate::var_table::VarTable::record_range_batch`) runs
 /// **outside** the TLS ring. Body preads are the machine.
 pub fn load_tweak_wave(table: &TxTable, fks: &[Fk]) -> Result<TweakWave, StoreError> {
     if fks.is_empty() {

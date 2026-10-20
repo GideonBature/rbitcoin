@@ -1,4 +1,4 @@
-//! Open-addressed head for hybrid scripthash: key[16] → pack8 value (24 B slots).
+//! Open-addressed head for hybrid scripthash: `key[16]` → pack8 value (24 B slots).
 //!
 //! Key is the first 16 bytes of Electrum SHA256(spk). Public APIs take full 32 B
 //! hashes and truncate. Values are [`ShHeadValue`] pack8 encodings.

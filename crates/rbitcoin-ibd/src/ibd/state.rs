@@ -4,7 +4,7 @@
 //!
 //! - `ordered` + `ordered_set` track headers after the local tip for getdata.
 //! - Middle completions leave **ghost** deque entries (see [`super::assign_plan::remove_from_ordered`]);
-//!   [`Self::hygiene`] compacts when the deque bloats.
+//!   `Self::hygiene` compacts when the deque bloats.
 //! - `hash_height` / `header_fks` are bounded to live ordered hashes (+ tip seed)
 //!   so they do not grow unbounded past `MAX_ORDERED_HEADERS`.
 

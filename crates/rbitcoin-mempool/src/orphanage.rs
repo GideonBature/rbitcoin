@@ -555,7 +555,7 @@ impl Orphanage {
     /// Drop orphans that are themselves included in a confirmed block.
     ///
     /// Children of confirmed parents are **not** erased here — callers should
-    /// [`take_children_of`] and re-accept (Core `AddChildrenToWorkSet` path).
+    /// `take_children_of` and re-accept (Core `AddChildrenToWorkSet` path).
     /// Spending a parent in the block does not invalidate the orphan; the parent
     /// create is now a chain UTXO.
     pub fn erase_for_block(&mut self, block_txids: &[Txid]) {

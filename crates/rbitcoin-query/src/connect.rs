@@ -653,7 +653,7 @@ impl Query {
 
     /// Apply queued SH write-behind jobs in height order (one Class B appender).
     ///
-    /// Production: the tip-follow worker. Tests / [`Self::connect_block`]: drain
+    /// Production: the tip-follow worker. Tests / `Self::connect_block`: drain
     /// so SH history is visible immediately after the fixture connect.
     pub fn apply_sh_pending(&self) -> Result<(), QueryError> {
         self.release_queued_sh_writebehind();

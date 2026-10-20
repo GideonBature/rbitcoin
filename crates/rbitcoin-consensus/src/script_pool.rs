@@ -6,7 +6,7 @@
 //! from the stage thread — steal workers must not `wait_done` on this pool.
 //!
 //! Idle steal workers [`thread::park`]. A new wave or detached job bumps an
-//! epoch and [`Thread::unpark`]s every worker (unpark-before-park leaves a
+//! epoch and [`thread::Thread::unpark`]s every worker (unpark-before-park leaves a
 //! permit, so a worker cannot miss work by parking after the wake). The jobs
 //! mutex is only the detached-job queue, never the steal wake path.
 //!

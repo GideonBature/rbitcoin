@@ -1,7 +1,7 @@
 //! BQ-ahead TipOnly parent resolve (lookup wave).
 //!
 //! Pack/hold uses enqueue-stamped Σ inputs (no `Block` decode). Emit runs one
-//! [`Store::get_fk_by_txid_batch`] (TipOnly) across the selected heights
+//! `Store::get_fk_by_txid_batch` (TipOnly) across the selected heights
 //! (soft **64000** inputs / hard **1080** blocks). Hits ride the wave as
 //! [`crate::BatchParentIds`] (fk + body_range + spent_range). Does not
 //! claim, structure, or stamp. Same-wave creates are omitted from TipOnly need.
@@ -50,7 +50,7 @@ pub fn wave_more_remain(selected: usize, requested: usize, filling: bool) -> boo
     selected < requested || filling
 }
 
-/// Same include-overshoot rule as load [`pack_stop_after`]: stop after the
+/// Same include-overshoot rule as load `pack_stop_after`: stop after the
 /// block that crosses the soft input budget or hits the hard height cap.
 #[inline]
 pub fn bq_resolve_wave_stop_after(
@@ -68,7 +68,7 @@ pub fn bq_resolve_wave_stop_after(
 ///
 /// `ready` is BQ depth. `soft_win` is the 1-min confirm window (`bq soft=n/win`).
 /// `path_lo` is the load frontier (store tip+1). `first_unresolved` is the
-/// lowest collected height (already sorted by [`BlockQueue::unresolved_heights`]).
+/// lowest collected height (already sorted by `BlockQueue::unresolved_heights`).
 ///
 /// Never hold (above the input floor) when the first unresolved height sits
 /// in the load-facing half of the window (`first - path_lo ≤ win/2`) — that
