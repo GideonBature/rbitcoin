@@ -77,6 +77,8 @@ pub fn inclusive_u8x8_times_8(st: &[u8; 8], no: &[u8; 8]) -> ([u32; 8], [u32; 8]
 /// # Safety
 /// `p` must be readable for 16 bytes.
 #[cfg(target_arch = "x86_64")]
+// Target-feature intrinsic sequence; safety is the function contract.
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn sse2_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool) {
     use std::arch::x86_64::{
         __m128i, _mm_and_si128, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8,
@@ -101,6 +103,8 @@ unsafe fn sse2_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool)
 /// `p` must be readable for 16 bytes.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+// Target-feature intrinsic sequence; safety is the function contract.
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn neon_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool) {
     use std::arch::aarch64::{vceq_u8, vdup_n_u8, vld2_u8, vmaxv_u8, vst1_u8};
     let v = vld2_u8(p);
@@ -117,6 +121,8 @@ unsafe fn neon_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool)
 /// `p` must be readable for 8 bytes.
 #[cfg(target_arch = "x86_64")]
 #[inline]
+// Target-feature intrinsic sequence; safety is the function contract.
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn sse2_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
     use std::arch::x86_64::{
         __m128i, _mm_add_epi32, _mm_cvtsi128_si32, _mm_loadl_epi64, _mm_set1_epi32,
@@ -145,6 +151,8 @@ unsafe fn sse2_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 #[inline]
+// Target-feature intrinsic sequence; safety is the function contract.
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn neon_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
     use std::arch::aarch64::{
         uint32x4_t, vaddq_u32, vdupq_n_u32, vextq_u32, vget_high_u16, vget_low_u16, vgetq_lane_u32,

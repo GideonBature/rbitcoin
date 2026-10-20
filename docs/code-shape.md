@@ -86,6 +86,11 @@ block in those libraries fails the build. Integration tests are separate
 crates and are not covered. Store, net, consensus, primitives, node, query,
 ibd, and sv2 stay open: they call FFI.
 
+`unsafe_op_in_unsafe_fn` is workspace deny. An `unsafe fn` wraps each
+unsafe operation in its own block. The four `loc_simd` helpers are a
+site allow: the body is one target-feature intrinsic sequence, and the
+contract is the function's `# Safety` section.
+
 `undocumented_unsafe_blocks` is workspace deny. Each `unsafe` block and
 `unsafe impl` has a `// SAFETY:` comment on the preceding line. A wrong
 positive is a site `#[allow(clippy::undocumented_unsafe_blocks)]` with a
