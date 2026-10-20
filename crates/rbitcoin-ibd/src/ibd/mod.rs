@@ -37,6 +37,8 @@ pub mod header_walk;
 #[doc(hidden)]
 pub mod path;
 #[doc(hidden)]
+pub mod peer_chain;
+#[doc(hidden)]
 pub mod peer_io;
 #[doc(hidden)]
 pub mod perf_log;

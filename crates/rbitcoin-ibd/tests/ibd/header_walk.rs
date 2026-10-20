@@ -57,6 +57,7 @@ fn slot(id: usize) -> (PeerSlot, mpsc::UnboundedReceiver<PeerCmd>) {
             first_data_ms: 0,
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
             rate: Default::default(),
+            chain: Default::default(),
             alive: true,
             task,
         },
@@ -1434,6 +1435,35 @@ fn two_peers_reserve_the_header_walk() {
     );
     assert!(matches!(slow_rx.try_recv(), Ok(PeerCmd::GetData { .. })));
     assert!(fast_rx.try_recv().is_err());
+
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::NotFound {
+            peer: 0,
+            hashes: vec![hash],
+        },
+        &AtomicU32::new(0),
+        &mut AddrMan::new(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+        None,
+    );
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(
+        st.slots[1].in_flight.contains(&hash),
+        "the header peer takes a block the other peer does not have"
+    );
+    assert!(slow_rx.try_recv().is_err(), "notfound is not asked again");
+    assert!(matches!(fast_rx.try_recv(), Ok(PeerCmd::GetData { .. })));
+    let _ = st.slots[1].track_remove(&hash);
+    st.inflight.remove(&hash);
 
     st.ordered.clear();
     st.ordered_set.clear();

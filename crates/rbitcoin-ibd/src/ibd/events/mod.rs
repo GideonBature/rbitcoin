@@ -467,6 +467,7 @@ pub fn apply_peer_event(
         PeerEvent::NotFound { peer, hashes } => apply_notfound(st, peer, hashes),
         PeerEvent::BlocksInv { peer, hashes } => {
             if !hashes.is_empty() {
+                note_announcement(st, peer);
                 super::header_walk::note_block_inv(st, peer);
             }
         }
@@ -640,7 +641,9 @@ pub fn plan_header_batch(
         challenger_work_before: st.header_walk.challenger.as_ref().map(|ch| ch.tip.work),
         outer_len: headers.len(),
     };
-    if mark.outer_len == 0 {
+    if mark.outer_len > 0 {
+        note_announcement(st, peer);
+    } else {
         super::header_walk::settle_walk_peer(
             st,
             hub,
@@ -882,12 +885,19 @@ pub fn apply_block_decode_failed(st: &mut IbdWorkState, peer: usize, hash: Block
 }
 
 #[doc(hidden)]
+fn note_announcement(st: &mut IbdWorkState, peer: usize) {
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+        s.chain.note_announcement();
+    }
+}
+
 pub fn apply_notfound(st: &mut IbdWorkState, peer: usize, hashes: Vec<BlockHash>) {
     note_block_progress(&mut st.slots, peer);
     let mut freed = Vec::new();
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
         for h in &hashes {
             s.track_remove(h);
+            s.chain.note_notfound(*h);
             let empty = st
                 .inflight
                 .get_mut(h)

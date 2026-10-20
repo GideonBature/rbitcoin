@@ -160,6 +160,8 @@ pub struct PeerSlot {
     /// All streamed wire bytes. Reader-only `fetch_add`. Not the stall clock.
     pub bytes_rx_total: Arc<AtomicU64>,
     pub rate: PeerRate,
+    /// What this peer has shown of its chain. IBD main thread only.
+    pub chain: super::peer_chain::PeerChain,
     pub alive: bool,
     pub task: JoinHandle<()>,
 }
@@ -1061,6 +1063,7 @@ pub async fn spawn_peer(
             rate.note_connected(connected_ms);
             rate
         },
+        chain: Default::default(),
         alive: true,
         task,
     })

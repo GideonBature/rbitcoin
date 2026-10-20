@@ -70,6 +70,7 @@ pub(crate) fn dummy_slot(id: usize) -> PeerSlot {
         first_data_ms: 0,
         bytes_rx_total: Arc::new(AtomicU64::new(0)),
         rate: Default::default(),
+        chain: Default::default(),
         alive: true,
         task,
     }

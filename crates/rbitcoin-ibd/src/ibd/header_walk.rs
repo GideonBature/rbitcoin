@@ -612,22 +612,15 @@ pub fn note_reservation(
     }
 }
 
-/// Peers that may receive block getdata. The reserved header peer is left
-/// out while another peer is connected. A single peer still does both.
-pub fn peers_for_blocks(st: &IbdWorkState) -> Vec<usize> {
-    let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
-    let Some(reserved) = st.header_walk.reserved else {
-        return alive;
-    };
-    if alive.len() <= 1 {
-        return alive;
+/// Whether block `hash` may be asked of `peer`. A peer is not asked for a
+/// block it answered `notfound`. The reserved header peer is asked only when
+/// no other live peer may have it, so a single peer still does both.
+pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
+    let has = |s: &super::peer_io::PeerSlot| s.alive && !s.chain.lacks(hash);
+    if !st.slots.iter().any(|s| s.id == peer && has(s)) {
+        return false;
     }
-    let rest: Vec<usize> = alive.iter().copied().filter(|&id| id != reserved).collect();
-    if rest.is_empty() {
-        alive
-    } else {
-        rest
-    }
+    st.header_walk.reserved != Some(peer) || !st.slots.iter().any(|s| s.id != peer && has(s))
 }
 
 /// Inputs for one main-loop header poll. The loop owns the cadence clock.

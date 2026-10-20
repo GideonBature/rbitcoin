@@ -242,7 +242,7 @@ pub fn assign_work_ordered(
 ) {
     let t0 = Instant::now();
     let mut issued = 0u64;
-    let alive = super::header_walk::peers_for_blocks(st);
+    let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
     if alive.is_empty() {
         return;
     }
@@ -816,7 +816,7 @@ pub fn issue_batch(
     let batch: Vec<BlockHash> = batch
         .into_iter()
         .filter(|h| {
-            if st.slots[idx].in_flight.contains(h) {
+            if st.slots[idx].in_flight.contains(h) || !super::header_walk::may_serve(st, pid, h) {
                 return false;
             }
             if st.inflight.contains_key(h) {
@@ -1315,6 +1315,7 @@ pub fn steal_hung_densify(
                 pid != owner
                     && peer_bps(&st.slots, pid) > owner_bps
                     && !st.inflight.get(&h).is_some_and(|r| r.holds(pid))
+                    && super::header_walk::may_serve(st, pid, &h)
             })
             .collect();
         if faster.is_empty() {

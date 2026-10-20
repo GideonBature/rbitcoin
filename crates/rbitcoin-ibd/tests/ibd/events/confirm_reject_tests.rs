@@ -717,6 +717,7 @@ fn apply_peer_event_body_and_control_surface() {
             first_data_ms: 0,
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
             rate: Default::default(),
+            chain: Default::default(),
             alive: true,
             task,
         }
@@ -840,10 +841,13 @@ fn apply_peer_event_body_and_control_surface() {
     let mut room = 4usize;
     let mut issued = 0u64;
     assert!(
-        rbitcoin_ibd::ibd::assign::issue_one(&mut st, 1, notfound_hash, &mut room, &mut issued),
+        !rbitcoin_ibd::ibd::assign::issue_one(&mut st, 1, notfound_hash, &mut room, &mut issued),
+        "a peer is not asked again for a block it does not have"
+    );
+    assert!(
+        rbitcoin_ibd::ibd::assign::issue_one(&mut st, 1, h(11), &mut room, &mut issued),
         "notfound does not ban the peer"
     );
-    assert!(st.slots[0].in_flight.contains(&notfound_hash));
 
     // Headers: attach height from tip parent and order.
     let hdr = dummy_header(gen, 1);
@@ -862,6 +866,11 @@ fn apply_peer_event_body_and_control_surface() {
     );
     assert!(st.known_headers.contains(&hash));
     assert!(st.ordered_set.contains(&hash) || st.hash_height.contains_key(&hash));
+    assert!(
+        rbitcoin_ibd::ibd::assign::issue_one(&mut st, 1, notfound_hash, &mut room, &mut issued),
+        "a peer that announces again may be asked again"
+    );
+    assert!(st.slots[0].in_flight.contains(&notfound_hash));
 
     // Empty headers with lag → keep headers_done false.
     st.max_peer_height = 100;
@@ -1037,6 +1046,7 @@ fn apply_peer_event_block_framed_bq_horizon_and_headers_done() {
             first_data_ms: 0,
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
             rate: Default::default(),
+            chain: Default::default(),
             alive: true,
             task,
         }
@@ -4060,6 +4070,7 @@ fn coord_loop_body_and_reject_do_not_read_headers() {
             first_data_ms: 0,
             bytes_rx_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             rate: Default::default(),
+            chain: Default::default(),
             alive: true,
             task,
         }
