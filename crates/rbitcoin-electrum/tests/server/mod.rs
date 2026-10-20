@@ -416,7 +416,12 @@ async fn read_exact_line(stream: &mut TcpStream) -> String {
     String::from_utf8(buf).unwrap()
 }
 
-async fn electrum_tcp_rpc(stream: &mut TcpStream, id: u32, method: &str, params: Value) -> Value {
+pub(crate) async fn electrum_tcp_rpc(
+    stream: &mut TcpStream,
+    id: u32,
+    method: &str,
+    params: Value,
+) -> Value {
     let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
     let mut line = serde_json::to_string(&req).unwrap();
     line.push('\n');

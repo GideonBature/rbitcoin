@@ -3,10 +3,26 @@ use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-use rbitcoin_consensus::{Milestone};
-use rbitcoin_query::{accept_and_connect_block};
+use rbitcoin_consensus::{ChainParams, Milestone};
+use rbitcoin_electrum::server::*;
+use rbitcoin_net::MempoolHub;
+use rbitcoin_primitives::{Fk, Height};
+use rbitcoin_query::testutil::FixtureChain;
 use rbitcoin_query::TxApply;
+use rbitcoin_query::{accept_and_connect_block, Query};
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpStream;
+use tokio::sync::broadcast;
+
+use crate::server::electrum_tcp_rpc;
+
+fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
+    rbitcoin_query::testutil::tiny_query_labeled("electrum-sh")
+}
 
 #[doc(hidden)]
 pub fn op_true_apply(tag: u8) -> TxApply {
@@ -24,12 +40,12 @@ pub fn op_true_apply(tag: u8) -> TxApply {
             output_count: 1,
         },
         inputs: vec![InputRecord {
-    prev_txid: [0u8; 32],
-    parent: rbitcoin_store::InputParent::Coinbase,
-    sequence: u32::MAX,
-    script_sig: vec![tag],
-    witness: vec![],
-}],
+            prev_txid: [0u8; 32],
+            parent: rbitcoin_store::InputParent::Coinbase,
+            sequence: u32::MAX,
+            script_sig: vec![tag],
+            witness: vec![],
+        }],
         outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
     }
 }
@@ -39,7 +55,8 @@ pub fn connect_op_true(q: &Query, height: u32, prev: Fk, parent: [u8; 32]) -> [u
     let mut merkle = [0u8; 32];
     merkle[0..4].copy_from_slice(&height.to_le_bytes());
     merkle[5] = 0xec;
-    let hash = rbitcoin_store::block_header_hash(1, &parent, &merkle, height + 1, 0x207fffff, height);
+    let hash =
+        rbitcoin_store::block_header_hash(1, &parent, &merkle, height + 1, 0x207fffff, height);
     let hdr = HeaderRecord {
         prev_fk: prev,
         version: 1,
@@ -59,7 +76,8 @@ pub fn connect_op_true(q: &Query, height: u32, prev: Fk, parent: [u8; 32]) -> [u
 #[doc(hidden)]
 pub fn class_a_op_true(q: &Query, height: u32, prev: Fk, parent: [u8; 32]) -> [u8; 32] {
     let merkle = [0x11; 32];
-    let hash = rbitcoin_store::block_header_hash(1, &parent, &merkle, height + 1, 0x207fffff, height);
+    let hash =
+        rbitcoin_store::block_header_hash(1, &parent, &merkle, height + 1, 0x207fffff, height);
     let hdr = HeaderRecord {
         prev_fk: prev,
         version: 1,
@@ -139,7 +157,10 @@ pub fn casa_cap_then_balance_history_unspent(q: &Query) {
         &mut capped,
     )
     .unwrap_err();
-    assert!(err.contains("scripthash join exceeds --max-sh-creates"), "{err}");
+    assert!(
+        err.contains("scripthash join exceeds --max-sh-creates"),
+        "{err}"
+    );
     let ping = dispatch_with_join(
         "server.ping",
         &json!([]),
@@ -190,7 +211,6 @@ pub fn casa_cap_then_balance_history_unspent(q: &Query) {
     )
     .unwrap();
     assert!(!unspent.as_array().unwrap().is_empty());
-
 }
 
 #[doc(hidden)]
@@ -199,7 +219,10 @@ pub fn spend_coinbase(cbtxid: bitcoin::Txid, fee: u64) -> Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
-            previous_output: OutPoint { txid: cbtxid, vout: 0 },
+            previous_output: OutPoint {
+                txid: cbtxid,
+                vout: 0,
+            },
             script_sig: ScriptBuf::new(),
             sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: Witness::new(),
@@ -263,10 +286,13 @@ pub fn listunspent_skips_unused(q: &Arc<Query>, hub: &MempoolHub, spent_cb: &bit
 pub async fn read_push(stream: &mut TcpStream) -> Value {
     let mut reader = BufReader::new(&mut *stream);
     let mut resp = String::new();
-    tokio::time::timeout(std::time::Duration::from_secs(3), reader.read_line(&mut resp))
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        reader.read_line(&mut resp),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     serde_json::from_str(&resp).unwrap()
 }
 
@@ -274,7 +300,9 @@ pub async fn tip_push_two_clients_and_late(q: Arc<Query>, hub: Option<Arc<Mempoo
     let params = ChainParams::regtest();
     let (tip_tx, _) = broadcast::channel(4);
     let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
-    let handle = run_electrum(cfg, q, params, tip_tx.clone(), hub).await.unwrap();
+    let handle = run_electrum(cfg, q, params, tip_tx.clone(), hub)
+        .await
+        .unwrap();
     let mut first = TcpStream::connect(handle.local_addr).await.unwrap();
     let mut second = TcpStream::connect(handle.local_addr).await.unwrap();
     let sub = electrum_tcp_rpc(&mut first, 1, "blockchain.headers.subscribe", json!([])).await;
@@ -290,7 +318,10 @@ pub async fn tip_push_two_clients_and_late(q: Arc<Query>, hub: Option<Arc<Mempoo
         .unwrap();
     for stream in [&mut first, &mut second] {
         let push = read_push(stream).await;
-        assert_eq!(push["method"].as_str(), Some("blockchain.headers.subscribe"));
+        assert_eq!(
+            push["method"].as_str(),
+            Some("blockchain.headers.subscribe")
+        );
     }
     let mut late = TcpStream::connect(handle.local_addr).await.unwrap();
     let caught = electrum_tcp_rpc(&mut late, 1, "blockchain.headers.subscribe", json!([])).await;
@@ -358,10 +389,7 @@ pub fn from_height_window_is_served_above_the_create_cap() {
     let mut spend = op_true_apply(0xee);
     spend.inputs = vec![InputRecord {
         prev_txid: oldest,
-        parent: rbitcoin_store::InputParent::Prevout {
-            create_fk,
-            vout: 0,
-        },
+        parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
         sequence: u32::MAX,
         script_sig: vec![],
         witness: vec![],
