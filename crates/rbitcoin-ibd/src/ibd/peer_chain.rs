@@ -134,6 +134,20 @@ impl PeerChain {
         }
     }
 
+    /// This peer's announced chain holds the path block at `height`: it
+    /// announced that block, or a path block above it.
+    pub fn shows(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
+        let Some(len) = (self.announced.len() as u32).checked_sub(1) else {
+            return false;
+        };
+        if height > self.from.saturating_add(len) {
+            return false;
+        }
+        let at = height.max(self.from);
+        path.get(&at)
+            .is_some_and(|p| *p == self.announced[(at - self.from) as usize])
+    }
+
     /// The peer does not have the path block at `height`: its chain left this
     /// node's chain at or below it, it holds a different block there, or its
     /// whole chain ends below it. Two chains that differ at one height differ

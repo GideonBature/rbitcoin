@@ -83,6 +83,8 @@ pub struct HeaderWalk {
     /// The last header of each refused batch that built on a rejected block.
     /// A batch that builds on one is refused too.
     pub invalid_tips: HashSet<BlockHash>,
+    /// `invalid_tips` in insertion order, so the cap drops the oldest.
+    pub invalid_tip_order: std::collections::VecDeque<BlockHash>,
     /// Peers that have answered empty at the current tip.
     pub emptied: HashSet<usize>,
     /// Checkpoint work has reached the milestone floor.
@@ -138,7 +140,7 @@ pub const LOOKAHEAD_ASK: Duration = Duration::from_secs(5);
 pub const HEADER_MISS_DISCONNECT: u8 = 2;
 #[doc(hidden)]
 pub const DEAD_END_CAP: usize = 1024;
-/// Past the cap the set starts again, so the newest refused tip is kept: the
+/// Past the cap the oldest refused tip gives way, so the newest is kept: the
 /// next batch of a long invalid chain links to it.
 const INVALID_TIP_CAP: usize = 1024;
 
@@ -642,7 +644,8 @@ pub fn note_reservation(
 /// Whether block `hash` may be asked of `peer`. A peer is not asked for a
 /// block it answered `notfound`, or for a path block its announced chain
 /// does not hold. The reserved header peer is asked only when no other live
-/// peer may have it, so a single peer still does both.
+/// peer may have it, or, once its own announced chain shows the block, when no
+/// other peer's shows it. A single peer still does both.
 pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
     use super::peer_io::PeerSlot;
     let height = st.hash_height.get(hash).copied();
@@ -662,7 +665,18 @@ pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
     if !holds(slot) {
         return false;
     }
-    st.header_walk.reserved != Some(peer) || !st.slots.iter().any(|s| s.id != peer && holds(s))
+    if st.header_walk.reserved != Some(peer) {
+        return true;
+    }
+    // A header peer whose announced chain shows the block is kept from it only
+    // by another peer that shows it too. Otherwise any peer that may hold it
+    // does: the header peer stays on headers while others fetch blocks.
+    let shows =
+        |s: &PeerSlot| askable(s) && height.is_some_and(|ht| s.chain.shows(&st.height_to_hash, ht));
+    let shown = shows(slot);
+    !st.slots
+        .iter()
+        .any(|s| s.id != peer && if shown { shows(s) } else { holds(s) })
 }
 
 /// Settle each peer's recorded split against this node's confirmed chain once
@@ -818,10 +832,16 @@ pub fn note_dead(st: &mut IbdWorkState, hash: BlockHash) {
 
 #[doc(hidden)]
 fn note_invalid_tip(st: &mut IbdWorkState, hash: BlockHash) {
-    if st.header_walk.invalid_tips.len() >= INVALID_TIP_CAP {
-        st.header_walk.invalid_tips.clear();
+    let walk = &mut st.header_walk;
+    if !walk.invalid_tips.insert(hash) {
+        return;
     }
-    st.header_walk.invalid_tips.insert(hash);
+    walk.invalid_tip_order.push_back(hash);
+    if walk.invalid_tip_order.len() > INVALID_TIP_CAP {
+        if let Some(oldest) = walk.invalid_tip_order.pop_front() {
+            walk.invalid_tips.remove(&oldest);
+        }
+    }
 }
 
 /// Refuse a batch that holds or builds on a rejected block, and retire
@@ -3265,6 +3285,7 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         origin: true,
         dead_ends: HashSet::new(),
         invalid_tips: HashSet::new(),
+        invalid_tip_order: std::collections::VecDeque::new(),
         emptied: HashSet::new(),
         proven: false,
         off_path: std::collections::HashMap::new(),

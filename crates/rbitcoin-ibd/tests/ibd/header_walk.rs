@@ -1618,10 +1618,14 @@ fn two_peers_reserve_the_header_walk() {
     let (mut head, mut head_rx) = slot(5);
     let (mut other, mut other_rx) = slot(6);
     let (mut short, _short_rx) = slot(7);
+    // Asked once, and answered nothing yet.
+    let (mut unknown, _unknown_rx) = slot(12);
     head.first_data_ms = 50;
     other.first_data_ms = 5_000;
     short.first_data_ms = 6_000;
-    let mut st = IbdWorkState::new(vec![head, other, short], Some(gen), Some(0));
+    unknown.first_data_ms = 7_000;
+    unknown.chain.note_probed();
+    let mut st = IbdWorkState::new(vec![head, other, short, unknown], Some(gen), Some(0));
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert_eq!(drain_getheaders(&mut head_rx), 1);
     let path = [mine(gen, 41), mine(mine(gen, 41).block_hash(), 42)];
@@ -1671,14 +1675,21 @@ fn two_peers_reserve_the_header_walk() {
     );
     assert!(!st.slots[2].in_flight.contains(&path[1].block_hash()));
     assert!(
-        st.slots[0].in_flight.contains(&path[1].block_hash()),
-        "the header peer takes what no other peer holds"
+        may_serve(&st, 5, &path[1].block_hash()),
+        "a peer that announced nothing does not keep the header peer from a block it showed"
+    );
+    assert!(
+        [0, 3]
+            .iter()
+            .any(|&i| st.slots[i].in_flight.contains(&path[1].block_hash())),
+        "the header peer, or a peer with no record, takes what no other peer holds"
     );
 
     // With no peer that holds the block by what it announced, a peer that
     // did not answer `notfound` is still asked.
     st.slots[0].chain.note_notfound(path[1].block_hash());
     st.slots[2].chain.note_notfound(path[1].block_hash());
+    st.slots[3].chain.note_notfound(path[1].block_hash());
     assert!(may_serve(&st, 6, &path[1].block_hash()));
 
     // A batch stored after one of its blocks failed is not planted, and does
@@ -1760,6 +1771,7 @@ fn a_long_chain_on_an_invalid_block_stays_refused() {
     let bad = mine(gen, 1);
     st.reorg.invalid.mark(bad.block_hash().to_byte_array());
     let mut prev = bad.block_hash();
+    let mut branch = None;
     for n in 0..1_100u32 {
         let next = mine(prev, 2 + n);
         assert!(
@@ -1767,7 +1779,18 @@ fn a_long_chain_on_an_invalid_block_stays_refused() {
             "batch {n} builds on the refused chain"
         );
         prev = next.block_hash();
+        if n == 100 {
+            // A second branch off the invalid block, refused once.
+            let side = mine(bad.block_hash(), 5_000);
+            assert!(refuse_invalid_batch(&mut st, 0, &[side]));
+            branch = Some(side.block_hash());
+        }
     }
+    let side_next = mine(branch.unwrap(), 5_001);
+    assert!(
+        refuse_invalid_batch(&mut st, 0, &[side_next]),
+        "a branch refused after the oldest tips is still refused past the cap"
+    );
 }
 
 #[test]
