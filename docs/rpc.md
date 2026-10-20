@@ -99,7 +99,8 @@ curl -H "Authorization: Bearer $TOKEN" --data-binary \
 
 `--datadir` (default `./datadir`) prefers `{datadir}/rpc.sock`.
 `--rpc-socket PATH` talks to a node started with `--rpc-socket PATH`. TCP uses
-`--rpc-url host:port` (plain HTTP; no scheme). When the flag is omitted and no
+`--rpc-url host:port` (plain HTTP; no scheme). An IP is a strict address
+(`10.0.0.1`, `[::1]`); leading zeros and hex forms are rejected. When the flag is omitted and no
 socket is present, the client uses `127.0.0.1` and the network RPC port. Bearer
 comes from `{datadir}/rpc.token` or `--rpc-token-file`. Prints the JSON-RPC
 `result` (strings unquoted).

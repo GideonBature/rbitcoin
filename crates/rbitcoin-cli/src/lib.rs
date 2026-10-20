@@ -4,7 +4,7 @@ use rbitcoin_primitives::Network;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -150,13 +150,58 @@ fn parse_rpc_addr(addr: &str) -> Result<(String, u16), String> {
     } else {
         raw_host
     };
-    if host.is_empty() {
-        return Err(format!("invalid --rpc-url host in {addr}"));
+    if host.is_empty() || !acceptable_host(host) {
+        return Err(bad());
     }
     let port: u16 = port_s
         .parse()
         .map_err(|_| format!("invalid --rpc-url port in {addr}"))?;
     Ok((host.to_string(), port))
+}
+
+/// A strict IP, a scoped IPv6 address, or a DNS name. inet_aton spellings
+/// (`010.0.0.1`, `0x7f.0.0.1`) are rejected so libc does not retarget them.
+fn acceptable_host(host: &str) -> bool {
+    if let Some((addr, zone)) = host.split_once('%') {
+        return addr.parse::<Ipv6Addr>().is_ok() && valid_zone(zone);
+    }
+    host.parse::<IpAddr>().is_ok() || !inet_aton_literal(host)
+}
+
+fn valid_zone(zone: &str) -> bool {
+    !zone.is_empty()
+        && !zone.contains('%')
+        && zone
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+}
+
+fn inet_aton_literal(host: &str) -> bool {
+    host.split('.').all(inet_aton_label)
+}
+
+fn inet_aton_label(label: &str) -> bool {
+    if label.is_empty() {
+        return false;
+    }
+    if label.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    let Some(hex) = label
+        .strip_prefix("0x")
+        .or_else(|| label.strip_prefix("0X"))
+    else {
+        return false;
+    };
+    !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, String> {
+    let connect = match host.parse::<IpAddr>() {
+        Ok(ip) => TcpStream::connect(SocketAddr::new(ip, port)),
+        Err(_) => TcpStream::connect((host, port)),
+    };
+    connect.map_err(|e| format!("connect {host}:{port}: {e}"))
 }
 
 fn http_host_value(host: &str, port: u16) -> String {
@@ -283,8 +328,7 @@ fn dispatch_call(cfg: &CliConfig) -> Result<String, String> {
             Some(u) => parse_rpc_addr(u)?,
             None => ("127.0.0.1".into(), cfg.network.default_rpc_port()),
         };
-        let stream = TcpStream::connect((host.as_str(), port))
-            .map_err(|e| format!("connect {host}:{port}: {e}"))?;
+        let stream = connect_tcp(&host, port)?;
         stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
         stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
         let token = read_token(&token_path(cfg))?;
@@ -404,6 +448,18 @@ mod tests {
             ("rpc.lan".into(), 18443)
         );
         assert_eq!(parse_rpc_addr("[::1]:8332").unwrap(), ("::1".into(), 8332));
+        assert_eq!(
+            parse_rpc_addr("[fe80::1%lo]:8332").unwrap(),
+            ("fe80::1%lo".into(), 8332)
+        );
+        assert_eq!(
+            parse_rpc_addr("dead.beef:8332").unwrap(),
+            ("dead.beef".into(), 8332)
+        );
+        assert_eq!(
+            parse_rpc_addr("0x10.lan:8332").unwrap(),
+            ("0x10.lan".into(), 8332)
+        );
         assert_eq!(http_host_value("127.0.0.1", 8332), "127.0.0.1:8332");
         assert_eq!(http_host_value("::1", 8332), "[::1]:8332");
         for bad in [
@@ -413,6 +469,12 @@ mod tests {
             "user:pass@127.0.0.1:8332",
             "::1:8332",
             "127.0.0.1",
+            "010.0.0.1:8332",
+            "0x7f.0.0.1:8332",
+            "0x7f000001:8332",
+            "127.1:8332",
+            "2130706433:8332",
+            "[fe80::1%]:8332",
         ] {
             let err = parse_rpc_addr(bad).unwrap_err();
             assert!(err.contains("host:port"), "{bad} -> {err}");
