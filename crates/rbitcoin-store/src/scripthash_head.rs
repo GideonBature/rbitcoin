@@ -13,7 +13,6 @@
 
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-#[cfg(debug_assertions)]
 use crate::open_address::{self, MAX_LOAD_DEN, MAX_LOAD_NUM};
 use crate::scripthash_layout::{
     head_key_from_full, pack8_bytes, unpack8_bytes, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN,

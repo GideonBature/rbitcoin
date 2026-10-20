@@ -77,6 +77,10 @@ assert_ok "required test job excludes rbitcoin-bench" \
   grep -q 'cargo test --workspace --exclude rbitcoin-bench' "$ROOT/.github/workflows/ci.yml"
 assert_ok "required test job still pins the bench scripthash" \
   grep -q 'cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a' "$ROOT/.github/workflows/ci.yml"
+# Suites link cfg(debug_assertions) hooks, so release is check-only. Without
+# this step a debug-only import on a production path ships uncompiled.
+assert_ok "qc checks the release profile compiles" \
+  grep -q 'cargo check --release --workspace --exclude rbitcoin-bench' "$ROOT/.github/workflows/ci.yml"
 assert_ok "gitignore ignores apilog jsonl" \
   bash -c 'grep -q "apilog\\*\\.jsonl" "$1/.gitignore" && git -C "$1" check-ignore -q -- apilog.jsonl && git -C "$1" check-ignore -q -- apilog-old.jsonl' _ "$ROOT"
 
