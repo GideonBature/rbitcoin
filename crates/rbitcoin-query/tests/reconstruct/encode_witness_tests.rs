@@ -1,9 +1,6 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::reconstruct::*;
-use rbitcoin_query::U64Map;
-use rbitcoin_query::*;
 use rbitcoin_store::{InputRecord, OutputRecord, StoreError, TxRecord};
-use std::time::Instant;
 
 #[test]
 fn encode_class_a_tx_emits_segwit_marker_when_input_has_witness() {

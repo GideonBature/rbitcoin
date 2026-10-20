@@ -1,7 +1,5 @@
 use rbitcoin_primitives::Fk;
-use rbitcoin_primitives::{read_compact_size, write_compact_size};
 use rbitcoin_store::tx_table::packed::*;
-use rbitcoin_store::tx_table::*;
 
 fn witness_refs(items: &[Vec<u8>]) -> Vec<&[u8]> {
     items.iter().map(|i| i.as_slice()).collect()

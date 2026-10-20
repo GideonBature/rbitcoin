@@ -2,7 +2,6 @@ use rbitcoin_ibd::ibd::confirm::ConfirmPipelineSizes;
 use rbitcoin_ibd::ibd::perf_log::*;
 use rbitcoin_ibd::ibd::state::WorkStructureSizes;
 use rbitcoin_ibd::ibd::status::LoopStats;
-use rbitcoin_log::debug;
 use rbitcoin_log::Level;
 use rbitcoin_query::ProcessOwnedSizes;
 use std::sync::atomic::Ordering;

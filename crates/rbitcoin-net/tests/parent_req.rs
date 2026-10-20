@@ -1,6 +1,5 @@
 use rbitcoin_net::tx_relay::parent_req::*;
-use rbitcoin_net::tx_relay::{GETDATA_TX_INTERVAL_SECS, MAX_PARENTS_PER_PARK};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rbitcoin_net::tx_relay::GETDATA_TX_INTERVAL_SECS;
 
 #[test]
 fn txid_parent_already_have_does_not_follow_another_peers_wtxid() {

@@ -1,8 +1,4 @@
-use rbitcoin_primitives::{schema_file_openable, SCHEMA_VERSION, STORE_MAGIC};
-use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::write_synced_tmp_rename;
 use rbitcoin_store::spend_durable::*;
-use std::path::Path;
 
 #[test]
 fn spend_sync_due_is_ten_minutes_elapsed_only() {

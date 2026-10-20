@@ -1,5 +1,4 @@
 use rbitcoin_primitives::compact::*;
-use std::fmt;
 
 #[test]
 fn compact_size_roundtrip() {

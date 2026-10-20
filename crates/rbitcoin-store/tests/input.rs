@@ -1,12 +1,7 @@
-use rbitcoin_primitives::{Fk, TableKind};
-use rbitcoin_store::delta_loc::{loc_window, loc_within, LOC_WINDOW};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_store::input::*;
 use rbitcoin_store::testutil::TempDir;
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 
 fn edge(parent: u64, vout: u32) -> InputEdge {
     InputEdge {

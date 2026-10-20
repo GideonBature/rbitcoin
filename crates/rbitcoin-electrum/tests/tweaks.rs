@@ -1,12 +1,7 @@
 use rbitcoin_consensus::{ChainParams, TxTweak};
 use rbitcoin_electrum::tweaks::*;
-use rbitcoin_primitives::Height;
-use rbitcoin_query::tweaks_for_height;
 use rbitcoin_query::{Query, ThinTweakRangeLimits, ThinTweakRow};
-use serde_json::Map;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
 
 use rbitcoin_query::testutil::FixtureChain;
 

@@ -1,6 +1,5 @@
 use rbitcoin_rpc::auth::*;
 use std::fs;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 

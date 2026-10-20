@@ -2,11 +2,10 @@ use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, Wtxid};
+use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use rbitcoin_mempool::error::MempoolError;
 use rbitcoin_mempool::packed::*;
-use rbitcoin_primitives::{read_compact_size, write_compact_size, Fk};
-use rbitcoin_store::OutputRecord;
+use rbitcoin_primitives::{write_compact_size, Fk};
 
 /// First vin's flag byte: the fixed prefix (ids, version and locktime,
 /// 104 B) plus the one-byte input and output counts.

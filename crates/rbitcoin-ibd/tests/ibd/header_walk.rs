@@ -6,10 +6,9 @@ use bitcoin::Work;
 use rbitcoin_ibd::ibd::events::apply_peer_event;
 use rbitcoin_ibd::ibd::header_walk::*;
 use rbitcoin_ibd::ibd::peer_io::{solicit_track, PeerCmd, PeerEvent, PeerSlot};
-use rbitcoin_ibd::ibd::state::{ConfirmedLocatorTail, IbdWorkState};
+use rbitcoin_ibd::ibd::state::IbdWorkState;
 use rbitcoin_ibd::ibd::ORDERED_HEADERS_SOFT_CAP;
 use rbitcoin_net::chain::ChainHub;
-use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use rbitcoin_net::seeds::AddrMan;

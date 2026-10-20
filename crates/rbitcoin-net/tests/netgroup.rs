@@ -1,7 +1,6 @@
 use rbitcoin_net::asmap::two_prefix_asmap_bytes;
 use rbitcoin_net::asmap::AsMap;
 use rbitcoin_net::netgroup::*;
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::net::{Ipv4Addr, Ipv6Addr};
 

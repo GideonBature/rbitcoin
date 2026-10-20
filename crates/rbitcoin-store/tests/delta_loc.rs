@@ -1,13 +1,8 @@
-use rbitcoin_primitives::{Fk, TableKind, SCHEMA_VERSION};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::delta_loc::*;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{
-    leading_header_bytes, write_synced_tmp_rename, GrowPolicy, TableFile, FILE_HEADER_LEN,
-};
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use rbitcoin_store::testutil::TempDir;
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 
 #[test]
 fn window_and_within() {

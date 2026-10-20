@@ -1,79 +1,8 @@
 //! Store wire walk and consensus decode agree on every truncation.
 #![cfg(test)]
 use bitcoin::absolute::LockTime;
-use bitcoin::block::{Header as BlockHeader, Version as BlockVersion};
 use bitcoin::hashes::Hash;
-use bitcoin::transaction::Version as TxVersion;
-use bitcoin::{
-    Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
-    TxMerkleNode, TxOut, Witness,
-};
-use rbitcoin_consensus::{
-    block_wire_len_from_pres, decode_block_precomputes, pres_for_tip, IdMap, OutPointHasher,
-    OutPointSet, TxPrecompute, TxidHasher, TxidMap, TxidSet,
-};
-use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_query::archive::{
-    input_records_from_wire, ArchiveWritePlan, CreatePin, CreatePinArc, CreatePinInner,
-    WirePlanNeed,
-};
-use rbitcoin_query::batch_parents::FkSet;
-use rbitcoin_query::batch_parents::{
-    layout_covers_need, sparse_spender_rels, BatchParents, FkMap, ParentPinView,
-    SharedPrevoutScript, U32Map, U64Map, U64Set,
-};
-use rbitcoin_query::block_filter::{basic_filter_from_scripts, basic_filter_of};
-use rbitcoin_query::catchup::IndexMode;
-use rbitcoin_query::chain_view::{header_lookup_count, ChainView, ChainViewKind};
-use rbitcoin_query::combined_stage::{load_creates_once, CombinedCreate};
-use rbitcoin_query::confirm_error::ConfirmError;
-use rbitcoin_query::confirm_load::SpendEdges;
-use rbitcoin_query::confirm_stats::{
-    add as note_confirm, add_dur as note_confirm_dur, ConfirmStats, ConfirmWindow, LastPinPhases,
-    LastPlanBatch, LastUnionMiss, LastWritePhases, TipShSnap,
-};
-use rbitcoin_query::connect::{spawn_sh_writebehind, ConfirmPrepared};
-use rbitcoin_query::connect_facade::*;
-use rbitcoin_query::convert::header_to_record;
-use rbitcoin_query::header_read::{
-    expected_next_bits, median_time_past, median_time_past_store, validate_header,
-    validate_header_hashed,
-};
-use rbitcoin_query::in_flight::InFlight;
-use rbitcoin_query::index_writebehind::{
-    build_indexes_released, index_tip_entry, prepare_live_indexes, spawn_index_writebehind,
-    IndexTipEntry, INDEX_STARTUP_GAP_HEIGHTS,
-};
-use rbitcoin_query::reconstruct::{BlockTxStatRows, StampedTxstatBlock};
-use rbitcoin_query::regtest_pad::pad_empty_from;
-use rbitcoin_query::resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
-use rbitcoin_query::scripthash::{
-    BlockTouch, FilteredHistory, HistoryFilter, HistoryOrder, ScriptHashBalance,
-    ScriptHashChainStats, ScriptHashHistoryItem, ScriptHashTxSummary, ScriptHashUtxo, ShJoinSlot,
-};
-use rbitcoin_query::soft_densify::{
-    bq_assign_stop_bytes, soft_ahead_quarter_full, soft_assign_restricted,
-    soft_confirm_window_covered, soft_confirm_window_n, soft_densify_band_hi, BQ_SOFT_FREE_BYTES,
-    TIP_HOLE_MIN_AHEAD_BLOCKS,
-};
-use rbitcoin_query::sp_read::{tweaks_at_height, tweaks_for_height, tweaks_from_thin_and_body};
-use rbitcoin_query::sp_tweaks::{ThinTweakRangeLimits, ThinTweakRow};
-use rbitcoin_query::spend_sync::SpendSync;
-use rbitcoin_query::stamp::{
-    fill_missing_parent_ranges, stamp_external_parents, BatchParentIds, ExternalParentStamp,
-    ParentIdent,
-};
-use rbitcoin_query::wave_prevout::SpendEdge;
-use rbitcoin_store::{
-    script_hash, HeaderRecord, InputRecord, OutputRecord, PointRecord, ScriptHashRecord,
-    SpTweaksTable, Store, StoreError, StoreLayout, TxRecord,
-};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::Path;
-use std::sync::atomic::{
-    AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering as AtomicOrdering,
-};
-use std::sync::{Arc, Condvar, Mutex};
+use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 
 use bitcoin::transaction::Version;
 

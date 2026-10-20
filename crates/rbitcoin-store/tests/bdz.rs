@@ -1,11 +1,5 @@
 use rbitcoin_store::bdz::*;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::io_handle::IoHandle;
-use rbitcoin_store::readonly_map::ReadonlyMap;
-use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
 fn read_packed_zero_modulus_or_vertices_is_corrupt() {

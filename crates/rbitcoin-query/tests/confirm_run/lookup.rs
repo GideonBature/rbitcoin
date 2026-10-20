@@ -6,7 +6,6 @@ use bitcoin::{
     TxOut, Txid, Witness,
 };
 use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone};
-use rbitcoin_primitives::Fk;
 use rbitcoin_primitives::Height;
 use rbitcoin_query::confirm_run::lookup::*;
 use rbitcoin_query::confirm_run::*;

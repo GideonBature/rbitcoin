@@ -1,6 +1,4 @@
 use rbitcoin_query::confirm_stats::*;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 #[test]
 fn last_union_miss_roundtrips_miss_on_codes() {

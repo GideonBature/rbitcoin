@@ -1,14 +1,7 @@
-use bitcoin::hashes::Hash;
-use bitcoin::Transaction;
-use rbitcoin_consensus::block::ScriptCheckJob;
-use rbitcoin_consensus::error::ConsensusError;
-use rbitcoin_consensus::script::classify::is_anyone_can_spend;
-use rbitcoin_consensus::script::classify::ScriptKind;
 use rbitcoin_consensus::script::crypto::{
     is_compressed_or_uncompressed_pubkey, is_compressed_pubkey, is_defined_hashtype,
     is_valid_signature_encoding, parse_der_sig, TapSpentHashes,
 };
-use rbitcoin_consensus::script::*;
 
 fn valid_der_sig() -> Vec<u8> {
     // Minimal valid-shaped DER + SIGHASH_ALL

@@ -1,31 +1,14 @@
-use bitcoin::consensus::Encodable;
-use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify};
-use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandle, EsploraListen};
-use rbitcoin_ibd::{read_platform_rss, tip_perf_json, IbdConfig, TipPerfLog};
-use rbitcoin_log::{debug, enabled, info, warn, Level};
-use rbitcoin_net::{
-    default_port, netgroup, sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap,
-    BlockingRegion, ChainHub, Dialer, MempoolHub, P2PNode, PeerConnType, TipEvent,
-};
-use rbitcoin_node::config::{parse_btc_to_sat, ListenOpts, NodeConfig};
-use rbitcoin_node::error::NodeError;
-use rbitcoin_node::health::{run_health, NodeStatus, Phase};
-use rbitcoin_node::regtest_rpc::HubRegtest;
+use rbitcoin_ibd::IbdConfig;
+use rbitcoin_net::{AddrMan, Dialer, PeerConnType, TipEvent};
+use rbitcoin_node::config::{parse_btc_to_sat, NodeConfig};
 use rbitcoin_node::run::*;
-use rbitcoin_primitives::Network;
-use rbitcoin_query::{spawn_sh_writebehind, Query, SpendSync};
-use rbitcoin_rpc::{
-    gbt_template, run_rpc, RpcActive, RpcConfig, RpcContext, RpcHandle, RpcRegtest,
-};
-use rbitcoin_store::StoreError;
-use rbitcoin_sv2::{run_sv2_tp, Sv2TpConfig, Sv2TpHandle};
+use rbitcoin_query::Query;
 use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::broadcast;
 fn tiny_regtest(dir: impl AsRef<std::path::Path>) -> NodeConfig {
     NodeConfig::default()
         .with_datadir(dir.as_ref())

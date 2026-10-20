@@ -1,17 +1,12 @@
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, Block, ScriptBuf, Transaction, TxOut};
+use bitcoin::{Amount, Transaction, TxOut};
 use rbitcoin_consensus::silent_payments::tweak_from_tx;
-use rbitcoin_consensus::ConsensusError;
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::confirm_run::index::*;
 use rbitcoin_query::confirm_run::{LoadedBatch, Prepared};
-use rbitcoin_query::index_rows::{self, IndexRows};
 use rbitcoin_query::testutil::tiny_query_labeled;
-use rbitcoin_query::{ConfirmError, ParentPinView, Query};
-use rbitcoin_store::StoreError;
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use rbitcoin_query::Query;
+use std::sync::Arc;
 
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::hash160;

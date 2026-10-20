@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
 mod archive;
 mod batch_parents;
 mod bip68_store_tests;

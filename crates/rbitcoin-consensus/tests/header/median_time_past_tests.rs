@@ -1,10 +1,9 @@
-use bitcoin::block::Header;
 use bitcoin::block::Version;
 use bitcoin::hashes::Hash;
 use bitcoin::{CompactTarget, Target};
 use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::header::*;
-use rbitcoin_consensus::params::{check_genesis_hash, ChainParams};
+use rbitcoin_consensus::params::ChainParams;
 use rbitcoin_primitives::median_time_past_times;
 use rbitcoin_primitives::Height;
 

@@ -1,10 +1,7 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::combined_stage::*;
 use rbitcoin_query::Query;
-use rbitcoin_store::{
-    decode_packed_tx_outs_with_spender_rels_secret, decode_packed_tx_with_spender_rels_secret,
-    IdxBodyJob, IdxBodyMode, Store, StoreError, StoreSecret,
-};
+use rbitcoin_store::{decode_packed_tx_with_spender_rels_secret, IdxBodyMode};
 use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
 
 fn temp_query() -> (rbitcoin_query::testutil::TempDir, Query) {

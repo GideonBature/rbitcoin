@@ -1,15 +1,13 @@
 use bitcoin::absolute::LockTime;
-use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, ShortId};
+use bitcoin::bip152::{BlockTransactions, HeaderAndShortIds, ShortId};
 use bitcoin::block::Header;
 use bitcoin::block::Version;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message::NetworkMessage;
-use bitcoin::p2p::Magic;
-use bitcoin::{Block, BlockHash, Transaction, Wtxid};
+use bitcoin::{Block, BlockHash, Transaction};
 use rbitcoin_net::compact::*;
 use std::borrow::Borrow;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
+use std::collections::HashMap;
 
 use bitcoin::script::ScriptBuf;
 use bitcoin::{Amount, CompactTarget, OutPoint, Sequence, TxIn, TxMerkleNode, TxOut, Witness};

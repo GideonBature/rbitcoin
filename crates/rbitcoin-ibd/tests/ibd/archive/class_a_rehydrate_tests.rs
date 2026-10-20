@@ -1,6 +1,5 @@
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header, Version};
-use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use rbitcoin_ibd::ibd::archive::{
@@ -9,9 +8,7 @@ use rbitcoin_ibd::ibd::archive::{
 use rbitcoin_ibd::ibd::confirm::ConfirmFeed;
 use rbitcoin_ibd::ibd::progress::claim_ready;
 use rbitcoin_ibd::ibd::state::IbdWorkState;
-use rbitcoin_net::chain::ChainHub;
 use rbitcoin_primitives::Fk;
-use std::time::Instant;
 
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version as TxVersion;

@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
 mod accept;
 mod error;
 mod fee_analog;

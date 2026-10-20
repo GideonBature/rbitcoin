@@ -1,6 +1,6 @@
 use rbitcoin_net::net_permissions::*;
 use std::net::SocketAddrV4;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 fn ip() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)

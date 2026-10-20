@@ -1,17 +1,5 @@
-use rbitcoin_primitives::{schema_file_openable, Fk, Height, SCHEMA_VERSION, STORE_MAGIC};
-use rbitcoin_store::chain::{ConfirmedTable, HeaderTxsTable, StrongTxTable};
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::hashhead::{HeadOpenOpts, HeadScale};
-use rbitcoin_store::header_table::{HeaderRecord, HeaderTable};
-use rbitcoin_store::height_fence::{HeightFence, MtpRing};
-use rbitcoin_store::point_table::{self, PointRecord};
-use rbitcoin_store::scripthash::ScriptHashTable;
-use rbitcoin_store::spender_table::SpenderTable;
 use rbitcoin_store::store::*;
-use rbitcoin_store::tx_table::{InputRecord, OutputRecord, TxRecord, TxTable};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 
 #[test]
 fn legacy_names_rename_and_both_exist_errors() {

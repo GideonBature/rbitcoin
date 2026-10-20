@@ -1,8 +1,4 @@
 use rbitcoin_store::testutil::*;
-use rbitcoin_store::Store;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn copy_store_tree_copies_nested_files() {

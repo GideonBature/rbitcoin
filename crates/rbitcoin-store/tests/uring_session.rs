@@ -1,11 +1,7 @@
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::io_handle::IoHandle;
-use rbitcoin_store::io_session_pool::PoolEngine;
 use rbitcoin_store::uring_session::*;
-use std::cell::Cell;
 use std::path::Path;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[test]
 fn enter_failure_with_pending_matches_the_hard_cap() {

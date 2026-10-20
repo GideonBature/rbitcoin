@@ -1,11 +1,6 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::testutil::FixtureChain;
-use rbitcoin_query::*;
 use rbitcoin_query::{Query, TxApply, WirePlanNeed};
-use rbitcoin_store::{
-    encode_seqsigwit_with_secret, encode_txout_meta_and_outs, encode_unspent_output_into_secret,
-    encode_wire_seqsigwit_input, seqsigwit_input_len_upper, InputEdge, PackedCreate,
-};
 use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
 use std::sync::Arc;
 

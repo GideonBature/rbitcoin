@@ -1,12 +1,8 @@
-use rbitcoin_consensus::{default_milestone_height, default_min_chain_work_be};
-use rbitcoin_log::{self, error, info, warn, Level};
+use rbitcoin_consensus::default_milestone_height;
 use rbitcoin_node::cli::*;
+use rbitcoin_node::config::NodeConfig;
 use rbitcoin_node::config::OPERATOR_ENV_TEST_LOCK;
-use rbitcoin_node::config::{ConfApply, NodeConfig};
-use rbitcoin_node::inhibit::SuspendInhibit;
-use rbitcoin_node::run::{run_node, run_p2p};
 use rbitcoin_primitives::Network;
-use rbitcoin_store::HeadScale;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;

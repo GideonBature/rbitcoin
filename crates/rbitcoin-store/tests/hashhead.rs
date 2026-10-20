@@ -1,11 +1,6 @@
-use rbitcoin_primitives::{Fk, TableKind};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_store::hashhead::*;
-use rbitcoin_store::open_address::{self, MAX_LOAD_DEN, MAX_LOAD_NUM};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 #[test]
 fn create_defaults_to_fd_only() {

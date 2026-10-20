@@ -1,7 +1,6 @@
 use bitcoin::blockdata::constants::genesis_block;
-use bitcoin::consensus::encode::Decodable;
 use bitcoin::consensus::serialize;
-use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
+use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::Magic;
 use bitcoin::Network;
 use rbitcoin_net::codec::*;

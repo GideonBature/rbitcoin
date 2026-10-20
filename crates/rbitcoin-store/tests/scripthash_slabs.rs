@@ -1,6 +1,6 @@
-use rbitcoin_primitives::{read_uleb128, write_uleb128_into, Fk};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::scripthash_layout::{slab_bytes, slab_cap, SH_INLINE_CAP, SH_MAX_SLAB_CLASS};
+use rbitcoin_store::scripthash_layout::slab_bytes;
 use rbitcoin_store::scripthash_pages::SH_FLAG_BIT;
 use rbitcoin_store::scripthash_slabs::*;
 

@@ -5,12 +5,8 @@
 //! rows (non-`0xc0`) go through the same job: BIP341 commitment must hold and
 //! the leaf is not executed. This Core file has no marked-invalid spends.
 #![cfg(test)]
-use bitcoin::hashes::Hash;
 use bitcoin::Transaction;
 use rbitcoin_consensus::block::ScriptCheckJob;
-use rbitcoin_consensus::error::ConsensusError;
-use rbitcoin_consensus::script::classify::is_anyone_can_spend;
-use rbitcoin_consensus::script::classify::ScriptKind;
 
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::deserialize;

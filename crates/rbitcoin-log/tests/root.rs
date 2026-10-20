@@ -1,10 +1,6 @@
-use rbitcoin_log::api_log::PARAMS_MAX;
-use rbitcoin_log::api_log::{api_call, close_api_log, init_api_log};
 use rbitcoin_log::*;
-use std::fmt;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use std::sync::{Mutex, OnceLock};
 

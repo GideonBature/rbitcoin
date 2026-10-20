@@ -10,18 +10,13 @@ use bitcoin::{
 };
 use rbitcoin_consensus::mine_empty_regtest;
 use rbitcoin_consensus::{ChainParams, Milestone};
-use rbitcoin_primitives::Fk;
 use rbitcoin_primitives::Height;
 use rbitcoin_query::accept_and_connect_block;
 use rbitcoin_query::confirm_run::bq_resolve::*;
-use rbitcoin_query::confirm_run::*;
 use rbitcoin_query::Query;
-use rbitcoin_query::{
-    BatchParentIds, IdMap, ResolvedWire, TxPrecompute, TxidHasher, U32Map, U64Map,
-};
-use std::collections::{HashMap, HashSet};
+use rbitcoin_query::{TxPrecompute, TxidHasher};
+use std::collections::HashSet;
 use std::hash::BuildHasherDefault;
-use std::sync::Arc;
 fn tmp_query() -> (rbitcoin_query::testutil::TempDir, Query) {
     rbitcoin_query::testutil::tiny_query_labeled("bq-resolve")
 }

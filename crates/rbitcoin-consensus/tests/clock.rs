@@ -1,7 +1,4 @@
 use rbitcoin_consensus::clock::*;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn mock_then_wall() {

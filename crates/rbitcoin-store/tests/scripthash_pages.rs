@@ -1,8 +1,7 @@
-use rbitcoin_primitives::{read_uleb128, uleb128_len, write_uleb128_into, Fk};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::scripthash_layout::SH_ENTRY_LEN;
 use rbitcoin_store::scripthash_pages::*;
-use rbitcoin_store::scripthash_slabs::{decode_fk_delta_stream_into, encode_fk_delta_stream_into};
+use rbitcoin_store::scripthash_slabs::encode_fk_delta_stream_into;
 
 fn raw(fks: &[Fk]) -> Vec<u64> {
     fks.iter().map(|fk| fk.0).collect()

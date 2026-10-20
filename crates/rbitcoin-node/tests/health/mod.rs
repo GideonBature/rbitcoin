@@ -1,20 +1,11 @@
-use axum::extract::State;
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Router;
-use rbitcoin_log::{info, progress, warn};
-use rbitcoin_net::{BlockingRegion, ChainHub, MempoolHub, PeerHub};
+use rbitcoin_log::progress;
 use rbitcoin_node::health::*;
 use rbitcoin_primitives::Network;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
-use tokio::task::{JoinError, JoinHandle};
-use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::timeout::TimeoutLayer;
 
 fn following() -> ReadySnapshot {
     ReadySnapshot {

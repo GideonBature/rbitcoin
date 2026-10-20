@@ -1,12 +1,6 @@
-use bitcoin::hashes::Hash;
-use bitcoin::{OutPoint, Transaction, TxOut, Witness};
-use rbitcoin_consensus::silent_payments::{tweak_from_tx, TaprootOut, TxTweak};
-use rbitcoin_consensus::ChainParams;
-use rbitcoin_primitives::{Fk, Height};
+use rbitcoin_primitives::Fk;
 use rbitcoin_query::sp_read::{build_tx_and_prevouts, taproot_outs_from_records};
-use rbitcoin_query::{ConfirmError, Query};
-use rbitcoin_store::{IndexWindow, InputRecord, LoadedTweakTx, OutputRecord, StoreError};
-use std::collections::{BTreeMap, HashMap};
+use rbitcoin_store::{InputRecord, OutputRecord};
 
 #[test]
 fn taproot_record_keeps_a_zero_value_and_skips_other_scripts() {

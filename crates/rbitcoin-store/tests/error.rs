@@ -1,7 +1,6 @@
 use rbitcoin_primitives::PackError;
 use rbitcoin_store::error::*;
 use std::error::Error;
-use std::fmt;
 use std::io;
 use std::path::PathBuf;
 

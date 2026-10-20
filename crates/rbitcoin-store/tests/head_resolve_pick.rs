@@ -2,7 +2,7 @@ use rbitcoin_primitives::Fk;
 use rbitcoin_store::head_resolve_pick::*;
 use rbitcoin_store::height_fence::FenceRun;
 use rbitcoin_store::height_fence::HeightFence;
-use rbitcoin_store::int_map::{U64Map, U64Set};
+use rbitcoin_store::int_map::U64Map;
 
 fn fence_on(fks: &[u64]) -> HeightFence {
     let runs: Vec<FenceRun> = fks

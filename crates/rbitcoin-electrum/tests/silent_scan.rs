@@ -1,12 +1,7 @@
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::Network;
-use rbitcoin_consensus::{taproot_matches_scan, ChainParams};
 use rbitcoin_electrum::silent_scan::*;
-use rbitcoin_primitives::Height;
-use rbitcoin_query::tweaks_for_height;
-use rbitcoin_query::Query;
-use serde_json::{json, Value};
+use serde_json::json;
 
 #[test]
 fn parse_sub_indexes_a_non_string_param() {

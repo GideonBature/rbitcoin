@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
 mod asmap;
 mod cache;
 mod chain;

@@ -1,15 +1,7 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::address_head::HeadLayout;
-use rbitcoin_store::error::StoreError;
-use rbitcoin_store::io_handle::IoHandle;
 use rbitcoin_store::sp_tweaks_uring::*;
-use rbitcoin_store::tx_table::{
-    decode_packed_tx_outs_with_spender_rels_secret, decode_seqsigwit_secret, InputRecord,
-    OutputRecord, TxRecord, TxTable,
-};
-use rbitcoin_store::uring_session::{self, UringSession};
-use rbitcoin_store::U64Map;
-use std::path::Path;
+use rbitcoin_store::tx_table::{InputRecord, OutputRecord, TxRecord, TxTable};
 
 fn tmp_dir() -> rbitcoin_store::testutil::TempDir {
     rbitcoin_store::testutil::TempDir::labeled("sp-uring").unwrap()

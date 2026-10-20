@@ -1,16 +1,9 @@
 use bitcoin::absolute::LockTime;
-use bitcoin::hashes::Hash;
+use bitcoin::script::Script;
 use bitcoin::script::ScriptBuf;
-use bitcoin::script::{Instruction, Script};
-use bitcoin::sighash::SighashCache;
 use bitcoin::{Amount, Sequence, Transaction};
 use bitcoin::{OutPoint, TxIn, TxOut, Witness};
-use rbitcoin_consensus::error::ConsensusError;
-use rbitcoin_consensus::script::crypto;
 use rbitcoin_consensus::script::interpreter::*;
-use rbitcoin_primitives::{scriptnum_decode_width, scriptnum_encode};
-use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
 
 fn eval_md(script_bytes: &[u8], md: bool) -> Result<(), String> {
     let tx = Transaction {

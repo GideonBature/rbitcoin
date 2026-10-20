@@ -1,16 +1,10 @@
 use rbitcoin_primitives::{merkle_branch, merkle_root_from_branch, merkle_root_mutated};
-use rbitcoin_primitives::{
-    merkle_root_from_txids, schema_file_openable, Fk, Height, SCHEMA_VERSION, STORE_MAGIC,
-};
-use rbitcoin_store::error::StoreError;
+use rbitcoin_primitives::{merkle_root_from_txids, Fk, Height};
 use rbitcoin_store::header_table::block_header_hash;
 use rbitcoin_store::header_table::HeaderRecord;
 use rbitcoin_store::integrity::*;
 use rbitcoin_store::store::Store;
 use rbitcoin_store::tx_table::{InputRecord, OutputRecord, TxRecord};
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 

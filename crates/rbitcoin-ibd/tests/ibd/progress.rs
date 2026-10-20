@@ -1,15 +1,10 @@
-use bitcoin::BlockHash;
-use rbitcoin_ibd::ibd::body::BodyPresence;
 use rbitcoin_ibd::ibd::progress::{
     format_duration_short, format_progress_line, format_rate, ibd_pct, tip_hole_from_claim_ready,
     ProgressLineInput, TipRateTracker,
 };
-use rbitcoin_net::chain::ChainHub;
 use rbitcoin_query::{
     soft_assign_restricted, soft_confirm_window_n, soft_densify_band_hi, BQ_SOFT_FREE_BYTES,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Shipped progress line: tip + in-RAM bq soft depth; forbid retired tokens.

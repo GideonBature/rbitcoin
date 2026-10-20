@@ -1,5 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
-
 mod asmap_journey;
 mod consensus_rules;
 mod core_analogs;

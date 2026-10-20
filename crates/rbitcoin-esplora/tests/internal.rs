@@ -1,25 +1,10 @@
-use axum::body::Bytes;
-use axum::extract::{Path, Query as AxumQuery, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
 use bitcoin::absolute::LockTime;
-use bitcoin::hashes::Hash;
 use bitcoin::Txid;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use rbitcoin_consensus::{ChainParams, Milestone};
-use rbitcoin_esplora::handlers::{outspend_json, spawn_join};
 use rbitcoin_esplora::internal::*;
-use rbitcoin_esplora::server::not_found;
-use rbitcoin_esplora::server::{block_hash_hex, parse_hash32, pin_or_reject, store_err, AppState};
 use rbitcoin_esplora::server::{run_esplora, EsploraConfig, EsploraListen};
-use rbitcoin_esplora::tx_json::{
-    build_tx_json, build_tx_json_from_tx, build_tx_json_from_tx_with_status, tx_status_json,
-};
-use rbitcoin_net::{MempoolHub, MempoolTxSnapEntry};
-use rbitcoin_query::ChainViewKind;
-use rbitcoin_store::StoreError;
-use serde::Deserialize;
+use rbitcoin_net::MempoolHub;
 use serde_json::{json, Value};
 
 use rbitcoin_primitives::Height;

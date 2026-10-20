@@ -1,5 +1,4 @@
 use rbitcoin_store::binary_fuse8::*;
-use rbitcoin_store::readonly_map::ReadonlyMap;
 
 #[test]
 fn single_key_and_small_set_no_false_negatives() {

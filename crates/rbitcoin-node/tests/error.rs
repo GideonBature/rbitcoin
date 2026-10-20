@@ -1,7 +1,6 @@
 use rbitcoin_node::error::*;
 use rbitcoin_primitives::ParseNetworkError;
 use rbitcoin_store::StoreError;
-use std::fmt;
 use std::path::PathBuf;
 
 use std::error::Error;

@@ -1,23 +1,4 @@
-use hex::{
-    decode as hex_decode, display_hash_hex, encode as hex_encode, parse_display_hash32,
-    HexToArrayError, HexToBytesError,
-};
-use rbitcoin_primitives::compact::{
-    compact_size_len, read_compact_size, read_compact_size_from, read_uleb128, uleb128_len,
-    write_compact_size, write_uleb128, write_uleb128_into, PackError,
-};
-use rbitcoin_primitives::loc_simd::{deinterleave_pairs_u8x8, inclusive_u8x8_times_8};
-use rbitcoin_primitives::median_time::median_time_past_times;
-use rbitcoin_primitives::merkle::{
-    merkle_branch, merkle_root_from_branch, merkle_root_from_txids, merkle_root_mutated,
-};
-use rbitcoin_primitives::script_sigops::script_sigop_count;
-use rbitcoin_primitives::scriptnum::{
-    scriptnum_decode, scriptnum_decode_width, scriptnum_encode, scriptnum_is_minimal,
-    ScriptNumError,
-};
 use rbitcoin_primitives::*;
-use std::fmt;
 
 #[test]
 fn fk_display_and_get() {

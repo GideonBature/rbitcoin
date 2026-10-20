@@ -1,12 +1,8 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::stamp::*;
-use rbitcoin_query::{CreatePin, InFlight, QueryError, U64Map};
-use rbitcoin_query::{IdMap, TxidHasher};
-use rbitcoin_store::Store;
-use std::collections::HashMap;
-use std::hash::BuildHasherDefault;
+use rbitcoin_query::IdMap;
+use rbitcoin_query::{CreatePin, InFlight, U64Map};
 use std::sync::Arc;
-use std::time::Instant;
 
 fn tmp_store() -> (rbitcoin_query::testutil::TempDir, rbitcoin_query::Query) {
     rbitcoin_query::testutil::tiny_query_labeled("stamp")

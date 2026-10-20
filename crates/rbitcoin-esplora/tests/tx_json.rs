@@ -1,14 +1,7 @@
-use bitcoin::hashes::Hash;
-use bitcoin::{Network, Transaction};
-use rbitcoin_esplora::script_fields::esplora_script_fields;
+use bitcoin::Network;
 use rbitcoin_esplora::tx_json::*;
-use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_query::{Query, QueryError, ScriptHashHistoryItem, ScriptHashUtxo};
-use rbitcoin_store::InputRecord;
-use serde::Serialize;
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use rbitcoin_query::Query;
 
 use rbitcoin_query::testutil::FixtureChain;
 #[test]

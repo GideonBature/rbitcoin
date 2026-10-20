@@ -1,10 +1,8 @@
 use rbitcoin_primitives::TableKind;
 use rbitcoin_store::array_table::*;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
-use std::path::Path;
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
 
 fn tmp_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(

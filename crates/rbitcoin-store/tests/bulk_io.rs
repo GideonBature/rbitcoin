@@ -1,7 +1,6 @@
 use rbitcoin_store::bulk_io::*;
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::io_handle::IoHandle;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 #[test]
 fn unset_io_env_opens_a_session_except_on_darwin() {

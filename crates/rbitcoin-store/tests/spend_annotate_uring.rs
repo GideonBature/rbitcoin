@@ -1,13 +1,10 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::compact::output_flags;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::io_handle::IoHandle;
 use rbitcoin_store::spend_annotate_uring::*;
 use rbitcoin_store::spender_table::SpenderTable;
-use rbitcoin_store::tx_table::{decode_spent_slot, encode_spent_slot, OutputRecord, TxTable};
 use rbitcoin_store::tx_table::{InputRecord, TxRecord};
-use rbitcoin_store::uring_session::{self, UringSession};
-use std::collections::VecDeque;
+use rbitcoin_store::tx_table::{OutputRecord, TxTable};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn temp_table() -> (std::path::PathBuf, TxTable, SpenderTable) {

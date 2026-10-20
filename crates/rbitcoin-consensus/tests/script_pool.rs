@@ -1,12 +1,8 @@
-use arc_swap::ArcSwap;
 use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::script_pool::*;
-use std::cell::Cell;
-use std::collections::VecDeque;
-use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use std::sync::MutexGuard;

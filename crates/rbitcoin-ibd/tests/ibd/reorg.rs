@@ -1,12 +1,9 @@
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, CompactTarget, Target};
 use rbitcoin_ibd::ibd::reorg::*;
-use rbitcoin_log::{info, warn};
 use rbitcoin_net::chain::ChainHub;
 use rbitcoin_net::error::NetError;
-use rbitcoin_net::most_work::{sum_work, work_better, InvalidHashSet};
-use rbitcoin_primitives::{Fk, Height};
-use std::collections::{HashMap, HashSet};
+use rbitcoin_primitives::Height;
 
 fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("ibd-reorg")

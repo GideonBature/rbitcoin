@@ -1,10 +1,5 @@
-use bitcoin::blockdata::constants;
-use bitcoin::consensus::Params as BtcParams;
-use bitcoin::hashes::Hash;
 use bitcoin::script::ScriptBuf;
-use bitcoin::{BlockHash, Network, Target};
 use rbitcoin_consensus::params::*;
-use std::str::FromStr;
 
 /// Core `SigNetParams` / Inquisition signet: soft forks at height 1 (not 0).
 #[test]

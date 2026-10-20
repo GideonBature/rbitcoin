@@ -1,19 +1,12 @@
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use rbitcoin_ibd::ibd::assign_plan::densify_slots_for_peer;
-use rbitcoin_ibd::ibd::dial::{
-    median_u64, relative_slow_pick, RelativeSlowSample, RELATIVE_SLOW_CLUSTER_SPREAD,
-};
 use rbitcoin_ibd::ibd::peer_io::solicit_track;
-use rbitcoin_ibd::ibd::peer_io::{ibd_mono_ms, PeerCmd, PeerSlot};
+use rbitcoin_ibd::ibd::peer_io::{PeerCmd, PeerSlot};
 use rbitcoin_ibd::ibd::state::{self, IbdWorkState};
 use rbitcoin_ibd::ibd::status::LoopStats;
-use rbitcoin_ibd::ibd::{
-    IbdConfig, CONTIG_DENSIFY_AHEAD, FAR_SCAN_BUDGET, PENDING_STALE, PRE_HOLE_MAX_PEERS,
-    TIP_HOLE_MAX, TIP_HOLE_MAX_PEERS,
-};
+use rbitcoin_ibd::ibd::{IbdConfig, PRE_HOLE_MAX_PEERS, TIP_HOLE_MAX, TIP_HOLE_MAX_PEERS};
 use rbitcoin_net::chain::ChainHub;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -1088,39 +1081,6 @@ fn ibd_cover_tip_holes() {
     );
 
     let _ = std::fs::remove_dir_all(dir);
-}
-
-/// Serialize env mutators — parallel suite races `bq_assign_stop_bytes`.
-static BQ_ASSIGN_STOP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub(crate) struct AssignStopEnvRestore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
-impl Drop for AssignStopEnvRestore {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
-            None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
-        }
-        match self.1.take() {
-            Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
-            None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
-        }
-    }
-}
-
-/// Tuple fields drop in order: the env is restored before the lock is
-/// released, so the next holder's own setting survives.
-pub(crate) fn lock_default_assign_stop(
-) -> (AssignStopEnvRestore, std::sync::MutexGuard<'static, ()>) {
-    let g = BQ_ASSIGN_STOP_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let restore = AssignStopEnvRestore(
-        std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES"),
-        std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB"),
-    );
-    std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
-    std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
-    (restore, g)
 }
 
 /// Densify on one hub at genesis across IBD restarts: assign depth, the

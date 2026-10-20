@@ -1,12 +1,8 @@
-use arc_swap::ArcSwap;
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::batch_parents::*;
-use rbitcoin_store::{FkMap, FkSet, U32Map, U64Map, U64Set};
-use rbitcoin_store::{OutputRecord, StoreError, TxRecord};
-use std::cell::RefCell;
-use std::hash::BuildHasherDefault;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use rbitcoin_store::U64Map;
+use rbitcoin_store::{OutputRecord, TxRecord};
+use std::sync::Arc;
 
 use rbitcoin_store::U64IdentityHasher;
 

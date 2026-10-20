@@ -1,27 +1,20 @@
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message::NetworkMessage;
-use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
+use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::BlockHash;
 use rbitcoin_ibd::ibd::peer_io::*;
 use rbitcoin_ibd::ibd::rate::PeerRate;
-use rbitcoin_net::codec::{FramedMessage, MAX_INV_SIZE};
+use rbitcoin_net::codec::FramedMessage;
 use rbitcoin_net::error::NetError;
-use rbitcoin_net::msg_decode::spawn_decode_then_with_err;
-use rbitcoin_net::peer::{
-    connect_and_handshake_timed, HandshakePolicy, BAN_SCORE_THRESHOLD, HANDSHAKE_TIMEOUT,
-};
 use rbitcoin_net::peer_dos::{PeerRateLimiter, RATE_LIMIT_BAN_SCORE};
-use rbitcoin_net::v2::{read_v2_frame_with_progress, write_v2_msg_offload, V2Reader, V2Writer};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, Semaphore};
 
 fn dummy_slot(id: usize) -> PeerSlot {
     let (cmd_tx, _rx) = mpsc::unbounded_channel();

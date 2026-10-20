@@ -1,15 +1,10 @@
-use bitcoin::p2p::ServiceFlags;
-use rbitcoin_net::asmap::AsMap;
-use rbitcoin_net::netaddr::{addr_allowed, NetAddr, OnlyNet};
-use rbitcoin_net::netgroup::{netgroup, select_diverse};
+use rbitcoin_net::netaddr::{NetAddr, OnlyNet};
+use rbitcoin_net::netgroup::netgroup;
 use rbitcoin_net::seeds::*;
 use rbitcoin_primitives::Network;
-use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn addr(o: u8) -> SocketAddr {

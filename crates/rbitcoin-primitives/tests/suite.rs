@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
 mod compact;
 mod hex;
 mod loc_simd;

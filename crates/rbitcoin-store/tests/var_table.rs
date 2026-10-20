@@ -1,10 +1,8 @@
 use rbitcoin_primitives::{Fk, TableKind};
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
-use rbitcoin_store::io_handle::IoHandle;
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use rbitcoin_store::var_table::*;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 #[test]
 fn class_a_body_waves_serial_is_one_stem_each() {

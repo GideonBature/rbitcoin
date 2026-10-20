@@ -1,6 +1,5 @@
 use rbitcoin_store::head_resolve_pick::LeftoverMissOn;
 use rbitcoin_store::head_resolve_stats::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Pure Sample math (no process atomics — safe under parallel cargo test).
 #[test]

@@ -1,8 +1,4 @@
-use rbitcoin_query::Query;
-use rbitcoin_store::{elapsed_after_checkpoint, SPEND_DURABLE_INTERVAL_MS};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use rbitcoin_primitives::{Fk, Height};
 

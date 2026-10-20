@@ -1,32 +1,12 @@
-use bitcoin::consensus::encode::deserialize;
 use bitcoin::hashes::Hash;
-use bitcoin::{Transaction, Txid, Wtxid};
-use rbitcoin_mempool::accept::{
-    check_mempool_structural, AcceptError, AcceptFailureRecord, AcceptResult, AcceptStageUs,
-    ActiveMempool, ChainPrevout, ChainTipCtx, Coin, LiftedOrphan, PreparedAdmit, UtxoProvider,
-    DEFAULT_MAX_MEMPOOL_WEIGHT, MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT,
-};
+use bitcoin::Txid;
 use rbitcoin_mempool::error::MempoolError;
-use rbitcoin_mempool::fee_analog::{AnalogHistory, HISTORICAL_CONFIDENCE_FAR};
-use rbitcoin_mempool::fee_est::{
-    block_individual_p10_sat_kvb, default_candidate_rates, depth_rate_sat_kvb,
-    enforce_monotone_desc, fee_at_target_sat_kvb, fine_candidate_rates, flow_for_depth,
-    hold_defined_then_monotone, min_rate_for_capacity, percentile_sat, published_depth_rate,
-    warmup_blend, BLOCK_WEIGHT_WU, CONFIDENCE_FAR, CONFIDENCE_NEAR,
-};
-use rbitcoin_mempool::fee_flow::FeeFlowMeter;
-use rbitcoin_mempool::graph::{
-    frontier_feerate_from_chunks, weight_above_from_chunks, Chunk, Cluster, MempoolGraphStats,
-    SelectBudget, Selected, StockAbove, TxEntry, TxGraph, MAX_CLUSTER_COUNT, MAX_CLUSTER_VSIZE,
-};
-use rbitcoin_mempool::orphanage::{OrphanSnapshot, Orphanage};
 use rbitcoin_mempool::packed::{VinAux, SIGOP_COST_OFF};
+use rbitcoin_mempool::store::Mempool;
 use rbitcoin_mempool::store::*;
-use rbitcoin_mempool::store::{Mempool, MempoolMeta};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::fs::{self, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
 
 /// Rewrite a closed current pool under `dir` as schema 2 (drop each
 /// record's sigops and accept time, stamp headers 2) — pre-upgrade fixture.

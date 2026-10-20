@@ -1,12 +1,10 @@
-use rbitcoin_primitives::{Fk, Height, TableKind};
+use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_store::block_filter::*;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
-use rbitcoin_store::seg_pair::{locate, SegDirs, SegPair};
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::path::Path;
 
 fn tmp_dir() -> rbitcoin_store::testutil::TempDir {
     rbitcoin_store::testutil::TempDir::labeled("blockfilter").unwrap()

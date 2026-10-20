@@ -1,10 +1,9 @@
 use rbitcoin_store::bdz::BdzMphf;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::scripthash_layout::{pack8, unpack8, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN};
+use rbitcoin_store::scripthash_layout::{pack8, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN};
 use rbitcoin_store::scripthash_mphf::*;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 
 use rbitcoin_primitives::Fk;
 

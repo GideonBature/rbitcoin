@@ -1,10 +1,6 @@
 use bitcoin::p2p::address::{AddrV2, AddrV2Message};
-use rbitcoin_net::error::NetError;
 use rbitcoin_net::netaddr::*;
-use sha3::{Digest, Sha3_256};
-use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::str::FromStr;
 
 #[test]
 fn netaddr_onion_parse_roundtrip() {

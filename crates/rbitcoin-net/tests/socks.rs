@@ -1,10 +1,8 @@
-use rbitcoin_net::error::NetError;
 use rbitcoin_net::socks::{
     dial_isolated, socks5_connect, socks5_connect_domain, Dialer, ProxyCreds,
 };
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 

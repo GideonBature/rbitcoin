@@ -1,16 +1,9 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::fuse8_filter::{fuse_key_from_mixed, SealedFuse8};
-use rbitcoin_store::io_handle::IoHandle;
-use rbitcoin_store::scripthash_layout::{
-    pack8_bytes, unpack8_bytes, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN, SH_HEAD_SLOT_SIZE,
-    SH_HEAD_VALUE_LEN,
-};
+use rbitcoin_store::scripthash_layout::{pack8_bytes, ShHeadKey, ShHeadValue, SH_HEAD_VALUE_LEN};
 use rbitcoin_store::scripthash_sorted_head::*;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 fn tmp() -> PathBuf {
     let p = std::env::temp_dir().join(format!(

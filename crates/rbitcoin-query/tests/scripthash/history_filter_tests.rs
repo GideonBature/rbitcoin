@@ -1,8 +1,5 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::scripthash::*;
-use rbitcoin_query::*;
-use rbitcoin_store::{output_flags, script_hash, spent_abs, IdxBodyMode, SpendSlotRun};
-use std::sync::Arc;
 
 fn item(height: i64, txid0: u8) -> ScriptHashHistoryItem {
     let mut txid = [0u8; 32];

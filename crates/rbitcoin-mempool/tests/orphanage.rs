@@ -2,9 +2,9 @@ use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness};
-use bitcoin::{Transaction, Txid, Wtxid};
+use bitcoin::{Transaction, Txid};
 use rbitcoin_mempool::orphanage::*;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::BTreeSet;
 
 fn txid_n(n: u8) -> Txid {
     Txid::from_byte_array([n; 32])

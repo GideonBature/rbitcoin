@@ -1,16 +1,8 @@
 use rbitcoin_primitives::Fk;
-use rbitcoin_primitives::TableKind;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
-use rbitcoin_store::open_address::{self, MAX_LOAD_DEN, MAX_LOAD_NUM};
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use rbitcoin_store::scripthash_head::*;
-use rbitcoin_store::scripthash_layout::{
-    head_key_from_full, pack8_bytes, unpack8_bytes, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN,
-    SH_HEAD_SLOT_SIZE, SH_HEAD_VALUE_LEN,
-};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use rbitcoin_store::scripthash_layout::{ShHeadValue, SH_HEAD_SLOT_SIZE};
 use std::time::Instant;
 
 #[test]

@@ -3,12 +3,9 @@ use bitcoin::sighash::SighashCache;
 use bitcoin::Transaction;
 use rbitcoin_consensus::block::ScriptCheckJob;
 use rbitcoin_consensus::error::ConsensusError;
-use rbitcoin_consensus::script::classify;
 use rbitcoin_consensus::script::crypto;
-use rbitcoin_consensus::script::interpreter::{self, EvalContext, SigVersion};
+use rbitcoin_consensus::script::interpreter::{self};
 use rbitcoin_consensus::script::nested::*;
-use rbitcoin_consensus::script::p2wpkh;
-use rbitcoin_consensus::script::p2wsh;
 
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;

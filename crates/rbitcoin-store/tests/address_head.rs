@@ -1,11 +1,11 @@
-use rbitcoin_primitives::{Fk, TableKind};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::address_head::*;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, TRAILING_FOOTER_LEN};
+use rbitcoin_store::file::TRAILING_FOOTER_LEN;
 use rbitcoin_store::hashhead::HeadScale;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 fn tmp(name: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);

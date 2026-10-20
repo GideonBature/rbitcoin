@@ -1,23 +1,17 @@
 use crate::test_chain::shared_regtest;
-use bitcoin::secp256k1::{Keypair, Secp256k1};
 use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
 };
-use rbitcoin_net::{ChainHub, RequestMeter};
 use rbitcoin_sv2::testutil::TpClient;
-use rbitcoin_sv2::transport::Frame;
 use rbitcoin_sv2::{
     run_sv2_tp, Sv2TpConfig, FEE_DELTA, MAX_SESSIONS, MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL,
     MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
 
 use std::time::Instant;
 use template_distribution_sv2::MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR;

@@ -1,10 +1,6 @@
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use rbitcoin_ibd::ibd::state::IbdWorkState;
-use rbitcoin_ibd::ibd::MAX_ORDERED_HEADERS;
-use rbitcoin_log::{info, warn};
-use rbitcoin_net::chain::ChainHub;
-use std::time::Instant;
 
 use rbitcoin_ibd::ibd::path::work_path_tips;
 

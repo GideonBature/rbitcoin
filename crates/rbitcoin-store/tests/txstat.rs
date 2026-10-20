@@ -1,10 +1,7 @@
-use rbitcoin_primitives::{read_uleb128, uleb128_len, write_uleb128, Fk, TableKind};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{GrowPolicy, TableFile, FILE_HEADER_LEN};
 use rbitcoin_store::testutil::TempDir;
 use rbitcoin_store::txstat::*;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 fn tiny(fee: u64, base: u32, wit: u32) -> TxStatRow {
     TxStatRow {

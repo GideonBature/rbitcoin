@@ -1,6 +1,5 @@
 use bitcoin_hashes::{sha256, Hash};
-use hex_conservative::{DisplayHex, FromHex};
-use hex_conservative::{HexToArrayError, HexToBytesError};
+use hex_conservative::FromHex;
 
 use rbitcoin_primitives::hex::*;
 

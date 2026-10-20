@@ -1,8 +1,6 @@
 use rbitcoin_consensus::ConsensusError;
-use rbitcoin_query::confirm_error::*;
 use rbitcoin_query::ConfirmError;
 use rbitcoin_store::StoreError;
-use std::fmt;
 
 #[test]
 fn uring_session_fault_covers_leftover_and_submit() {

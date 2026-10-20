@@ -1,13 +1,6 @@
-use bitcoin::consensus::encode::serialize_hex;
-use bitcoin::hashes::Hash;
-use bitcoin::{OutPoint, Transaction, Txid};
-use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::Height;
 use rbitcoin_rpc::methods::mempool::{
     fold_tx_fee_sat, package_dialect_from_env, submitpackage_topology_disallowed, TxFeeLook,
 };
-use rbitcoin_rpc::methods::*;
-use serde_json::{json, Value};
 
 #[test]
 fn package_dialect_from_env_only_one_and_true() {

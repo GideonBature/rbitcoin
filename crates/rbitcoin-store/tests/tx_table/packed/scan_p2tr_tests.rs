@@ -1,6 +1,5 @@
 use rbitcoin_primitives::write_uleb128;
 use rbitcoin_primitives::Fk;
-use rbitcoin_primitives::{read_compact_size, write_compact_size};
 use rbitcoin_store::compact::{amount_exp_mantissa, SCRIPT_KIND_V17_P2TR};
 use rbitcoin_store::tx_table::packed::*;
 use rbitcoin_store::tx_table::*;

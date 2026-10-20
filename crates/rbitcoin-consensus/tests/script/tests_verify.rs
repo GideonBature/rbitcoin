@@ -2,9 +2,6 @@
 use bitcoin::hashes::Hash;
 use bitcoin::Transaction;
 use rbitcoin_consensus::block::ScriptCheckJob;
-use rbitcoin_consensus::error::ConsensusError;
-use rbitcoin_consensus::script::classify::is_anyone_can_spend;
-use rbitcoin_consensus::script::classify::ScriptKind;
 
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::hash160;
