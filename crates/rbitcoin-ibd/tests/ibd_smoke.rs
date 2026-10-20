@@ -281,7 +281,8 @@ async fn ibd_notes_a_body_queue_row_above_the_tip() {
 }
 
 /// A first dial wave that reaches no one is not the end of catch-up while the
-/// book still has untried addresses (Core keeps opening connections).
+/// book still has untried addresses (Core keeps opening connections). With
+/// `initial_dial_waves = 1`, as the stale-tip retry runs, it is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ibd_dials_a_second_wave_when_the_first_reaches_no_one() {
     let seed_dir = tmp_dir("seed-wave");
@@ -313,6 +314,32 @@ async fn ibd_dials_a_second_wave_when_the_first_reaches_no_one() {
         "the second wave reaches the seed: {synced:?}"
     );
     assert_eq!(peer.tip_height(), Some(2));
+
+    let fresh_dir = tmp_dir("peer-wave-cap");
+    let fresh = start_node(&fresh_dir).await;
+    let mut book = rbitcoin_net::AddrMan::new();
+    for a in &dead {
+        book.add_addr(*a);
+    }
+    book.add_addr(rbitcoin_net::NetAddr::Ip(seed.local_addr));
+    let mut cfg = IbdConfig::for_test();
+    cfg.target_peers = 1;
+    cfg.connect_timeout = Duration::from_millis(300);
+    cfg.initial_dial_waves = 1;
+    cfg.peers = Some(Arc::new(std::sync::Mutex::new(book)));
+    let capped = tokio::time::timeout(
+        Duration::from_secs(20),
+        rbitcoin_ibd::sync(&fresh, &dead, cfg),
+    )
+    .await
+    .expect("a capped catch-up returns");
+    assert!(
+        capped.is_err(),
+        "one wave stops before the seed: {capped:?}"
+    );
+    assert_eq!(fresh.tip_height(), Some(0));
+    fresh.shutdown().await;
+    let _ = std::fs::remove_dir_all(&fresh_dir);
     seed.shutdown().await;
     peer.shutdown().await;
     let _ = std::fs::remove_dir_all(&seed_dir);

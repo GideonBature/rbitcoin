@@ -2341,8 +2341,11 @@ pub fn catch_up_retry_config(
     peers: std::sync::Arc<std::sync::Mutex<AddrMan>>,
     dialer: Dialer,
 ) -> IbdConfig {
+    // One wave: the supervisor retries on its own clock, and a sweep here
+    // would hold tip follow while it walks the shared book.
     IbdConfig {
         target_peers: 1,
+        initial_dial_waves: 1,
         peers: Some(peers),
         dialer,
         ..IbdConfig::default()

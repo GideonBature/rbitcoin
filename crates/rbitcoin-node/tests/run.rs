@@ -372,6 +372,10 @@ fn catch_up_retry_config_uses_production_not_for_test() {
     let test = IbdConfig::for_test();
 
     assert_eq!(cfg.target_peers, 1);
+    assert_eq!(
+        cfg.initial_dial_waves, 1,
+        "a stale-tip retry dials one wave"
+    );
     assert!(cfg.peers.is_some());
     // Production class (main catch-up path), not for_test knobs.
     assert_eq!(cfg.window, prod.window);
