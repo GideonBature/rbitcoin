@@ -34,6 +34,10 @@ assert_fail "cfg(test) inside a string does not open a skip" \
   python3 "$PY" --root "$FIX/cfg-string"
 assert_fail "cfg(test) inside a block comment does not open a skip" \
   python3 "$PY" --root "$FIX/cfg-block"
+assert_fail "braceless cfg(test) item does not skip the next function" \
+  python3 "$PY" --root "$FIX/cfg-braceless"
+assert_ok "cfg(test) function whose signature holds a semicolon is skipped" \
+  python3 "$PY" --root "$FIX/cfg-header"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "unwrap-ratchet.test.sh: $PASS passed, $FAIL failed"

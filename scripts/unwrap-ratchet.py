@@ -182,13 +182,24 @@ def file_count(path: str) -> int:
         code = line
         if CFG_TEST_ATTR.search(code):
             pending = True
+        stripped = code.strip()
         in_test = bool(test_stack)
         if pending and "{" in code:
             test_stack.append(depth)
             pending = False
             in_test = True
-        elif pending and code.strip() and not code.strip().startswith("#"):
-            if not any(word in code for word in ITEM_WORDS):
+        elif pending and stripped:
+            # Attribute-only lines keep the skip open. A braceless item
+            # ends in `;` and must not swallow the next braced item.
+            # A header such as `fn f(x: [u8; 4])` does not end in `;`.
+            attr_only = (
+                stripped.startswith("#")
+                and "{" not in stripped
+                and not stripped.endswith(";")
+            )
+            if not attr_only and (
+                stripped.endswith(";") or not any(word in code for word in ITEM_WORDS)
+            ):
                 pending = False
         if not in_test:
             n += bare_on_line(code, prev)
