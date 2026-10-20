@@ -69,8 +69,9 @@ Wrapper [`scripts/lightning/bitcoin-cli`](../scripts/lightning/bitcoin-cli) talk
 | `getutxout` | `gettxout` | Live coin: `value` BTC, `scriptPubKey.hex`. Spent / unknown / disconnected archive: JSON **`null`** (not RPC error). |
 | `sendrawtransaction` | `sendrawtransaction` | `maxfeerate` is **sat/vB** (default 10000). CLN `allowhighfees` must pass **`0`**. |
 
-`rbitcoin-cli` argv is `--datadir` / `--rpc-url`, not Core `-datadir=` /
-`-rpcport`. That is why the wrapper exists.
+`rbitcoin-cli` argv is `--datadir` / `--rpc-url host:port`, not Core
+`-datadir=` / `-rpcport`. The value is an address, not a URL. That is why
+the wrapper exists.
 
 ## LDK / ldk-node
 

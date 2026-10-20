@@ -17,7 +17,7 @@ fn usage() -> String {
            --datadir PATH         node datadir (default ./datadir); unix socket PATH/rpc.sock\n\
            --rpc-socket PATH      unix socket the node binds with --rpc-socket\n\
            --network NET          mainnet|testnet|signet|regtest (default TCP port)\n\
-           --rpc-url URL          HTTP JSON-RPC (default http://127.0.0.1:<network port>)\n\
+           --rpc-url ADDR         plain HTTP host:port (else 127.0.0.1:<network port> if no socket)\n\
            --rpc-token-file PATH  Bearer token (default PATH/rpc.token from --datadir)\n\
            -h, --help             this message\n\
            -V, --version          print version\n\
@@ -133,21 +133,38 @@ fn token_path(cfg: &CliConfig) -> PathBuf {
         .unwrap_or_else(|| cfg.datadir.join("rpc.token"))
 }
 
-fn parse_http_url(url: &str) -> Result<(String, u16), String> {
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
-    let (host, port) = rest
-        .rsplit_once(':')
-        .ok_or_else(|| format!("--rpc-url needs host:port (got {url})"))?;
-    let port: u16 = port
-        .parse()
-        .map_err(|_| format!("invalid --rpc-url port in {url}"))?;
-    if host.is_empty() {
-        return Err(format!("invalid --rpc-url host in {url}"));
+fn parse_rpc_addr(addr: &str) -> Result<(String, u16), String> {
+    let bad = || format!("--rpc-url takes host:port (plain HTTP, no scheme; got {addr})");
+    if addr.contains("://") || addr.contains('/') || addr.contains('@') {
+        return Err(bad());
     }
+    let (raw_host, port_s) = addr.rsplit_once(':').ok_or_else(bad)?;
+    let host = if let Some(inner) = raw_host.strip_prefix('[') {
+        let inner = inner.strip_suffix(']').ok_or_else(bad)?;
+        if !inner.contains(':') {
+            return Err(bad());
+        }
+        inner
+    } else if raw_host.contains(':') {
+        return Err(bad());
+    } else {
+        raw_host
+    };
+    if host.is_empty() {
+        return Err(format!("invalid --rpc-url host in {addr}"));
+    }
+    let port: u16 = port_s
+        .parse()
+        .map_err(|_| format!("invalid --rpc-url port in {addr}"))?;
     Ok((host.to_string(), port))
+}
+
+fn http_host_value(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 fn read_token(path: &Path) -> Result<String, String> {
@@ -183,9 +200,10 @@ fn rpc_http(
         Some(t) => format!("Authorization: Bearer {t}\r\n"),
         None => String::new(),
     };
+    let host_hdr = http_host_value(host, port);
     let req = format!(
         "POST / HTTP/1.1\r\n\
-         Host: {host}:{port}\r\n\
+         Host: {host_hdr}\r\n\
          {auth_h}\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
@@ -262,7 +280,7 @@ fn dispatch_call(cfg: &CliConfig) -> Result<String, String> {
         rpc_http(stream, "localhost", 0, None, cmd, &params)?
     } else {
         let (host, port) = match cfg.rpc_url.as_deref() {
-            Some(u) => parse_http_url(u)?,
+            Some(u) => parse_rpc_addr(u)?,
             None => ("127.0.0.1".into(), cfg.network.default_rpc_port()),
         };
         let stream = TcpStream::connect((host.as_str(), port))
@@ -376,6 +394,35 @@ mod tests {
     }
 
     #[test]
+    fn rpc_url_is_host_and_port() {
+        assert_eq!(
+            parse_rpc_addr("127.0.0.1:8332").unwrap(),
+            ("127.0.0.1".into(), 8332)
+        );
+        assert_eq!(
+            parse_rpc_addr("rpc.lan:18443").unwrap(),
+            ("rpc.lan".into(), 18443)
+        );
+        assert_eq!(parse_rpc_addr("[::1]:8332").unwrap(), ("::1".into(), 8332));
+        assert_eq!(http_host_value("127.0.0.1", 8332), "127.0.0.1:8332");
+        assert_eq!(http_host_value("::1", 8332), "[::1]:8332");
+        for bad in [
+            "http://127.0.0.1:8332",
+            "https://127.0.0.1:8332",
+            "127.0.0.1:8332/",
+            "user:pass@127.0.0.1:8332",
+            "::1:8332",
+            "127.0.0.1",
+        ] {
+            let err = parse_rpc_addr(bad).unwrap_err();
+            assert!(err.contains("host:port"), "{bad} -> {err}");
+        }
+        let u = usage();
+        assert!(u.contains("--rpc-url ADDR"), "{u}");
+        assert!(!u.contains("http://"), "{u}");
+    }
+
+    #[test]
     fn param_tokens_json_or_string() {
         assert_eq!(param_value("0"), serde_json::json!(0));
         assert_eq!(param_value("true"), serde_json::json!(true));
@@ -391,7 +438,7 @@ mod tests {
         let code = cli_main([
             "rbitcoin-cli",
             flag.as_str(),
-            &format!("--rpc-url=http://127.0.0.1:{port}"),
+            &format!("--rpc-url=127.0.0.1:{port}"),
             "getblockcount",
         ]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -405,7 +452,7 @@ mod tests {
         for needle in [
             "--datadir PATH",
             "--network NET",
-            "--rpc-url URL",
+            "--rpc-url ADDR",
             "--rpc-token-file PATH",
             "-h, --help",
             "-V, --version",
@@ -432,7 +479,7 @@ mod tests {
             "--datadir",
             dir.to_str().unwrap(),
             "--rpc-url",
-            &format!("http://127.0.0.1:{port}"),
+            &format!("127.0.0.1:{port}"),
             "getblockcount",
         ]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -452,7 +499,7 @@ mod tests {
             "--datadir",
             dir.to_str().unwrap(),
             "--rpc-url",
-            &format!("http://127.0.0.1:{port}"),
+            &format!("127.0.0.1:{port}"),
             "getblockcount",
         ]);
         let _ = std::fs::remove_dir_all(&dir);
