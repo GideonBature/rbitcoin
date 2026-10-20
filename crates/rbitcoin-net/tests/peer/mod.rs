@@ -5077,8 +5077,9 @@ fn compact_filter_ranges_past_core_limits_disconnect() {
 mod log_text_tests;
 
 /// Core `ProcessMessage` ADDR/ADDRV2: the `getaddr` an addr-fetch session
-/// sends buys `MAX_ADDR_TO_SEND` more addresses. The reply is learned, then
-/// the session ends without misbehavior.
+/// sends buys `MAX_ADDR_TO_SEND` more addresses. The reply, v1 or v2, is
+/// learned and not relayed (`m_getaddr_sent`). More than one address ends the
+/// session without misbehavior; a one-address self-announce does not.
 #[tokio::test]
 async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
     use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
@@ -5090,7 +5091,7 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
     let peers = rbitcoin_net::peers::PeerHub::new();
     let book = std::sync::Arc::new(std::sync::Mutex::new(rbitcoin_net::seeds::AddrMan::new()));
     peers.set_addrman(std::sync::Arc::clone(&book));
-    let seed_at = |port: u16| {
+    let register = |port: u16, typ: rbitcoin_net::peers::PeerConnType| {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let ver = VersionMessage {
             version: bitcoin::p2p::PROTOCOL_VERSION,
@@ -5103,28 +5104,46 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
             start_height: 0,
             relay: true,
         };
-        peers.register(
-            addr,
-            addr,
-            &ver,
-            false,
-            rbitcoin_net::peers::PeerConnType::AddrFetch,
-        )
+        peers.register(addr, addr, &ver, false, typ)
     };
+    let neighbor = register(18459, rbitcoin_net::peers::PeerConnType::OutboundFullRelay);
+    neighbor.set_wants_addrv2();
+    let (relay_tx, mut relayed) = mpsc::unbounded_channel();
+    neighbor.attach_out(relay_tx);
+    let book_len = || book.lock().unwrap().len();
+    let routable = |i: u32| AddrV2::Ipv4(std::net::Ipv4Addr::from(0x0b00_0001 + (i << 16)));
 
-    let seed = seed_at(18460);
+    let seed = register(18460, rbitcoin_net::peers::PeerConnType::AddrFetch);
     let (out_tx, _out_rx) = mpsc::unbounded_channel();
     assert!(maybe_queue_addrfetch_getaddr(&out_tx, &seed));
     let time = seed.clock_now() as u32;
+    let mut follow = PeerFollowState::new();
+    push(
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(seed.as_ref()),
+        NetworkMessage::AddrV2(vec![AddrV2Message {
+            time,
+            services: ServiceFlags::NETWORK,
+            addr: AddrV2::Ipv4(std::net::Ipv4Addr::new(9, 9, 9, 9)),
+            port: 8333,
+        }]),
+    )
+    .await;
+    assert_eq!(book_len(), 1, "a self-announce is learned");
+    assert!(
+        !seed.stop.load(Ordering::SeqCst),
+        "one address is not the reply"
+    );
     let reply = (0..MAX_ADDR_TO_SEND as u32)
         .map(|i| AddrV2Message {
             time,
             services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
-            addr: AddrV2::Ipv4(std::net::Ipv4Addr::from(0x0b00_0001 + (i << 16))),
+            addr: routable(i),
             port: 18444,
         })
         .collect();
-    let mut follow = PeerFollowState::new();
     push(
         &hub,
         &out_tx,
@@ -5133,9 +5152,9 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
         NetworkMessage::AddrV2(reply),
     )
     .await;
-    let learned = book.lock().unwrap().len();
+    let learned = book_len() - 1;
     assert!(
-        learned > 1,
+        learned >= MAX_ADDR_TO_SEND * 9 / 10,
         "the getaddr reply is learned past one token: {learned}"
     );
     assert!(
@@ -5143,23 +5162,36 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
         "the reply ends addr-fetch"
     );
     assert_eq!(follow.ban_score, 0, "a getaddr reply is not misbehavior");
+    assert!(
+        relayed.try_recv().is_err(),
+        "an addr-fetch reply is not relayed"
+    );
 
-    let v1_seed = seed_at(18461);
-    let addr = std::net::SocketAddr::from(([11, 0, 0, 1], 18444));
-    let v1 = bitcoin::p2p::address::Address::new(&addr, ServiceFlags::NETWORK);
+    let v1_seed = register(18461, rbitcoin_net::peers::PeerConnType::AddrFetch);
+    assert!(maybe_queue_addrfetch_getaddr(&out_tx, &v1_seed));
+    let before = book_len();
+    let v1 = |last: u8| {
+        let addr = std::net::SocketAddr::from(([12, 0, 0, last], 18444));
+        (time, Address::new(&addr, ServiceFlags::NETWORK))
+    };
     let mut follow = PeerFollowState::new();
     push(
         &hub,
         &out_tx,
         &mut follow,
         Some(v1_seed.as_ref()),
-        NetworkMessage::Addr(vec![(time, v1.clone()), (time, v1)]),
+        NetworkMessage::Addr(vec![v1(1), v1(2)]),
     )
     .await;
+    assert!(book_len() > before, "a v1 getaddr reply is learned");
     assert!(
         v1_seed.stop.load(Ordering::SeqCst),
         "a v1 reply ends addr-fetch"
     );
     assert_eq!(follow.ban_score, 0, "a v1 getaddr reply is not misbehavior");
+    assert!(
+        relayed.try_recv().is_err(),
+        "a v1 addr-fetch reply is not relayed"
+    );
     let _ = std::fs::remove_dir_all(dir.path());
 }

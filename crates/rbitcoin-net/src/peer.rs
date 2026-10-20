@@ -2976,7 +2976,7 @@ pub fn handle_peer_inventory_msg(
         return Ok(());
     }
     match payload {
-        NetworkMessage::Addr(list) => on_addr_list(session, list.len())?,
+        NetworkMessage::Addr(list) => on_addr_list(follow, session, list)?,
         NetworkMessage::AddrV2(list) => on_addrv2(follow, session, list)?,
         NetworkMessage::GetHeaders(gh) => on_getheaders(hub, out_tx, follow, session, gh)?,
         NetworkMessage::GetBlocks(gb) => on_getblocks(hub, out_tx, follow, session, gb)?,
@@ -3087,21 +3087,52 @@ pub fn on_sendaddrv2(follow: &mut PeerFollowState, session: Option<&crate::peers
     punish_disconnect(&mut follow.ban_score, session);
 }
 
+/// v1 `addr` is learned only as an addr-fetch session's `getaddr` reply.
 #[doc(hidden)]
-pub fn on_addr_list(session: Option<&crate::peers::LivePeer>, n: usize) -> Result<(), NetError> {
-    end_addrfetch_on_reply(session, n);
+pub fn on_addr_list(
+    follow: &mut PeerFollowState,
+    session: Option<&crate::peers::LivePeer>,
+    list: &[(u32, bitcoin::p2p::address::Address)],
+) -> Result<(), NetError> {
+    let Some(s) = session.filter(|s| s.conn_type == crate::peers::PeerConnType::AddrFetch) else {
+        return Ok(());
+    };
+    if list.len() > MAX_ADDR_TO_SEND {
+        misbehaving(&mut follow.ban_score, session);
+        return Ok(());
+    }
+    let v2: Vec<_> = list
+        .iter()
+        .filter_map(|(time, a)| {
+            let sock = a.socket_addr().ok()?;
+            Some(bitcoin::p2p::address::AddrV2Message {
+                time: *time,
+                services: a.services,
+                addr: crate::NetAddr::from_socket(sock).to_addrv2(),
+                port: sock.port(),
+            })
+        })
+        .collect();
+    learn_addrfetch_reply(s, &v2, list.len());
     Ok(())
 }
 
-/// Core: an addr-fetch peer that answered with more than one address is
-/// done. It is disconnected, not punished.
-fn end_addrfetch_on_reply(session: Option<&crate::peers::LivePeer>, n: usize) -> bool {
-    match session {
-        Some(s) if s.conn_type == crate::peers::PeerConnType::AddrFetch && n > 1 => {
-            s.request_disconnect();
-            true
-        }
-        _ => false,
+/// Core `ProcessMessage` ADDR/ADDRV2 on an addr-fetch session: the reply to
+/// the `getaddr` it sent is learned and not relayed (`m_getaddr_sent`).
+/// More than one address ends the session, without misbehavior.
+fn learn_addrfetch_reply(
+    s: &crate::peers::LivePeer,
+    list: &[bitcoin::p2p::address::AddrV2Message],
+    n: usize,
+) {
+    if let Some(ph) = s.peer_hub() {
+        // Node time, as the bucket's start (`connected_at`) is.
+        let now_ms = s.clock_now().saturating_mul(1000);
+        let allow = s.take_addr_tokens(list.len(), now_ms);
+        ph.learn_addrv2(&list[..allow]);
+    }
+    if n > 1 {
+        s.request_disconnect();
     }
 }
 
@@ -3121,15 +3152,16 @@ pub fn on_addrv2(
         misbehaving(&mut follow.ban_score, session);
         return Ok(());
     }
+    if let Some(s) = session.filter(|s| s.conn_type == crate::peers::PeerConnType::AddrFetch) {
+        learn_addrfetch_reply(s, list, n);
+        return Ok(());
+    }
     if let Some(s) = session {
         if let Some(ph) = s.peer_hub() {
             // Node time, as the bucket's start (`connected_at`) is.
             let now_ms = s.clock_now().saturating_mul(1000);
             let allow = s.take_addr_tokens(list.len(), now_ms);
             ph.learn_addrv2(&list[..allow]);
-            if end_addrfetch_on_reply(session, n) {
-                return Ok(());
-            }
             let mut neighbors: Vec<_> = ph
                 .live_peers()
                 .into_iter()
