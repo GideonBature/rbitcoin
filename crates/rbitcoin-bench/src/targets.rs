@@ -1,16 +1,10 @@
 //! One scripthash or Bitcoin address per line. Embedded corpora in `corpora/`.
 
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::hashes::{sha256, Hash};
 use bitcoin::Address;
 
 use std::path::Path;
 use std::str::FromStr;
-
-/// Electrum / Esplora display scripthash: SHA256(spk) bytes reversed, hex.
-pub fn electrum_scripthash_hex(spk: &[u8]) -> String {
-    rbitcoin_primitives::display_hash_hex(sha256::Hash::hash(spk).to_byte_array())
-}
 
 pub const CORPUS_HOT: &str = include_str!("../corpora/hot.txt");
 pub const CORPUS_CASA: &str = include_str!("../corpora/casa.txt");
@@ -39,7 +33,7 @@ pub fn parse_target_line(line: &str) -> Result<Option<String>, String> {
     }
     let addr: Address<NetworkUnchecked> = Address::from_str(line).map_err(|e| e.to_string())?;
     let addr = addr.assume_checked();
-    Ok(Some(electrum_scripthash_hex(
+    Ok(Some(rbitcoin_primitives::scripthash_display_hex(
         addr.script_pubkey().as_bytes(),
     )))
 }
