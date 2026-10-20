@@ -3130,6 +3130,9 @@ fn learn_addrfetch_reply(
         let now_ms = s.clock_now().saturating_mul(1000);
         let allow = s.take_addr_tokens(list.len(), now_ms);
         ph.learn_addrv2(&list[..allow]);
+        if n > 1 {
+            ph.note_addrfetch_reply();
+        }
     }
     if n > 1 {
         s.request_disconnect();

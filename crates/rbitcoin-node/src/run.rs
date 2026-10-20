@@ -685,6 +685,26 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             node.user_agent().to_string(),
         );
     }
+    if proxy_seeds_queued && addrman.is_empty() {
+        info!("ibd: waiting for a SOCKS seed addrfetch answer…");
+        if let Some(book) = await_proxy_seed_book(
+            &node.peers,
+            config.network,
+            &shared_peers,
+            &shutdown,
+            || node.peers.addrfetch_replies(),
+            PROXY_SEED_RETRY,
+            PROXY_SEED_WAIT,
+        )
+        .await
+        {
+            addrman = book;
+            info!(
+                "ibd: seed addrfetch filled the book (book={})",
+                addrman.len()
+            );
+        }
+    }
 
     let max_out = config.listen.max_outbound.max(1) as usize;
     let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
@@ -1587,6 +1607,66 @@ pub fn queue_proxy_seed_addrfetch(peers: &Arc<rbitcoin_net::PeerHub>, network: N
         }
     }
     n
+}
+
+/// A SOCKS seed answer that lost its circuit is not retried by the dial
+/// queue, so the wait re-queues the seeds on this period.
+const PROXY_SEED_RETRY: Duration = Duration::from_secs(60);
+
+/// How long catch-up waits for a `--proxy` seed answer. Past it the empty
+/// book falls through to the `awaiting_dialable` path.
+const PROXY_SEED_WAIT: Duration = Duration::from_secs(180);
+
+/// The shared book once an addr-fetch `getaddr` reply has been learned
+/// since the wait began (`replies` counts them; a self-announce does not),
+/// or `None` on shutdown or after `wait`. Re-queues the seeds every `retry`
+/// while no addr-fetch session is live.
+#[doc(hidden)]
+pub async fn await_proxy_seed_book(
+    peers: &Arc<rbitcoin_net::PeerHub>,
+    network: Network,
+    shared_peers: &Arc<std::sync::Mutex<AddrMan>>,
+    shutdown: &Shutdown,
+    replies: impl Fn() -> u64,
+    retry: Duration,
+    wait: Duration,
+) -> Option<AddrMan> {
+    let start = replies();
+    let deadline = tokio::time::sleep(wait);
+    tokio::pin!(deadline);
+    let mut poll = tokio::time::interval(Duration::from_millis(250));
+    let mut requeue = tokio::time::interval_at(tokio::time::Instant::now() + retry, retry);
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return None,
+            _ = &mut deadline => {
+                warn!(
+                    "ibd: no SOCKS seed addrfetch answer in {}s — catch-up stays open",
+                    wait.as_secs()
+                );
+                return None;
+            }
+            _ = requeue.tick() => {
+                let answering = peers
+                    .snapshot()
+                    .iter()
+                    .any(|p| p.conn_type == PeerConnType::AddrFetch);
+                if !answering {
+                    let n = queue_proxy_seed_addrfetch(peers, network);
+                    info!("ibd: no seed answer yet — re-queued {n} seed hostnames via SOCKS addrfetch");
+                }
+            }
+            _ = poll.tick() => {
+                if replies() > start {
+                    let book = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
+                    if !book.is_empty() {
+                        return Some(book.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// IBD horizon after `sync_cancellable` (or no peers to dial).

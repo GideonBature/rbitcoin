@@ -1466,6 +1466,9 @@ pub struct PeerHub {
     /// Outbound dials still before session registration, by target. The
     /// redial pass skips these, so a slow connect is not stacked every 2 s.
     pub dials_in_flight: Arc<Mutex<HashMap<String, usize>>>,
+    /// Addr-fetch `getaddr` replies (more than one address) learned into the
+    /// book. A self-announce does not count.
+    addrfetch_replies: AtomicU64,
     /// Network P2P port used when a remembered host omits `:port`. `0` = unset.
     pub connect_default_port: AtomicU16,
     pub dial_tx: Mutex<Option<mpsc::UnboundedSender<DialRequest>>>,
@@ -1588,6 +1591,7 @@ impl PeerHub {
             connect_hosts: Mutex::new(Vec::new()),
             connect_addrs: Mutex::new(Vec::new()),
             dials_in_flight: Arc::new(Mutex::new(HashMap::new())),
+            addrfetch_replies: AtomicU64::new(0),
             connect_default_port: AtomicU16::new(0),
             dial_tx: Mutex::new(None),
             hb_selected: Mutex::new(Vec::new()),
@@ -1816,6 +1820,15 @@ impl PeerHub {
     ///
     /// Copies the I2P reachability bit onto that book. `learn_addrv2` stores
     /// only rows the book will dial.
+    /// How many addr-fetch `getaddr` replies have been learned so far.
+    pub fn addrfetch_replies(&self) -> u64 {
+        self.addrfetch_replies.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn note_addrfetch_reply(&self) {
+        self.addrfetch_replies.fetch_add(1, Ordering::Release);
+    }
+
     pub fn set_addrman(&self, am: std::sync::Arc<Mutex<crate::seeds::AddrMan>>) {
         let on = self.i2p_reachable.load(Ordering::Relaxed);
         am.lock()

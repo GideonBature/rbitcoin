@@ -5132,6 +5132,11 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
     )
     .await;
     assert_eq!(book_len(), 1, "a self-announce is learned");
+    assert_eq!(
+        peers.addrfetch_replies(),
+        0,
+        "a self-announce is not the reply"
+    );
     assert!(
         !seed.stop.load(Ordering::SeqCst),
         "one address is not the reply"
@@ -5162,6 +5167,7 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
         "the reply ends addr-fetch"
     );
     assert_eq!(follow.ban_score, 0, "a getaddr reply is not misbehavior");
+    assert_eq!(peers.addrfetch_replies(), 1);
     assert!(
         relayed.try_recv().is_err(),
         "an addr-fetch reply is not relayed"
@@ -5189,6 +5195,7 @@ async fn addrfetch_learns_the_getaddr_reply_then_disconnects() {
         "a v1 reply ends addr-fetch"
     );
     assert_eq!(follow.ban_score, 0, "a v1 getaddr reply is not misbehavior");
+    assert_eq!(peers.addrfetch_replies(), 2);
     assert!(
         relayed.try_recv().is_err(),
         "a v1 addr-fetch reply is not relayed"
