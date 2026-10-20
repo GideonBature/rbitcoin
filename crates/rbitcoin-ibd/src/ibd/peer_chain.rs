@@ -75,6 +75,7 @@ impl PeerChain {
     ) {
         self.probed = true;
         let hashes: Vec<BlockHash> = headers.iter().map(|h| h.block_hash()).collect();
+        let mut split_moved = false;
         for (ht, hash) in (height..).zip(&hashes) {
             let on_path = path.get(&ht).copied();
             let Some(our) = on_path.or_else(|| (ht <= tip).then(|| confirmed(ht)).flatten()) else {
@@ -89,6 +90,7 @@ impl PeerChain {
             if self.split.is_none_or(|(at, _)| ht <= at) {
                 self.split = Some((ht, *hash));
                 self.split_confirmed = on_path.is_none();
+                split_moved = true;
             }
             break;
         }
@@ -97,6 +99,11 @@ impl PeerChain {
         self.from = self.from.max(tip.saturating_add(1));
         let skip = tip.saturating_add(1).saturating_sub(height) as usize;
         let Some(fresh) = hashes.get(skip..).filter(|h| !h.is_empty()) else {
+            // The peer's chain now leaves this one at or below the tip; the
+            // kept run is from the chain it left.
+            if split_moved {
+                self.announced.clear();
+            }
             return;
         };
         let start = height.saturating_add(skip as u32);
@@ -135,8 +142,12 @@ impl PeerChain {
     }
 
     /// This peer's announced chain holds the path block at `height`: it
-    /// announced that block, or a path block above it.
+    /// announced that block, or a path block above it, and has not left the
+    /// path at or below it.
     pub fn shows(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
+        if self.left_path_by(path, height) {
+            return false;
+        }
         let Some(len) = (self.announced.len() as u32).checked_sub(1) else {
             return false;
         };

@@ -270,7 +270,7 @@ fn parse_invalid_file(bytes: &[u8]) -> Option<Vec<BlockHash>> {
     )
 }
 
-fn write_invalid_file(path: &std::path::Path, hashes: &[BlockHash]) {
+fn write_invalid_file(path: &std::path::Path, hashes: &[BlockHash]) -> bool {
     let mut buf = Vec::with_capacity(12 + 32 * hashes.len());
     buf.extend_from_slice(INVALID_MAGIC);
     buf.extend_from_slice(&(hashes.len() as u32).to_le_bytes());
@@ -280,9 +280,10 @@ fn write_invalid_file(path: &std::path::Path, hashes: &[BlockHash]) {
     let wrote = rbitcoin_store::file::write_synced_tmp_file(path, |f| {
         std::io::Write::write_all(f, &buf).map_err(|e| rbitcoin_store::StoreError::io(path, e))
     });
-    if let Err(e) = wrote {
+    if let Err(e) = &wrote {
         warn!("chain: write {}: {e}", path.display());
     }
+    wrote.is_ok()
 }
 
 /// The hashes one `invalidateblock` marked, in height order. `connected` when
@@ -318,16 +319,17 @@ impl Invalidated {
         }
     }
 
-    fn keep_failed(&self, hash: BlockHash) {
+    /// True once `hash` is in the file on disk.
+    fn keep_failed(&self, hash: BlockHash) -> bool {
         let mut failed = self.failed.write().unwrap();
         if failed.contains(&hash) {
-            return;
+            return true;
         }
         if failed.len() >= INVALID_FILE_CAP {
             failed.remove(0);
         }
         failed.push(hash);
-        write_invalid_file(&self.file, &failed);
+        write_invalid_file(&self.file, &failed)
     }
 
     /// Drop kept failures that are no longer marked invalid.
@@ -337,7 +339,7 @@ impl Invalidated {
         let before = failed.len();
         failed.retain(|h| set.contains(h));
         if failed.len() != before {
-            write_invalid_file(&self.file, &failed);
+            let _ = write_invalid_file(&self.file, &failed);
         }
     }
 }
@@ -1439,9 +1441,10 @@ impl ChainHub {
     /// A block failed connect on a consensus rule. Unlike
     /// [`Self::note_invalid_block`], the mark survives restart; mutated bodies,
     /// a future timestamp, and store faults are not this.
-    pub fn note_failed_connect(&self, hash: BlockHash) {
+    /// True when the mark is on disk.
+    pub fn note_failed_connect(&self, hash: BlockHash) -> bool {
         self.note_invalid_block(hash);
-        self.invalidated.keep_failed(hash);
+        self.invalidated.keep_failed(hash)
     }
 
     /// Every hash marked invalid, for a header scan that must not count them.
@@ -1472,12 +1475,12 @@ impl ChainHub {
             return;
         }
         if e.failing_block_hash().is_some() {
-            self.note_failed_connect(hash);
+            let _ = self.note_failed_connect(hash);
             return;
         }
         if let NetError::Consensus(s) = e {
             if !s.to_ascii_lowercase().contains("not found") {
-                self.note_failed_connect(hash);
+                let _ = self.note_failed_connect(hash);
             }
         }
     }

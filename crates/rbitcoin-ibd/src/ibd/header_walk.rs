@@ -2914,6 +2914,11 @@ pub const ADOPT_MAGIC: &[u8; 8] = b"rbtchdr1";
 pub const DIFF_SNAP_LEN: usize = 4 + 80 + 4 + 4;
 
 #[doc(hidden)]
+/// Drop `header.adopt`; the next start walks again from the confirmed tip.
+pub fn forget_adopt(hub: &ChainHub) {
+    let _ = std::fs::remove_file(adopt_path(hub));
+}
+
 pub fn adopt_path(hub: &ChainHub) -> std::path::PathBuf {
     hub.query.store().path().join("header.adopt")
 }
@@ -2996,7 +3001,7 @@ pub fn base_conflicts(st: &IbdWorkState, hub: &ChainHub, walk: &HeaderWalk) -> b
 pub fn on_confirmed_rewind(st: &mut IbdWorkState, hub: &ChainHub, lca_h: u32) {
     if st.header_walk.base_hash.is_some() && lca_h < st.header_walk.base_height {
         st.header_walk = HeaderWalk::default();
-        let _ = std::fs::remove_file(adopt_path(hub));
+        forget_adopt(hub);
         return;
     }
     if hub.milestone.height == 0 || !st.header_walk.origin {
@@ -3126,7 +3131,7 @@ pub fn retire_adopt_if_confirmed(st: &mut IbdWorkState, hub: &ChainHub) {
     }
     hub.query
         .note_milestone_checkpoint_work(tip_h, work.to_be_bytes());
-    let _ = std::fs::remove_file(adopt_path(hub));
+    forget_adopt(hub);
 }
 
 /// Read `header.adopt`. A file that does not parse does not restore

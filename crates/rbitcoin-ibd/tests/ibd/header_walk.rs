@@ -1793,6 +1793,71 @@ fn a_long_chain_on_an_invalid_block_stays_refused() {
     );
 }
 
+/// A peer that announced the path and then forks below the confirmed tip no
+/// longer shows path blocks, so it does not keep the header peer that
+/// announced them from them.
+#[test]
+fn a_peer_that_forks_below_the_tip_does_not_keep_the_header_peer_off() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-fork-below");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let b1 = mine_block(gen, 1);
+    hub.accept_block(b1.clone()).unwrap();
+    let b2 = mine_block(b1.block_hash(), 2);
+    hub.accept_block(b2.clone()).unwrap();
+    let (mut head, _head_rx) = slot(0);
+    let (mut other, _other_rx) = slot(1);
+    head.first_data_ms = 50;
+    other.first_data_ms = 5_000;
+    let mut st = IbdWorkState::new(vec![head, other], Some(b2.block_hash()), Some(2));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let h3 = mine(b2.block_hash(), 3);
+    let path = [h3, mine(h3.block_hash(), 4)];
+    apply(&mut st, &hub, 0, path.to_vec());
+    apply(&mut st, &hub, 1, path.to_vec());
+    assert_eq!(st.header_walk.reserved, Some(0));
+    assert!(st.slots[1].chain.shows(&st.height_to_hash, 3));
+    apply(&mut st, &hub, 1, vec![mine(b1.block_hash(), 92)]);
+    assert!(
+        !st.slots[1].chain.shows(&st.height_to_hash, 3),
+        "a peer that left the path does not show a block on it"
+    );
+    assert!(
+        may_serve(&st, 0, &path[0].block_hash()),
+        "the header peer that announced the block is still asked"
+    );
+}
+
+/// When the failure cannot be written, this process still retires the
+/// candidate, but the retired walk is not left on disk as the resume point.
+#[test]
+fn a_retire_whose_failure_is_not_written_leaves_no_resume_point() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retire-unsaved");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let store = hub.query.store().path().to_path_buf();
+    std::fs::create_dir(store.join("block.invalid")).unwrap();
+    let (s1, _rx1) = slot(1);
+    let mut st = IbdWorkState::new(vec![s1], Some(gen), Some(0));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let p1 = mine(gen, 61);
+    apply(&mut st, &hub, 1, vec![p1, mine(p1.block_hash(), 62)]);
+    assert!(st.is_on_path(&p1.block_hash(), 1));
+    rbitcoin_ibd::ibd::events::apply_consensus_invalid_reject(
+        &mut st,
+        1,
+        p1.block_hash(),
+        "bad block: coinbase excess value",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    assert_eq!(st.header_walk.tip_height(), 0, "the candidate is retired");
+    assert!(
+        !store.join("header.adopt").exists(),
+        "a retired walk is not the resume point while its failure is not on disk"
+    );
+}
+
 #[test]
 fn idle_header_requests_rotate_and_skip_a_short_peer() {
     let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-rotate");
