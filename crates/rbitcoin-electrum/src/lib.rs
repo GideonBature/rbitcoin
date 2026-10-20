@@ -8,6 +8,8 @@
 //! substring `electrs` before it will probe `blockchain.tweaks.subscribe`.
 //! Other tweaks clients (kiss-bdk) use the same stream without that probe.
 
+#![forbid(unsafe_code)]
+
 #[doc(hidden)]
 pub mod server;
 #[doc(hidden)]

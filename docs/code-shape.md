@@ -79,6 +79,13 @@ Do not copy the helper into a test-friendly crate and leave the original
 
 CI is `cargo clippy --workspace --all-targets -- -D warnings`.
 
+`rbitcoin-log`, `rbitcoin-mempool`, `rbitcoin-rpc`, `rbitcoin-electrum`,
+`rbitcoin-esplora`, and `rbitcoin-cli` are `#![forbid(unsafe_code)]` on
+each crate root (`lib.rs`, and `rbitcoin-cli`'s `main.rs`). A new `unsafe`
+block in those libraries fails the build. Integration tests are separate
+crates and are not covered. Store, net, consensus, primitives, node, query,
+ibd, and sv2 stay open: they call FFI.
+
 **Goal:** no `[workspace.lints.clippy]` `= "allow"`. A lint that is wrong
 for one item is `#[allow(clippy::lint)]` on **that item**, with a one-line
 reason (Core-faithful opcode loop, wire layout, dispatch bag,

@@ -37,6 +37,8 @@
 //! - **P3:** package accept (CPFP), durable remove, block/reorg hooks  
 //! - **P5:** full RBF + pure RBFR (1.25×) + package RBF + worst-chunk eviction  
 
+#![forbid(unsafe_code)]
+
 #[doc(hidden)]
 pub mod accept;
 #[doc(hidden)]
