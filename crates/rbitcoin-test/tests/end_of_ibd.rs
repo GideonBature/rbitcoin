@@ -16,7 +16,9 @@ use rbitcoin_node::{run_p2p, NodeConfig};
 use rbitcoin_primitives::{Fk, Height, Network};
 use rbitcoin_query::Query;
 use rbitcoin_store::{script_hash, ScriptHashRecord};
-use rbitcoin_test::mine::{mine_regtest_block, mine_regtest_block_at, regtest_genesis};
+use rbitcoin_test::mine::{
+    coinbase_tx, mine_regtest_block, mine_regtest_block_at, regtest_genesis,
+};
 use rbitcoin_test::TestDatadir;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -1183,6 +1185,132 @@ async fn work_fork_journey() {
     sync_heavy(syncer.path().as_path(), params, peers, heavy_h, heavy_hash).await;
     heavy.shutdown().await;
     light.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn end_of_ibd_invalid_heavier_fork() {
+    let wall = llvm_cov_wall(60, 180);
+    tokio::time::timeout(wall, invalid_heavier_fork_journey())
+        .await
+        .expect("end_of_ibd_invalid_heavier_fork wall");
+}
+
+/// The subsidy halves at this height for the syncer and the honest miners.
+const SPLIT_HALVING: u32 = 20;
+
+fn split_params() -> ChainParams {
+    let mut params = ChainParams::regtest();
+    params.overlay_subsidy_halving_interval(SPLIT_HALVING);
+    params
+}
+
+/// Extend `chain` to `top`. Blocks at or past [`SPLIT_HALVING`] pay 25 BTC
+/// when `halved`; a miner that never halves pays 50 BTC there, which the
+/// syncer rejects as coinbase excess. `skew` keeps sibling hashes apart.
+fn extend_split(chain: &mut Vec<bitcoin::Block>, top: u32, halved: bool, skew: u32) {
+    while (chain.len() as u32) <= top {
+        let height = chain.len() as u32;
+        let prev = chain.last().unwrap();
+        let time = prev.header.time.saturating_add(1).saturating_add(skew);
+        let mut block = mine_regtest_block(prev.block_hash(), time, height, vec![]);
+        if halved && height >= SPLIT_HALVING {
+            block.txdata[0] = coinbase_tx(height, Amount::from_sat(25_0000_0000));
+            block.header.merkle_root = block.compute_merkle_root().unwrap();
+            rbitcoin_consensus::grind_regtest_pow(&mut block.header);
+        }
+        chain.push(block);
+    }
+}
+
+/// Sync `dir` from `peers`; IBD must return at `tip`.
+async fn sync_to(dir: &Path, peers: &[SocketAddr], tip: &bitcoin::Block, height: u32, beat: &str) {
+    let node = start_node(dir, split_params()).await;
+    let addrs: Vec<NetAddr> = peers.iter().copied().map(NetAddr::Ip).collect();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        rbitcoin_ibd::sync(&node, &addrs, IbdConfig::for_test()),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{beat}: IBD did not return (tip {:?}, want {height})",
+            node.tip_height()
+        )
+    })
+    .unwrap_or_else(|e| panic!("{beat}: sync: {e}"));
+    assert_eq!(node.tip_height(), Some(height), "{beat}: tip height");
+    assert_eq!(
+        node.hub.tip_hash(),
+        Some(tip.block_hash()),
+        "{beat}: tip hash"
+    );
+    node.shutdown().await;
+}
+
+async fn invalid_heavier_fork_journey() {
+    // `split` never halves, so from SPLIT_HALVING on its chain is invalid to
+    // the syncer while it carries the most header work. `honest` forks below
+    // the halving; `at_fork` forks at the first invalid block.
+    let mut split_blocks = vec![regtest_genesis()];
+    extend_split(&mut split_blocks, 40, false, 0);
+    let mut honest_blocks = split_blocks[..=14].to_vec();
+    extend_split(&mut honest_blocks, 17, true, 1_000);
+    let mut at_fork_blocks = split_blocks[..SPLIT_HALVING as usize].to_vec();
+    extend_split(&mut at_fork_blocks, 30, true, 2_000);
+
+    let split_dir = TestDatadir::new().unwrap();
+    let honest_dir = TestDatadir::new().unwrap();
+    let at_fork_dir = TestDatadir::new().unwrap();
+    let split = start_node(split_dir.path().as_path(), ChainParams::regtest()).await;
+    let honest = start_node(honest_dir.path().as_path(), split_params()).await;
+    let at_fork = start_node(at_fork_dir.path().as_path(), split_params()).await;
+    load_chain(&split, &split_blocks);
+    load_chain(&honest, &honest_blocks);
+    load_chain(&at_fork, &at_fork_blocks);
+
+    // The split chain's valid prefix (to 19) has more work than honest (17).
+    let syncer = TestDatadir::new().unwrap();
+    let pair = [split.local_addr, honest.local_addr];
+    let valid_top = &split_blocks[SPLIT_HALVING as usize - 1];
+    sync_to(
+        syncer.path().as_path(),
+        &pair,
+        valid_top,
+        SPLIT_HALVING - 1,
+        "valid prefix",
+    )
+    .await;
+
+    // Once honest outgrows that prefix, a syncer that confirmed the prefix
+    // leaves it for the honest chain.
+    let from = honest_blocks.len() as u32;
+    extend_split(&mut honest_blocks, 30, true, 1_000);
+    for (height, block) in honest_blocks.iter().enumerate().skip(from as usize) {
+        honest.ingest_block(height as u32, block.clone()).unwrap();
+    }
+    let rewinds = TestDatadir::new().unwrap();
+    sync_to(
+        rewinds.path().as_path(),
+        &pair,
+        honest_blocks.last().unwrap(),
+        30,
+        "heavier honest",
+    )
+    .await;
+
+    // A fork at the first invalid block: nothing on the split side to keep.
+    let fresh = TestDatadir::new().unwrap();
+    sync_to(
+        fresh.path().as_path(),
+        &[split.local_addr, at_fork.local_addr],
+        at_fork_blocks.last().unwrap(),
+        30,
+        "fork at the invalid block",
+    )
+    .await;
+    split.shutdown().await;
+    honest.shutdown().await;
+    at_fork.shutdown().await;
 }
 
 fn startup_cfg(dir: &Path, miner: SocketAddr, max_tip_age: u64) -> NodeConfig {

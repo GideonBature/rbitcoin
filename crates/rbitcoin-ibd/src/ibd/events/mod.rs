@@ -643,6 +643,7 @@ pub fn plan_header_batch(
     };
     if mark.outer_len > 0 {
         note_announcement(st, peer);
+        note_peer_headers(st, hub, peer, &headers);
     } else {
         super::header_walk::settle_walk_peer(
             st,
@@ -680,6 +681,9 @@ pub fn plan_header_reply(
         } else {
             HeaderPlan::Done
         };
+    }
+    if super::header_walk::refuse_invalid_batch(st, peer, &headers) {
+        return HeaderPlan::Done;
     }
     let class = super::header_walk::classify(st, hub, ask, &headers);
     let mut headers = headers;
@@ -885,6 +889,28 @@ pub fn apply_block_decode_failed(st: &mut IbdWorkState, peer: usize, hash: Block
 }
 
 #[doc(hidden)]
+fn note_peer_headers(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    peer: usize,
+    headers: &[bitcoin::block::Header],
+) {
+    let Some(height) = headers
+        .first()
+        .and_then(|h| parent_height(&st.hash_height, hub, h.prev_blockhash))
+    else {
+        return;
+    };
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+        s.chain.note_headers(
+            &st.height_to_hash,
+            hub.tip_height().unwrap_or(0),
+            height,
+            headers,
+        );
+    }
+}
+
 fn note_announcement(st: &mut IbdWorkState, peer: usize) {
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
         s.chain.note_announcement();
@@ -1415,6 +1441,9 @@ pub fn apply_consensus_invalid_reject(
     }
     st.body.mark_rejected(hash);
     st.reorg.invalid.mark(hash.to_byte_array());
+    if let Some(h) = hub {
+        super::header_walk::retire_invalid(st, h, hash, height);
+    }
     if st.height_to_hash.get(&height) == Some(&hash) {
         st.height_to_hash.remove(&height);
     }

@@ -80,6 +80,9 @@ pub struct HeaderWalk {
     pub origin: bool,
     /// Look-ahead tips that every peer left empty before the work floor.
     pub dead_ends: HashSet<BlockHash>,
+    /// Rejected blocks, and the last header of each refused batch that built
+    /// on one. A batch that holds or builds on either is refused.
+    pub invalid_tips: HashSet<BlockHash>,
     /// Peers that have answered empty at the current tip.
     pub emptied: HashSet<usize>,
     /// Checkpoint work has reached the milestone floor.
@@ -135,6 +138,8 @@ pub const LOOKAHEAD_ASK: Duration = Duration::from_secs(5);
 pub const HEADER_MISS_DISCONNECT: u8 = 2;
 #[doc(hidden)]
 pub const DEAD_END_CAP: usize = 1024;
+/// Past the cap a new invalid tip is not stored; the oldest stay.
+const INVALID_TIP_CAP: usize = 1024;
 
 impl HeaderWalk {
     pub fn tip_height(&self) -> u32 {
@@ -613,10 +618,16 @@ pub fn note_reservation(
 }
 
 /// Whether block `hash` may be asked of `peer`. A peer is not asked for a
-/// block it answered `notfound`. The reserved header peer is asked only when
-/// no other live peer may have it, so a single peer still does both.
+/// block it answered `notfound`, or for a path block above where its
+/// announced chain left the path. The reserved header peer is asked only
+/// when no other live peer may have it, so a single peer still does both.
 pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
-    let has = |s: &super::peer_io::PeerSlot| s.alive && !s.chain.lacks(hash);
+    let height = st.hash_height.get(hash).copied();
+    let has = |s: &super::peer_io::PeerSlot| {
+        s.alive
+            && !s.chain.lacks(hash)
+            && !height.is_some_and(|ht| s.chain.left_path_by(&st.height_to_hash, ht))
+    };
     if !st.slots.iter().any(|s| s.id == peer && has(s)) {
         return false;
     }
@@ -765,6 +776,129 @@ pub fn note_dead(st: &mut IbdWorkState, hash: BlockHash) {
 }
 
 #[doc(hidden)]
+fn note_invalid_tip(st: &mut IbdWorkState, hash: BlockHash) {
+    if st.header_walk.invalid_tips.len() < INVALID_TIP_CAP {
+        st.header_walk.invalid_tips.insert(hash);
+    }
+}
+
+/// Refuse a batch that holds or builds on a rejected block, and retire
+/// `peer` from the walk. The batch's last header is remembered, so the next
+/// batch of that chain is refused too.
+pub fn refuse_invalid_batch(st: &mut IbdWorkState, peer: usize, headers: &[Header]) -> bool {
+    let Some(first) = headers.first() else {
+        return false;
+    };
+    let tips = &st.header_walk.invalid_tips;
+    if !tips.contains(&first.prev_blockhash)
+        && !headers.iter().any(|h| tips.contains(&h.block_hash()))
+    {
+        return false;
+    }
+    if let Some(last) = headers.last() {
+        note_invalid_tip(st, last.block_hash());
+    }
+    st.header_walk.walk_quiet.insert(peer);
+    if st.header_walk.reserved == Some(peer) {
+        st.header_walk.reserved = None;
+    }
+    true
+}
+
+/// The block at `height` failed consensus. When the download path holds it,
+/// the path above its parent is dropped and every peer may be asked for
+/// headers again. A candidate built on it falls back to that parent, and a
+/// challenger that forks at or below the parent with more work takes over.
+pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, height: u32) {
+    note_invalid_tip(st, hash);
+    if !st.is_on_path(&hash, height) {
+        return;
+    }
+    let Some(parent) = hub.header_of(&hash).map(|h| h.prev_blockhash) else {
+        return;
+    };
+    let parent_h = height.saturating_sub(1);
+    drop_dead_path(st, hub, parent_h);
+    if !st.header_walk.origin || st.header_walk.tip_height() < height {
+        return;
+    }
+    let tip = cut_back_to(st, hub, parent, parent_h);
+    if st.header_walk.base_height > parent_h {
+        st.header_walk.base_hash = tip.hash;
+        st.header_walk.base_height = parent_h;
+        st.header_walk.base_work = tip.work.to_be_bytes();
+        st.header_walk.base_diff = tip.diff;
+    }
+    st.header_walk.tip = tip;
+    if st
+        .header_walk
+        .challenger
+        .as_ref()
+        .is_some_and(|ch| ch.fork_height > parent_h)
+    {
+        st.header_walk.challenger = None;
+    }
+    rbitcoin_log::warn!(
+        "ibd: header candidate retired at {hash} height={height}; walk back to {parent} height={parent_h}"
+    );
+    let beat = st
+        .header_walk
+        .challenger
+        .as_ref()
+        .is_some_and(|ch| ch.tip.work > st.header_walk.tip.work);
+    if beat {
+        promote_challenger(st, hub);
+    } else {
+        publish_work(st, hub);
+        save_adopt(st, hub);
+    }
+}
+
+/// Forget the download path above `keep`: queued hashes, bodies waiting in
+/// the body queue, the confirm plan, and the densify cursor. Every peer may
+/// be asked for headers again.
+fn drop_dead_path(st: &mut IbdWorkState, hub: &ChainHub, keep: u32) {
+    st.clear_path_above(keep);
+    drop_queue_above(st, keep, &HashSet::new());
+    for queued in hub.query.block_queue_queued_heights() {
+        if queued > keep {
+            let _ = hub.query.block_queue_dequeue_height(queued);
+        }
+    }
+    st.confirm_quiesce = true;
+    st.max_ready_height = st.max_ready_height.min(keep);
+    let next = keep.saturating_add(1);
+    st.densify_scan_lo = st.densify_scan_lo.min(next);
+    st.densify_ready_through = st.densify_ready_through.min(next);
+    st.header_walk.reserved = None;
+    st.header_walk.walk_quiet.clear();
+    st.header_walk.emptied.clear();
+    clear_off_path(st);
+}
+
+/// A walk tip at stored `hash`, `height` on the candidate. Checkpoints and a
+/// milestone above it are dropped.
+fn cut_back_to(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, height: u32) -> WalkTip {
+    let mut tip = WalkTip {
+        hash: Some(hash),
+        height,
+        work: work_at(st, hub, hash).unwrap_or(Work::from_be_bytes([0; 32])),
+        header: parent_header(st, hub, hash),
+        times: times_ending_at(st, hub, hash),
+        diff: diff_at(st, hub, hash),
+        milestone_hash: st.header_walk.tip.milestone_hash,
+        milestone_prev: st.header_walk.tip.milestone_prev,
+        milestone_header: st.header_walk.tip.milestone_header,
+    };
+    forget_milestone_below(st, hub, height);
+    if height < hub.milestone.height {
+        tip.milestone_hash = None;
+        tip.milestone_header = None;
+    }
+    st.header_walk.checkpoints.retain(|c| c.height <= height);
+    tip
+}
+
 pub fn rewind_above(st: &mut IbdWorkState, hub: &ChainHub, height: u32) {
     rewind_to(st, hub, height, None);
 }
@@ -1439,26 +1573,8 @@ pub fn adopt_heavier(
         return;
     };
     // Capture the fork's period and timestamps before the challenger is dropped.
-    let mut tip = WalkTip {
-        hash: Some(prev),
-        height: fork_height,
-        work: work_at(st, hub, prev).unwrap_or(Work::from_be_bytes([0; 32])),
-        header: parent_header(st, hub, prev),
-        times: times_ending_at(st, hub, prev),
-        diff: diff_at(st, hub, prev),
-        milestone_hash: st.header_walk.tip.milestone_hash,
-        milestone_prev: st.header_walk.tip.milestone_prev,
-        milestone_header: st.header_walk.tip.milestone_header,
-    };
+    let mut tip = cut_back_to(st, hub, prev, fork_height);
     st.header_walk.challenger = None;
-    forget_milestone_below(st, hub, fork_height);
-    if fork_height < hub.milestone.height {
-        tip.milestone_hash = None;
-        tip.milestone_header = None;
-    }
-    st.header_walk
-        .checkpoints
-        .retain(|c| c.height <= fork_height);
     let mut link = prev;
     for hdr in headers {
         if !push_header(&mut tip, hub, hdr) {
@@ -3100,6 +3216,7 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         },
         origin: true,
         dead_ends: HashSet::new(),
+        invalid_tips: HashSet::new(),
         emptied: HashSet::new(),
         proven: false,
         off_path: std::collections::HashMap::new(),
