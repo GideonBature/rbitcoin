@@ -44,6 +44,8 @@ jobs:
       CARGO_TARGET_DIR: target/dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
         with:
           components: rustfmt, clippy
@@ -60,7 +62,7 @@ jobs:
         run: ./scripts/ast-grep.test.sh
       - name: ast-grep scan crates
         run: ./scripts/ast-grep.sh
-      # Prebuilt cargo-deny — do not cargo install. Pin Action commit (CodeQL).
+      # Prebuilt cargo-deny — do not cargo install. Pin the action commit.
       # 0.18.x cannot parse rustsec CVSS 4.0 advisories (2026).
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
@@ -129,6 +131,8 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/scripts/tmpfs-test-runner.sh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -157,6 +161,8 @@ jobs:
       RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
         with:
           targets: x86_64-pc-windows-msvc
@@ -177,6 +183,8 @@ jobs:
       RBITCOIN_HEAD_SCALE: tiny
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -201,6 +209,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
         with:
           components: llvm-tools-preview
@@ -209,7 +218,7 @@ jobs:
           shared-key: ci-coverage
           workspaces: ". -> target/cov"
       # Prebuilt binary — do not `cargo install` (compiles llvm-cov from crates.io).
-      # Pin commit (CodeQL: unpinned 3rd-party Action tags are not immutable).
+      # Pin the action commit. Unpinned third-party tags are not immutable.
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov@0.6.14,cargo-crap@0.4.3
@@ -241,6 +250,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job pushes the coverage badge.
+          persist-credentials: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: coverage-badge

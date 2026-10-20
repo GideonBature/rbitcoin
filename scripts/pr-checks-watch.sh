@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Poll a PR's required checks (plus optional --interest jobs). Exit 1 as
-# soon as any watched job fails — do not wait for coverage / CodeQL /
-# Analyze after windows (or another job of interest) is already red.
+# soon as any watched job fails — do not wait for coverage / zizmor
+# after windows (or another job of interest) is already red.
 set -euo pipefail
 
 REPO="${PR_CHECKS_REPO:-reardencode/rbitcoin}"

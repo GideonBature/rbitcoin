@@ -47,7 +47,7 @@ updates:
       # see docs/reproducible-builds.md § Dependabot.
       - dependency-name: "bitcoin_hashes"
 
-  # --- GitHub Actions (ci.yml, codeql.yml, …) -------------------------------
+  # --- GitHub Actions (ci.yml, zizmor.yml, …) -------------------------------
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
