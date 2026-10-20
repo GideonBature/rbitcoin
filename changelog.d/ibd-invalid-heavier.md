@@ -15,3 +15,10 @@ Fixed
   is not asked again for a block it answered `notfound` until it announces
   more, or for a block above where its announced headers left the download
   path.
+- **A block that failed connect stays invalid after restart.** The mark was
+  in memory only, so a restart adopted the stored header chain through that
+  block again and rewound a valid tip to chase it. Connect failures are
+  kept in `store/block.invalid`; `reconsiderblock` clears one. The startup
+  header scan and the IBD resume seed do not walk through them.
+- **IBD does not blacklist a block whose timestamp is too far in the
+  future.** It is requeued, as in tip-follow and Core.

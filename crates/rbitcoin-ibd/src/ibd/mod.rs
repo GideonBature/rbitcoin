@@ -473,6 +473,11 @@ pub async fn ibd_cancellable(
     let window = cfg.window;
 
     let mut st = IbdWorkState::new(initial_slots, hub.tip_hash(), hub.tip_height());
+    for hash in hub.invalid_blocks() {
+        st.reorg
+            .invalid
+            .mark(bitcoin::hashes::Hash::to_byte_array(hash));
+    }
     st.addr_cooldown = boot_cooldown;
     st.addr_strikes = boot_strikes;
     st.perms = perms;

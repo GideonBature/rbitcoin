@@ -80,8 +80,8 @@ pub struct HeaderWalk {
     pub origin: bool,
     /// Look-ahead tips that every peer left empty before the work floor.
     pub dead_ends: HashSet<BlockHash>,
-    /// Rejected blocks, and the last header of each refused batch that built
-    /// on one. A batch that holds or builds on either is refused.
+    /// The last header of each refused batch that built on a rejected block.
+    /// A batch that builds on one is refused too.
     pub invalid_tips: HashSet<BlockHash>,
     /// Peers that have answered empty at the current tip.
     pub emptied: HashSet<usize>,
@@ -789,10 +789,11 @@ pub fn refuse_invalid_batch(st: &mut IbdWorkState, peer: usize, headers: &[Heade
     let Some(first) = headers.first() else {
         return false;
     };
-    let tips = &st.header_walk.invalid_tips;
-    if !tips.contains(&first.prev_blockhash)
-        && !headers.iter().any(|h| tips.contains(&h.block_hash()))
-    {
+    let rejected = |hash: &BlockHash| {
+        st.header_walk.invalid_tips.contains(hash)
+            || st.reorg.invalid.contains(hash.to_byte_array())
+    };
+    if !rejected(&first.prev_blockhash) && !headers.iter().any(|h| rejected(&h.block_hash())) {
         return false;
     }
     if let Some(last) = headers.last() {
@@ -810,7 +811,6 @@ pub fn refuse_invalid_batch(st: &mut IbdWorkState, peer: usize, headers: &[Heade
 /// headers again. A candidate built on it falls back to that parent, and a
 /// challenger that forks at or below the parent with more work takes over.
 pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, height: u32) {
-    note_invalid_tip(st, hash);
     if !st.is_on_path(&hash, height) {
         return;
     }

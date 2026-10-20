@@ -375,6 +375,9 @@ impl ConfirmRejectClass {
         if s.contains("missing retarget first header") {
             return Self::SoftWire;
         }
+        if s.contains("timestamp too far in future") {
+            return Self::Cascade;
+        }
         if s.contains("fk mismatch")
             || s.contains("plan not committed in order")
             || s.contains("connect height not tip+1")
@@ -415,6 +418,7 @@ impl ConfirmRejectClass {
                 Self::SoftWire
             }
             ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
+            ConsensusError::BadHeader("timestamp too far in future") => Self::Cascade,
             ConsensusError::Internal(m) => Self::from_err_str(m),
             ConsensusError::BadBlock(_)
             | ConsensusError::BadTx(_)

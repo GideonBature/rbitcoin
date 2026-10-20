@@ -237,6 +237,48 @@ impl ForkTips {
 pub struct Invalidated {
     pub set: RwLock<HashSet<BlockHash>>,
     pub paths: RwLock<Vec<InvalidPath>>,
+    /// Connect failures kept across restart in [`INVALID_FILE`], oldest first.
+    /// Operator invalidations are not: their paths are in-process only.
+    pub failed: RwLock<Vec<BlockHash>>,
+    pub file: std::path::PathBuf,
+}
+
+/// Sidecar of connect failures next to `header.adopt`. Not a schema bump.
+const INVALID_FILE: &str = "block.invalid";
+const INVALID_MAGIC: &[u8; 8] = b"rbtcinv1";
+/// Past the cap a new failure is not written; the oldest stay.
+const INVALID_FILE_CAP: usize = 4_096;
+
+fn parse_invalid_file(bytes: &[u8]) -> Option<Vec<BlockHash>> {
+    let rest = bytes.strip_prefix(INVALID_MAGIC)?;
+    let (count, rest) = rest.split_first_chunk::<4>()?;
+    let n = u32::from_le_bytes(*count) as usize;
+    if n > INVALID_FILE_CAP || rest.len() != n.checked_mul(32)? {
+        return None;
+    }
+    Some(
+        rest.chunks_exact(32)
+            .map(|c| {
+                let mut raw = [0u8; 32];
+                raw.copy_from_slice(c);
+                BlockHash::from_byte_array(raw)
+            })
+            .collect(),
+    )
+}
+
+fn write_invalid_file(path: &std::path::Path, hashes: &[BlockHash]) {
+    let mut buf = Vec::with_capacity(12 + 32 * hashes.len());
+    buf.extend_from_slice(INVALID_MAGIC);
+    buf.extend_from_slice(&(hashes.len() as u32).to_le_bytes());
+    for h in hashes {
+        buf.extend_from_slice(h.as_byte_array());
+    }
+    let tmp = path.with_file_name("block.invalid.tmp");
+    let wrote = std::fs::write(&tmp, &buf).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = wrote {
+        warn!("chain: write {}: {e}", path.display());
+    }
 }
 
 /// The hashes one `invalidateblock` marked, in height order. `connected` when
@@ -249,11 +291,46 @@ pub struct InvalidPath {
 }
 
 impl Invalidated {
+    /// Load the connect failures in `store/block.invalid`. A missing file is
+    /// none; one that does not parse is none and is replaced on the next write.
     #[doc(hidden)]
-    pub fn new() -> Self {
+    pub fn open(store: &std::path::Path) -> Self {
+        let file = store.join(INVALID_FILE);
+        let failed = match std::fs::read(&file) {
+            Ok(bytes) => parse_invalid_file(&bytes).unwrap_or_else(|| {
+                warn!(
+                    "chain: {} does not parse; no stored invalid blocks",
+                    file.display()
+                );
+                Vec::new()
+            }),
+            Err(_) => Vec::new(),
+        };
         Self {
-            set: RwLock::new(HashSet::new()),
+            set: RwLock::new(failed.iter().copied().collect()),
             paths: RwLock::new(Vec::new()),
+            failed: RwLock::new(failed),
+            file,
+        }
+    }
+
+    fn keep_failed(&self, hash: BlockHash) {
+        let mut failed = self.failed.write().unwrap();
+        if failed.len() >= INVALID_FILE_CAP || failed.contains(&hash) {
+            return;
+        }
+        failed.push(hash);
+        write_invalid_file(&self.file, &failed);
+    }
+
+    /// Drop kept failures that are no longer marked invalid.
+    fn prune_failed(&self) {
+        let set = self.set.read().unwrap();
+        let mut failed = self.failed.write().unwrap();
+        let before = failed.len();
+        failed.retain(|h| set.contains(h));
+        if failed.len() != before {
+            write_invalid_file(&self.file, &failed);
         }
     }
 }
@@ -578,6 +655,7 @@ impl ChainHub {
         // Full confirmed-set fill in background (mainnet-scale tips make a
         // synchronous walk multi-minute). Tip/genesis are seeded immediately.
         spawn_confirmed_seed(query.clone(), confirmed.clone());
+        let invalidated = Invalidated::open(query.store().path());
         Self {
             query,
             cache: Arc::new(BlockCache::new()),
@@ -591,7 +669,7 @@ impl ChainHub {
             mempool: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
             clock: rbitcoin_consensus::NodeClock::new(),
-            invalidated: Invalidated::new(),
+            invalidated,
             held_bodies: RwLock::new(HeldBodies::new()),
             precious: RwLock::new(None),
             fork_tips: RwLock::new(ForkTips::new()),
@@ -1351,6 +1429,25 @@ impl ChainHub {
         self.drop_held(hash);
     }
 
+    /// A block failed connect on a consensus rule. Unlike
+    /// [`Self::note_invalid_block`], the mark survives restart; mutated bodies,
+    /// a future timestamp, and store faults are not this.
+    pub fn note_failed_connect(&self, hash: BlockHash) {
+        self.note_invalid_block(hash);
+        self.invalidated.keep_failed(hash);
+    }
+
+    /// Every hash marked invalid, for a header scan that must not count them.
+    pub fn invalid_blocks(&self) -> Vec<BlockHash> {
+        self.invalidated
+            .set
+            .read()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect()
+    }
+
     /// A reconstructed compact with the right header hash and wrong txs must
     /// not poison later getdata of that hash.
     #[doc(hidden)]
@@ -1365,12 +1462,12 @@ impl ChainHub {
             return;
         }
         if e.failing_block_hash().is_some() {
-            self.note_invalid_block(hash);
+            self.note_failed_connect(hash);
             return;
         }
         if let NetError::Consensus(s) = e {
             if !s.to_ascii_lowercase().contains("not found") {
-                self.note_invalid_block(hash);
+                self.note_failed_connect(hash);
             }
         }
     }
@@ -2313,6 +2410,7 @@ impl ChainHub {
                 inv.remove(h);
             }
         }
+        self.invalidated.prune_failed();
 
         let restored: HashSet<BlockHash> = paths
             .iter()

@@ -4090,12 +4090,21 @@ fn reconsider_skips_a_branch_that_fails() {
     rbitcoin_consensus::grind_regtest_pow(&mut bad5.header);
     let bad5_hash = bad5.block_hash();
     assert!(hub.accept_received_block(bad5).is_err());
+    let marks = dir.path().join("block.invalid");
+    let kept = |marks: &std::path::Path| {
+        std::fs::read(marks)
+            .unwrap()
+            .windows(32)
+            .any(|w| w == bad5_hash.as_byte_array())
+    };
+    assert!(kept(&marks), "a connect failure is kept across restart");
     let a5 = mine_distinct(a[3], t0 + 31, 5, &[bad5_hash]);
     let a6 = mine(a5.block_hash(), t0 + 32, 6);
     hub.accept_block(a5).unwrap();
     hub.accept_block(a6).unwrap();
     hub.invalidate_block(bad5_hash).unwrap();
     hub.reconsider_block(bad5_hash).unwrap();
+    assert!(!kept(&marks), "reconsiderblock forgets the kept failure");
     assert!(
         !hub.fork_tips.read().unwrap().iter().any(|h| h == bad5_hash),
         "a block that never connected is not kept as a fork tip"

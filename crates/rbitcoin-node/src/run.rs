@@ -1752,7 +1752,15 @@ pub fn stored_header_chain_heavier_than_tip(hub: &ChainHub) -> bool {
             return true;
         }
     };
-    match hub.query.has_heavier_header_chain_than_tip(rec.hash, tip_h) {
+    let invalid: Vec<[u8; 32]> = hub
+        .invalid_blocks()
+        .into_iter()
+        .map(bitcoin::hashes::Hash::to_byte_array)
+        .collect();
+    match hub
+        .query
+        .has_heavier_header_chain_than_tip(rec.hash, tip_h, &invalid)
+    {
         Ok(heavier) => heavier,
         Err(e) => {
             warn!("node: startup header scan failed: {e} — catch-up");

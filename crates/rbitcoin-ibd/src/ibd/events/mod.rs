@@ -1442,6 +1442,7 @@ pub fn apply_consensus_invalid_reject(
     st.body.mark_rejected(hash);
     st.reorg.invalid.mark(hash.to_byte_array());
     if let Some(h) = hub {
+        h.note_failed_connect(hash);
         super::header_walk::retire_invalid(st, h, hash, height);
     }
     if st.height_to_hash.get(&height) == Some(&hash) {

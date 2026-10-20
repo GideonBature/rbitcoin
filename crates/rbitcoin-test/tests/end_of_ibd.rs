@@ -1298,6 +1298,19 @@ async fn invalid_heavier_fork_journey() {
     )
     .await;
 
+    // The syncer that kept the prefix restarts. The invalid block stays
+    // invalid, so the split headers stored above it are not a path.
+    let honest_tip = honest_blocks.last().unwrap();
+    sync_to(syncer.path().as_path(), &pair, honest_tip, 30, "restart").await;
+    sync_to(
+        syncer.path().as_path(),
+        &[honest.local_addr],
+        honest_tip,
+        30,
+        "restart with only honest",
+    )
+    .await;
+
     // A fork at the first invalid block: nothing on the split side to keep.
     let fresh = TestDatadir::new().unwrap();
     sync_to(
@@ -1352,7 +1365,7 @@ fn regtest_chain(blocks: u32) -> Vec<bitcoin::Block> {
 }
 
 /// One difficulty-1 header under genesis. Its work beats a long easy regtest chain.
-fn plant_deep_heavy_header(q: &Query) {
+fn plant_deep_heavy_header(q: &Query) -> [u8; 32] {
     use rbitcoin_store::{block_header_hash, HeaderRecord};
     let (gfk, genesis) = q.header_at_height(Height(0)).unwrap().unwrap();
     let version = 1i32;
@@ -1373,6 +1386,7 @@ fn plant_deep_heavy_header(q: &Query) {
         weight: 0,
     })
     .unwrap();
+    hash
 }
 
 type StartupLogs = Vec<(rbitcoin_log::Level, String)>;
@@ -1489,7 +1503,7 @@ async fn startup_tip_follow_journey() {
     let deep_dir = TestDatadir::new().unwrap();
     let deep_node = start_miner(deep_dir.path().as_path()).await;
     load_chain(&deep_node, &deep);
-    plant_deep_heavy_header(&deep_node.hub.query);
+    let heavy = plant_deep_heavy_header(&deep_node.hub.query);
     deep_node.hub.query.flush().unwrap();
     deep_node.shutdown().await;
 
@@ -1502,6 +1516,22 @@ async fn startup_tip_follow_journey() {
     wait_height(rpc, 40).await;
     let logs = stop_logged(rpc, node).await;
     assert_startup(&logs, false);
+
+    // The same heavier header, once a connect failure marked it invalid, is
+    // not a chain to catch up to.
+    let mut marks = b"rbtcinv1".to_vec();
+    marks.extend_from_slice(&1u32.to_le_bytes());
+    marks.extend_from_slice(&heavy);
+    std::fs::write(deep_dir.path().join("store").join("block.invalid"), marks).unwrap();
+    let node = spawn_run_p2p_logs(startup_cfg(
+        deep_dir.path().as_path(),
+        deep_miner.local_addr,
+        u64::MAX,
+    ));
+    let rpc = published_listener(deep_dir.path().as_path(), "rpc", Duration::from_secs(30)).await;
+    wait_height(rpc, 40).await;
+    let logs = stop_logged(rpc, node).await;
+    assert_startup(&logs, true);
 
     deep_miner.shutdown().await;
     miner.shutdown().await;

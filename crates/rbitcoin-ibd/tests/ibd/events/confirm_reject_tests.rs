@@ -99,6 +99,10 @@ fn confirm_reject_class_matches_substring_table() {
             ConfirmRejectClass::Cascade,
         ),
         ("confirm cancelled", ConfirmRejectClass::Cancelled),
+        (
+            "consensus: bad header: timestamp too far in future",
+            ConfirmRejectClass::Cascade,
+        ),
     ];
     for (s, want) in cases {
         assert_eq!(ConfirmRejectClass::from_err_str(s), *want, "{s}");
@@ -144,6 +148,13 @@ fn confirm_reject_class_matches_substring_table() {
     assert_eq!(
         ConfirmRejectClass::from_consensus(&ConsensusError::Cancelled),
         ConfirmRejectClass::Cancelled
+    );
+    // Core BLOCK_TIME_FUTURE: the block may connect once the clock passes it.
+    assert_eq!(
+        ConfirmRejectClass::from_consensus(&ConsensusError::BadHeader(
+            "timestamp too far in future"
+        )),
+        ConfirmRejectClass::Cascade
     );
     assert_eq!(
         ConfirmRejectClass::from_confirm(&rbitcoin_query::ConfirmError::from(
