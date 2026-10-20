@@ -358,10 +358,13 @@ fn follow_connect_timeout_i2p_is_longer_than_clearnet() {
     };
     let ip: rbitcoin_net::NetAddr = "127.0.0.1:1".parse().unwrap();
     assert_eq!(
-        follow_connect_timeout(ip),
+        follow_connect_timeout(&Dialer::Direct, ip),
         Duration::from_secs(FOLLOW_CONNECT_SECS)
     );
-    assert_eq!(follow_connect_timeout(i2p), Duration::from_secs(90));
+    assert_eq!(
+        follow_connect_timeout(&Dialer::Direct, i2p),
+        Duration::from_secs(90)
+    );
 }
 
 #[test]

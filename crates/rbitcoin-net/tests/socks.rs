@@ -540,6 +540,7 @@ async fn connect_isolated_net_dials_ip_and_onion_and_rejects_the_rest() {
         onion: None,
         randomize: true,
         shared_creds: None,
+        connect_floor: std::time::Duration::from_secs(30),
     };
     let err = bare
         .connect_isolated_net(NetAddr::Onion {

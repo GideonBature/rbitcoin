@@ -48,7 +48,6 @@ use rbitcoin_ibd::ibd::PeerBookSession;
 use rbitcoin_log::{info, warn};
 use rbitcoin_net::chain::ChainHub;
 use rbitcoin_net::codec::MAX_HEADERS_RESULTS;
-use rbitcoin_net::connect_timeout_for;
 use rbitcoin_net::error::NetError;
 use rbitcoin_net::seeds::AddrMan;
 use std::collections::{HashMap, HashSet};

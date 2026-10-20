@@ -7,7 +7,6 @@ use rbitcoin_ibd::ibd::peer_io::{ibd_mono_ms, spawn_peer, PeerCmd, PeerEventSink
 use rbitcoin_ibd::ibd::rate::{PROGRESS_STEP, RELSLOW_ACTIVE_MS};
 use rbitcoin_log::{debug, error, warn};
 use rbitcoin_net::chain::ChainHub;
-use rbitcoin_net::connect_timeout_for;
 use rbitcoin_net::error::NetError;
 use rbitcoin_net::peers::{trying_connection_log, PeerConnType};
 use rbitcoin_net::seeds::AddrMan;
@@ -24,16 +23,47 @@ fn addr(o: u8) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, o)), 8333)
 }
 
+/// A wave of isolated SOCKS dials queues on Tor circuit builds for longer
+/// than a clearnet RTT; I2P waits on tunnels and leasesets. A base above
+/// a floor is kept.
 #[test]
-fn i2p_connect_timeout_is_longer_than_clearnet() {
+fn overlay_and_socks_connects_outlast_a_direct_one() {
     let i2p = rbitcoin_net::NetAddr::I2p {
         dest: [0u8; 32],
         port: 1,
     };
+    let onion: rbitcoin_net::NetAddr =
+        "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion:8333"
+            .parse()
+            .unwrap();
     let ip: rbitcoin_net::NetAddr = "127.0.0.1:1".parse().unwrap();
+    let cjdns = rbitcoin_net::NetAddr::Cjdns {
+        ip: std::net::Ipv6Addr::new(0xfc00, 1, 2, 3, 4, 5, 6, 7),
+        port: 8333,
+    };
+    let tor: SocketAddr = "127.0.0.1:9050".parse().unwrap();
     let base = Duration::from_secs(8);
-    assert_eq!(connect_timeout_for(ip, base), base);
-    assert_eq!(connect_timeout_for(i2p, base), Duration::from_secs(90));
+    let socks = Duration::from_secs(30);
+    let direct = rbitcoin_net::Dialer::Direct;
+    let proxied = rbitcoin_net::Dialer::socks(tor, true);
+    let onion_only = rbitcoin_net::Dialer::with_proxies(None, Some(tor), true);
+    assert_eq!(direct.connect_timeout(ip, base), base);
+    assert_eq!(direct.connect_timeout(cjdns, base), base);
+    assert_eq!(onion_only.connect_timeout(ip, base), base);
+    assert_eq!(proxied.connect_timeout(cjdns, base), base);
+    assert_eq!(proxied.connect_timeout(ip, base), socks);
+    assert_eq!(onion_only.connect_timeout(onion, base), socks);
+    assert_eq!(proxied.connect_timeout(onion, base), socks);
+    assert_eq!(direct.connect_timeout(i2p, base), Duration::from_secs(90));
+    assert_eq!(proxied.connect_timeout(i2p, base), Duration::from_secs(90));
+    let long = Duration::from_secs(120);
+    assert_eq!(proxied.connect_timeout(ip, long), long);
+    assert_eq!(proxied.connect_timeout(i2p, long), long);
+    let lowered = proxied.with_connect_floor(Duration::from_secs(2));
+    assert_eq!(
+        lowered.connect_timeout(ip, Duration::from_secs(1)),
+        Duration::from_secs(2)
+    );
 }
 
 fn dummy_slot(id: usize, a: SocketAddr, alive: bool) -> PeerSlot {

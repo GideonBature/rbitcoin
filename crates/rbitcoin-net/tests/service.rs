@@ -382,7 +382,8 @@ async fn redial_skips_a_connect_target_still_dialling() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(redial)/".into(),
         0,
-        rbitcoin_net::socks::Dialer::socks(proxy_addr, false),
+        rbitcoin_net::socks::Dialer::socks(proxy_addr, false)
+            .with_connect_floor(OUTBOUND_CONNECT_TIMEOUT),
     )
     .await
     .unwrap();
