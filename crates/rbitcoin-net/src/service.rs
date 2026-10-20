@@ -640,8 +640,8 @@ const REDIAL_INTERVAL: Duration = Duration::from_secs(2);
 const REDIAL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Bound on the TCP / SOCKS / SAM connect of an outbound dial, the same 8 s
-/// as the IBD and tip-follow dials ([`crate::connect_timeout_for`] gives I2P
-/// longer). Without it a proxy that accepts and never answers holds the
+/// as the IBD and tip-follow dials ([`crate::socks::Dialer::connect_timeout`]
+/// gives SOCKS and I2P longer). Without it a proxy that accepts and never answers holds the
 /// dial, and its [`crate::peers::DialInFlight`] mark, for good, so the
 /// redial pass would never try that target again. Debug builds keep 8 s.
 /// The short redial interval is separate.
@@ -677,7 +677,7 @@ pub async fn prepare_outbound_session(
         }
     };
     let stream = tokio::time::timeout(
-        crate::connect_timeout_for(peer_net, OUTBOUND_CONNECT_TIMEOUT),
+        dialer.connect_timeout(peer_net, OUTBOUND_CONNECT_TIMEOUT),
         connect,
     )
     .await

@@ -108,8 +108,8 @@ impl Shutdown {
 pub const FOLLOW_CONNECT_SECS: u64 = 8;
 
 #[doc(hidden)]
-pub fn follow_connect_timeout(peer: rbitcoin_net::NetAddr) -> Duration {
-    rbitcoin_net::connect_timeout_for(peer, Duration::from_secs(FOLLOW_CONNECT_SECS))
+pub fn follow_connect_timeout(dialer: &Dialer, peer: rbitcoin_net::NetAddr) -> Duration {
+    dialer.connect_timeout(peer, Duration::from_secs(FOLLOW_CONNECT_SECS))
 }
 
 /// Install SIGTERM / SIGINT (and Ctrl+C) handlers that trip `shutdown`.
@@ -827,7 +827,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 if shutdown.requested() {
                     break;
                 }
-                let to = follow_connect_timeout(*peer);
+                let to = follow_connect_timeout(&node.dialer(), *peer);
                 tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => {

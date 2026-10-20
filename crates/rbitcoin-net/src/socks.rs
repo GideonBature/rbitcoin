@@ -3,6 +3,7 @@
 use crate::error::NetError;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -78,10 +79,52 @@ pub enum Dialer {
         onion: Option<SocketAddr>,
         randomize: bool,
         shared_creds: Option<Arc<(Vec<u8>, Vec<u8>)>>,
+        /// Least [`Dialer::connect_timeout`] for a dial through this proxy.
+        connect_floor: Duration,
     },
 }
 
+/// Each isolated SOCKS dial builds its own Tor circuit, and a wave of them
+/// queues inside Tor for longer than a clearnet RTT.
+const SOCKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// I2P STREAM CONNECT waits on tunnel + leaseset lookup.
+const I2P_CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
+
 impl Dialer {
+    /// Dial bound for `addr` over this dialer: `base` for a direct socket,
+    /// at least the SOCKS floor through a proxy, at least 90 s for I2P.
+    ///
+    /// IBD `dial_batch` and tip-follow wrap connect and handshake in this one
+    /// bound, so a slow peer is skipped rather than held through a wave.
+    /// `prepare_outbound_session` bounds only the connect with it, then gives
+    /// the handshake its own `HANDSHAKE_TIMEOUT`.
+    pub fn connect_timeout(&self, addr: crate::NetAddr, base: Duration) -> Duration {
+        match (self, addr) {
+            (_, crate::NetAddr::I2p { .. }) => base.max(I2P_CONNECT_TIMEOUT),
+            (Dialer::Socks { connect_floor, .. }, crate::NetAddr::Onion { .. })
+            | (
+                Dialer::Socks {
+                    proxy: Some(_),
+                    connect_floor,
+                    ..
+                },
+                crate::NetAddr::Ip(_),
+            ) => base.max(*connect_floor),
+            _ => base,
+        }
+    }
+
+    /// The same dialer with a lower SOCKS floor, for a test that waits out a
+    /// stalled proxy.
+    #[doc(hidden)]
+    pub fn with_connect_floor(mut self, floor: Duration) -> Self {
+        if let Dialer::Socks { connect_floor, .. } = &mut self {
+            *connect_floor = floor;
+        }
+        self
+    }
+
     pub fn socks(proxy: SocketAddr, randomize: bool) -> Self {
         Self::with_proxies(Some(proxy), None, randomize)
     }
@@ -103,6 +146,7 @@ impl Dialer {
             onion,
             randomize,
             shared_creds,
+            connect_floor: SOCKS_CONNECT_TIMEOUT,
         }
     }
 

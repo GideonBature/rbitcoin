@@ -6,7 +6,6 @@ use sha3::{Digest, Sha3_256};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
-use std::time::Duration;
 
 #[doc(hidden)]
 pub const B32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -343,14 +342,6 @@ impl NetAddr {
             NetAddr::I2p { .. } => "i2p",
             NetAddr::Cjdns { .. } => "cjdns",
         }
-    }
-}
-
-/// I2P STREAM CONNECT waits on tunnel + leaseset lookup; 8s is a clearnet RTT.
-pub fn connect_timeout_for(addr: NetAddr, base: Duration) -> Duration {
-    match addr {
-        NetAddr::I2p { .. } => base.max(Duration::from_secs(90)),
-        _ => base,
     }
 }
 

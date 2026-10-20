@@ -299,7 +299,7 @@ pub async fn dial_batch(
             trying_connection_log(PeerConnType::OutboundFullRelay, addr)
         );
         let dialer = dialer.clone();
-        let to = rbitcoin_net::connect_timeout_for(addr, connect_timeout);
+        let to = dialer.connect_timeout(addr, connect_timeout);
         let dial_perms = perms.clone();
         handles.push(tokio::spawn(async move {
             let fut = spawn_peer(
