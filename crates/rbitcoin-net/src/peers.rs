@@ -87,6 +87,12 @@ pub struct CappedSet<T> {
     pub fifo: VecDeque<T>,
 }
 
+impl<T> Default for CappedSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> CappedSet<T> {
     pub fn new() -> Self {
         Self {
@@ -112,6 +118,11 @@ impl<T> CappedSet<T> {
     #[cfg(debug_assertions)]
     pub fn len(&self) -> usize {
         self.set.len()
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
     }
 
     pub fn insert(&mut self, item: T, cap: usize)

@@ -1690,6 +1690,7 @@ impl MempoolHub {
     }
 
     #[doc(hidden)]
+    #[allow(clippy::result_unit_err)] // a store fault is (); confirm-drop keeps the pool
     pub fn live_confirmed_strong(&self, live: &[Txid]) -> Result<Vec<Txid>, ()> {
         let tid_bytes: Vec<[u8; 32]> = live.iter().map(|t| t.to_byte_array()).collect();
         let hits = self
@@ -1708,6 +1709,7 @@ impl MempoolHub {
     }
 
     #[doc(hidden)]
+    #[allow(clippy::result_unit_err)] // a store fault is (); confirm-drop keeps the pool
     pub fn spent_chain_prevouts(
         &self,
         g: &ActiveMempool,
@@ -1751,6 +1753,7 @@ impl MempoolHub {
     }
 
     #[doc(hidden)]
+    #[allow(clippy::result_unit_err)] // a store fault is (); confirm-drop keeps the pool
     pub fn chain_create_fks(
         &self,
         g: &ActiveMempool,

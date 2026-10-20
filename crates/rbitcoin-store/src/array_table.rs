@@ -139,6 +139,10 @@ impl ArrayTable {
         self.len.load(Ordering::Acquire)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     #[doc(hidden)]
     pub fn offset(index: u64) -> u64 {
         FILE_HEADER_LEN as u64 + index * ELEM

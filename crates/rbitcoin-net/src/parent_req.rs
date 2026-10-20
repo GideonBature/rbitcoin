@@ -63,6 +63,12 @@ pub struct ParentTracker {
     pub announcements: usize,
 }
 
+impl Default for ParentTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParentTracker {
     pub fn new() -> Self {
         Self {

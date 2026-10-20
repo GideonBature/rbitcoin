@@ -819,6 +819,7 @@ pub fn utxo_response(
     )
 }
 
+#[allow(clippy::result_unit_err)] // a bad address is (); the handler maps it to not found
 pub fn resolve_address_sh(addr_s: &str, network: Network) -> Result<[u8; 32], ()> {
     let addr = Address::from_str(addr_s).map_err(|_| ())?;
     let addr = addr.require_network(network).map_err(|_| ())?;

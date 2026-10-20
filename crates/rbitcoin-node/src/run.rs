@@ -1818,7 +1818,7 @@ pub async fn run_ibd_or_skip(
     // that used to drop a nested multi-thread runtime mid-async and panic
     // (`Cannot drop a runtime in an async context`), making Ctrl+C slow/noisy.
     let cancel = Some(Arc::clone(&shutdown.flag));
-    let catch_up = match rbitcoin_ibd::sync_cancellable(&node, ibd_targets, ibd_cfg, cancel).await {
+    let catch_up = match rbitcoin_ibd::sync_cancellable(node, ibd_targets, ibd_cfg, cancel).await {
         Ok(n) => {
             if shutdown.requested() {
                 warn!(

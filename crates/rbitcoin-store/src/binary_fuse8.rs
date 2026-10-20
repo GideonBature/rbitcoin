@@ -28,6 +28,10 @@ impl Fingerprints {
         self.as_slice().len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn heap_bytes(&self) -> usize {
         match self {
             Self::Heap(b) => b.len(),
@@ -423,6 +427,11 @@ impl BinaryFuse8 {
     #[inline]
     pub fn len(&self) -> usize {
         self.fingerprints.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn fingerprint_heap_bytes(&self) -> usize {

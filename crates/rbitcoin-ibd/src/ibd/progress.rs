@@ -227,6 +227,12 @@ pub struct TipRateTracker {
     pub first_at: Option<Instant>,
 }
 
+impl Default for TipRateTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TipRateTracker {
     pub fn new() -> Self {
         Self {
@@ -435,6 +441,12 @@ pub fn log_progress_tick(
 pub struct StatusBoard {
     pub snap: std::sync::Mutex<StatusSnap>,
     pub hole: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for StatusBoard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StatusBoard {

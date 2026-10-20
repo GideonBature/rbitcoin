@@ -9,8 +9,10 @@ use std::sync::atomic::Ordering;
 
 #[test]
 fn ibd_perf_sample_is_one_timestamped_json_debug_line() {
-    let mut s = IbdPerfSample::default();
-    s.inflight = 7;
+    let s = IbdPerfSample {
+        inflight: 7,
+        ..Default::default()
+    };
     rbitcoin_log::capture_logs(true);
     log_sample(&s);
     let logs = rbitcoin_log::take_logs();
@@ -71,25 +73,33 @@ const SAMPLE_FIELDS: &str = "inflight,inflight_cap,bq_bytes,bq_count,bq_soft_sto
 
 #[test]
 fn write_inventory_stage_ms_sums_the_table() {
-    let mut write = WriteStageSample::default();
-    write.class_a_ms = 1;
-    write.ensure_ms = 2;
-    write.structural_ms = 3;
-    write.class_c_ms = 4;
-    write.sh_ms = 5;
-    write.utxo_ms = 6;
-    write.pins_ms = 8;
-    write.head_sub_ms = 9;
-    write.class_c_join_ms = 10;
-    write.drain_join_ms = 11;
-    write.dequeue_ms = 12;
-    write.idx_put_ms = 13;
+    let write = WriteStageSample {
+        class_a_ms: 1,
+        ensure_ms: 2,
+        structural_ms: 3,
+        class_c_ms: 4,
+        sh_ms: 5,
+        utxo_ms: 6,
+        pins_ms: 8,
+        head_sub_ms: 9,
+        class_c_join_ms: 10,
+        drain_join_ms: 11,
+        dequeue_ms: 12,
+        idx_put_ms: 13,
+        ..Default::default()
+    };
     assert_eq!(write.stage_ms(), 84);
-    let mut s = IbdPerfSample::default();
-    s.write = write;
+    let s = IbdPerfSample {
+        write: write.clone(),
+        ..Default::default()
+    };
     assert_eq!(write_stage_ms(&s), 84);
-    s.load_ms = 30;
-    s.connect_ms = 8;
+    let s = IbdPerfSample {
+        write,
+        load_ms: 30,
+        connect_ms: 8,
+        ..Default::default()
+    };
     assert_eq!(load_stage_wall_ms(&s), 38);
 }
 

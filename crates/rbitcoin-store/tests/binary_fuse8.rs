@@ -5,7 +5,7 @@ use rbitcoin_store::readonly_map::ReadonlyMap;
 fn single_key_and_small_set_no_false_negatives() {
     let one = BinaryFuse8::try_from_keys(&[0x1122_3344_5566_7788]).unwrap();
     assert!(one.contains(0x1122_3344_5566_7788));
-    assert!(one.len() > 0);
+    assert!(!one.is_empty());
 
     let keys: Vec<u64> = (0u64..50)
         .map(|i| i.wrapping_mul(0x9e37_79b9_7f4a_7c15))

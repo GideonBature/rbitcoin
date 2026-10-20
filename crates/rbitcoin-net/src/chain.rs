@@ -122,6 +122,11 @@ impl HeldBodies {
     }
 
     #[doc(hidden)]
+    pub fn is_empty(&self) -> bool {
+        self.by_hash.is_empty()
+    }
+
+    #[doc(hidden)]
     pub fn contains(&self, hash: &BlockHash) -> bool {
         self.by_hash.contains_key(hash)
     }
@@ -285,6 +290,11 @@ impl HeaderTips {
     #[doc(hidden)]
     pub fn len(&self) -> usize {
         self.by_hash.len()
+    }
+
+    #[doc(hidden)]
+    pub fn is_empty(&self) -> bool {
+        self.by_hash.is_empty()
     }
 
     #[doc(hidden)]

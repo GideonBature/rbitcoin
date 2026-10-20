@@ -87,6 +87,10 @@ impl InflightReq {
         self.peers.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
     /// Racing and retired: every peer already sent this getdata.
     pub fn holders(&self) -> usize {
         self.peers.len() + self.retired.len()

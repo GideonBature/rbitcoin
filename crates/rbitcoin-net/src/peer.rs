@@ -2615,6 +2615,7 @@ pub fn queue_due_tx_invs(
 
 /// Finish a pending compact block with a `blocktxn` payload.
 #[doc(hidden)]
+#[allow(clippy::result_unit_err)] // a short blocktxn is (); the caller scores the peer
 pub fn apply_cmpct_blocktxn(
     pc: &PendingCmpct,
     bt: &BlockTransactions,

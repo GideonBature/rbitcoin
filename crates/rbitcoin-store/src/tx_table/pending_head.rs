@@ -25,6 +25,10 @@ impl PendingHeadInserts {
         self.queued.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn note(&self, entries: &[([u8; 32], Fk)]) {
         if entries.is_empty() {
             return;

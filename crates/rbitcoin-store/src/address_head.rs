@@ -301,6 +301,11 @@ impl ProbeCands {
     }
 
     #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
     pub fn push(&mut self, depth: u32, fk: u64) {
         let i = self.n as usize;
         if i < PROBE_CANDS_INLINE {

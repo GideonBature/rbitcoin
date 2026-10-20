@@ -209,6 +209,12 @@ pub struct ConfirmFeedInner {
     pub claimed_epoch: HashMap<u32, u64>,
 }
 
+impl Default for ConfirmFeed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfirmFeed {
     pub fn new() -> Self {
         Self {

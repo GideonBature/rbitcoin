@@ -35,6 +35,12 @@ pub struct BlockFilterWriteBehind {
     pub wake_cv: Condvar,
 }
 
+impl Default for BlockFilterWriteBehind {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockFilterWriteBehind {
     pub fn new() -> Self {
         Self {

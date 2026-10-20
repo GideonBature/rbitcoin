@@ -118,6 +118,7 @@ impl FromRequestParts<AppState> for AsOf {
     }
 }
 
+#[allow(clippy::result_unit_err)] // a bad asof is (); the extractor maps it to not found
 pub fn parse_asof_param(q: &AsOfQuery) -> Result<Option<[u8; 32]>, ()> {
     match q.asof.as_deref() {
         None => Ok(None),
@@ -151,6 +152,7 @@ pub fn pin_or_reject(
 }
 
 #[doc(hidden)]
+#[allow(clippy::result_unit_err)] // a bad asof is (); the caller treats it as no view
 pub fn asof_hash_from_uri(uri: &axum::http::Uri) -> Result<Option<[u8; 32]>, ()> {
     let Some(query) = uri.query() else {
         return Ok(None);
@@ -1161,6 +1163,7 @@ pub fn block_hash_hex(hash: &[u8; 32]) -> String {
 }
 
 /// Parse 32-byte hash/txid hex (display order) → internal byte order.
+#[allow(clippy::result_unit_err)] // bad hex is (); callers map it to not found
 pub fn parse_hash32(s: &str) -> Result<[u8; 32], ()> {
     rbitcoin_primitives::parse_display_hash32(s).map_err(|_| ())
 }

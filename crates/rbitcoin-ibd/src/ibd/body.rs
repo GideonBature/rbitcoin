@@ -36,6 +36,12 @@ pub struct BodyPresence {
     pub rejected: HashSet<BlockHash>,
 }
 
+impl Default for BodyPresence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BodyPresence {
     pub fn new() -> Self {
         Self {

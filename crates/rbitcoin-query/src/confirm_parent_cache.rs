@@ -44,6 +44,12 @@ pub struct ConfirmParentCache {
     pub inner: Mutex<Inner>,
 }
 
+impl Default for ConfirmParentCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfirmParentCache {
     pub fn new() -> Self {
         Self {

@@ -36,13 +36,6 @@ sha3 = "0.12"
 libc = "0.2"
 
 [dev-dependencies]
-# Relay tests pin a full mempool slot table. Dependents of this crate do
-# not turn the feature on.
-rbitcoin-mempool = { workspace = true, features = ["test-hooks"] }
-# Side-block accept arms one cancelled header read. Dependents do not.
-rbitcoin-query = { workspace = true, features = ["test-hooks"] }
-# A proposal test blanks a confirmed height. Dependents do not.
-rbitcoin-store = { workspace = true, features = ["test-hooks"] }
 rbitcoin-ibd = { workspace = true }
 
 [[test]]
