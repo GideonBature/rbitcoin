@@ -11,17 +11,19 @@ autotests = false
 
 [lib]
 doctest = false
+test = false
 
 [dependencies]
 rbitcoin-primitives = { workspace = true }
 rbitcoin-store = { workspace = true }
 rbitcoin-query = { workspace = true }
 rbitcoin-consensus = { workspace = true }
-rbitcoin-net = { workspace = true, features = ["test-hooks"] }
+rbitcoin-net = { workspace = true }
+rbitcoin-ibd = { workspace = true }
 rbitcoin-rpc = { workspace = true }
 rbitcoin-electrum = { workspace = true }
 rbitcoin-esplora = { workspace = true }
-rbitcoin-sv2 = { workspace = true, features = ["test-hooks"] }
+rbitcoin-sv2 = { workspace = true }
 rbitcoin-cli = { workspace = true }
 rbitcoin-node = { workspace = true }
 rbitcoin-log = { workspace = true }
@@ -31,20 +33,14 @@ serde_json = { workspace = true }
 binary_sv2 = { workspace = true }
 template_distribution_sv2 = { workspace = true }
 
-[dev-dependencies]
-# Tip-flush journeys hold or fail the IBD flush thread. Dependents do not.
-rbitcoin-query = { workspace = true, features = ["test-hooks"] }
-
 [[bin]]
 name = "journey-node"
 path = "src/bin/journey-node.rs"
 test = false
 
-# One harness: the default journeys link once and share pads. `overlay`
-# stays its own target because it is feature-gated.
 [[test]]
-name = "journeys"
-path = "tests/journeys.rs"
+name = "suite"
+path = "tests/suite.rs"
 
 [features]
 mutants = []

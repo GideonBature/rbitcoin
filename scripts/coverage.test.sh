@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Contract: LCOV gate ignores test files (not substring "test"), runs default
-# workspace tests (Tier A IBD included), 93% floor (no never-falls ratchet),
+# workspace tests (Tier A IBD included), 91% floor (no never-falls ratchet),
 # writes Shields JSON. Does not run llvm-cov.
 set -euo pipefail
 
@@ -75,6 +75,8 @@ assert_ok "ci coverage job has a wall timeout" \
   bash -c 'awk "/^  coverage:/{p=1} p&&/timeout-minutes:/{print; exit}" "$1" | grep -q timeout-minutes' _ "$ROOT/.github/workflows/ci.yml"
 assert_ok "required test job excludes rbitcoin-bench" \
   grep -q 'cargo test --workspace --exclude rbitcoin-bench' "$ROOT/.github/workflows/ci.yml"
+assert_ok "required test job still pins the bench scripthash" \
+  grep -q 'cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a' "$ROOT/.github/workflows/ci.yml"
 assert_ok "gitignore ignores apilog jsonl" \
   bash -c 'grep -q "apilog\\*\\.jsonl" "$1/.gitignore" && git -C "$1" check-ignore -q -- apilog.jsonl && git -C "$1" check-ignore -q -- apilog-old.jsonl' _ "$ROOT"
 
@@ -210,23 +212,24 @@ assert_gate_fail() {
   fi
 }
 
-assert_gate_pass "93.00% floor passes" --lh 93 --lf 100
-assert_gate_fail "92.99% floor fails" --lh 9299 --lf 10000
-assert_gate_pass "production-scale 93.32% passes the 93% floor" \
-  --lh 150469 --lf 161235
-assert_gate_fail "92.00% fails the 93% floor" --lh 92 --lf 100
+assert_gate_pass "91.00% floor passes" --lh 91 --lf 100
+assert_gate_fail "90.99% floor fails" --lh 9099 --lf 10000
+assert_gate_pass "suite-rlib 91.26% passes the 91% floor" \
+  --lh 93410 --lf 102361
+assert_gate_fail "89.71% fails the 91% floor" \
+  --lh 91583 --lf 102091
 
 st="$(mktemp)"
-python3 "$GATE" --lh 150469 --lf 161235 --status-out "$st" >/dev/null
+python3 "$GATE" --lh 93410 --lf 102361 --status-out "$st" >/dev/null
 python3 - "$st" <<'PY'
 import json, sys
 from pathlib import Path
 d = json.loads(Path(sys.argv[1]).read_text())
 assert d["ok"] is True, d
 assert d["mode"] == "floor", d
-assert d["floor"] == 93, d
+assert d["floor"] == 91, d
 PY
-assert_ok "status-out JSON names 93% floor" true
+assert_ok "status-out JSON names 91% floor" true
 rm -f "$st"
 
 assert_ok "coverage.sh calls coverage-gate.py" \

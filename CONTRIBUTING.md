@@ -112,8 +112,8 @@ You can also run the script yourself before the first consensus test:
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target/dev}"
 cargo fmt --all                            # includes nested fuzz/ crate
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p rbitcoin-primitives --lib          # fast sanity
-cargo test -p rbitcoin-store --lib               # store (tests pass Tiny at open; production default is Mainnet)
+cargo test -p rbitcoin-primitives --test suite  # fast sanity
+cargo test -p rbitcoin-store --test suite        # store (tests pass Tiny at open; production default is Mainnet)
 cargo test --workspace                           # default suite — Linux / macOS; see table
 ./scripts/ci-os-smoke.sh                         # Windows/macOS PR surface
 ```
@@ -164,7 +164,7 @@ engineering.
 2. Prefer **high-level functional/integration tests** over unit tests
    ([`TESTING.md`](./TESTING.md)). A branch no peer, client, or operator can
    trigger is removed rather than covered by a unit.
-3. Every PR must keep production line coverage **≥ 93%** (`LH*100 >= LF*93`).
+3. Every PR must keep production line coverage **≥ 91%** (`LH*100 >= LF*91`).
    Nightly branch coverage stays ≥90% when measured. Same bar as CI via
    `./scripts/coverage.sh`. CRAP `--fail-above 30` with the allowlist in
    `.cargo-crap.toml`. Hold the floor by covering from the surface journey

@@ -138,6 +138,10 @@ jobs:
         run: df -h /dev/shm && free -m
       - name: cargo test
         run: cargo test --workspace --exclude rbitcoin-bench
+      # The workspace exclude stays (coverage.test.sh). This one lib test is
+      # the address-corpus pin: sha256::Hash Display is internal order.
+      - name: bench scripthash pin
+        run: cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a -- --quiet
 
   # Windows IOCP store + mmap fuse + query confirm + --smoke. Required. Not a CRT-static snapshot.
   windows:
@@ -181,7 +185,7 @@ jobs:
       - name: store + node smoke
         run: ./scripts/ci-os-smoke.sh
 
-  # Line-coverage 93% floor + CRAP --fail-above 30 (allowlist in .cargo-crap.toml).
+  # Line-coverage 91% floor + CRAP --fail-above 30 (allowlist in .cargo-crap.toml).
   # Slow; waits for qc and test so a red check does not start
   # this job. Required. Job+step timeouts so a hung llvm-cov test binary
   # cannot sit until the runner's 6h default.

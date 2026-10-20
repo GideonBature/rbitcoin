@@ -12,14 +12,15 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo "== structure, header, finality, sigops =="
-cargo test -p rbitcoin-consensus --lib -- \
-  structure_rule_tests \
+cargo test -p rbitcoin-consensus --test suite -- \
   sigop_cost_tests \
   finality_tests \
-  median_time_past_tests \
+  median_time_past_tests
+cargo test -p rbitcoin-query --test suite -- \
+  structure_rule_tests \
   assemble_second_block_rejects_stale_nversion
 
 echo "== connect / header journey =="
-cargo test -p rbitcoin-test --test journeys consensus_rules::
+cargo test -p rbitcoin-test --test suite consensus_rules::
 
 echo "hornet-mapped pins OK"

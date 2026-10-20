@@ -1,5 +1,6 @@
 [package]
 name = "rbitcoin-query"
+autotests = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +10,7 @@ description = "Query API over the rbitcoin store"
 
 [lib]
 doctest = false
+test = false
 
 [dependencies]
 rbitcoin-consensus = { workspace = true }
@@ -21,14 +23,12 @@ arc-swap = { workspace = true }
 mutants = { version = "0.0.4", optional = true }
 
 [features]
-test-hooks = []
 # Nightly cargo-mutants only. Off for the node build.
 mutants = ["dep:mutants"]
 
-[dev-dependencies]
-# Height-index tests write a raw confirmed slot. Dependents of this crate
-# do not turn the feature on.
-rbitcoin-store = { workspace = true, features = ["test-hooks"] }
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
 
 [lints]
 workspace = true

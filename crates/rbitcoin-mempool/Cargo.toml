@@ -1,5 +1,6 @@
 [package]
 name = "rbitcoin-mempool"
+autotests = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +10,7 @@ description = "Cluster mempool with InRam buffers + private sidecar files under 
 
 [lib]
 doctest = false
+test = false
 
 [dependencies]
 rbitcoin-log = { workspace = true }
@@ -19,8 +21,10 @@ bitcoin = { workspace = true }
 
 [features]
 mutants = []
-# Net tests pin a full slot table. A production build leaves this off.
-test-hooks = []
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
 
 [lints]
 workspace = true

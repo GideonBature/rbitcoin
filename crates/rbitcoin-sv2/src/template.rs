@@ -17,14 +17,16 @@ use template_distribution_sv2::{NewTemplate, SetNewPrevHash};
 
 /// Coinbase witness reserved value the template's witness commitment is
 /// built with (BIP141).
-pub(crate) const WITNESS_RESERVED_VALUE: [u8; 32] = [0u8; 32];
+pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0u8; 32];
 
 /// sv2-spec 07 §7.1: coinbase weight outside the client's additional outputs,
 /// and the floor on the whole reserve.
-const COINBASE_BASE_WU: u64 = 1168;
-const MIN_COINBASE_RESERVE_WU: u64 = 2000;
+#[doc(hidden)]
+pub const COINBASE_BASE_WU: u64 = 1168;
+#[doc(hidden)]
+pub const MIN_COINBASE_RESERVE_WU: u64 = 2000;
 
-pub(crate) struct Template {
+pub struct Template {
     pub version: u32,
     pub coinbase_prefix: Vec<u8>,
     pub value_remaining: u64,
@@ -80,7 +82,8 @@ impl Template {
 /// `Ok(None)` when that tip has not been recorded, or is no longer the
 /// header at its height. Takes the mempool lock and reads the store:
 /// blocking region only.
-pub(crate) fn build(
+#[doc(hidden)]
+pub fn build(
     chain: &ChainHub,
     max_additional_size: u32,
     max_additional_sigops: u16,
@@ -148,30 +151,4 @@ pub(crate) fn build(
         target: Target::from_compact(bits).to_le_bytes(),
         txs: selected.into_iter().map(|(tx, _)| tx).collect(),
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::build;
-    use crate::test_chain::padded_chain;
-    use bitcoin::hashes::Hash;
-    use rbitcoin_primitives::Height;
-
-    #[test]
-    fn template_builds_on_the_stripped_tip() {
-        let tc = padded_chain("sv2-stripped-tip", 0);
-        let tip = tc.chain.query.tip_height().unwrap();
-        assert!(tip.0 > 0);
-        let (_, genesis) = tc
-            .chain
-            .query
-            .header_at_height(Height::GENESIS)
-            .unwrap()
-            .unwrap();
-        tc.mempool.note_template_prev(genesis.hash);
-        let built = build(&tc.chain, 0, 0).unwrap().expect("template");
-        assert_eq!(built.prev_hash, genesis.hash);
-        let best = tc.chain.query.wire_header_at_height(tip).unwrap();
-        assert_ne!(built.prev_hash, best.block_hash().to_byte_array());
-    }
 }

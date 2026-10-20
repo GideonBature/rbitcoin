@@ -143,7 +143,8 @@ pub async fn jsonrpc(addr: SocketAddr, method: &str, params: Value) -> Value {
     crate::jsonrpc::jsonrpc(addr, method, params).await
 }
 
-async fn jsonrpc_try(addr: SocketAddr, method: &str, params: Value) -> Result<Value, String> {
+#[doc(hidden)]
+pub async fn jsonrpc_try(addr: SocketAddr, method: &str, params: Value) -> Result<Value, String> {
     crate::jsonrpc::try_jsonrpc(addr, method, params)
         .await
         .map_err(|e| format!("rpc connect: {e}"))
@@ -268,14 +269,7 @@ pub async fn wait_peer_network(rpc: SocketAddr, net: &str, inbound: bool, wall: 
     .await
 }
 
-/// I2P b32 hostname from a SAM `DESTINATION=` / `{datadir}/i2p/p2p.priv` blob.
-///
-/// Same host `NetAddr::host_str` reports for that destination.
-pub fn i2p_b32_from_dest(dest: &str) -> String {
-    rbitcoin_net::i2p_addr_from_sam_b64(dest)
-        .unwrap_or_else(|e| panic!("{e}"))
-        .host_str()
-}
+pub use crate::i2p_dest::i2p_b32_from_dest;
 
 pub async fn socks_http_get(proxy: SocketAddr, host: &str, port: u16, path: &str) -> (u16, String) {
     let dialer = rbitcoin_net::Dialer::socks(proxy, true);
@@ -340,49 +334,5 @@ pub async fn wait_file(path: &Path, wall: Duration) -> String {
             panic!("missing {} after {wall:?}", path.display());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    #[should_panic(expected = "rpc getblockcount json:")]
-    async fn jsonrpc_try_panics_when_the_body_is_not_json() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 2048];
-            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
-            let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope";
-            tokio::io::AsyncWriteExt::write_all(&mut sock, resp)
-                .await
-                .unwrap();
-        });
-        let _ = jsonrpc_try(addr, "getblockcount", serde_json::json!([])).await;
-    }
-
-    #[test]
-    #[should_panic(expected = "i2p destination base64 contains")]
-    fn i2p_b32_rejects_unknown_base64() {
-        let _ = i2p_b32_from_dest("!!!");
-    }
-
-    #[test]
-    #[should_panic(expected = "i2p destination too short")]
-    fn i2p_b32_rejects_a_short_destination() {
-        let _ = i2p_b32_from_dest("AQID");
-    }
-
-    #[test]
-    fn i2p_b32_matches_the_address_host() {
-        // Same 387-byte identity and private suffix as `i2p_addr_hashes_public_destination_only`.
-        let ident = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAAAA";
-        let privd = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHAAAACQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
-        let host = "cxroqjd4tx5c5ufkracpqnx4hjjsgdj4uwhagtifp6yo5ed3hjlq.b32.i2p";
-        assert_eq!(i2p_b32_from_dest(ident), host);
-        assert_eq!(i2p_b32_from_dest(privd), host);
     }
 }

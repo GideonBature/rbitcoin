@@ -1,5 +1,6 @@
 [package]
 name = "rbitcoin-consensus"
+autotests = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,14 +8,19 @@ rust-version.workspace = true
 repository.workspace = true
 description = "Block and transaction validation / confirmability"
 
+[lib]
+test = false
+doctest = false
+
 [features]
+# The suite links the assembler (`core_script`). Product crates depend on
+# this package with `default-features = false`, so a node build leaves it off.
+default = ["corpus"]
 # Lets script-oracle call the Core script assembler. Off for the node.
 corpus = ["dep:serde_json"]
 # Nightly cargo-mutants only. Off for the node build.
 mutants = ["dep:mutants"]
 
-[lib]
-doctest = false
 
 [dependencies]
 rbitcoin-primitives = { workspace = true }
@@ -31,9 +37,11 @@ mutants = { version = "0.0.4", optional = true }
 serde_json = { workspace = true }
 # Test-only zstd decode for Floresta historical block packs (not on the node graph).
 ruzstd = "0.9"
-# Spend-checkpoint tests call the store hooks. This feature stays off for
-# dependents of this crate.
-rbitcoin-store = { workspace = true, features = ["test-hooks"] }
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+required-features = ["corpus"]
 
 [lints]
 workspace = true

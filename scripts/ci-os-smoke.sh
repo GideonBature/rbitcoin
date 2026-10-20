@@ -11,16 +11,16 @@ cd "$ROOT"
 # Keep this list the platform-diff surface, not the whole store suite.
 STORE_PLATFORM_FILTERS=(
   file::advise_tests
-  sorted_run::tests::workers_for_free_ram
-  sorted_run::tests::mem_available
-  sorted_run::tests::host_mem
-  sorted_run::tests::darwin_vm
-  io_backend::tests
-  bulk_io::tests::unset_io_env_opens_a_session
-  uring_session::tests::pool_
-  fuse8_filter::tests::no_false_negatives_and_roundtrip
-  segmented_head::tests::insert_roll_seal_lookup_roundtrip
-  bdz::tests::compact_packed_fd_is_bdz3_and_matches_ram
+  sorted_run::workers_for_free_ram
+  sorted_run::mem_available
+  sorted_run::host_mem
+  sorted_run::darwin_vm
+  io_backend::
+  bulk_io::unset_io_env_opens_a_session
+  uring_session::pool_
+  fuse8_filter::no_false_negatives_and_roundtrip
+  segmented_head::insert_roll_seal_lookup_roundtrip
+  bdz::compact_packed_fd_is_bdz3_and_matches_ram
   pread_file_exact_reports_the_pread_errno
 )
 # Query confirm: TableFile + Class C write-behind on the native completion
@@ -45,11 +45,11 @@ case "${CI_OS_SMOKE_UNAME:-$(uname -s)}" in
     # `mod io_session_iocp` is #[cfg(windows)] — the tests do not exist elsewhere.
     STORE_PLATFORM_FILTERS+=(io_session_iocp)
     # Linux and Windows only: Darwin opens no session by default.
-    STORE_PLATFORM_FILTERS+=(uring_session::tests::default_kind_follows_os)
-    PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::tests)
+    STORE_PLATFORM_FILTERS+=(uring_session::default_kind_follows_os)
+    PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::)
     ;;
   Darwin*)
-    PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::tests)
+    PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::)
     ;;
 esac
 
@@ -73,7 +73,7 @@ done
 assert_filter_matches() {
   local pkg="$1" f="$2"
   local listed
-  if ! listed="$(cargo test -q -p "$pkg" --lib -- --list "$f")"; then
+  if ! listed="$(cargo test -q -p "$pkg" --test suite -- --list "$f")"; then
     echo "ci-os-smoke: failed to list tests for '$f' in $pkg" >&2
     exit 1
   fi
@@ -85,17 +85,17 @@ assert_filter_matches() {
 
 for f in "${STORE_PLATFORM_FILTERS[@]}"; do
   assert_filter_matches rbitcoin-store "$f"
-  cargo test -p rbitcoin-store --lib -- "$f" ${skip_args[@]+"${skip_args[@]}"}
+  cargo test -p rbitcoin-store --test suite -- "$f" ${skip_args[@]+"${skip_args[@]}"}
 done
 
 for f in "${QUERY_PLATFORM_FILTERS[@]}"; do
   assert_filter_matches rbitcoin-query "$f"
-  cargo test -p rbitcoin-query --lib -- "$f"
+  cargo test -p rbitcoin-query --test suite -- "$f"
 done
 
 for f in ${PRIMITIVES_PLATFORM_FILTERS[@]+"${PRIMITIVES_PLATFORM_FILTERS[@]}"}; do
   assert_filter_matches rbitcoin-primitives "$f"
-  cargo test -p rbitcoin-primitives --lib -- "$f"
+  cargo test -p rbitcoin-primitives --test suite -- "$f"
 done
 
 cargo build -p rbitcoin-node -p rbitcoin-cli

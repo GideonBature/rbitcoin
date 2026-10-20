@@ -15,11 +15,11 @@ use crate::scripthash_pages::{
     sh_page_entries_into, sh_page_extent_creates, sh_page_set_extent_creates,
 };
 use rbitcoin_primitives::Fk;
-#[cfg(test)]
+#[cfg(debug_assertions)]
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 thread_local! {
     static WATCH_READABLE: Cell<bool> = const { Cell::new(false) };
     static READABLE_BROKE: Cell<bool> = const { Cell::new(false) };
@@ -27,42 +27,54 @@ thread_local! {
     static FAIL_NEXT_DEFERRED_FREE: Cell<bool> = const { Cell::new(false) };
 }
 
-const UNDO_AT: usize = 256;
-const UNDO_LEN: usize = 48;
-const UNDO_MAGIC: [u8; 4] = *b"SHUN";
+#[doc(hidden)]
+pub const UNDO_AT: usize = 256;
+#[doc(hidden)]
+pub const UNDO_LEN: usize = 48;
+#[doc(hidden)]
+pub const UNDO_MAGIC: [u8; 4] = *b"SHUN";
 
-const HEAD_NONE: u8 = 0;
-const HEAD_MAIN: u8 = 1;
-const HEAD_INGEST: u8 = 2;
-const HEAD_SORTED_OVF: u8 = 3;
-const HEAD_OVF_L1: u8 = 4;
+#[doc(hidden)]
+pub const HEAD_NONE: u8 = 0;
+#[doc(hidden)]
+pub const HEAD_MAIN: u8 = 1;
+#[doc(hidden)]
+pub const HEAD_INGEST: u8 = 2;
+#[doc(hidden)]
+pub const HEAD_SORTED_OVF: u8 = 3;
+#[doc(hidden)]
+pub const HEAD_OVF_L1: u8 = 4;
 
-struct HeadWord {
-    tag: u8,
-    index: u16,
-    off: u64,
-    old: [u8; 8],
+#[doc(hidden)]
+pub struct HeadWord {
+    pub tag: u8,
+    pub index: u16,
+    pub off: u64,
+    pub old: [u8; 8],
 }
 
-struct UndoRec {
-    target: u64,
-    image: u64,
-    word: Option<HeadWord>,
+#[doc(hidden)]
+pub struct UndoRec {
+    pub target: u64,
+    pub image: u64,
+    pub word: Option<HeadWord>,
 }
 
 #[derive(Default)]
-struct UnlinkBatch {
-    rewrites: Vec<DeferredRewrite>,
-    main_shards: Vec<usize>,
-    ovf: bool,
+#[doc(hidden)]
+pub struct UnlinkBatch {
+    pub rewrites: Vec<DeferredRewrite>,
+    pub main_shards: Vec<usize>,
+    pub ovf: bool,
 }
 
-struct DeferredRewrite {
-    scripthash: [u8; 32],
-    home: LocatedHome,
-    new_val: ShHeadValue,
-    old: ShHeadValue,
-    removed: u64,
+#[doc(hidden)]
+pub struct DeferredRewrite {
+    pub scripthash: [u8; 32],
+    pub home: LocatedHome,
+    pub new_val: ShHeadValue,
+    pub old: ShHeadValue,
+    pub removed: u64,
 }
 
 /// A full-list unlink. The empty head and the page free wait until the
@@ -81,7 +93,7 @@ pub(super) struct PendingEmpty {
     live_applied: bool,
 }
 
-enum SuffixPlan {
+pub enum SuffixPlan {
     NotSuffix,
     Absent,
     DropAll {
@@ -107,8 +119,8 @@ impl ScriptHashTable {
     ///
     /// Refused while any empty head is still queued. Disconnect publishes
     /// those through [`Self::commit_deferred_empty_heads`] after the tip flush.
-    #[cfg(test)]
-    pub(super) fn unlink_creates(
+    #[cfg(debug_assertions)]
+    pub fn unlink_creates(
         &self,
         scripthash: &[u8; 32],
         create_tx_fks: &[Fk],
@@ -138,7 +150,8 @@ impl ScriptHashTable {
         self.finish_unlink_batch(batch)
     }
 
-    fn unlink_one(
+    #[doc(hidden)]
+    pub fn unlink_one(
         &self,
         scripthash: &[u8; 32],
         create_tx_fks: &[Fk],
@@ -172,8 +185,8 @@ impl ScriptHashTable {
 
     /// Unlink one create_tx_fk. One tx pays a scripthash once, however many
     /// outputs share that script. Disconnect uses [`Self::unlink_creates_batch`].
-    #[cfg(test)]
-    pub(super) fn unlink_create(
+    #[cfg(debug_assertions)]
+    pub fn unlink_create(
         &self,
         scripthash: &[u8; 32],
         create_tx_fk: Fk,
@@ -182,7 +195,7 @@ impl ScriptHashTable {
         self.unlink_creates(scripthash, &[create_tx_fk])
     }
 
-    pub(super) fn recover_unlink_undos(&self) -> Result<(), StoreError> {
+    pub fn recover_unlink_undos(&self) -> Result<(), StoreError> {
         for (i, body) in self.bodies.iter().enumerate() {
             self.recover_one_undo(body, &self.allocs[i])?;
         }
@@ -193,8 +206,8 @@ impl ScriptHashTable {
     }
 
     /// Leave a torn last page and an empty head word. Open restores both.
-    #[cfg(test)]
-    pub(super) fn test_tear_extent_tail(&self, scripthash: &[u8; 32]) -> Result<(), StoreError> {
+    #[cfg(debug_assertions)]
+    pub fn test_tear_extent_tail(&self, scripthash: &[u8; 32]) -> Result<(), StoreError> {
         let Some((val, home)) = self.locate_head(scripthash)? else {
             return Err(StoreError::Corrupt("scripthash tear: missing key"));
         };
@@ -217,25 +230,26 @@ impl ScriptHashTable {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) fn watch_readable_during_unlink(&self, on: bool) {
+    #[cfg(debug_assertions)]
+    pub fn watch_readable_during_unlink(&self, on: bool) {
         WATCH_READABLE.with(|c| c.set(on));
         if on {
             READABLE_BROKE.with(|c| c.set(false));
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn readable_broke(&self) -> bool {
+    #[cfg(debug_assertions)]
+    pub fn readable_broke(&self) -> bool {
         READABLE_BROKE.with(|c| c.get())
     }
 
-    #[cfg(test)]
-    pub(super) fn fail_next_undo_clear(&self) {
+    #[cfg(debug_assertions)]
+    pub fn fail_next_undo_clear(&self) {
         FAIL_CLEAR_UNDO.with(|c| c.set(true));
     }
 
-    fn unlink_by_rewrite(
+    #[doc(hidden)]
+    pub fn unlink_by_rewrite(
         &self,
         scripthash: &[u8; 32],
         home: LocatedHome,
@@ -291,7 +305,8 @@ impl ScriptHashTable {
         Ok(true)
     }
 
-    fn finish_unlink_batch(&self, batch: UnlinkBatch) -> Result<(), StoreError> {
+    #[doc(hidden)]
+    pub fn finish_unlink_batch(&self, batch: UnlinkBatch) -> Result<(), StoreError> {
         if batch.rewrites.is_empty() {
             return Ok(());
         }
@@ -321,7 +336,8 @@ impl ScriptHashTable {
         Ok(())
     }
 
-    fn sync_batch_homes(&self, batch: &UnlinkBatch) -> Result<(), StoreError> {
+    #[doc(hidden)]
+    pub fn sync_batch_homes(&self, batch: &UnlinkBatch) -> Result<(), StoreError> {
         for si in &batch.main_shards {
             if let Some(slot) = self.sorted_main.get(*si) {
                 if let Some(h) = slot.read().unwrap().as_ref() {
@@ -433,7 +449,7 @@ impl ScriptHashTable {
     }
 
     /// Publish empty heads for `scripthash` only. Jobs for other keys stay queued.
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     fn commit_deferred_for(&self, scripthash: &[u8; 32]) -> Result<(), StoreError> {
         let mine = {
             let mut q = self.pending_empty.lock().unwrap();
@@ -530,7 +546,7 @@ impl ScriptHashTable {
         class: u8,
         off: u64,
     ) -> Result<(), StoreError> {
-        #[cfg(test)]
+        #[cfg(debug_assertions)]
         if FAIL_NEXT_DEFERRED_FREE.with(|c| c.replace(false)) {
             return Err(StoreError::Corrupt("scripthash deferred free failed"));
         }
@@ -538,7 +554,7 @@ impl ScriptHashTable {
     }
 
     /// The next deferred page free fails once, before the freelist changes.
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub fn fail_next_deferred_free() {
         FAIL_NEXT_DEFERRED_FREE.with(|c| c.set(true));
     }
@@ -632,7 +648,8 @@ impl ScriptHashTable {
         }
     }
 
-    fn commit_tail_page(
+    #[doc(hidden)]
+    pub fn commit_tail_page(
         &self,
         body: &TableFile,
         alloc: &mut AllocState,
@@ -680,7 +697,8 @@ impl ScriptHashTable {
     /// The page stays `ver=2` and empty. Readers follow the predecessor's
     /// `next` onto it and stop, so a later rewrite of that predecessor is
     /// not an interior-link break.
-    fn retire_head_page(
+    #[doc(hidden)]
+    pub fn retire_head_page(
         &self,
         body: &TableFile,
         alloc: &mut AllocState,
@@ -707,7 +725,8 @@ impl ScriptHashTable {
         )
     }
 
-    fn rollback_undo(
+    #[doc(hidden)]
+    pub fn rollback_undo(
         &self,
         body: &TableFile,
         alloc: &mut AllocState,
@@ -722,7 +741,8 @@ impl ScriptHashTable {
         Ok(())
     }
 
-    fn recover_one_undo(
+    #[doc(hidden)]
+    pub fn recover_one_undo(
         &self,
         body: &TableFile,
         alloc_mu: &std::sync::Mutex<AllocState>,
@@ -737,7 +757,8 @@ impl ScriptHashTable {
         Ok(())
     }
 
-    fn capture_head_word(
+    #[doc(hidden)]
+    pub fn capture_head_word(
         &self,
         scripthash: &[u8; 32],
         home: LocatedHome,
@@ -793,7 +814,11 @@ impl ScriptHashTable {
         }
     }
 
-    fn capture_ingest_word(&self, scripthash: &[u8; 32]) -> Result<Option<HeadWord>, StoreError> {
+    #[doc(hidden)]
+    pub fn capture_ingest_word(
+        &self,
+        scripthash: &[u8; 32],
+    ) -> Result<Option<HeadWord>, StoreError> {
         let ingest = self.ingest.lock().unwrap();
         let Some(off) = ingest.value_word_offset(scripthash)? else {
             return Ok(None);
@@ -807,7 +832,8 @@ impl ScriptHashTable {
         }))
     }
 
-    fn restore_head_word(&self, word: &HeadWord) -> Result<(), StoreError> {
+    #[doc(hidden)]
+    pub fn restore_head_word(&self, word: &HeadWord) -> Result<(), StoreError> {
         match word.tag {
             HEAD_NONE => Ok(()),
             HEAD_MAIN => {
@@ -847,7 +873,8 @@ impl ScriptHashTable {
         }
     }
 
-    fn sync_home(&self, home: LocatedHome, scripthash: &[u8; 32]) -> Result<(), StoreError> {
+    #[doc(hidden)]
+    pub fn sync_home(&self, home: LocatedHome, scripthash: &[u8; 32]) -> Result<(), StoreError> {
         match home {
             LocatedHome::Main => {
                 let si = self.shard_index(scripthash);
@@ -872,29 +899,33 @@ impl ScriptHashTable {
     }
 }
 
-struct PreparedTail {
-    at: u64,
-    bytes: [u8; SH_PAGE_SIZE],
-    new_last: u64,
+#[doc(hidden)]
+pub struct PreparedTail {
+    pub at: u64,
+    pub bytes: [u8; SH_PAGE_SIZE],
+    pub new_last: u64,
 }
 
-struct BoundaryPack {
-    base: u64,
-    extent_n: u32,
-    boundary: u64,
-    creates: u32,
+#[doc(hidden)]
+pub struct BoundaryPack {
+    pub base: u64,
+    pub extent_n: u32,
+    pub boundary: u64,
+    pub creates: u32,
 }
 
-struct TailWrite<'a> {
-    target: u64,
-    bytes: &'a [u8; SH_PAGE_SIZE],
-    new_head: Option<ShHeadValue>,
+#[doc(hidden)]
+pub struct TailWrite<'a> {
+    pub target: u64,
+    pub bytes: &'a [u8; SH_PAGE_SIZE],
+    pub new_head: Option<ShHeadValue>,
     /// Page the head names while `target` is written.
-    head_page: u64,
-    removed: u64,
+    pub head_page: u64,
+    pub removed: u64,
 }
 
-fn prepare_boundary(
+#[doc(hidden)]
+pub fn prepare_boundary(
     table: &ScriptHashTable,
     body: &TableFile,
     alloc: &mut AllocState,
@@ -937,7 +968,8 @@ fn prepare_boundary(
     })
 }
 
-fn new_extent_n(base: u64, old_n: u32, boundary: u64) -> u32 {
+#[doc(hidden)]
+pub fn new_extent_n(base: u64, old_n: u32, boundary: u64) -> u32 {
     if old_n == 0
         || base == 0
         || boundary < base
@@ -955,7 +987,8 @@ fn new_extent_n(base: u64, old_n: u32, boundary: u64) -> u32 {
     }
 }
 
-fn new_creates(old: u32, removed: u64) -> u32 {
+#[doc(hidden)]
+pub fn new_creates(old: u32, removed: u64) -> u32 {
     if old == 0 {
         0
     } else {
@@ -963,7 +996,8 @@ fn new_creates(old: u32, removed: u64) -> u32 {
     }
 }
 
-fn plan_extent_suffix(
+#[doc(hidden)]
+pub fn plan_extent_suffix(
     body: &TableFile,
     last_page: u64,
     remove: &BTreeSet<u64>,
@@ -1060,7 +1094,8 @@ fn plan_extent_suffix(
     Ok(SuffixPlan::NotSuffix)
 }
 
-fn finish_dropped_page(
+#[doc(hidden)]
+pub fn finish_dropped_page(
     body: &TableFile,
     base: u64,
     old_n: u32,
@@ -1090,7 +1125,8 @@ fn finish_dropped_page(
     })
 }
 
-fn predecessor(body: &TableFile, base: u64, page: u64) -> Result<Option<u64>, StoreError> {
+#[doc(hidden)]
+pub fn predecessor(body: &TableFile, base: u64, page: u64) -> Result<Option<u64>, StoreError> {
     if page >= base.saturating_add(SH_PAGE_SIZE as u64)
         && (page - base).is_multiple_of(SH_PAGE_SIZE as u64)
     {
@@ -1124,19 +1160,22 @@ fn predecessor(body: &TableFile, base: u64, page: u64) -> Result<Option<u64>, St
     ))
 }
 
-fn read_page(body: &TableFile, off: u64) -> Result<[u8; SH_PAGE_SIZE], StoreError> {
+#[doc(hidden)]
+pub fn read_page(body: &TableFile, off: u64) -> Result<[u8; SH_PAGE_SIZE], StoreError> {
     let mut page = [0u8; SH_PAGE_SIZE];
     body.read_at(off, &mut page)?;
     Ok(page)
 }
 
-fn page_fks(page: &[u8; SH_PAGE_SIZE]) -> Result<Vec<Fk>, StoreError> {
+#[doc(hidden)]
+pub fn page_fks(page: &[u8; SH_PAGE_SIZE]) -> Result<Vec<Fk>, StoreError> {
     let mut out = Vec::new();
     sh_page_entries_into(page, &mut out)?;
     Ok(out)
 }
 
-fn arm_undo(
+#[doc(hidden)]
+pub fn arm_undo(
     table: &ScriptHashTable,
     body: &TableFile,
     alloc: &mut AllocState,
@@ -1159,15 +1198,17 @@ fn arm_undo(
     Ok(rec)
 }
 
-fn restore_page(body: &TableFile, rec: &UndoRec) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn restore_page(body: &TableFile, rec: &UndoRec) -> Result<(), StoreError> {
     let image = read_page(body, rec.image)?;
     body.write_at(rec.target, &image)?;
     body.sync_data_only()?;
     Ok(())
 }
 
-fn clear_undo_keep_image(body: &TableFile, alloc: &AllocState) -> Result<(), StoreError> {
-    #[cfg(test)]
+#[doc(hidden)]
+pub fn clear_undo_keep_image(body: &TableFile, alloc: &AllocState) -> Result<(), StoreError> {
+    #[cfg(debug_assertions)]
     if FAIL_CLEAR_UNDO.with(|c| c.replace(false)) {
         return Err(StoreError::Corrupt("scripthash undo clear failed"));
     }
@@ -1176,11 +1217,13 @@ fn clear_undo_keep_image(body: &TableFile, alloc: &AllocState) -> Result<(), Sto
     Ok(())
 }
 
-fn frees_old_pages(old: &ShHeadValue) -> bool {
+#[doc(hidden)]
+pub fn frees_old_pages(old: &ShHeadValue) -> bool {
     matches!(old, ShHeadValue::Extent { .. } | ShHeadValue::Slab { .. })
 }
 
-fn note_batch_body(
+#[doc(hidden)]
+pub fn note_batch_body(
     table: &ScriptHashTable,
     batch: &mut UnlinkBatch,
     scripthash: &[u8; 32],
@@ -1197,19 +1240,21 @@ fn note_batch_body(
     }
 }
 
-fn note_readable(body: &TableFile, last_page: u64) {
-    #[cfg(test)]
+#[doc(hidden)]
+pub fn note_readable(body: &TableFile, last_page: u64) {
+    #[cfg(debug_assertions)]
     if WATCH_READABLE.with(|c| c.get()) && super::collect_extent_then_tail(body, last_page).is_err()
     {
         READABLE_BROKE.with(|c| c.set(true));
     }
-    #[cfg(not(test))]
+    #[cfg(not(debug_assertions))]
     {
         let _ = (body, last_page);
     }
 }
 
-fn persist_undo(
+#[doc(hidden)]
+pub fn persist_undo(
     body: &TableFile,
     alloc: &AllocState,
     undo: Option<&UndoRec>,
@@ -1222,7 +1267,8 @@ fn persist_undo(
     body.write_at(crate::file::FILE_HEADER_LEN as u64, &buf)
 }
 
-fn fill_alloc_prefix(buf: &mut [u8], state: &AllocState) {
+#[doc(hidden)]
+pub fn fill_alloc_prefix(buf: &mut [u8], state: &AllocState) {
     buf[0..4].copy_from_slice(&super::SH_ALLOC_MAGIC);
     buf[4..6].copy_from_slice(&super::SH_ALLOC_VERSION.to_le_bytes());
     buf[8..16].copy_from_slice(&state.live_count.to_le_bytes());
@@ -1237,7 +1283,8 @@ fn fill_alloc_prefix(buf: &mut [u8], state: &AllocState) {
     }
 }
 
-fn encode_undo(buf: &mut [u8], rec: &UndoRec) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn encode_undo(buf: &mut [u8], rec: &UndoRec) -> Result<(), StoreError> {
     if buf.len() < UNDO_LEN {
         return Err(StoreError::Corrupt("scripthash undo record short"));
     }
@@ -1252,7 +1299,8 @@ fn encode_undo(buf: &mut [u8], rec: &UndoRec) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn read_undo(body: &TableFile) -> Result<Option<UndoRec>, StoreError> {
+#[doc(hidden)]
+pub fn read_undo(body: &TableFile) -> Result<Option<UndoRec>, StoreError> {
     let mut buf = [0u8; UNDO_LEN];
     let at = crate::file::FILE_HEADER_LEN as u64 + UNDO_AT as u64;
     if body.logical_len() < at + UNDO_LEN as u64 {

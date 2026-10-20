@@ -10,7 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rbitcoin-consensus = { path = "../crates/rbitcoin-consensus" }
+rbitcoin-consensus = { path = "../crates/rbitcoin-consensus", default-features = false }
 rbitcoin-net = { path = "../crates/rbitcoin-net" }
 rbitcoin-electrum = { path = "../crates/rbitcoin-electrum" }
 rbitcoin-query = { path = "../crates/rbitcoin-query" }

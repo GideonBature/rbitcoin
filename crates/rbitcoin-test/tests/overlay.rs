@@ -9,16 +9,17 @@ use rbitcoin_net::{NetAddr, OnlyNet};
 use rbitcoin_node::{NodeConfig, P2pListen};
 use rbitcoin_test::mine::spend_anyone_can_spend;
 use rbitcoin_test::overlay::{
-    base_node, ephemeral_addr, i2p_b32_from_dest, jsonrpc, localaddresses, require_env,
-    socks_electrum_rpc, socks_http_get, spawn_node, wait_file, wait_i2p_stream, wait_jsonrpc,
-    wait_onion_port, wait_p2p_onion, wait_peer_network, wait_socks_onion, write_rpc_token,
-    OverlayEnv,
+    base_node, ephemeral_addr, i2p_b32_from_dest, jsonrpc, jsonrpc_try, localaddresses,
+    require_env, socks_electrum_rpc, socks_http_get, spawn_node, wait_file, wait_i2p_stream,
+    wait_jsonrpc, wait_onion_port, wait_p2p_onion, wait_peer_network, wait_socks_onion,
+    write_rpc_token, OverlayEnv,
 };
 use rbitcoin_test::TempDir;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn tor_b(env: &OverlayEnv, datadir: &std::path::Path, rpc: SocketAddr) -> NodeConfig {
     write_rpc_token(datadir);
@@ -381,4 +382,19 @@ async fn ephemeral_socks_isolated_broadcast() {
 
     a.stop().await;
     b.stop().await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "rpc getblockcount json:")]
+async fn jsonrpc_try_panics_when_the_body_is_not_json() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 2048];
+        let _ = sock.read(&mut buf).await;
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope";
+        sock.write_all(resp).await.unwrap();
+    });
+    let _ = jsonrpc_try(addr, "getblockcount", serde_json::json!([])).await;
 }
