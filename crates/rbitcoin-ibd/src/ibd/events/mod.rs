@@ -1126,7 +1126,7 @@ pub fn apply_soft_wire_reject(
     let bad_prev = super::reorg::is_bad_prev_err(err);
     // A BadPrev whose parent is the current tip is a missing header slot,
     // not a competing fork. Keep the hash so densify asks for it again.
-    let retry_tip_child = bad_prev && prev_is_hub_tip(st, hub, hash);
+    let retry_tip_child = bad_prev && prev_continues_own_path(st, hub, hash, height);
     if bad_prev {
         st.headers_done = false;
         if let Some(h) = hub {
@@ -1200,24 +1200,32 @@ pub fn apply_soft_wire_reject(
     }
 }
 
-/// True when `hash` chains directly off the hub tip.
+/// True when `hash` chains off the hub tip, or off this path's own block at
+/// `height - 1`. Load may stamp a child while its parent is still being
+/// written, and that reject can arrive before the parent's `Accepted`.
 #[doc(hidden)]
-pub fn prev_is_hub_tip(
+pub fn prev_continues_own_path(
     st: &IbdWorkState,
     hub: Option<&rbitcoin_net::chain::ChainHub>,
     hash: BlockHash,
+    height: u32,
 ) -> bool {
     let Some(h) = hub else {
         return false;
     };
-    let Some(tip) = h.tip_hash() else {
-        return false;
-    };
-    st.path_prev
+    let Some(prev) = st
+        .path_prev
         .get(&hash)
         .copied()
         .or_else(|| h.prev_of(&hash))
-        == Some(tip)
+    else {
+        return false;
+    };
+    h.tip_hash() == Some(prev)
+        || height
+            .checked_sub(1)
+            .and_then(|below| st.height_to_hash.get(&below))
+            == Some(&prev)
 }
 
 /// Core `MaybePunishNodeForBlock` (`BLOCK_MUTATED`): drop the sender and

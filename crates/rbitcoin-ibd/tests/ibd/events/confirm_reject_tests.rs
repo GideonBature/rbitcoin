@@ -296,6 +296,42 @@ fn bad_prev_on_the_tip_child_is_fetched_again() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Load can stamp tip+2 while tip+1 is still committing, and its BadPrev
+/// can reach IBD before tip+1's `Accepted`. The parent is this path's own
+/// block at the height below, so it is not a fork: the hash is fetched
+/// again the same as a tip child. Dropping it left `asked` empty.
+#[test]
+fn bad_prev_racing_its_parents_commit_is_fetched_again() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("bad-prev-parent-commit");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let t = hub.tip_height().unwrap();
+    let (parent, hash) = (h(0x45), h(0x46));
+    let mut st = IbdWorkState::new(Vec::new(), Some(tip), Some(t));
+    st.record_height(parent, t + 1);
+    st.note_path_prev(parent, tip);
+    st.record_height(hash, t + 2);
+    st.note_path_prev(hash, parent);
+    st.densify_scan_lo = t + 5;
+    st.densify_ready_through = t + 5;
+    apply_confirm_reject(
+        &mut st,
+        t + 2,
+        hash,
+        "consensus: unexpected previous header",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    assert_eq!(st.height_to_hash.get(&(t + 2)), Some(&hash));
+    assert!(st.body.is_missing(&hash));
+    assert!(
+        st.densify_scan_lo <= t + 2,
+        "scan_lo={}",
+        st.densify_scan_lo
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A tip-child BadPrev that a new body cannot fix stops after three tries.
 /// The hash is not fetched again and is not blacklisted.
 #[test]
@@ -3005,13 +3041,14 @@ fn load_engine_fault_near_the_tip_retakes_the_wave() {
 /// tip+1 and tip+2 load in one wave, and pin cannot read the coinbase
 /// outputs they spend. A pin-stage engine fault can be a stale-plan race,
 /// so the retry runs one block at a time and names tip+1 alone. Once the
-/// outputs read again, both blocks connect.
+/// outputs read again, both blocks connect. A load reject may drop tip+2
+/// for a fetch from peers (`docs/concurrency.md`), so IBD runs after the
+/// mend and serves that fetch.
 #[test]
 fn batched_pin_engine_fault_retries_one_block_at_a_time() {
     use bitcoin::ScriptBuf;
     use rbitcoin_consensus::mine_regtest_paying;
     use rbitcoin_ibd::ibd::state::InflightReq;
-    use std::time::{Duration, Instant};
 
     let mut rig = WireRig::new("pin-engine-fault", 1);
     let (t, cbs) = (rig.t, rig.cbs.clone());
@@ -3052,16 +3089,10 @@ fn batched_pin_engine_fault_retries_one_block_at_a_time() {
             (h1, ConfirmRejectClass::EngineFault, 1)
         ]
     );
-    let rx = &rig.engine.as_ref().unwrap().1;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while rig.hub.tip_hash() != Some(h2) {
-        assert!(
-            Instant::now() < deadline,
-            "stall at {:?}",
-            rig.hub.tip_height()
-        );
-        let _ = rx.recv_timeout(Duration::from_millis(5));
-    }
+    rig.pump(
+        |_, hash| if hash == h1 { b1.clone() } else { b2.clone() },
+        |_, hub, _| hub.tip_hash() == Some(h2),
+    );
     rig.finish();
 }
 
