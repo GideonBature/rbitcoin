@@ -212,8 +212,12 @@ a production line already counts that line, so a second in-crate `#[test]`
 is not required to make LCOV see it. Library tests live in each crate's
 `tests/suite` and link the normal rlib, so a `#[cfg(test)]` arm in `src/`
 is no longer how those tests compile. `#[cfg(debug_assertions)]` hooks in
-production files still count. llvm-cov hit counts jitter tens of lines on the same
-tree; the floor is the gate, not a never-falls ratchet vs master.
+production files still count. Those hooks also mean the suites link only in
+the `dev` / `test` profiles: `cargo test --release` does not build. Release
+correctness is `cargo check --release --workspace --exclude rbitcoin-bench`
+(`qc`) plus the labeled harnesses that run the shipped binaries. llvm-cov
+hit counts jitter tens of lines on the same tree; the floor is the gate,
+not a never-falls ratchet vs master.
 
 The README badge and rbitcoin.org figure are the last **green `master`**
 `coverage` job (`badges` branch `coverage.json`, Shields endpoint). The

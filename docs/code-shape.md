@@ -90,6 +90,12 @@ Complexity still drops because the types got better, not because clippy
 denied a Core-faithful loop. That is a **site** allow on that function, not
 a standing workspace `cognitive_complexity` allow.
 
+Suite roots (`tests/suite.rs`) carry no `#![allow(...)]` either: the test
+tree is linted like `src/`. Visibility for the suite is `#[doc(hidden)]
+pub`, and test hooks in production files are opt-in
+`#[cfg(debug_assertions)]`; the rule and its limits are
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) principle 11.
+
 The workspace allow list is empty. `cognitive_complexity` is workspace
 `warn` (nursery opt-in). A leftover Core-faithful loop or dense surface
 test is a **site** allow — do not peel **R-10**, flatten io_uring, or
