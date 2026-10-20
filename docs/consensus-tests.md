@@ -20,7 +20,7 @@ cargo test -p rbitcoin-consensus --test suite core_bip341 -- --nocapture
 cargo test -p rbitcoin-consensus --test suite script_corpus_rows_match_our_interpreter -- --quiet
 cargo test --manifest-path script-oracle/Cargo.toml --quiet
 cargo test -p rbitcoin-consensus --test suite block_866342 -- --nocapture
-cargo test -p rbitcoin-consensus --test script_edge_fixtures
+cargo test -p rbitcoin-consensus --test suite script_edge
 # broader integration still covers connect success paths:
 cargo test -p rbitcoin-test --test suite scenarios::consensus_
 ```
