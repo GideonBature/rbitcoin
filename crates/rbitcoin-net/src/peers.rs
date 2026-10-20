@@ -202,12 +202,15 @@ impl DialTarget {
         self.version_socket()
     }
 
+    /// An overlay host is its own `NetAddr`. A DNS name (a `--proxy` seed
+    /// addr-fetch) has no address until the proxy resolves it, so it is the
+    /// [`Self::version_socket`] `0.0.0.0:port`.
     pub fn net_addr(&self) -> crate::NetAddr {
         match self {
             Self::Socket(addr) => crate::NetAddr::from_socket(*addr),
             Self::Domain { host, port } => format!("{host}:{port}")
                 .parse()
-                .expect("DialTarget::Domain is host:port from overlay NetAddr"),
+                .unwrap_or_else(|_| crate::NetAddr::from_socket(self.version_socket())),
         }
     }
 }

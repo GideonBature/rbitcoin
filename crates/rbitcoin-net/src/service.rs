@@ -699,9 +699,15 @@ async fn prepare_outbound_session(
     if peers.net_discouraged(peer_net) {
         return Err(NetError::Protocol("discouraged"));
     }
+    let connect = async {
+        match &peer {
+            DialTarget::Socket(_) => dialer.connect_net(peer_net).await,
+            DialTarget::Domain { host, port } => dialer.connect_domain(host, *port).await,
+        }
+    };
     let stream = tokio::time::timeout(
         crate::connect_timeout_for(peer_net, OUTBOUND_CONNECT_TIMEOUT),
-        dialer.connect_net(peer_net),
+        connect,
     )
     .await
     .map_err(|_| NetError::Timeout)??;
@@ -946,6 +952,77 @@ mod tests {
             matches!(err, NetError::Protocol("discouraged")),
             "feeler dialed a discouraged address, got {err:?}"
         );
+    }
+
+    /// `--proxy` turns the DNS seeds into addr-fetch dials by name. The
+    /// proxy resolves the name, so the node holds no address for it.
+    #[tokio::test]
+    async fn proxied_dns_seed_dials_by_name_through_socks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let socks = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 2];
+            s.read_exact(&mut greeting).await.unwrap();
+            let mut methods = vec![0u8; greeting[1] as usize];
+            s.read_exact(&mut methods).await.unwrap();
+            if methods.contains(&0x02) {
+                s.write_all(&[5, 0x02]).await.unwrap();
+                let mut ulen = [0u8; 2];
+                s.read_exact(&mut ulen).await.unwrap();
+                let mut user = vec![0u8; ulen[1] as usize];
+                s.read_exact(&mut user).await.unwrap();
+                let mut plen = [0u8; 1];
+                s.read_exact(&mut plen).await.unwrap();
+                let mut pass = vec![0u8; plen[0] as usize];
+                s.read_exact(&mut pass).await.unwrap();
+                s.write_all(&[1, 0]).await.unwrap();
+            } else {
+                s.write_all(&[5, 0x00]).await.unwrap();
+            }
+            let mut req = [0u8; 5];
+            s.read_exact(&mut req).await.unwrap();
+            assert_eq!(req[3], 3, "ATYP domain");
+            let mut host = vec![0u8; req[4] as usize];
+            s.read_exact(&mut host).await.unwrap();
+            let mut port = [0u8; 2];
+            s.read_exact(&mut port).await.unwrap();
+            s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            (String::from_utf8(host).unwrap(), u16::from_be_bytes(port))
+        });
+        let peers = crate::peers::PeerHub::new();
+        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("proxied-dns-seed");
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_outbound_session_with_abort(
+                crate::peers::DialTarget::Domain {
+                    host: "seed.example".into(),
+                    port: 8333,
+                },
+                None,
+                Magic::REGTEST,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                std::sync::Arc::new(hub),
+                peers,
+                "/rbitcoin:test/".into(),
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                crate::peers::PeerConnType::AddrFetch,
+                rx,
+                crate::socks::Dialer::socks(proxy, false),
+            ),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(dir.path());
+        assert!(
+            result
+                .expect("the session ends when the proxy closes")
+                .is_err(),
+            "the proxy closed before VERSION"
+        );
+        assert_eq!(socks.await.unwrap(), ("seed.example".to_string(), 8333));
     }
 
     /// Dial and connect-retry block on a channel and a tick. Shutdown must
