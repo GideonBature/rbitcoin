@@ -7,4 +7,6 @@ mod cross_surface;
 mod electrum_protocol;
 mod end_of_ibd;
 mod integration_multinode;
+mod jsonrpc;
+mod mine;
 mod scenarios;

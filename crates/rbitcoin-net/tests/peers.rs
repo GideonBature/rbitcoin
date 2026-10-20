@@ -948,3 +948,24 @@ fn getaddr_omits_unroutable_clearnet() {
 }
 
 include!("overlay_addrman_journey.rs");
+
+#[test]
+fn external_ip_uses_the_clearnet_bogon_filter() {
+    let blocked = [
+        IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)),
+        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1)),
+    ];
+    for ip in blocked {
+        assert!(
+            !ip_is_advertisable(&ip, true),
+            "{ip} must not be self-announced"
+        );
+    }
+    assert!(ip_is_advertisable(
+        &IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+        false
+    ));
+}

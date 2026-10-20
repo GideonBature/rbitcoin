@@ -2103,3 +2103,351 @@ fn a_full_pinned_slot_table_evicts_one_chunk_then_stops() {
 }
 
 include!("accept_life_journey.rs");
+
+#[test]
+fn promote_keeps_the_announcer_of_a_multi_parent_orphan() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent_a = spend_tx(ops[0], 99_000);
+    let parent_b = spend_tx(ops[1], 99_000);
+    let child = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_a.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_b.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![TxOut {
+            value: Amount::from_sat(197_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let child_id = child.compute_txid();
+    let mut missing = BTreeSet::new();
+    missing.insert(parent_a.compute_txid());
+    missing.insert(parent_b.compute_txid());
+    mp.park_orphan_from(&child, missing, Some(4));
+    mp.accept_tx(&parent_a, &utxos, TIP_OK)
+        .expect("first parent");
+    assert_eq!(
+        mp.orphanage.announcers_of(&child_id),
+        vec![4],
+        "the repark must keep the announcing peer"
+    );
+    mp.orphanage.erase_for_peer(4);
+    assert!(
+        !mp.orphanage.contains(&child_id),
+        "a disconnect of the only announcer must drop the orphan"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn disconnect_while_the_orphan_is_out_is_not_reparked() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent_a = spend_tx(ops[0], 99_000);
+    let parent_b = spend_tx(ops[1], 99_000);
+    let child = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_a.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_b.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![TxOut {
+            value: Amount::from_sat(197_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let child_id = child.compute_txid();
+    let mut missing = BTreeSet::new();
+    missing.insert(parent_a.compute_txid());
+    missing.insert(parent_b.compute_txid());
+    mp.park_orphan_from(&child, missing.clone(), Some(4));
+    mp.orphanage.add_announcer(&child_id, 8);
+    let _taken = mp.orphanage.take_children_of(&parent_a.compute_txid());
+    mp.orphanage.erase_for_peer(4);
+    let _ = mp.park_announced(&child, missing.clone(), &[4, 8]);
+    assert_eq!(
+        mp.orphanage.announcers_of(&child_id),
+        vec![8],
+        "only the peer that is still connected is restored"
+    );
+    let _taken = mp.orphanage.take_children_of(&parent_b.compute_txid());
+    mp.orphanage.erase_for_peer(8);
+    let _ = mp.park_announced(&child, missing, &[8]);
+    assert!(
+        !mp.orphanage.contains(&child_id),
+        "the last live announcer disconnecting while the orphan is out drops it on repark"
+    );
+    let _ = utxos;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn older_promote_forget_does_not_clear_a_newer_take() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent_a = spend_tx(ops[0], 99_000);
+    let parent_b = spend_tx(ops[1], 99_000);
+    let child = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_a.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_b.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![TxOut {
+            value: Amount::from_sat(197_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let child_id = child.compute_txid();
+    let mut missing = BTreeSet::new();
+    missing.insert(parent_a.compute_txid());
+    missing.insert(parent_b.compute_txid());
+    mp.park_orphan_from(&child, missing.clone(), Some(4));
+    let first = mp.orphanage.take_children_of(&parent_a.compute_txid());
+    let old_gen = first[0].taken_gen;
+    let _ = mp.park_announced(&child, missing.clone(), &[4]);
+    let second = mp.orphanage.take_children_of(&parent_b.compute_txid());
+    assert_eq!(
+        second.len(),
+        1,
+        "the second promote took the reparked child"
+    );
+    mp.orphanage.forget_taken_gen(&child_id, old_gen);
+    mp.orphanage.erase_for_peer(4);
+    let _ = mp.park_announced(&child, missing, &[4]);
+    assert!(
+        !mp.orphanage.contains(&child_id),
+        "a forget from the first promote must not drop the second promote's disconnect"
+    );
+    let _ = utxos;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn package_lift_disconnect_is_not_reparked() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent_a = spend_tx(ops[0], 99_000);
+    let parent_b = spend_tx(ops[1], 99_000);
+    let child = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_a.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: OutPoint {
+                    txid: parent_b.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![TxOut {
+            value: Amount::from_sat(197_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let child_id = child.compute_txid();
+    let mut missing = BTreeSet::new();
+    missing.insert(parent_a.compute_txid());
+    missing.insert(parent_b.compute_txid());
+    mp.park_orphan_from(&child, missing.clone(), Some(4));
+    mp.orphanage.add_announcer(&child_id, 8);
+    let lifted = mp.lift_parked_member(&child).unwrap();
+    mp.orphanage.erase_for_peer(4);
+    let _ = mp.park_announced(&lifted.tx, missing.clone(), &lifted.announcers);
+    assert_eq!(
+        mp.orphanage.announcers_of(&child_id),
+        vec![8],
+        "a disconnect during a package lift drops that peer"
+    );
+    let lifted = mp.lift_parked_member(&child).unwrap();
+    mp.orphanage.erase_for_peer(8);
+    let _ = mp.park_announced(&lifted.tx, missing, &lifted.announcers);
+    assert!(
+        !mp.orphanage.contains(&child_id),
+        "the last announcer disconnecting during a package lift drops the orphan"
+    );
+    let _ = utxos;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn package_admit_drops_the_inflight_row() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = spend_tx(ops[0], 99_000);
+    let child = spend_tx(
+        OutPoint {
+            txid: parent.compute_txid(),
+            vout: 0,
+        },
+        98_000,
+    );
+    let child_id = child.compute_txid();
+    let mut missing = BTreeSet::new();
+    missing.insert(parent.compute_txid());
+    mp.park_orphan_from(&child, missing, Some(4));
+    mp.accept_package(&[parent, child], &utxos, TIP_OK)
+        .expect("package admits the parked child");
+    assert!(mp.graph.contains(&child_id));
+    assert!(
+        !mp.orphanage.has_announcer(4),
+        "an admitted lift must not keep the peer in the in-flight map"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn package_rollback_admit_drops_the_inflight_row() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000, 50_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let parent = spend_tx(ops[0], 99_000);
+    mp.accept_tx(&parent, &utxos, TIP_OK).expect("parent");
+    let child = spend_tx(
+        OutPoint {
+            txid: parent.compute_txid(),
+            vout: 0,
+        },
+        98_000,
+    );
+    let child_id = child.compute_txid();
+    let mut missing = BTreeSet::new();
+    missing.insert(parent.compute_txid());
+    mp.park_orphan_from(&child, missing, Some(4));
+    let bad = spend_tx(ops[1], 60_000);
+    let err = mp
+        .accept_package(&[child, bad], &utxos, TIP_OK)
+        .expect_err("the overspend fails the package");
+    assert!(
+        mp.graph.contains(&child_id),
+        "the lifted child is admitted on its own, got {err}"
+    );
+    assert!(
+        !mp.orphanage.has_announcer(4),
+        "that admit must not keep the peer in the in-flight map"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn package_rollback_reject_drops_the_inflight_row() {
+    use bitcoin::WPubkeyHash;
+
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let spk = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x11; 20]));
+    let parent = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: ops[0],
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(99_000),
+            script_pubkey: spk,
+        }],
+    };
+    mp.accept_tx(&parent, &utxos, TIP_OK).expect("parent");
+    let child = spend_tx(
+        OutPoint {
+            txid: parent.compute_txid(),
+            vout: 0,
+        },
+        98_000,
+    );
+    let child_id = child.compute_txid();
+    let mut missing = BTreeSet::new();
+    missing.insert(parent.compute_txid());
+    mp.park_orphan_from(&child, missing, Some(4));
+    let err = mp
+        .accept_package(std::slice::from_ref(&child), &utxos, TIP_OK)
+        .expect_err("empty witness cannot spend the parent");
+    assert!(
+        matches!(err, AcceptError::Script(_)),
+        "script failure, got {err}"
+    );
+    assert!(!mp.graph.contains(&child_id));
+    assert!(
+        !mp.orphanage.contains(&child_id),
+        "a script failure must not put the lifted child back"
+    );
+    assert!(
+        !mp.orphanage.has_announcer(4),
+        "a rejected lift must not keep its peer"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

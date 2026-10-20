@@ -421,3 +421,46 @@ async fn redial_skips_a_connect_target_still_dialling() {
     drop(node);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+#[test]
+fn accept_retries_a_full_fd_table_and_stops_on_a_dead_listener() {
+    let aborted = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "reset");
+    let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "signal");
+    let emfile = std::io::Error::from_raw_os_error(24);
+    let enfile = std::io::Error::from_raw_os_error(23);
+    let dead = std::io::Error::new(std::io::ErrorKind::InvalidInput, "closed");
+    assert!(!accept_error_ends_listen(&aborted));
+    assert!(!accept_error_ends_listen(&interrupted));
+    assert!(!accept_error_ends_listen(&emfile));
+    assert!(!accept_error_ends_listen(&enfile));
+    assert!(accept_error_ends_listen(&dead));
+}
+
+#[tokio::test]
+async fn shutdown_finishes_without_the_dial_grace() {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("rbitcoin-shutdown-grace-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let node = P2PNode::start_outbound_only(
+        Query::open_or_create_tiny(&dir).unwrap(),
+        ChainParams::regtest(),
+        Milestone::NONE,
+        "/rbitcoin:test/".into(),
+        0,
+        rbitcoin_net::socks::Dialer::Direct,
+    )
+    .await
+    .unwrap();
+    let t0 = tokio::time::Instant::now();
+    node.shutdown().await;
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "dial and retry must observe shutdown, took {elapsed:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

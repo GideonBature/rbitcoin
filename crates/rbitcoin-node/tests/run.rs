@@ -667,3 +667,30 @@ fn enter_tip_mode_cancel_does_not_name_missing_cold_progress() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn max_run_deadline_wakes_without_the_perf_tick() {
+    let mut perf = tokio::time::interval(Duration::from_secs(30));
+    perf.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    perf.tick().await;
+    let mut stale = tokio::time::interval(Duration::from_secs(30));
+    stale.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    stale.tick().await;
+    let (_tx, mut tip_rx) = broadcast::channel::<TipEvent>(8);
+    let start = Instant::now();
+    let wake = tokio::time::timeout(
+        Duration::from_millis(500),
+        tip_follow_next_wake(
+            std::future::pending(),
+            None,
+            &mut perf,
+            &mut tip_rx,
+            &mut stale,
+            Some(Instant::now() + Duration::from_millis(40)),
+        ),
+    )
+    .await
+    .expect("deadline must wake before the perf tick");
+    assert!(matches!(wake, TipFollowWake::Stop));
+    assert!(start.elapsed() < Duration::from_millis(200));
+}

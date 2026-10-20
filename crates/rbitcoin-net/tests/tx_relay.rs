@@ -2544,12 +2544,20 @@ fn hub_package_admits_its_parked_child() {
             "spend of the missing parent must park, got {err:?}"
         );
     }
+    assert!(
+        hub.add_orphan_announcer(&child_id, 4),
+        "the parked child takes the peer"
+    );
     let accepted = hub
         .accept_package(&[parent.clone(), child.clone()])
         .expect("hub package contains the parked child");
     assert_eq!(accepted.len(), 2);
     assert!(hub.try_contains(&parent_id));
     assert!(hub.try_contains(&child_id));
+    assert!(
+        !hub.lock_write().orphanage.has_announcer(4),
+        "admitting the lifted child must drop its in-flight peer"
+    );
     assert!(
         hub.try_contains(&sibling_id),
         "a parked sibling outside the package must still be admitted"

@@ -621,7 +621,8 @@ pub fn compiled_with_test_hooks() -> bool {
 /// `ConnectionAborted` is a peer that vanished during accept.
 /// `Interrupted` is a signal. `EMFILE` / `ENFILE` (24 / 23) clear once a
 /// socket is closed. Anything else, including a closed listener, ends accept.
-pub(crate) fn accept_error_ends_listen(err: &std::io::Error) -> bool {
+#[doc(hidden)]
+pub fn accept_error_ends_listen(err: &std::io::Error) -> bool {
     if matches!(
         err.kind(),
         std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::Interrupted

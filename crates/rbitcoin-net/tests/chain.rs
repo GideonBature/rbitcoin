@@ -1333,6 +1333,12 @@ fn chain_edges_pin_work_headers_and_reopen() {
         Some("valid-headers"),
         "a held side block outranks a header-only label"
     );
+    hub.reconsider_block(side.block_hash()).unwrap();
+    assert_eq!(
+        side_status(&hub).as_deref(),
+        Some("valid-headers"),
+        "a block that never connected is not a valid fork after reconsider"
+    );
     hub.invalidate_block(side.block_hash()).unwrap();
     assert_eq!(
         side_status(&hub).as_deref(),
@@ -4046,4 +4052,89 @@ fn spend_out(txid: bitcoin::Txid, value: u64) -> Transaction {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     }
+}
+
+#[test]
+fn reconsider_skips_a_branch_that_fails() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let t0 = hub.tip_header().unwrap().time;
+    let mut a = Vec::new();
+    let mut prev = gen;
+    for h in 1..=4u32 {
+        let b = mine(prev, t0 + h, h);
+        prev = b.block_hash();
+        a.push(prev);
+        hub.accept_block(b).unwrap();
+    }
+    let mut bad = mine(a[0], t0 + 20, 2);
+    let cb = &mut bad.txdata[0].output[0].value;
+    *cb = Amount::from_sat(cb.to_sat() + 1);
+    bad.header.merkle_root = bad.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut bad.header);
+    let bad_hash = bad.block_hash();
+    let b3 = mine(bad_hash, t0 + 21, 3);
+    let b4 = mine(b3.block_hash(), t0 + 22, 4);
+    for b in [bad, b3, b4] {
+        let _ = hub.accept_received_block(b);
+    }
+    assert_eq!(hub.tip_hash(), Some(a[3]));
+    let _ = hub.invalidate_block(a[1]);
+    assert_eq!(hub.tip_hash(), Some(a[0]));
+    hub.reconsider_block(a[1]).unwrap();
+    assert_eq!(hub.tip_hash(), Some(a[3]));
+    assert!(hub.is_block_invalid(&bad_hash));
+
+    // A held child of a4 whose time is below the median fails its header
+    // check. That is not a mark, and a4 under it still connects.
+    hub.invalidate_block(a[3]).unwrap();
+    assert_eq!(hub.tip_hash(), Some(a[2]));
+    let late = mine(a[3], t0, 5);
+    let _ = hub.accept_received_block(late);
+    hub.reconsider_block(a[3]).unwrap();
+    assert_eq!(hub.tip_hash(), Some(a[3]));
+
+    // A tip child that failed connect keeps its archived body. It was
+    // never connected, so reconsider does not make it a valid fork.
+    let mut bad5 = mine(a[3], t0 + 30, 5);
+    let cb = &mut bad5.txdata[0].output[0].value;
+    *cb = Amount::from_sat(cb.to_sat() + 1);
+    bad5.header.merkle_root = bad5.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut bad5.header);
+    let bad5_hash = bad5.block_hash();
+    assert!(hub.accept_received_block(bad5).is_err());
+    let a5 = mine_distinct(a[3], t0 + 31, 5, &[bad5_hash]);
+    let a6 = mine(a5.block_hash(), t0 + 32, 6);
+    hub.accept_block(a5).unwrap();
+    hub.accept_block(a6).unwrap();
+    hub.invalidate_block(bad5_hash).unwrap();
+    hub.reconsider_block(bad5_hash).unwrap();
+    assert!(
+        !hub.fork_tips.read().unwrap().iter().any(|h| h == bad5_hash),
+        "a block that never connected is not kept as a fork tip"
+    );
+
+    // Last, because it truncates the store: a fault reading chain work
+    // while ranking is an error. Its invalidate path is gone, so the
+    // restored tip is still kept as a fork tip to return to.
+    let tip = hub.tip_hash().unwrap();
+    let tip_body = hub
+        .block_at_height(hub.tip_height().unwrap())
+        .unwrap()
+        .unwrap();
+    hub.invalidate_block(tip).unwrap();
+    hub.hold_unconnected_body(tip_body);
+    hub.chain_work_prefix.write().unwrap().clear();
+    let header_body = dir.path().join("header.body");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&header_body)
+        .unwrap()
+        .set_len(16)
+        .unwrap();
+    let err = hub.reconsider_block(tip).unwrap_err();
+    assert!(err.is_local_fault(), "{err}");
+    assert!(hub.fork_tips.read().unwrap().iter().any(|h| h == tip));
+    let _ = std::fs::remove_dir_all(dir);
 }
