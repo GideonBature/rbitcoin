@@ -706,7 +706,10 @@ async fn max_run_deadline_wakes_without_the_perf_tick() {
 /// reply is learned. The wait re-queues the seeds while no addr-fetch
 /// session is live, ignores a book filled only by a self-announce, and
 /// ends on that reply, shutdown, or its deadline.
-#[tokio::test]
+///
+/// The clock is paused. Polls still happen before the 400 ms deadline, so
+/// a self-announce cannot pass as a reply, and that wait is not wall time.
+#[tokio::test(start_paused = true)]
 async fn proxy_seed_wait_ends_on_a_learned_reply_shutdown_or_deadline() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
