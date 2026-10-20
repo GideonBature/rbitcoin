@@ -623,6 +623,24 @@ fn blocksonly_sendraw_admits_valid_tx() {
 }
 
 #[test]
+fn relay_off_empty_mempool_is_listed() {
+    let (ctx, dir) = ctx_empty();
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
+    assert_eq!(raw, json!([]), "{raw}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn relay_off_empty_pool_serves_template() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap();
+    assert!(gbt.get("height").is_some(), "{gbt}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn relay_off_refuses_pool_listing_and_mines_coinbase_only() {
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
     let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
@@ -717,25 +735,32 @@ fn template_follows_blocks_the_hub_connects() {
 }
 
 #[test]
-fn blocksonly_refuses_template_mempool_and_generate() {
+fn blocksonly_lists_mempool_mines_and_refuses_template() {
     let (mut ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
     ctx.blocksonly = true;
     ctx.mempool.as_ref().unwrap().set_relay_enabled(true);
     let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
     let ok = dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
-    assert_eq!(ok.as_str().unwrap(), &spend.compute_txid().to_string());
-    for (method, params) in [
-        ("getblocktemplate", vec![json!({"rules": ["segwit"]})]),
-        ("getrawmempool", vec![]),
-        ("generate", vec![json!(1)]),
-    ] {
-        let err = dispatch(&ctx, method, params).unwrap_err();
-        assert_ne!(err["code"], -10, "{method}: {err}");
-        assert!(
-            err["message"].as_str().unwrap_or("").contains("blocksonly"),
-            "{method}: {err}"
-        );
-    }
+    let txid = spend.compute_txid().to_string();
+    assert_eq!(ok.as_str().unwrap(), &txid);
+    let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
+    assert_eq!(raw, json!([txid]), "{raw}");
+    let gbt = dispatch(&ctx, "getblocktemplate", vec![json!({"rules": ["segwit"]})]).unwrap_err();
+    assert_ne!(gbt["code"], -10, "{gbt}");
+    assert!(
+        gbt["message"].as_str().unwrap_or("").contains("blocksonly"),
+        "{gbt}"
+    );
+    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    assert_eq!(hashes.as_array().map(Vec::len), Some(1), "{hashes}");
+    let hash = hashes[0].as_str().unwrap();
+    let block = dispatch(&ctx, "getblock", vec![json!(hash)]).unwrap();
+    assert_eq!(block["nTx"].as_u64(), Some(2), "{block}");
+    assert!(!ctx
+        .mempool
+        .as_ref()
+        .unwrap()
+        .contains(&spend.compute_txid()));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

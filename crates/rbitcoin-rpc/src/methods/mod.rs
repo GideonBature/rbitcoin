@@ -238,11 +238,27 @@ impl RpcContext {
     }
 }
 
+/// An empty catch-up pool has no confirmed transactions left in it.
+pub(crate) fn catch_up_pool_empty(ctx: &RpcContext) -> bool {
+    ctx.mempool.as_ref().is_none_or(|m| m.live_count() == 0)
+}
+
+/// `getblocktemplate` on a catch-up pool that still holds transactions, and
+/// on `-blocksonly`. An empty catch-up pool is served: regtest builds the
+/// next block before the tip is recent.
+pub(crate) fn refuse_unmaintained_template(ctx: &RpcContext) -> Result<(), Value> {
+    match ctx.pool_listing() {
+        PoolListing::Ready => Ok(()),
+        PoolListing::Downloading if catch_up_pool_empty(ctx) => Ok(()),
+        other => Err(pool_listing_unavailable(other)),
+    }
+}
+
 pub(crate) fn pool_listing_unavailable(listing: PoolListing) -> Value {
     match listing {
         PoolListing::Blocksonly => rpc_error(
             ERR_MISC,
-            "blocksonly: this node does not serve a block template or the raw mempool",
+            "blocksonly: this node does not serve a block template",
         ),
         PoolListing::Downloading => rpc_error(
             ERR_CLIENT_IN_INITIAL_DOWNLOAD,

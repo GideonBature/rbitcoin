@@ -207,7 +207,11 @@ pub(crate) fn mempool_graph_json(mp: &MempoolHub, txid: &Txid, fee: u64, weight:
 
 pub(crate) fn getrawmempool(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
     let listing = ctx.pool_listing();
-    if !matches!(listing, PoolListing::Ready) {
+    // Core lists this during catch-up. A nonempty catch-up pool may still
+    // hold confirmed transactions, so that case stays refused. `-blocksonly`
+    // lists what RPC admitted.
+    let stale_catch_up = matches!(listing, PoolListing::Downloading) && !catch_up_pool_empty(ctx);
+    if stale_catch_up {
         return Err(pool_listing_unavailable(listing));
     }
     params.reject_unknown(&["verbose", "mempool_sequence"])?;
