@@ -3470,7 +3470,7 @@ fn spindle_mark_records_only_while_armed() {
         spindle_mark, spindle_trace_arm, spindle_trace_clear, spindle_trace_snapshot,
     };
 
-    spindle_trace_clear();
+    // Fresh test thread: the default state must already be off.
     spindle_mark("unarmed");
     assert!(spindle_trace_snapshot().is_empty());
 

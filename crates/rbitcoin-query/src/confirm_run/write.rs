@@ -9,8 +9,6 @@ thread_local! {
         RefCell::new(super::phases::StructuralReuse::default());
 }
 
-// Opt-in: a debug node runs `spindle_mark` on every batch and nothing
-// reads the trace, so it records only after `spindle_trace_arm`.
 #[cfg(debug_assertions)]
 thread_local! {
     static SPINDLE_TRACE_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -25,7 +23,9 @@ pub fn spindle_mark(_ev: &'static str) {
     }
 }
 
-/// Start recording on this thread, from an empty trace.
+/// Start recording on this thread, from an empty trace. A debug node runs
+/// `spindle_mark` on every batch and nothing in the node reads the trace, so
+/// it records only after this call.
 #[cfg(debug_assertions)]
 pub fn spindle_trace_arm() {
     SPINDLE_TRACE.with(|trace| trace.borrow_mut().clear());
