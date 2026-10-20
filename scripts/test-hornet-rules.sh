@@ -13,10 +13,11 @@ fi
 
 echo "== structure, header, finality, sigops =="
 cargo test -p rbitcoin-consensus --test suite -- \
-  structure_rule_tests \
   sigop_cost_tests \
   finality_tests \
-  median_time_past_tests \
+  median_time_past_tests
+cargo test -p rbitcoin-query --test suite -- \
+  structure_rule_tests \
   assemble_second_block_rejects_stale_nversion
 
 echo "== connect / header journey =="

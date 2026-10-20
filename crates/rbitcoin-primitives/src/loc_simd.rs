@@ -73,7 +73,7 @@ pub fn inclusive_u8x8_times_8(st: &[u8; 8], no: &[u8; 8]) -> ([u32; 8], [u32; 8]
 /// # Safety
 /// `p` must be readable for 16 bytes.
 #[cfg(target_arch = "x86_64")]
-pub unsafe fn sse2_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool) {
+unsafe fn sse2_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool) {
     use std::arch::x86_64::{
         __m128i, _mm_and_si128, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8,
         _mm_packus_epi16, _mm_set1_epi16, _mm_setzero_si128, _mm_srli_epi16, _mm_storel_epi64,
@@ -97,7 +97,7 @@ pub unsafe fn sse2_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], b
 /// `p` must be readable for 16 bytes.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-pub unsafe fn neon_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool) {
+unsafe fn neon_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], bool) {
     use std::arch::aarch64::{vceq_u8, vdup_n_u8, vld2_u8, vmaxv_u8, vst1_u8};
     let v = vld2_u8(p);
     let z = vdup_n_u8(0);
@@ -113,7 +113,7 @@ pub unsafe fn neon_deinterleave_pairs_u8x8(p: *const u8) -> ([u8; 8], [u8; 8], b
 /// `p` must be readable for 8 bytes.
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub unsafe fn sse2_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
+unsafe fn sse2_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
     use std::arch::x86_64::{
         __m128i, _mm_add_epi32, _mm_cvtsi128_si32, _mm_loadl_epi64, _mm_set1_epi32,
         _mm_setzero_si128, _mm_slli_epi32, _mm_slli_si128, _mm_srli_si128, _mm_storeu_si128,
@@ -141,7 +141,7 @@ pub unsafe fn sse2_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 #[inline]
-pub unsafe fn neon_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
+unsafe fn neon_u8x8_times_8_inclusive(p: *const u8) -> [u32; 8] {
     use std::arch::aarch64::{
         uint32x4_t, vaddq_u32, vdupq_n_u32, vextq_u32, vget_high_u16, vget_low_u16, vgetq_lane_u32,
         vld1_u8, vmovl_u16, vmovl_u8, vshlq_n_u32, vst1q_u32,
