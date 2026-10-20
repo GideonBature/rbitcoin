@@ -241,6 +241,8 @@ pub struct Invalidated {
     /// Operator invalidations are not: their paths are in-process only.
     pub failed: RwLock<Vec<BlockHash>>,
     pub file: std::path::PathBuf,
+    /// `failed` holds a mark the last write did not put on disk.
+    pub pending: std::sync::atomic::AtomicBool,
 }
 
 /// Refusal of a hash already marked invalid. Not a fresh validation result.
@@ -316,20 +318,26 @@ impl Invalidated {
             paths: RwLock::new(Vec::new()),
             failed: RwLock::new(failed),
             file,
+            pending: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    /// True once `hash` is in the file on disk.
+    /// True once `hash`, and every mark before it, is in the file on disk. A
+    /// write that failed before is tried again.
     fn keep_failed(&self, hash: BlockHash) -> bool {
+        use std::sync::atomic::Ordering;
         let mut failed = self.failed.write().unwrap();
-        if failed.contains(&hash) {
+        if !failed.contains(&hash) {
+            if failed.len() >= INVALID_FILE_CAP {
+                failed.remove(0);
+            }
+            failed.push(hash);
+        } else if !self.pending.load(Ordering::Acquire) {
             return true;
         }
-        if failed.len() >= INVALID_FILE_CAP {
-            failed.remove(0);
-        }
-        failed.push(hash);
-        write_invalid_file(&self.file, &failed)
+        let wrote = write_invalid_file(&self.file, &failed);
+        self.pending.store(!wrote, Ordering::Release);
+        wrote
     }
 
     /// Drop kept failures that are no longer marked invalid.
@@ -338,8 +346,11 @@ impl Invalidated {
         let mut failed = self.failed.write().unwrap();
         let before = failed.len();
         failed.retain(|h| set.contains(h));
-        if failed.len() != before {
-            let _ = write_invalid_file(&self.file, &failed);
+        let pending = self.pending.load(std::sync::atomic::Ordering::Acquire);
+        if failed.len() != before || pending {
+            let wrote = write_invalid_file(&self.file, &failed);
+            self.pending
+                .store(!wrote, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -1445,6 +1456,14 @@ impl ChainHub {
     pub fn note_failed_connect(&self, hash: BlockHash) -> bool {
         self.note_invalid_block(hash);
         self.invalidated.keep_failed(hash)
+    }
+
+    /// Every kept connect failure is in `block.invalid` on disk.
+    pub fn invalid_marks_on_disk(&self) -> bool {
+        !self
+            .invalidated
+            .pending
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Every hash marked invalid, for a header scan that must not count them.

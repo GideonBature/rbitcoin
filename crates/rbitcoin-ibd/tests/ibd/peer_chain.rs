@@ -76,3 +76,17 @@ fn a_split_is_settled_by_the_confirmed_chain() {
         "a peer whose chain this node confirmed has not"
     );
 }
+
+/// A `notfound` keeps a peer off that block for one stall window, then the
+/// peer may be asked again.
+#[test]
+fn a_notfound_lasts_one_stall_window() {
+    let mut peer = PeerChain::default();
+    let hash = BlockHash::from_byte_array([3u8; 32]);
+    peer.note_notfound(hash, 1_000);
+    assert!(peer.lacks(&hash, 1_000 + 29_999));
+    assert!(
+        !peer.lacks(&hash, 1_000 + 30_000),
+        "past the stall window the peer is asked again"
+    );
+}

@@ -649,7 +649,8 @@ pub fn note_reservation(
 pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
     use super::peer_io::PeerSlot;
     let height = st.hash_height.get(hash).copied();
-    let askable = |s: &PeerSlot| s.alive && !s.chain.lacks(hash);
+    let now = super::peer_io::ibd_mono_ms();
+    let askable = |s: &PeerSlot| s.alive && !s.chain.lacks(hash, now);
     let holds = |s: &PeerSlot| {
         askable(s) && !height.is_some_and(|ht| s.chain.left_path_by(&st.height_to_hash, ht))
     };
@@ -2916,7 +2917,16 @@ pub const DIFF_SNAP_LEN: usize = 4 + 80 + 4 + 4;
 #[doc(hidden)]
 /// Drop `header.adopt`; the next start walks again from the confirmed tip.
 pub fn forget_adopt(hub: &ChainHub) {
-    let _ = std::fs::remove_file(adopt_path(hub));
+    let path = adopt_path(hub);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            if let Some(dir) = path.parent() {
+                let _ = rbitcoin_store::file::fsync_parent_dir(dir);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => rbitcoin_log::warn!("ibd: remove {}: {e}", path.display()),
+    }
 }
 
 pub fn adopt_path(hub: &ChainHub) -> std::path::PathBuf {
@@ -3037,6 +3047,12 @@ pub fn on_confirmed_rewind(st: &mut IbdWorkState, hub: &ChainHub, lca_h: u32) {
 #[doc(hidden)]
 pub fn save_adopt(st: &IbdWorkState, hub: &ChainHub) {
     if !st.header_walk.origin {
+        return;
+    }
+    // A walk saved while a failure is not on disk could resume onto the
+    // invalid chain. No walk is the resume point until the mark is.
+    if !hub.invalid_marks_on_disk() {
+        forget_adopt(hub);
         return;
     }
     let mut buf = Vec::new();

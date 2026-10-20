@@ -3,21 +3,25 @@
 //! Core asks a peer only for blocks on that peer's best known chain
 //! (`pindexBestKnownBlock`). A peer whose announced headers leave the
 //! download path is not asked for blocks above that point, and a peer that
-//! answered `notfound` for a block is not asked for it again.
+//! answered `notfound` for a block is not asked for it again for a while.
 
 use bitcoin::block::Header;
 use bitcoin::BlockHash;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 /// `notfound` hashes kept per peer. Past the cap a peer may be asked again.
 const LACKS_CAP: usize = 1024;
+/// How long a `notfound` keeps a peer off that block: one stall window. A
+/// peer that answered `notfound` everywhere is asked again after it.
+const LACKS_TTL_MS: u64 = 30_000;
 
 /// Announced hashes kept per peer: one full `headers` reply.
 const ANNOUNCED_CAP: usize = rbitcoin_net::codec::MAX_HEADERS_RESULTS;
 
 #[derive(Debug, Default)]
 pub struct PeerChain {
-    lacks: HashSet<BlockHash>,
+    /// `notfound` hashes, with the mono ms they were answered.
+    lacks: HashMap<BlockHash, u64>,
     /// This peer's announced chain above the confirmed tip, oldest first.
     announced: VecDeque<BlockHash>,
     /// Height of `announced[0]`.
@@ -36,14 +40,20 @@ pub struct PeerChain {
 }
 
 impl PeerChain {
-    pub fn note_notfound(&mut self, hash: BlockHash) {
+    pub fn note_notfound(&mut self, hash: BlockHash, now_ms: u64) {
+        if self.lacks.len() >= LACKS_CAP {
+            self.lacks
+                .retain(|_, at| now_ms.saturating_sub(*at) < LACKS_TTL_MS);
+        }
         if self.lacks.len() < LACKS_CAP {
-            self.lacks.insert(hash);
+            self.lacks.insert(hash, now_ms);
         }
     }
 
-    pub fn lacks(&self, hash: &BlockHash) -> bool {
-        self.lacks.contains(hash)
+    pub fn lacks(&self, hash: &BlockHash, now_ms: u64) -> bool {
+        self.lacks
+            .get(hash)
+            .is_some_and(|at| now_ms.saturating_sub(*at) < LACKS_TTL_MS)
     }
 
     /// A headers message or a block inv: the peer may have those blocks now.

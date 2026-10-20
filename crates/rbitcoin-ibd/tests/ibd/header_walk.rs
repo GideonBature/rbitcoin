@@ -1687,9 +1687,18 @@ fn two_peers_reserve_the_header_walk() {
 
     // With no peer that holds the block by what it announced, a peer that
     // did not answer `notfound` is still asked.
-    st.slots[0].chain.note_notfound(path[1].block_hash());
-    st.slots[2].chain.note_notfound(path[1].block_hash());
-    st.slots[3].chain.note_notfound(path[1].block_hash());
+    st.slots[0].chain.note_notfound(
+        path[1].block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    st.slots[2].chain.note_notfound(
+        path[1].block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    st.slots[3].chain.note_notfound(
+        path[1].block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
     assert!(may_serve(&st, 6, &path[1].block_hash()));
 
     // A batch stored after one of its blocks failed is not planted, and does
@@ -1754,8 +1763,14 @@ fn two_peers_reserve_the_header_walk() {
     );
     // With no peer that holds a block by what it announced, the header peer
     // is asked too.
-    st.slots[1].chain.note_notfound(taken2.block_hash());
-    st.slots[2].chain.note_notfound(taken2.block_hash());
+    st.slots[1].chain.note_notfound(
+        taken2.block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    st.slots[2].chain.note_notfound(
+        taken2.block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
     assert!(may_serve(&st, 8, &taken2.block_hash()));
 }
 
@@ -1856,6 +1871,26 @@ fn a_retire_whose_failure_is_not_written_leaves_no_resume_point() {
         !store.join("header.adopt").exists(),
         "a retired walk is not the resume point while its failure is not on disk"
     );
+    assert!(
+        !hub.note_failed_connect(p1.block_hash()),
+        "a mark whose write failed is still not on disk"
+    );
+    save_adopt(&st, &hub);
+    assert!(
+        !store.join("header.adopt").exists(),
+        "no walk is saved while a failure is not on disk"
+    );
+    std::fs::remove_dir(store.join("block.invalid")).unwrap();
+    assert!(
+        hub.note_failed_connect(p1.block_hash()),
+        "once the file can be written the pending mark goes to disk"
+    );
+    assert!(std::fs::read(store.join("block.invalid"))
+        .unwrap()
+        .windows(32)
+        .any(|w| w == p1.block_hash().as_byte_array()));
+    save_adopt(&st, &hub);
+    assert!(store.join("header.adopt").exists());
 }
 
 #[test]

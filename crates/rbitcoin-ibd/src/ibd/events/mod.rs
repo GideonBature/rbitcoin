@@ -931,7 +931,7 @@ pub fn apply_notfound(st: &mut IbdWorkState, peer: usize, hashes: Vec<BlockHash>
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
         for h in &hashes {
             s.track_remove(h);
-            s.chain.note_notfound(*h);
+            s.chain.note_notfound(*h, super::peer_io::ibd_mono_ms());
             let empty = st
                 .inflight
                 .get_mut(h)
@@ -1451,13 +1451,10 @@ pub fn apply_consensus_invalid_reject(
     st.reorg.invalid.mark(hash.to_byte_array());
     if let Some(h) = hub {
         // The failure goes to disk before the retired walk does: a walk saved
-        // with its failure lost would resume onto the invalid chain. Without
-        // the mark on disk, the retired walk is not left as the resume point.
-        let kept = h.note_failed_connect(hash);
+        // with its failure lost would resume onto the invalid chain, and
+        // `save_adopt` saves none while a mark is not on disk.
+        let _ = h.note_failed_connect(hash);
         super::header_walk::retire_invalid(st, h, hash, height);
-        if !kept {
-            super::header_walk::forget_adopt(h);
-        }
     }
     if st.height_to_hash.get(&height) == Some(&hash) {
         st.height_to_hash.remove(&height);

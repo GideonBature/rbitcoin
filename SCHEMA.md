@@ -397,7 +397,7 @@ Each checkpoint is the hash, height, and total work at the end of one look-ahead
 
 ### `block.invalid`
 
-Sidecar of blocks that failed connect on a consensus rule, so a restart does not adopt a stored header chain through them again. Not a schema bump: missing is none. A file that does not parse is none and is replaced at the next mark. The whole file is written again (synced temp file, rename, directory sync) for each new failure and when `reconsiderblock` clears one. An IBD failure is written here before the retired walk goes to `header.adopt`; when this write fails, `header.adopt` is removed, so the next start walks again from the confirmed tip.
+Sidecar of blocks that failed connect on a consensus rule, so a restart does not adopt a stored header chain through them again. Not a schema bump: missing is none. A file that does not parse is none and is replaced at the next mark. The whole file is written again (synced temp file, rename, directory sync) for each new failure and when `reconsiderblock` clears one. An IBD failure is written here before the retired walk goes to `header.adopt`. While a failure is not on disk, no walk is saved to `header.adopt` and an existing one is removed, and every later mark tries the write again. A restart while the write still fails has no record of that block and validates it again.
 
 ```text
 0..8     magic b"rbtcinv1"
