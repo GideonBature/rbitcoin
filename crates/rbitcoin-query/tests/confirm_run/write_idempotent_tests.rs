@@ -3491,13 +3491,36 @@ fn assert_spindle_schedule(trace: &[&str], hdd: bool, expect_class_a: bool) {
     }
 }
 
+/// A debug node runs `spindle_mark` on every confirm batch. The trace must
+/// stay empty until a test arms it, or the write thread grows a Vec forever.
+#[test]
+fn spindle_mark_records_only_while_armed() {
+    use rbitcoin_query::confirm_run::write::{
+        spindle_mark, spindle_trace_arm, spindle_trace_clear, spindle_trace_snapshot,
+    };
+
+    spindle_trace_clear();
+    spindle_mark("unarmed");
+    assert!(spindle_trace_snapshot().is_empty());
+
+    spindle_trace_arm();
+    spindle_mark("armed");
+    assert_eq!(spindle_trace_snapshot(), vec!["armed"]);
+
+    spindle_trace_clear();
+    spindle_mark("after-clear");
+    assert!(spindle_trace_snapshot().is_empty());
+}
+
 #[test]
 fn datadir_hdd_submits_head_after_annotate() {
     use bitcoin::hashes::Hash;
     use rbitcoin_consensus::mine_empty_regtest;
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::accept_and_connect_block;
-    use rbitcoin_query::confirm_run::write::{spindle_trace_clear, spindle_trace_snapshot};
+    use rbitcoin_query::confirm_run::write::{
+        spindle_trace_arm, spindle_trace_clear, spindle_trace_snapshot,
+    };
     use rbitcoin_query::confirm_run::{
         confirm_scripts_phase, confirm_wire_load_from_plan, confirm_wire_lookup_stamp,
         confirm_write_phase, finish_post_commit_hashes, ScriptPreverified,
@@ -3524,15 +3547,16 @@ fn datadir_hdd_submits_head_after_annotate() {
         )
         .expect("load");
         let ok = confirm_scripts_phase(mat.batch).expect("scripts");
-        spindle_trace_clear();
+        spindle_trace_arm();
         confirm_write_phase(&q, &params, Milestone::NONE, ok.batch).expect("write");
         assert_spindle_schedule(&spindle_trace_snapshot(), hdd, true);
 
         let txid = b1.txdata[0].compute_txid().to_byte_array();
         q.store().txs.head_note_pending(&[(txid, Fk(2))]);
-        spindle_trace_clear();
+        spindle_trace_arm();
         finish_post_commit_hashes(&q, &[(1, b1.block_hash().to_byte_array())]).expect("finish");
         assert_spindle_schedule(&spindle_trace_snapshot(), hdd, false);
+        spindle_trace_clear();
         let _ = std::fs::remove_dir_all(&path);
     }
 }
