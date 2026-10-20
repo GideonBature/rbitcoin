@@ -1409,7 +1409,8 @@ impl ChainHub {
         let prev = header.prev_blockhash;
         let prev_bytes = prev.to_byte_array();
         // Same for the parent, plus a body parked with no header row yet.
-        let prev_known = prev_bytes == [0u8; 32]
+        // An all-zero parent is known only to genesis.
+        let prev_known = (prev_bytes == [0u8; 32] && hash == self.params.genesis_hash)
             || self
                 .query
                 .get_header_by_hash(&prev_bytes)
@@ -1516,6 +1517,13 @@ impl ChainHub {
     ) -> Result<Fk, NetError> {
         let prev_bytes = header.prev_blockhash.to_byte_array();
         let prev_fk = if prev_bytes == [0u8; 32] {
+            // Only genesis has no parent. Any other all-zero parent is
+            // missing, as in Core, and gets no row.
+            if header.block_hash() != self.params.genesis_hash {
+                return Err(NetError::Consensus(
+                    "header parent unknown — ensure parent before child".into(),
+                ));
+            }
             Fk::NULL
         } else if let Some(n) = in_batch.get(&prev_bytes) {
             n.fk
@@ -6064,6 +6072,23 @@ mod tests {
             .to_string()
             .contains("header parent unknown"));
         assert_eq!(hub.query.store().header_count(), after_ok);
+        // Only genesis has an all-zero parent. Any other zero-parent header
+        // is an orphan, as in Core, and writes no row.
+        let mut zero = b4.header;
+        zero.prev_blockhash = BlockHash::from_byte_array([0u8; 32]);
+        rbitcoin_consensus::grind_regtest_pow(&mut zero);
+        let err = hub.ensure_header(&zero).unwrap_err();
+        assert!(err.to_string().contains("header parent unknown"), "{err}");
+        let err = hub.ensure_headers_batch(&[zero, b4.header]).unwrap_err();
+        assert!(err.to_string().contains("header parent unknown"), "{err}");
+        assert_eq!(
+            hub.process_submitted_header(&zero).unwrap_err(),
+            "Must submit previous header"
+        );
+        assert_eq!(hub.query.store().header_count(), after_ok);
+        assert!(!hub.knows_header(&zero.block_hash()));
+        hub.ensure_header(&rbitcoin_consensus::genesis_block(&hub.params).header)
+            .expect("genesis still writes its zero-parent row");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

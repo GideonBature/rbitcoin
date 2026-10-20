@@ -727,6 +727,25 @@ async fn header_reject_punishes_except_time(hub: &crate::chain::ChainHub) {
         "an unrequested header with bad pow must disconnect"
     );
 
+    // Core: a missing parent is `prev-blk-not-found` and Misbehaving. An
+    // all-zero parent is missing too unless the block is genesis.
+    let mut zero_prev = rbitcoin_consensus::mine_regtest_paying(
+        gen,
+        tip_time.saturating_add(2),
+        next_h,
+        op_true(),
+        vec![],
+    );
+    zero_prev.header.prev_blockhash = zero_stop();
+    rbitcoin_consensus::grind_regtest_pow(&mut zero_prev.header);
+    let mut follow = PeerFollowState::new();
+    push(hub, &out_tx, &mut follow, None, NetworkMessage::Block(zero_prev.clone())).await;
+    assert!(
+        follow.ban_score >= BAN_SCORE_THRESHOLD,
+        "an unrequested block with an all-zero parent must disconnect"
+    );
+    assert!(!hub.knows_header(&zero_prev.block_hash()));
+
     let now = u32::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
