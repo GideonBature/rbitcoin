@@ -91,9 +91,7 @@ denied a Core-faithful loop. That is a **site** allow on that function, not
 a standing workspace `cognitive_complexity` allow.
 
 Suite roots (`tests/suite.rs`) carry no `#![allow(...)]` either: the test
-tree is linted like `src/`. Visibility for the suite is `#[doc(hidden)]
-pub`, and test hooks in production files are opt-in
-`#[cfg(debug_assertions)]`; the rule and its limits are
+tree is linted like `src/`. Suite visibility and test-hook gating:
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) principle 11.
 
 The workspace allow list is empty. `cognitive_complexity` is workspace

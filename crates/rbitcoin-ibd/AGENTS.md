@@ -1,9 +1,10 @@
 # rbitcoin-ibd
 
 Multi-peer initial block download and the confirm pipeline. Depends on
-net, query, store, consensus, log, and primitives. Only `rbitcoin-node`
-and `rbitcoin-test` depend on this crate; RPC, Electrum, Esplora, and SV2
-do not. Tip follow and relay stay in `rbitcoin-net`.
+net, query, store, consensus, log, and primitives. In the production
+graph only `rbitcoin-node` and `rbitcoin-test` depend on this crate; RPC,
+Electrum, Esplora, and SV2 do not (`rbitcoin-net` dev-depends on it for
+`peer_header_sync_journey`). Tip follow and relay stay in `rbitcoin-net`.
 
 ## Read first
 

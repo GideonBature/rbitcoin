@@ -241,15 +241,19 @@ engineering.
     hidden item, so a change that removes the last caller removes the
     callee in the same change (code-shape rule 9); `#[allow(dead_code)]`
     is not a fix, in `src/` or in a suite root. Test hooks in production
-    files are `#[cfg(debug_assertions)]` and **opt-in**: off until the test
-    arms them on its thread, and a no-op on the hot path otherwise, because
-    every debug node runs that code. A release build must still compile
-    (`cargo check --release` in `qc`), so a `cfg(debug_assertions)` gate
-    never covers an import or re-export that production code uses. Tests
-    drive the shipped function (principle 8), not a second test-only
-    wrapper or `*_for_test` backdoor. IO-shape pins use session/table
-    instance stats or on-disk file state, not thread-local `test_take_*`
-    probes on the hot path. Fuzz-only `pub` is the same smell — prefer the
+    files are `#[cfg(debug_assertions)]`, and every debug node runs that
+    code, so a hook is either a bounded counter (`Cell` / atomic increment)
+    or **opt-in**: off until the test arms it on its thread. Nothing
+    accumulates unarmed (`spindle_mark` is the pattern). A
+    `cfg(debug_assertions)` gate never covers an import or re-export that
+    production code uses, and it never changes a production constant or
+    code path (the debug-only `REDIAL_INTERVAL`, `SAM_RETRY`, and
+    `CONSTRAINTS_COOLDOWN` values are the known exceptions to retire); how
+    CI compiles the release profile is in
+    [`TESTING.md`](TESTING.md#coverage). Tests drive the shipped function
+    (principle 8), not a second test-only wrapper or `*_for_test` backdoor.
+    IO-shape pins prefer session/table instance stats or on-disk file state
+    over a thread-local probe. Fuzz-only `pub` is the same smell — prefer the
     in-crate graph or the published **binary** surface (`rbitcoin-node` /
     CLI) even if the harness pays a little extra setup, rather than
     exporting helpers solely for `fuzz/`.
@@ -320,8 +324,9 @@ IO; they do not package zips. GitHub Releases:
 - [ ] No unused crate-root `pub` / `pub use`; suite-only items are
       `#[doc(hidden)]`; a removed caller removes its callee (principle 11).
       Tests drive shipped functions, not `*_for_test` backdoors. A
-      `cfg(debug_assertions)` hook is opt-in and gates no production
-      import. Fuzz does not grow `pub` without considering the binary
+      `cfg(debug_assertions)` hook is a bounded counter or opt-in, and
+      gates no production import, constant, or code path. Fuzz does not
+      grow `pub` without considering the binary
       surface.
 - [ ] Store changes respect Class A/B/C and allocate-then-publish
 - [ ] Experimental / milestone honesty preserved in user-facing docs when relevant
