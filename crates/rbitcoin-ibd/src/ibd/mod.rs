@@ -377,44 +377,58 @@ pub async fn ibd_cancellable(
         .max(peers.len())
         .min(peer_sess.book().len())
         .max(1);
-    let initial = dial_batch(
-        peer_sess.book(),
-        initial_dial_n,
-        HashSet::new(),
-        &[],
-        magic,
-        local_addr,
-        hub.tip_height(),
-        sinks.clone(),
-        cfg.connect_timeout,
-        cancel.as_ref().map(Arc::clone),
-        cfg.dialer.clone(),
-        &hub.clock,
-        perms.clone(),
-    )
-    .await;
+    // A wave that reaches no one dials the next untried addresses, as Core
+    // keeps opening connections. Only an exhausted book ends catch-up here.
     let mut boot_cooldown = HashMap::new();
     let mut boot_strikes = HashMap::new();
-    apply_dial_result(
-        peer_sess.book_mut(),
-        &initial,
-        &mut boot_cooldown,
-        &mut boot_strikes,
-        Instant::now(),
-    );
-    let mut initial_slots = initial.slots;
-    if cancelled() {
-        warn!("ibd: cancel during initial dial — stopping");
-        for s in &initial_slots {
-            let _ = s.cmd_tx.send(PeerCmd::Shutdown);
-            s.task.abort();
+    let mut tried = HashSet::new();
+    let initial_slots = loop {
+        let wave = dial_batch(
+            peer_sess.book(),
+            initial_dial_n,
+            tried.clone(),
+            &[],
+            magic,
+            local_addr,
+            hub.tip_height(),
+            sinks.clone(),
+            cfg.connect_timeout,
+            cancel.as_ref().map(Arc::clone),
+            cfg.dialer.clone(),
+            &hub.clock,
+            perms.clone(),
+        )
+        .await;
+        apply_dial_result(
+            peer_sess.book_mut(),
+            &wave,
+            &mut boot_cooldown,
+            &mut boot_strikes,
+            Instant::now(),
+        );
+        tried.extend(wave.attempted.iter().copied());
+        let mut slots = wave.slots;
+        if cancelled() {
+            warn!("ibd: cancel during initial dial — stopping");
+            for s in &slots {
+                let _ = s.cmd_tx.send(PeerCmd::Shutdown);
+                s.task.abort();
+            }
+            return Ok(0);
         }
-        return Ok(0);
-    }
-    initial_slots.retain(|s| s.alive);
-    if initial_slots.is_empty() {
-        return Err(NetError::Protocol("no peers connected"));
-    }
+        slots.retain(|s| s.alive);
+        if !slots.is_empty() {
+            break slots;
+        }
+        if wave.attempted.is_empty() {
+            return Err(NetError::Protocol("no peers connected"));
+        }
+        info!(
+            "ibd: no peer from {} dial(s) ({} tried) — dialing the next wave",
+            wave.attempted.len(),
+            tried.len()
+        );
+    };
     let init_peer_tip = initial_slots
         .iter()
         .map(|s| s.peer_height)

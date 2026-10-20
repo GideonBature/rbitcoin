@@ -279,3 +279,42 @@ async fn ibd_notes_a_body_queue_row_above_the_tip() {
     let _ = std::fs::remove_dir_all(&seed_dir);
     let _ = std::fs::remove_dir_all(&peer_dir);
 }
+
+/// A first dial wave that reaches no one is not the end of catch-up while the
+/// book still has untried addresses (Core keeps opening connections).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ibd_dials_a_second_wave_when_the_first_reaches_no_one() {
+    let seed_dir = tmp_dir("seed-wave");
+    let peer_dir = tmp_dir("peer-wave");
+    let seed = start_node(&seed_dir).await;
+    seed_chain(&seed, 2);
+    let peer = start_node(&peer_dir).await;
+    let dead: Vec<rbitcoin_net::NetAddr> = ["127.0.0.1:1", "127.0.0.1:2"]
+        .iter()
+        .map(|a| rbitcoin_net::NetAddr::Ip(a.parse().unwrap()))
+        .collect();
+    let mut book = rbitcoin_net::AddrMan::new();
+    for a in &dead {
+        book.add_addr(*a);
+    }
+    book.add_addr(rbitcoin_net::NetAddr::Ip(seed.local_addr));
+    let mut cfg = IbdConfig::for_test();
+    cfg.target_peers = 1;
+    cfg.connect_timeout = Duration::from_millis(300);
+    cfg.peers = Some(Arc::new(std::sync::Mutex::new(book)));
+    let synced = tokio::time::timeout(
+        Duration::from_secs(20),
+        rbitcoin_ibd::sync(&peer, &dead, cfg),
+    )
+    .await
+    .expect("catch-up finishes");
+    assert!(
+        synced.is_ok(),
+        "the second wave reaches the seed: {synced:?}"
+    );
+    assert_eq!(peer.tip_height(), Some(2));
+    seed.shutdown().await;
+    peer.shutdown().await;
+    let _ = std::fs::remove_dir_all(&seed_dir);
+    let _ = std::fs::remove_dir_all(&peer_dir);
+}
