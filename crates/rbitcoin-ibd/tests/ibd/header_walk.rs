@@ -1313,6 +1313,29 @@ fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
         !skips(&hub, 1, h1.block_hash().as_byte_array()),
         "a file that does not parse does not skip scripts by height"
     );
+
+    // A candidate retired on a failed block restarts at its parent.
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retire");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let p1 = mine(gen, 61);
+    let p2 = mine(p1.block_hash(), 62);
+    let p3 = mine(p2.block_hash(), 63);
+    let (s1, _rx1) = slot(1);
+    let mut st = IbdWorkState::new(vec![s1], Some(gen), Some(0));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    apply(&mut st, &hub, 1, vec![p1, p2, p3]);
+    assert!(st.is_on_path(&p3.block_hash(), 3));
+    retire_invalid(&mut st, &hub, p3.block_hash(), 3);
+    st.header_walk = HeaderWalk::default();
+    assert!(restore_adopt(&mut st, &hub));
+    assert_eq!(st.header_walk.tip_hash(), Some(p2.block_hash()));
+    assert_eq!(st.header_walk.tip_height(), 2);
+    // Once a failed block is stored, a saved candidate above the confirmed
+    // tip may build on it and is not restored.
+    hub.note_failed_connect(p3.block_hash());
+    st.header_walk = HeaderWalk::default();
+    assert!(!restore_adopt(&mut st, &hub));
 }
 
 #[test]
@@ -1594,9 +1617,11 @@ fn two_peers_reserve_the_header_walk() {
     // forks below the path, so it is not asked for path blocks.
     let (mut head, mut head_rx) = slot(5);
     let (mut other, mut other_rx) = slot(6);
+    let (mut short, _short_rx) = slot(7);
     head.first_data_ms = 50;
     other.first_data_ms = 5_000;
-    let mut st = IbdWorkState::new(vec![head, other], Some(gen), Some(0));
+    short.first_data_ms = 6_000;
+    let mut st = IbdWorkState::new(vec![head, other, short], Some(gen), Some(0));
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert_eq!(drain_getheaders(&mut head_rx), 1);
     let path = [mine(gen, 41), mine(mine(gen, 41).block_hash(), 42)];
@@ -1611,7 +1636,10 @@ fn two_peers_reserve_the_header_walk() {
         "the silent peer is asked once"
     );
     assert_eq!(drain_getheaders(&mut head_rx), 0);
-    apply(&mut st, &hub, 6, vec![mine(gen, 43)]);
+    let fork = mine(gen, 43);
+    apply(&mut st, &hub, 6, vec![fork, mine(fork.block_hash(), 46)]);
+    // A short reply is everything that peer has: its chain ends at height 1.
+    apply(&mut st, &hub, 7, vec![path[0]]);
     challenge_unprobed_peer(&mut st);
     assert!(st.header_walk.challenge.is_none(), "a peer is probed once");
     for h in &path {
@@ -1629,7 +1657,47 @@ fn two_peers_reserve_the_header_walk() {
         st.slots[1].in_flight.is_empty(),
         "a peer whose chain left the path below a block is not asked for it"
     );
-    assert!(st.slots[0].in_flight.contains(&path[0].block_hash()));
+    assert!(
+        !st.slots[2].in_flight.contains(&path[1].block_hash()),
+        "a peer whose whole chain ends below a block is not asked for it"
+    );
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(!st.slots[2].in_flight.contains(&path[1].block_hash()));
+    assert!(
+        st.slots[0].in_flight.contains(&path[1].block_hash()),
+        "the header peer takes what no other peer holds"
+    );
+
+    // Once the fork height leaves the path (confirmed and pruned), that peer
+    // has still left it.
+    st.height_to_hash.remove(&1);
+    st.height_to_hash.remove(&2);
+    assert!(!may_serve(&st, 6, &path[1].block_hash()));
+    // With no peer that holds the block by what it announced, a peer that
+    // did not answer `notfound` is still asked.
+    st.slots[0].chain.note_notfound(path[1].block_hash());
+    st.slots[2].chain.note_notfound(path[1].block_hash());
+    assert!(may_serve(&st, 6, &path[1].block_hash()));
+
+    // A batch stored after one of its blocks failed is not planted, and does
+    // not grow the candidate again.
+    let late0 = mine(path[1].block_hash(), 44);
+    let late = [late0, mine(late0.block_hash(), 45)];
+    st.reorg.invalid.mark(late[0].block_hash().to_byte_array());
+    let tip = st.header_walk.tip_hash();
+    let (fks, work) = rbitcoin_ibd::ibd::events::prepare_header_store(&hub, &late);
+    let added =
+        rbitcoin_ibd::ibd::events::on_headers_batch(&mut st, &hub, 5, late.to_vec(), &fks, work);
+    assert_eq!(added, 0);
+    assert!(!st.ordered_set.contains(&late[1].block_hash()));
+    assert_eq!(st.header_walk.tip_hash(), tip);
 }
 
 #[test]

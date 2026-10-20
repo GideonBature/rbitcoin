@@ -22,6 +22,12 @@ pub struct PeerChain {
     announced: VecDeque<BlockHash>,
     /// Height of `announced[0]`.
     from: u32,
+    /// The last reply was shorter than a full `headers` batch: the peer had
+    /// nothing past its top.
+    complete: bool,
+    /// The peer's header at the first height where its announced chain
+    /// differed from this node's chain (path or confirmed) when announced.
+    split: Option<(u32, BlockHash)>,
     /// The peer announced headers, or was asked for them once.
     probed: bool,
 }
@@ -50,17 +56,43 @@ impl PeerChain {
         self.probed = true;
     }
 
-    /// Keep announced `headers`, the first at `height`, above the confirmed
-    /// `tip`. A batch that overlaps or continues the kept run replaces it
-    /// from where it starts; one that starts lower replaces it. One that
+    /// Keep announced `headers`, the first at `height`. `ours` is this node's
+    /// block at a height (path or confirmed), when known. The first height
+    /// where they differ is where the peer leaves this chain; a later reply
+    /// that agrees there clears it. Only heights above the confirmed `tip`
+    /// are kept. A reply that overlaps or continues the kept run replaces it
+    /// from where it starts, one that starts lower replaces it, and one that
     /// leaves a gap above it is dropped: the run nearer the tip says more.
-    pub fn note_headers(&mut self, tip: u32, height: u32, headers: &[Header]) {
+    pub fn note_headers(
+        &mut self,
+        ours: impl Fn(u32) -> Option<BlockHash>,
+        tip: u32,
+        height: u32,
+        headers: &[Header],
+    ) {
         self.probed = true;
+        self.complete = headers.len() < ANNOUNCED_CAP;
+        let hashes: Vec<BlockHash> = headers.iter().map(|h| h.block_hash()).collect();
+        for (ht, hash) in (height..).zip(&hashes) {
+            let Some(our) = ours(ht) else {
+                continue;
+            };
+            if our == *hash {
+                if self.split.is_some_and(|(at, _)| at == ht) {
+                    self.split = None;
+                }
+                continue;
+            }
+            if self.split.is_none_or(|(at, _)| ht <= at) {
+                self.split = Some((ht, *hash));
+            }
+            break;
+        }
         let drop = tip.saturating_add(1).saturating_sub(self.from) as usize;
         self.announced.drain(..drop.min(self.announced.len()));
         self.from = self.from.max(tip.saturating_add(1));
         let skip = tip.saturating_add(1).saturating_sub(height) as usize;
-        let Some(fresh) = headers.get(skip..).filter(|h| !h.is_empty()) else {
+        let Some(fresh) = hashes.get(skip..).filter(|h| !h.is_empty()) else {
             return;
         };
         let start = height.saturating_add(skip as u32);
@@ -73,21 +105,31 @@ impl PeerChain {
         } else {
             self.announced.truncate((start - self.from) as usize);
         }
-        self.announced.extend(fresh.iter().map(|h| h.block_hash()));
+        self.announced.extend(fresh.iter().copied());
         self.announced.truncate(ANNOUNCED_CAP);
     }
 
-    /// The peer's announced chain holds a different block than the path at
-    /// `height`, or at its own top below it. Two chains that differ at one
-    /// height differ above it, so the peer does not have the path block.
+    /// The peer does not have the path block at `height`: its chain left this
+    /// node's chain at or below it, it holds a different block there, or its
+    /// whole chain ends below it. Two chains that differ at one height differ
+    /// above it. A recorded split whose height has left the path still holds.
     pub fn left_path_by(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
+        if let Some((at, hash)) = self.split {
+            if at <= height && path.get(&at).is_none_or(|p| *p != hash) {
+                return true;
+            }
+        }
         let Some(len) = (self.announced.len() as u32).checked_sub(1) else {
             return false;
         };
         if height < self.from {
             return false;
         }
-        let at = height.min(self.from.saturating_add(len));
+        let top = self.from.saturating_add(len);
+        if height > top && self.complete {
+            return true;
+        }
+        let at = height.min(top);
         let peer = self.announced[(at - self.from) as usize];
         path.get(&at).is_some_and(|p| *p != peer)
     }

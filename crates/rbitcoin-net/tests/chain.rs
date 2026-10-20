@@ -4105,6 +4105,21 @@ fn reconsider_skips_a_branch_that_fails() {
     hub.invalidate_block(bad5_hash).unwrap();
     hub.reconsider_block(bad5_hash).unwrap();
     assert!(!kept(&marks), "reconsiderblock forgets the kept failure");
+    let tip_block = hub
+        .block_at_height(hub.tip_height().unwrap())
+        .unwrap()
+        .unwrap();
+    let tip_hash = tip_block.block_hash();
+    hub.invalidate_block(tip_hash).unwrap();
+    assert!(hub.accept_received_block(tip_block).is_err());
+    assert!(
+        !std::fs::read(&marks)
+            .unwrap()
+            .windows(32)
+            .any(|w| w == tip_hash.as_byte_array()),
+        "a block refused as already invalidated is not a connect failure"
+    );
+    hub.reconsider_block(tip_hash).unwrap();
     assert!(
         !hub.fork_tips.read().unwrap().iter().any(|h| h == bad5_hash),
         "a block that never connected is not kept as a fork tip"

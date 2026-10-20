@@ -243,6 +243,9 @@ pub struct Invalidated {
     pub file: std::path::PathBuf,
 }
 
+/// Refusal of a hash already marked invalid. Not a fresh validation result.
+const BLOCK_IS_INVALIDATED: &str = "block is invalidated";
+
 /// Sidecar of connect failures next to `header.adopt`. Not a schema bump.
 const INVALID_FILE: &str = "block.invalid";
 const INVALID_MAGIC: &[u8; 8] = b"rbtcinv1";
@@ -274,8 +277,9 @@ fn write_invalid_file(path: &std::path::Path, hashes: &[BlockHash]) {
     for h in hashes {
         buf.extend_from_slice(h.as_byte_array());
     }
-    let tmp = path.with_file_name("block.invalid.tmp");
-    let wrote = std::fs::write(&tmp, &buf).and_then(|()| std::fs::rename(&tmp, path));
+    let wrote = rbitcoin_store::file::write_synced_tmp_file(path, |f| {
+        std::io::Write::write_all(f, &buf).map_err(|e| rbitcoin_store::StoreError::io(path, e))
+    });
     if let Err(e) = wrote {
         warn!("chain: write {}: {e}", path.display());
     }
@@ -1452,6 +1456,9 @@ impl ChainHub {
     /// not poison later getdata of that hash.
     #[doc(hidden)]
     pub fn remember_failed_accept(&self, offered: BlockHash, e: &NetError) {
+        if matches!(e, NetError::Consensus(m) if m == BLOCK_IS_INVALIDATED) {
+            return;
+        }
         let hash = e
             .failing_block_hash()
             .map(BlockHash::from_byte_array)
@@ -2651,7 +2658,7 @@ impl ChainHub {
             return Ok(AcceptOutcome::AlreadyHave);
         }
         if self.invalidated.set.read().unwrap().contains(&hash) {
-            return Err(NetError::Consensus("block is invalidated".into()));
+            return Err(NetError::Consensus(BLOCK_IS_INVALIDATED.into()));
         }
         if rbitcoin_consensus::block_mutated_without_coinbase(&block) {
             return Err(NetError::Mutated(
@@ -2794,7 +2801,7 @@ impl ChainHub {
             .iter()
             .any(|b| self.is_block_invalid(&b.block_hash()))
         {
-            return Err(NetError::Consensus("block is invalidated".into()));
+            return Err(NetError::Consensus(BLOCK_IS_INVALIDATED.into()));
         }
         for w in blocks.windows(2) {
             if w[1].header.prev_blockhash != w[0].block_hash() {

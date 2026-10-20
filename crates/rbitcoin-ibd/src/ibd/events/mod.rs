@@ -325,6 +325,11 @@ pub fn on_headers_batch(
     fks: &[rbitcoin_primitives::Fk],
     work: Option<bitcoin::Work>,
 ) -> usize {
+    // A block in this batch can fail while its headers are written outside
+    // the lock. The retire already dropped that path.
+    if super::header_walk::refuse_invalid_batch(st, peer, &headers) {
+        return 0;
+    }
     let accepted = accepted_headers(&headers, fks);
     let mut added = 0usize;
     let mut batch_prev: Option<(BlockHash, u32)> = None;
@@ -901,9 +906,18 @@ fn note_peer_headers(
     else {
         return;
     };
+    let tip = hub.tip_height().unwrap_or(0);
+    let path = &st.height_to_hash;
+    let ours = |ht: u32| {
+        path.get(&ht).copied().or_else(|| {
+            (ht <= tip)
+                .then(|| hub.query.header_at_height(rbitcoin_primitives::Height(ht)))
+                .and_then(|r| r.ok().flatten())
+                .map(|(_, rec)| BlockHash::from_byte_array(rec.hash))
+        })
+    };
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
-        s.chain
-            .note_headers(hub.tip_height().unwrap_or(0), height, headers);
+        s.chain.note_headers(ours, tip, height, headers);
     }
 }
 
@@ -1438,8 +1452,8 @@ pub fn apply_consensus_invalid_reject(
     st.body.mark_rejected(hash);
     st.reorg.invalid.mark(hash.to_byte_array());
     if let Some(h) = hub {
-        h.note_failed_connect(hash);
         super::header_walk::retire_invalid(st, h, hash, height);
+        h.note_failed_connect(hash);
     }
     if st.height_to_hash.get(&height) == Some(&hash) {
         st.height_to_hash.remove(&height);

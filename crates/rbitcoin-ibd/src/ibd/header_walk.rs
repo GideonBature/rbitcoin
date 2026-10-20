@@ -639,16 +639,20 @@ pub fn note_reservation(
 }
 
 /// Whether block `hash` may be asked of `peer`. A peer is not asked for a
-/// block it answered `notfound`, or for a path block above where its
-/// announced chain left the path. The reserved header peer is asked only
-/// when no other live peer may have it, so a single peer still does both.
+/// block it answered `notfound`, or for a path block its announced chain
+/// does not hold. The reserved header peer is asked only when no other live
+/// peer may have it, so a single peer still does both.
 pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
+    use super::peer_io::PeerSlot;
     let height = st.hash_height.get(hash).copied();
-    let has = |s: &super::peer_io::PeerSlot| {
-        s.alive
-            && !s.chain.lacks(hash)
-            && !height.is_some_and(|ht| s.chain.left_path_by(&st.height_to_hash, ht))
+    let askable = |s: &PeerSlot| s.alive && !s.chain.lacks(hash);
+    let holds = |s: &PeerSlot| {
+        askable(s) && !height.is_some_and(|ht| s.chain.left_path_by(&st.height_to_hash, ht))
     };
+    // A chain record can be stale. With no peer that holds the block by what
+    // it announced, any peer that did not answer `notfound` may be asked.
+    let by_chain = st.slots.iter().any(&holds);
+    let has = |s: &PeerSlot| if by_chain { holds(s) } else { askable(s) };
     if !st.slots.iter().any(|s| s.id == peer && has(s)) {
         return false;
     }
@@ -850,6 +854,16 @@ pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, he
         st.header_walk.base_diff = tip.diff;
     }
     st.header_walk.tip = tip;
+    // `header.adopt` restores the tip from the last checkpoint.
+    if st
+        .header_walk
+        .checkpoints
+        .last()
+        .is_none_or(|c| c.height < parent_h)
+    {
+        let at_parent = checkpoint_at(&st.header_walk.tip);
+        st.header_walk.checkpoints.push(at_parent);
+    }
     // A challenger's headers are not stored, and its fork can sit below the
     // confirmed tip. Peers are asked again from the parent, and a heavier
     // chain comes back as headers that are stored and can be rewound onto.
@@ -3107,6 +3121,16 @@ pub fn restore_adopt(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
         rbitcoin_log::info!(
             "ibd: headers resume refused height={} took={took:?}",
             parsed.base_height
+        );
+        renote_stored_path(st, hub);
+        return false;
+    }
+    // A saved candidate above the confirmed tip may build on a block marked
+    // invalid after it was saved. The walk starts again from the tip.
+    if parsed.tip.height > hub.tip_height().unwrap_or(0) && !hub.invalid_blocks().is_empty() {
+        rbitcoin_log::info!(
+            "ibd: headers resume refused height={}: invalid blocks are stored",
+            parsed.tip.height
         );
         renote_stored_path(st, hub);
         return false;
