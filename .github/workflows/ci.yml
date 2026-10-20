@@ -109,10 +109,15 @@ jobs:
           workspaces: ". -> target/dev"
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # Suites link cfg(debug_assertions) hooks and cannot run in release, so
-      # this is the only PR check that compiles what release.yml and nix ship.
+      # Both shapes TESTING.md names: workspace, and the product set that
+      # nix/rbitcoin.nix and release.yml build (consensus without `corpus`).
       - name: cargo check --release
-        run: cargo check --release --workspace --exclude rbitcoin-bench
+        run: |
+          cargo check --release --workspace
+          cargo check --release -p rbitcoin-node -p rbitcoin-cli -p rbitcoin-store
+      # doc(hidden) pub modules are rustdoc-visible; a broken link is an error.
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
           github_access_token: ${{ github.token }}
