@@ -299,7 +299,8 @@ fn bad_prev_on_the_tip_child_is_fetched_again() {
 /// Load can stamp tip+2 while tip+1 is still committing, and its BadPrev
 /// can reach IBD before tip+1's `Accepted`. The parent is this path's own
 /// block at the height below, so it is not a fork: the hash is fetched
-/// again the same as a tip child. Dropping it left `asked` empty.
+/// again. Dropping it left `asked` empty. The tip does not move during the
+/// race, so repeats do not take the tip-child strikes and cannot halt IBD.
 #[test]
 fn bad_prev_racing_its_parents_commit_is_fetched_again() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("bad-prev-parent-commit");
@@ -312,23 +313,27 @@ fn bad_prev_racing_its_parents_commit_is_fetched_again() {
     st.note_path_prev(parent, tip);
     st.record_height(hash, t + 2);
     st.note_path_prev(hash, parent);
-    st.densify_scan_lo = t + 5;
-    st.densify_ready_through = t + 5;
-    apply_confirm_reject(
-        &mut st,
-        t + 2,
-        hash,
-        "consensus: unexpected previous header",
-        Some(hub.query.as_ref()),
-        Some(&hub),
-    );
-    assert_eq!(st.height_to_hash.get(&(t + 2)), Some(&hash));
-    assert!(st.body.is_missing(&hash));
-    assert!(
-        st.densify_scan_lo <= t + 2,
-        "scan_lo={}",
-        st.densify_scan_lo
-    );
+    for _ in 0..4 {
+        st.densify_scan_lo = t + 5;
+        st.densify_ready_through = t + 5;
+        apply_confirm_reject(
+            &mut st,
+            t + 2,
+            hash,
+            "consensus: unexpected previous header",
+            Some(hub.query.as_ref()),
+            Some(&hub),
+        );
+        assert!(st.halt.is_none(), "a committing parent is not a strike");
+        assert_eq!(st.height_to_hash.get(&(t + 2)), Some(&hash));
+        assert!(st.body.is_missing(&hash));
+        assert!(
+            st.densify_scan_lo <= t + 2,
+            "scan_lo={}",
+            st.densify_scan_lo
+        );
+    }
+    assert_eq!(hub.tip_hash(), Some(tip));
     let _ = std::fs::remove_dir_all(dir);
 }
 

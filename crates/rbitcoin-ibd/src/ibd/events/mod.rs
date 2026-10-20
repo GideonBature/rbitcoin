@@ -1125,8 +1125,14 @@ pub fn apply_soft_wire_reject(
 ) {
     let bad_prev = super::reorg::is_bad_prev_err(err);
     // A BadPrev whose parent is the current tip is a missing header slot,
-    // not a competing fork. Keep the hash so densify asks for it again.
-    let retry_tip_child = bad_prev && prev_continues_own_path(st, hub, hash, height);
+    // and one whose parent is still committing is a stale stamp. Neither is
+    // a competing fork. Keep the hash so densify asks for it again.
+    let parent = if bad_prev {
+        bad_prev_parent(st, hub, hash, height)
+    } else {
+        BadPrevParent::OffPath
+    };
+    let retry_tip_child = parent != BadPrevParent::OffPath;
     if bad_prev {
         st.headers_done = false;
         if let Some(h) = hub {
@@ -1172,26 +1178,34 @@ pub fn apply_soft_wire_reject(
         // also clears a count for another hash: the tip+1 retry got a
         // verdict, so the pipeline is not stuck repeating that cascade.
         // A tip-child BadPrev is fetched again as the same hash. It has its
-        // own counter: this clear must not restart those three strikes.
-        if retry_tip_child {
-            apply_tip_child_bad_prev(st, height, hash, err, hub);
-            if st.halt.is_some() {
-                st.body.stop_reget(hash);
-                return;
+        // own counter: this clear must not restart those three strikes. A
+        // committing parent is not a strike: the tip has not moved yet.
+        match parent {
+            BadPrevParent::Tip => {
+                apply_tip_child_bad_prev(st, height, hash, err, hub);
+                if st.halt.is_some() {
+                    st.body.stop_reget(hash);
+                    return;
+                }
             }
-        } else {
-            st.cascade_at = None;
+            BadPrevParent::Committing => {}
+            BadPrevParent::OffPath => st.cascade_at = None,
         }
         st.body.mark_missing(hash);
         st.reopen_for_densify(&[hash]);
         st.body.demote_known(hash);
         st.reopen_for_densify(&[hash]);
-        if retry_tip_child {
-            warn!(
+        match parent {
+            BadPrevParent::Tip => warn!(
                 "ibd: confirm reject BadPrev @{height} {hash}: {err} (parent is tip, re-getdata)"
-            );
-        } else {
-            warn!("ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)");
+            ),
+            BadPrevParent::Committing => warn!(
+                "ibd: confirm reject BadPrev @{height} {hash}: {err} \
+                 (parent is the path block still committing, re-getdata)"
+            ),
+            BadPrevParent::OffPath => warn!(
+                "ibd: confirm reject soft @{height} {hash}: {err} (re-getdata, not blacklisted)"
+            ),
         }
     } else {
         warn!(
@@ -1200,18 +1214,30 @@ pub fn apply_soft_wire_reject(
     }
 }
 
-/// True when `hash` chains off the hub tip, or off this path's own block at
-/// `height - 1`. Load may stamp a child while its parent is still being
-/// written, and that reject can arrive before the parent's `Accepted`.
+/// Where a BadPrev block's parent sits relative to this IBD path.
 #[doc(hidden)]
-pub fn prev_continues_own_path(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadPrevParent {
+    /// The hub tip: a missing header slot, under the tip-child strikes.
+    Tip,
+    /// This path's own block at `height - 1`, not the tip yet. Load stamped
+    /// the child while that parent was still being written, and the reject
+    /// arrived before the parent's `Accepted`. The tip has not moved, so it
+    /// is not a strike.
+    Committing,
+    /// Anything else: a competing fork.
+    OffPath,
+}
+
+#[doc(hidden)]
+pub fn bad_prev_parent(
     st: &IbdWorkState,
     hub: Option<&rbitcoin_net::chain::ChainHub>,
     hash: BlockHash,
     height: u32,
-) -> bool {
+) -> BadPrevParent {
     let Some(h) = hub else {
-        return false;
+        return BadPrevParent::OffPath;
     };
     let Some(prev) = st
         .path_prev
@@ -1219,13 +1245,19 @@ pub fn prev_continues_own_path(
         .copied()
         .or_else(|| h.prev_of(&hash))
     else {
-        return false;
+        return BadPrevParent::OffPath;
     };
-    h.tip_hash() == Some(prev)
-        || height
-            .checked_sub(1)
-            .and_then(|below| st.height_to_hash.get(&below))
-            == Some(&prev)
+    if h.tip_hash() == Some(prev) {
+        BadPrevParent::Tip
+    } else if height
+        .checked_sub(1)
+        .and_then(|below| st.height_to_hash.get(&below))
+        == Some(&prev)
+    {
+        BadPrevParent::Committing
+    } else {
+        BadPrevParent::OffPath
+    }
 }
 
 /// Core `MaybePunishNodeForBlock` (`BLOCK_MUTATED`): drop the sender and

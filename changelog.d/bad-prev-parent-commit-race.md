@@ -5,4 +5,5 @@ Fixed
   reach IBD before tip+1's `Accepted`. IBD then treated the block as a fork,
   dropped it from the path, and never asked for it again, so catch-up
   stalled. A BadPrev whose parent is the path's own block at the height
-  below is now fetched again like a tip child.
+  below is now fetched again. It does not count toward the tip-child
+  three-strike halt, since the tip has not moved.
