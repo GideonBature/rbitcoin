@@ -2371,9 +2371,14 @@ fn chain_ops_proposal_spends(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
     let mut time_locked = spend.clone();
     time_locked.lock_time = LockTime::from_time(tip_mtp).unwrap();
     time_locked.input[0].sequence = bitcoin::Sequence::ZERO;
-    let block = proposal_on_tip(ctx, vec![time_locked]);
+    let block = proposal_on_tip(ctx, vec![time_locked.clone()]);
     assert!(block.header.time > tip_mtp);
     assert_eq!(propose(ctx, &block), "bad-txns-nonfinal", "BIP113");
+    time_locked.lock_time = LockTime::from_time(tip_mtp - 1).unwrap();
+    assert!(
+        propose(ctx, &proposal_on_tip(ctx, vec![time_locked])).is_null(),
+        "BIP113: one second below the median is final"
+    );
     // BIP68: the coin at height `f` is `age` deep in the proposed block.
     let age = tip_count(ctx) as u32 + 1 - f;
     let mut rel = spend.clone();

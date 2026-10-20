@@ -3601,7 +3601,7 @@ pub fn check_block_proposal_with(
     if block.header.bits.to_consensus() != expected {
         return Err("bad-diffbits".into());
     }
-    let mtp = rbitcoin_query::median_time_past(query, tip_h).unwrap_or(tip_rec.timestamp);
+    let mtp = rbitcoin_query::median_time_past_store(query, tip_h).map_err(|e| e.to_string())?;
     // Core is `<=` MTP. Proposal uses `<` so a template stamped at the
     // parent's mediantime+1 still validates after that parent is submitted
     // (new MTP often equals that stamp on an incrementing cache).
@@ -3788,7 +3788,8 @@ fn proposal_connect(
 }
 
 /// BIP68 on a proposal, as at connect: a coin's time is the median time of
-/// the block before the one that created it. An unknown median fails closed.
+/// the block before the one that created it, from confirmed headers only.
+/// A store fault reading it is the store error, not a reject.
 fn proposal_sequence_locks(
     query: &Query,
     tx: &Transaction,
@@ -3802,8 +3803,8 @@ fn proposal_sequence_locks(
     let mut coin_mtps = Vec::with_capacity(coin_heights.len());
     for (inp, &h) in tx.input.iter().zip(coin_heights) {
         let coin_mtp = if inp.sequence.is_time_locked() {
-            rbitcoin_query::median_time_past(query, Height(h.saturating_sub(1)))
-                .map_err(|_| "bad-txns-nonfinal")?
+            rbitcoin_query::median_time_past_store(query, Height(h.saturating_sub(1)))
+                .map_err(|e| e.to_string())?
         } else {
             0
         };
@@ -8106,6 +8107,54 @@ mod tests {
             }
             other => panic!("consensus header failure must name the block, got {other}"),
         }
+    }
+
+    /// A proposal reads its medians from confirmed headers, as connect does.
+    /// With blocks 600 s apart, a coin's time is the median of the block
+    /// before the one that created it: 118 intervals pass and 119 do not,
+    /// and 118 would fail on the creating block's own median. A median the
+    /// store cannot read is that store error. The tip median does not fall
+    /// back to the tip's own time, and a coin median is not
+    /// `bad-txns-nonfinal`.
+    #[test]
+    fn check_block_proposal_reads_medians_from_confirmed_headers() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let t0 = hub.tip_header().unwrap().time;
+        let mut tip = hub.tip_hash().unwrap();
+        for h in 1..=112u32 {
+            let b = mine(tip, t0 + 600 * h, h);
+            tip = b.block_hash();
+            hub.accept_block(b).unwrap();
+        }
+        let op_true = ScriptBuf::from_bytes(vec![0x51]);
+        let time_locked = |intervals: u16| {
+            let mut tx = mature_spend_tx(&hub, 12);
+            tx.input[0].sequence = Sequence::from_512_second_intervals(intervals);
+            hub.assemble_block_to_script(op_true.clone(), vec![tx])
+                .unwrap()
+        };
+        let met = time_locked(118);
+        assert_eq!(hub.check_block_proposal(&met), Ok(10_000));
+        assert_eq!(
+            hub.check_block_proposal(&time_locked(119)).unwrap_err(),
+            "bad-txns-nonfinal"
+        );
+        let empty = hub
+            .assemble_block_to_script(op_true.clone(), vec![])
+            .unwrap();
+
+        let missing = "missing confirmed header";
+        let confirmed = &hub.query.store().confirmed;
+        confirmed.set_raw_for_test(Height(11), 0).unwrap();
+        let err = hub.check_block_proposal(&met).unwrap_err();
+        assert!(err.contains(missing), "coin median: {err}");
+        assert_eq!(hub.check_block_proposal(&empty), Ok(0));
+        confirmed.set_raw_for_test(Height(110), 0).unwrap();
+        hub.query.store().rebuild_height_fence().unwrap();
+        let err = hub.check_block_proposal(&empty).unwrap_err();
+        assert!(err.contains(missing), "tip median: {err}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Witness sigops are not in the structure walk. Nine P2WSH inputs of
