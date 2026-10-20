@@ -12,8 +12,10 @@ fn enter_failure_with_pending_matches_the_hard_cap() {
     let idle = inflight_enter_failure(0, StoreError::Corrupt("io_uring submit_and_wait failed"))
         .unwrap_err();
     assert!(idle.to_string().contains("submit_and_wait"), "{idle}");
-    let busy = inflight_enter_failure(2, StoreError::Corrupt("io_uring submit_and_wait failed"))
-        .unwrap_err();
+    let busy = with_drain_hard_cap(Duration::from_secs(120), || {
+        inflight_enter_failure(2, StoreError::Corrupt("io_uring submit_and_wait failed"))
+    })
+    .unwrap_err();
     assert!(busy.to_string().contains("undrained"), "{busy}");
 }
 

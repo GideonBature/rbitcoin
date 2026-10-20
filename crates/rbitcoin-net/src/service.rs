@@ -643,13 +643,10 @@ const REDIAL_INTERVAL: Duration = Duration::from_millis(250);
 /// as the IBD and tip-follow dials ([`crate::connect_timeout_for`] gives I2P
 /// longer). Without it a proxy that accepts and never answers holds the
 /// dial, and its [`crate::peers::DialInFlight`] mark, for good, so the
-/// redial pass would never try that target again.
-#[cfg(not(debug_assertions))]
+/// redial pass would never try that target again. Debug builds keep 8 s.
+/// The short redial interval is separate.
 #[doc(hidden)]
 pub const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-#[cfg(debug_assertions)]
-#[doc(hidden)]
-pub const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub async fn prepare_outbound_session(

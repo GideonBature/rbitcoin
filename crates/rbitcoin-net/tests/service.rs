@@ -422,6 +422,10 @@ async fn redial_skips_a_connect_target_still_dialling() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn outbound_connect_timeout_is_eight_seconds() {
+    assert_eq!(OUTBOUND_CONNECT_TIMEOUT, Duration::from_secs(8));
+}
 
 #[test]
 fn accept_retries_a_full_fd_table_and_stops_on_a_dead_listener() {

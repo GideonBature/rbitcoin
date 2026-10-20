@@ -152,7 +152,7 @@ pub fn abort_uring_unusable(reason: &str) -> ! {
 }
 
 /// Enter failed. Pending SQEs still own caller buffers, so this matches the
-/// hard cap (abort outside tests) instead of returning into a free.
+/// hard cap (abort, including a debug node) instead of returning into a free.
 ///
 /// Linux is the only production caller. Other targets keep the function for
 /// the unit test; a non-Linux lib build must not see it as dead code.
@@ -169,12 +169,13 @@ pub fn finish_drain_hard_cap(pending: usize) -> Result<(), StoreError> {
     let thread = std::thread::current();
     let thread = thread.name().unwrap_or("unnamed");
     let reason = format!("drain hard cap pending={pending} thread={thread}");
+    // `with_drain_hard_cap` is the only opt-in. A debug node does not set it,
+    // so a leftover SQE still aborts instead of freeing caller buffers.
     #[cfg(debug_assertions)]
-    {
+    if TEST_DRAIN_HARD.with(|c| c.get()).is_some() {
         let _ = reason;
-        Err(StoreError::Corrupt("invariant: io_uring undrained"))
+        return Err(StoreError::Corrupt("invariant: io_uring undrained"));
     }
-    #[cfg(not(debug_assertions))]
     abort_uring_unusable(&reason);
 }
 
@@ -933,7 +934,8 @@ impl UringSession {
 
 impl UringSession {
     /// Drop must not ignore a hard cap and then free caller buffers.
-    /// `fail_closed` aborts outside tests. Leftover ids stay in `pending`.
+    /// `fail_closed` aborts unless this thread is inside [`with_drain_hard_cap`].
+    /// Leftover ids stay in `pending`.
     #[doc(hidden)]
     pub fn drop_drain(&mut self) {
         if let Err(err) = self.drain_all_inner(true) {
