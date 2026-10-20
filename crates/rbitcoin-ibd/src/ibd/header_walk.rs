@@ -545,6 +545,27 @@ pub fn note_block_inv(st: &mut IbdWorkState, peer: usize) {
     }
 }
 
+/// Ask one block peer that has not announced a chain for headers, so block
+/// getdata can follow what it holds. Core starts header sync with each
+/// peer. This is the block-inv challenge: one peer at a time, once per
+/// peer, never the reserved header peer.
+pub fn challenge_unprobed_peer(st: &mut IbdWorkState) {
+    if st.header_walk.challenge.is_some() || st.header_walk.challenge_open.is_some() {
+        return;
+    }
+    let reserved = st.header_walk.reserved;
+    let Some(slot) = st
+        .slots
+        .iter_mut()
+        .find(|s| s.alive && Some(s.id) != reserved && !s.chain.probed())
+    else {
+        return;
+    };
+    slot.chain.note_probed();
+    st.header_walk.challenge = Some(slot.id);
+    st.header_walk.challenge_external = false;
+}
+
 /// A follow-session block inv has no IBD slot. Poke one live header peer
 /// the same way [`note_block_inv`] does. Returns false when nobody is live
 /// yet, so the caller keeps the flag.
@@ -808,8 +829,7 @@ pub fn refuse_invalid_batch(st: &mut IbdWorkState, peer: usize, headers: &[Heade
 
 /// The block at `height` failed consensus. When the download path holds it,
 /// the path above its parent is dropped and every peer may be asked for
-/// headers again. A candidate built on it falls back to that parent, and a
-/// challenger that forks at or below the parent with more work takes over.
+/// headers again. A candidate built on it falls back to that parent.
 pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, height: u32) {
     if !st.is_on_path(&hash, height) {
         return;
@@ -830,28 +850,15 @@ pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, he
         st.header_walk.base_diff = tip.diff;
     }
     st.header_walk.tip = tip;
-    if st
-        .header_walk
-        .challenger
-        .as_ref()
-        .is_some_and(|ch| ch.fork_height > parent_h)
-    {
-        st.header_walk.challenger = None;
-    }
+    // A challenger's headers are not stored, and its fork can sit below the
+    // confirmed tip. Peers are asked again from the parent, and a heavier
+    // chain comes back as headers that are stored and can be rewound onto.
+    st.header_walk.challenger = None;
     rbitcoin_log::warn!(
         "ibd: header candidate retired at {hash} height={height}; walk back to {parent} height={parent_h}"
     );
-    let beat = st
-        .header_walk
-        .challenger
-        .as_ref()
-        .is_some_and(|ch| ch.tip.work > st.header_walk.tip.work);
-    if beat {
-        promote_challenger(st, hub);
-    } else {
-        publish_work(st, hub);
-        save_adopt(st, hub);
-    }
+    publish_work(st, hub);
+    save_adopt(st, hub);
 }
 
 /// Forget the download path above `keep`: queued hashes, bodies waiting in

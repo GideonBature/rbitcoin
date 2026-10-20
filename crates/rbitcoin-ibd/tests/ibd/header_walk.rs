@@ -1588,6 +1588,48 @@ fn two_peers_reserve_the_header_walk() {
     assert!(!st.slots[0].alive);
     assert!(st.addr_cooldown.contains_key(&addr));
     assert!(matches!(rx.try_recv(), Ok(PeerCmd::Shutdown)));
+
+    // A fourth, because the header peer must hold the path: a block peer
+    // that never announced a chain is asked for headers once. Its reply
+    // forks below the path, so it is not asked for path blocks.
+    let (mut head, mut head_rx) = slot(5);
+    let (mut other, mut other_rx) = slot(6);
+    head.first_data_ms = 50;
+    other.first_data_ms = 5_000;
+    let mut st = IbdWorkState::new(vec![head, other], Some(gen), Some(0));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    assert_eq!(drain_getheaders(&mut head_rx), 1);
+    let path = [mine(gen, 41), mine(mine(gen, 41).block_hash(), 42)];
+    apply(&mut st, &hub, 5, path.to_vec());
+    assert_eq!(st.header_walk.reserved, Some(5));
+    let _ = take_header_ask(&mut st, 5);
+    challenge_unprobed_peer(&mut st);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    assert_eq!(
+        drain_getheaders(&mut other_rx),
+        1,
+        "the silent peer is asked once"
+    );
+    assert_eq!(drain_getheaders(&mut head_rx), 0);
+    apply(&mut st, &hub, 6, vec![mine(gen, 43)]);
+    challenge_unprobed_peer(&mut st);
+    assert!(st.header_walk.challenge.is_none(), "a peer is probed once");
+    for h in &path {
+        st.body.mark_missing(h.block_hash());
+    }
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(
+        st.slots[1].in_flight.is_empty(),
+        "a peer whose chain left the path below a block is not asked for it"
+    );
+    assert!(st.slots[0].in_flight.contains(&path[0].block_hash()));
 }
 
 #[test]

@@ -902,12 +902,8 @@ fn note_peer_headers(
         return;
     };
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
-        s.chain.note_headers(
-            &st.height_to_hash,
-            hub.tip_height().unwrap_or(0),
-            height,
-            headers,
-        );
+        s.chain
+            .note_headers(hub.tip_height().unwrap_or(0), height, headers);
     }
 }
 
