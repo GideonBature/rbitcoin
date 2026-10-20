@@ -1009,6 +1009,10 @@ pub(crate) fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
         .query
         .tx_output_at_fk(fk, n)
         .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
+    // Core never adds an unspendable output to the coins view.
+    if rbitcoin_consensus::policy::is_unspendable(&out.script) {
+        return Ok(Value::Null);
+    }
     let height = ctx
         .query
         .store()
