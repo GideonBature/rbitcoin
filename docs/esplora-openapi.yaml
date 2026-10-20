@@ -12,7 +12,8 @@ info:
 
     ## Hashes
     Every txid and block hash is 64 hex characters in display order (the
-    order Core and Esplora print). A malformed hash in a path or in `?asof=`
+    order Core and Esplora print). `a-f` and `A-F` are both accepted, as is an
+    optional `0x` or `0X` prefix. A malformed hash in a path or in `?asof=`
     returns **404** `Not Found`.
 
     ## Chain-view headers
@@ -222,8 +223,12 @@ paths:
       summary: Transaction JSON
       description: |
         Falls back to the mempool. Below the seqsigwit prune point the body is a
-        partial 200 with `pruned: true`, `vout` and `status`, and an empty `vin`.
-        Does **not** accept `?asof=` (404).
+        partial 200 with `pruned: true`, `vout`, and `status`. `sigops` is omitted.
+        `fee`, `size`, and `weight` are present only when a txstat row was stored.
+        `vin` is omitted when no input edges were stored. When edges exist, each
+        input is only `txid`, `vout`, `is_coinbase`, and `prevout` if the parent
+        output is still stored: no `scriptsig`, `scriptsig_asm`, `witness`, or
+        `sequence`. Does **not** accept `?asof=` (404).
       parameters: [{ $ref: "#/components/parameters/Txid" }]
       responses:
         "200":
@@ -697,6 +702,10 @@ paths:
     post:
       tags: [broadcast]
       summary: Test mempool acceptance without admitting
+      description: |
+        One result per transaction. If the batch contains a duplicate txid, the
+        body is a single object with `allowed: false` and
+        `package-error: package-contains-duplicates` (no `reject-reason`).
       parameters:
         - name: maxfeerate
           in: query
@@ -941,7 +950,8 @@ components:
   schemas:
     Hash:
       type: string
-      pattern: "^[0-9a-f]{64}$"
+      description: Display-order hex. Uppercase and an optional `0x` / `0X` prefix are accepted.
+      pattern: "^(?:0[xX])?[0-9a-fA-F]{64}$"
     Block:
       type: object
       required: [id, height, version, timestamp, tx_count, size, weight, merkle_root, previousblockhash, mediantime, nonce, bits, difficulty]
@@ -982,7 +992,9 @@ components:
       properties:
         scriptpubkey: { type: string }
         scriptpubkey_asm: { type: string }
-        scriptpubkey_type: { type: string }
+        scriptpubkey_type:
+          type: string
+          enum: [p2pkh, p2sh, p2pk, v0_p2wpkh, v0_p2wsh, v1_p2tr, op_return, multisig, unknown]
         scriptpubkey_address: { type: string }
         value: { type: integer, description: sats }
     Vin:
@@ -1002,7 +1014,7 @@ components:
           oneOf: [{ $ref: "#/components/schemas/Vout" }, { type: "null" }]
     Transaction:
       type: object
-      required: [txid, version, locktime, vin, vout, status]
+      required: [txid, version, locktime, vout, status]
       properties:
         txid: { $ref: "#/components/schemas/Hash" }
         version: { type: integer }
@@ -1011,12 +1023,19 @@ components:
         weight: { type: integer }
         sigops: { type: integer }
         fee: { type: integer, description: sats }
-        vin: { type: array, items: { $ref: "#/components/schemas/Vin" } }
+        vin:
+          type: array
+          description: |
+            Full transactions always include this. A pruned transaction includes it
+            only when input edges are stored, and those entries omit script and witness fields.
+          items: { $ref: "#/components/schemas/Vin" }
         vout: { type: array, items: { $ref: "#/components/schemas/Vout" } }
         status: { $ref: "#/components/schemas/TxStatus" }
         pruned:
           type: boolean
-          description: Present and true below the seqsigwit prune point; `vin` is then empty.
+          description: |
+            Present and true below the seqsigwit prune point. `sigops` is omitted.
+            `vin` is partial (see the `vin` property) or absent when no input edges were stored.
     MerkleProof:
       type: object
       required: [block_height, merkle, pos]
@@ -1083,9 +1102,19 @@ components:
         txid: { $ref: "#/components/schemas/Hash" }
         wtxid: { $ref: "#/components/schemas/Hash" }
         allowed: { type: boolean }
-        vsize: { type: integer }
+        vsize:
+          type: integer
+          description: Present when `allowed` is true. `floor(weight / 4)`, not the ceiling Core uses.
         fees:
           type: object
+          description: Present when `allowed` is true.
           properties:
             base: { type: number, description: BTC }
-        reject-reason: { type: string }
+        reject-reason:
+          type: string
+          description: Policy or fee failure, including `max-fee-exceeded`. Absent when `package-error` is set.
+        package-error:
+          type: string
+          description: |
+            Set to `package-contains-duplicates` when the batch repeats a txid.
+            That response is one object, not one per transaction, and has no `reject-reason`.
