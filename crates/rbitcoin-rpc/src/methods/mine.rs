@@ -150,17 +150,15 @@ pub(crate) fn generate_with_mempool(
 ) -> Result<Value, Value> {
     let miner = require_regtest_miner(ctx, "generate")?;
     let listing = ctx.pool_listing();
-    if matches!(listing, PoolListing::Blocksonly) {
-        return Err(pool_listing_unavailable(listing));
-    }
-    // Catch-up leaves the pool unstripped. Mine the coinbase only.
-    let extras: Vec<Transaction> = if matches!(listing, PoolListing::Ready) {
+    // Catch-up leaves confirmed transactions in the pool, so mine the coinbase
+    // only. `-blocksonly` still strips on connect and regtest mines that node.
+    let extras: Vec<Transaction> = if matches!(listing, PoolListing::Downloading) {
+        Vec::new()
+    } else {
         mempool_block_txs(ctx)
             .into_iter()
             .map(|(tx, _)| Transaction::clone(&tx))
             .collect()
-    } else {
-        Vec::new()
     };
     let hashes = miner
         .generate_to_script(nblocks, script, extras.clone())
@@ -549,10 +547,7 @@ pub(crate) fn gbt_rules(req: Option<&Value>) -> Result<Vec<String>, Value> {
 }
 
 pub(crate) fn getblocktemplate(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
-    let listing = ctx.pool_listing();
-    if !matches!(listing, PoolListing::Ready) {
-        return Err(pool_listing_unavailable(listing));
-    }
+    refuse_unmaintained_template(ctx)?;
     params.reject_unknown(&["template_request"])?;
     let req = params.get(0, "template_request");
     let _rules = gbt_rules(req)?;
@@ -657,10 +652,7 @@ pub(crate) fn gbt_longpoll_id(ctx: &RpcContext) -> String {
 }
 
 pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
-    let listing = ctx.pool_listing();
-    if !matches!(listing, PoolListing::Ready) {
-        return Err(pool_listing_unavailable(listing));
-    }
+    refuse_unmaintained_template(ctx)?;
     let GbtTip::Ready(tip_h, prev_hex, tip_time, tip_bits) = gbt_tip(ctx)? else {
         return Err(rpc_error(ERR_MISC, "template tip is not on the best chain"));
     };
