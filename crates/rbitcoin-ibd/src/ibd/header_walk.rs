@@ -138,7 +138,8 @@ pub const LOOKAHEAD_ASK: Duration = Duration::from_secs(5);
 pub const HEADER_MISS_DISCONNECT: u8 = 2;
 #[doc(hidden)]
 pub const DEAD_END_CAP: usize = 1024;
-/// Past the cap a new invalid tip is not stored; the oldest stay.
+/// Past the cap the set starts again, so the newest refused tip is kept: the
+/// next batch of a long invalid chain links to it.
 const INVALID_TIP_CAP: usize = 1024;
 
 impl HeaderWalk {
@@ -649,14 +650,29 @@ pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
     let holds = |s: &PeerSlot| {
         askable(s) && !height.is_some_and(|ht| s.chain.left_path_by(&st.height_to_hash, ht))
     };
+    let Some(slot) = st.slots.iter().find(|s| s.id == peer) else {
+        return false;
+    };
     // A chain record can be stale. With no peer that holds the block by what
-    // it announced, any peer that did not answer `notfound` may be asked.
-    let by_chain = st.slots.iter().any(&holds);
-    let has = |s: &PeerSlot| if by_chain { holds(s) } else { askable(s) };
-    if !st.slots.iter().any(|s| s.id == peer && has(s)) {
+    // it announced, any peer that did not answer `notfound` may be asked,
+    // the header peer too.
+    if !st.slots.iter().any(&holds) {
+        return askable(slot);
+    }
+    if !holds(slot) {
         return false;
     }
-    st.header_walk.reserved != Some(peer) || !st.slots.iter().any(|s| s.id != peer && has(s))
+    st.header_walk.reserved != Some(peer) || !st.slots.iter().any(|s| s.id != peer && holds(s))
+}
+
+/// Settle each peer's recorded split against this node's confirmed chain once
+/// that height has left the path. Runs before block assignment.
+pub fn settle_peer_splits(st: &mut IbdWorkState, hub: &ChainHub) {
+    let path = &st.height_to_hash;
+    for slot in &mut st.slots {
+        slot.chain
+            .settle_split(path, |ht| super::peer_chain::confirmed_at(hub, ht));
+    }
 }
 
 /// Inputs for one main-loop header poll. The loop owns the cadence clock.
@@ -802,9 +818,10 @@ pub fn note_dead(st: &mut IbdWorkState, hash: BlockHash) {
 
 #[doc(hidden)]
 fn note_invalid_tip(st: &mut IbdWorkState, hash: BlockHash) {
-    if st.header_walk.invalid_tips.len() < INVALID_TIP_CAP {
-        st.header_walk.invalid_tips.insert(hash);
+    if st.header_walk.invalid_tips.len() >= INVALID_TIP_CAP {
+        st.header_walk.invalid_tips.clear();
     }
+    st.header_walk.invalid_tips.insert(hash);
 }
 
 /// Refuse a batch that holds or builds on a rejected block, and retire

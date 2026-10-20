@@ -249,7 +249,7 @@ const BLOCK_IS_INVALIDATED: &str = "block is invalidated";
 /// Sidecar of connect failures next to `header.adopt`. Not a schema bump.
 const INVALID_FILE: &str = "block.invalid";
 const INVALID_MAGIC: &[u8; 8] = b"rbtcinv1";
-/// Past the cap a new failure is not written; the oldest stay.
+/// Past the cap the oldest kept failure gives way, so the newest survives restart.
 const INVALID_FILE_CAP: usize = 4_096;
 
 fn parse_invalid_file(bytes: &[u8]) -> Option<Vec<BlockHash>> {
@@ -320,8 +320,11 @@ impl Invalidated {
 
     fn keep_failed(&self, hash: BlockHash) {
         let mut failed = self.failed.write().unwrap();
-        if failed.len() >= INVALID_FILE_CAP || failed.contains(&hash) {
+        if failed.contains(&hash) {
             return;
+        }
+        if failed.len() >= INVALID_FILE_CAP {
+            failed.remove(0);
         }
         failed.push(hash);
         write_invalid_file(&self.file, &failed);

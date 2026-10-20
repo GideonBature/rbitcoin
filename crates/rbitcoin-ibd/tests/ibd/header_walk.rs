@@ -1675,11 +1675,6 @@ fn two_peers_reserve_the_header_walk() {
         "the header peer takes what no other peer holds"
     );
 
-    // Once the fork height leaves the path (confirmed and pruned), that peer
-    // has still left it.
-    st.height_to_hash.remove(&1);
-    st.height_to_hash.remove(&2);
-    assert!(!may_serve(&st, 6, &path[1].block_hash()));
     // With no peer that holds the block by what it announced, a peer that
     // did not answer `notfound` is still asked.
     st.slots[0].chain.note_notfound(path[1].block_hash());
@@ -1698,6 +1693,81 @@ fn two_peers_reserve_the_header_walk() {
     assert_eq!(added, 0);
     assert!(!st.ordered_set.contains(&late[1].block_hash()));
     assert_eq!(st.header_walk.tip_hash(), tip);
+
+    // A fifth, on its own hub, because this node takes the forked peer's
+    // chain: once the fork height is confirmed and leaves the path, that peer
+    // holds the next path block again, also while a peer that announced
+    // nothing is up.
+    let (_dir5, hub5) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-taken");
+    hub5.ensure_genesis().unwrap();
+    let gen5 = hub5.tip_hash().unwrap();
+    let (mut head, _head_rx) = slot(8);
+    let (forked, _forked_rx) = slot(9);
+    let (silent, _silent_rx) = slot(10);
+    let (other_fork, _other_rx) = slot(11);
+    head.first_data_ms = 50;
+    let mut st = IbdWorkState::new(vec![head, forked, silent, other_fork], Some(gen5), Some(0));
+    assert!(send_getheaders(&mut st, &hub5).unwrap());
+    let lost0 = mine(gen5, 81);
+    apply(&mut st, &hub5, 8, vec![lost0, mine(lost0.block_hash(), 82)]);
+    let taken1 = mine_block(gen5, 1);
+    let taken2 = mine_block(taken1.block_hash(), 2);
+    apply(&mut st, &hub5, 9, vec![taken1.header, taken2.header]);
+    let elsewhere = mine(gen5, 83);
+    apply(
+        &mut st,
+        &hub5,
+        11,
+        vec![elsewhere, mine(elsewhere.block_hash(), 84)],
+    );
+    hub5.accept_block(taken1.clone()).unwrap();
+    st.height_to_hash.remove(&1);
+    st.height_to_hash.insert(2, taken2.block_hash());
+    st.record_height(taken2.block_hash(), 2);
+    st.body.mark_missing(taken2.block_hash());
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub5,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(
+        may_serve(&st, 9, &taken2.block_hash()),
+        "the peer whose chain this node took is asked again"
+    );
+    assert!(
+        !may_serve(&st, 11, &taken2.block_hash()),
+        "a peer that left where this node confirmed a different block has still left"
+    );
+    // With no peer that holds a block by what it announced, the header peer
+    // is asked too.
+    st.slots[1].chain.note_notfound(taken2.block_hash());
+    st.slots[2].chain.note_notfound(taken2.block_hash());
+    assert!(may_serve(&st, 8, &taken2.block_hash()));
+}
+
+/// A long chain on an invalid block stays refused past the cap on
+/// remembered tips: the newest link is kept.
+#[test]
+fn a_long_chain_on_an_invalid_block_stays_refused() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-refuse-cap");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let (s0, _rx0) = slot(0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    let bad = mine(gen, 1);
+    st.reorg.invalid.mark(bad.block_hash().to_byte_array());
+    let mut prev = bad.block_hash();
+    for n in 0..1_100u32 {
+        let next = mine(prev, 2 + n);
+        assert!(
+            refuse_invalid_batch(&mut st, 0, &[next]),
+            "batch {n} builds on the refused chain"
+        );
+        prev = next.block_hash();
+    }
 }
 
 #[test]

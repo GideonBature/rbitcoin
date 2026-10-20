@@ -11,6 +11,7 @@ mod exit;
 mod header_walk;
 mod path;
 mod peer_book_and_config_tests;
+mod peer_chain;
 mod peer_io;
 mod perf_log;
 mod progress;

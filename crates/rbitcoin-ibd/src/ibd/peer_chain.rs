@@ -28,6 +28,9 @@ pub struct PeerChain {
     /// The peer's header at the first height where its announced chain
     /// differed from this node's chain (path or confirmed) when announced.
     split: Option<(u32, BlockHash)>,
+    /// That height has left the path and this node's confirmed block there
+    /// is a different one.
+    split_confirmed: bool,
     /// The peer announced headers, or was asked for them once.
     probed: bool,
 }
@@ -56,25 +59,25 @@ impl PeerChain {
         self.probed = true;
     }
 
-    /// Keep announced `headers`, the first at `height`. `ours` is this node's
-    /// block at a height (path or confirmed), when known. The first height
-    /// where they differ is where the peer leaves this chain; a later reply
-    /// that agrees there clears it. Only heights above the confirmed `tip`
-    /// are kept. A reply that overlaps or continues the kept run replaces it
-    /// from where it starts, one that starts lower replaces it, and one that
-    /// leaves a gap above it is dropped: the run nearer the tip says more.
+    /// Keep announced `headers`, the first at `height`, against this node's
+    /// chain: the `path`, or a `confirmed` block at or below `tip`. The first
+    /// height where they differ is where the peer leaves this chain; a later
+    /// reply that agrees there clears it. Only heights above `tip` are kept,
+    /// newest last: a reply that continues the kept run extends it, any other
+    /// replaces it, and the oldest hashes past one full reply give way.
     pub fn note_headers(
         &mut self,
-        ours: impl Fn(u32) -> Option<BlockHash>,
+        path: &HashMap<u32, BlockHash>,
+        confirmed: impl Fn(u32) -> Option<BlockHash>,
         tip: u32,
         height: u32,
         headers: &[Header],
     ) {
         self.probed = true;
-        self.complete = headers.len() < ANNOUNCED_CAP;
         let hashes: Vec<BlockHash> = headers.iter().map(|h| h.block_hash()).collect();
         for (ht, hash) in (height..).zip(&hashes) {
-            let Some(our) = ours(ht) else {
+            let on_path = path.get(&ht).copied();
+            let Some(our) = on_path.or_else(|| (ht <= tip).then(|| confirmed(ht)).flatten()) else {
                 continue;
             };
             if our == *hash {
@@ -85,6 +88,7 @@ impl PeerChain {
             }
             if self.split.is_none_or(|(at, _)| ht <= at) {
                 self.split = Some((ht, *hash));
+                self.split_confirmed = on_path.is_none();
             }
             break;
         }
@@ -97,25 +101,50 @@ impl PeerChain {
         };
         let start = height.saturating_add(skip as u32);
         let end = self.from.saturating_add(self.announced.len() as u32);
-        if self.announced.is_empty() || start < self.from {
+        if self.announced.is_empty() || start < self.from || start > end {
             self.announced.clear();
             self.from = start;
-        } else if start > end {
-            return;
         } else {
             self.announced.truncate((start - self.from) as usize);
         }
         self.announced.extend(fresh.iter().copied());
-        self.announced.truncate(ANNOUNCED_CAP);
+        let over = self.announced.len().saturating_sub(ANNOUNCED_CAP);
+        self.announced.drain(..over);
+        self.from = self.from.saturating_add(over as u32);
+        self.complete = headers.len() < ANNOUNCED_CAP;
+    }
+
+    /// The recorded split's height has left the path: compare it with this
+    /// node's `confirmed` block there. The same block means this node took
+    /// the peer's chain, so the split is gone.
+    pub fn settle_split(
+        &mut self,
+        path: &HashMap<u32, BlockHash>,
+        confirmed: impl Fn(u32) -> Option<BlockHash>,
+    ) {
+        let Some((at, hash)) = self.split else {
+            return;
+        };
+        if path.contains_key(&at) {
+            return;
+        }
+        match confirmed(at) {
+            Some(ours) if ours == hash => self.split = None,
+            ours => self.split_confirmed = ours.is_some(),
+        }
     }
 
     /// The peer does not have the path block at `height`: its chain left this
     /// node's chain at or below it, it holds a different block there, or its
     /// whole chain ends below it. Two chains that differ at one height differ
-    /// above it. A recorded split whose height has left the path still holds.
+    /// above it.
     pub fn left_path_by(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
         if let Some((at, hash)) = self.split {
-            if at <= height && path.get(&at).is_none_or(|p| *p != hash) {
+            let differs = match path.get(&at) {
+                Some(p) => *p != hash,
+                None => self.split_confirmed,
+            };
+            if at <= height && differs {
                 return true;
             }
         }
@@ -133,4 +162,15 @@ impl PeerChain {
         let peer = self.announced[(at - self.from) as usize];
         path.get(&at).is_some_and(|p| *p != peer)
     }
+}
+
+/// This node's confirmed block at `height`.
+pub fn confirmed_at(hub: &rbitcoin_net::chain::ChainHub, height: u32) -> Option<BlockHash> {
+    use bitcoin::hashes::Hash;
+    let (_, rec) = hub
+        .query
+        .header_at_height(rbitcoin_primitives::Height(height))
+        .ok()
+        .flatten()?;
+    Some(BlockHash::from_byte_array(rec.hash))
 }

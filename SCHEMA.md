@@ -405,7 +405,7 @@ Sidecar of blocks that failed connect on a consensus rule, so a restart does not
 repeat   block hash [u8; 32]
 ```
 
-Length is exact: `12 + count × 32`. Oldest first. Past 4096 a new failure is marked in memory only. Mutated bodies, a header timestamp too far in the future, store and engine faults, and operator `invalidateblock` are not written. A descendant is invalid through its ancestor: the startup header scan and the IBD resume seed do not walk through a listed hash.
+Length is exact: `12 + count × 32`. Oldest first. Past 4096 the oldest hash gives way, so the newest failure survives restart. Mutated bodies, a header timestamp too far in the future, store and engine faults, and operator `invalidateblock` are not written. A descendant is invalid through its ancestor: the startup header scan and the IBD resume seed do not walk through a listed hash.
 
 ---
 

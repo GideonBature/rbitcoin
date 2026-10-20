@@ -908,16 +908,14 @@ fn note_peer_headers(
     };
     let tip = hub.tip_height().unwrap_or(0);
     let path = &st.height_to_hash;
-    let ours = |ht: u32| {
-        path.get(&ht).copied().or_else(|| {
-            (ht <= tip)
-                .then(|| hub.query.header_at_height(rbitcoin_primitives::Height(ht)))
-                .and_then(|r| r.ok().flatten())
-                .map(|(_, rec)| BlockHash::from_byte_array(rec.hash))
-        })
-    };
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
-        s.chain.note_headers(ours, tip, height, headers);
+        s.chain.note_headers(
+            path,
+            |ht| super::peer_chain::confirmed_at(hub, ht),
+            tip,
+            height,
+            headers,
+        );
     }
 }
 

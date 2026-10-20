@@ -53,6 +53,38 @@ fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("chain")
 }
 
+/// A full `block.invalid` drops its oldest hash for a new failure, so the
+/// newest one survives restart.
+#[test]
+fn a_full_invalid_file_keeps_the_newest_failure() {
+    let (dir, hub) = tmp_hub();
+    drop(hub);
+    let mut full = b"rbtcinv1".to_vec();
+    full.extend_from_slice(&4_096u32.to_le_bytes());
+    for i in 0..4_096u32 {
+        let mut raw = [0u8; 32];
+        raw[..4].copy_from_slice(&i.to_le_bytes());
+        raw[31] = 0xaa;
+        full.extend_from_slice(&raw);
+    }
+    let marks = dir.path().join("block.invalid");
+    std::fs::write(&marks, &full).unwrap();
+    let q = rbitcoin_query::Query::open_or_create_tiny(dir.path()).unwrap();
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let newest = BlockHash::from_byte_array([0xbb; 32]);
+    hub.note_failed_connect(newest);
+    let kept = std::fs::read(&marks).unwrap();
+    assert_eq!(kept.len(), full.len(), "the file stays at its cap");
+    assert!(
+        kept.windows(32).any(|w| w == newest.as_byte_array()),
+        "the newest failure is kept"
+    );
+    assert!(
+        !kept.windows(32).any(|w| w == &full[12..44]),
+        "the oldest one gives way"
+    );
+}
+
 #[test]
 fn ancestor_walk_stops_at_cap() {
     let hashes: Vec<BlockHash> = (0..9u8)

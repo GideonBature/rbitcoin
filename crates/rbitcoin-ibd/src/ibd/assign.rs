@@ -246,6 +246,7 @@ pub fn assign_work_ordered(
     if alive.is_empty() {
         return;
     }
+    super::header_walk::settle_peer_splits(st, hub);
 
     let (bq_bytes, bq_count) = hub.query.block_queue_stats();
     let bq_stop = cfg.assign_stop_bytes;
