@@ -101,6 +101,7 @@ paths:
     get:
       tags: [blocks]
       summary: Ten block summaries ending at `start_height`, newest first
+      description: A `start_height` above the tip is clamped down to the tip. The route does not 404.
       parameters:
         - { name: start_height, in: path, required: true, schema: { type: integer, minimum: 0 } }
       responses:
@@ -149,6 +150,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BlockStatus" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /block/{hash}/raw:
     get:
       tags: [blocks]
@@ -357,7 +359,9 @@ paths:
     get:
       tags: [addresses]
       summary: Address chain and mempool stats
-      description: With `?asof=`, `chain_stats` are as of that block and `mempool_stats` are all zero.
+      description: |
+        With `?asof=`, `chain_stats` are as of that block and `mempool_stats` are all zero.
+        A valid address with no history is 200 and all counters are zero. 404 is a bad address or a bad `asof`.
       parameters:
         - { $ref: "#/components/parameters/Address" }
         - { $ref: "#/components/parameters/AsOf" }
@@ -369,7 +373,9 @@ paths:
     get:
       tags: [addresses]
       summary: Scripthash chain and mempool stats
-      description: With `?asof=`, `chain_stats` are as of that block and `mempool_stats` are all zero.
+      description: |
+        With `?asof=`, `chain_stats` are as of that block and `mempool_stats` are all zero.
+        A valid scripthash with no history is 200 and all counters are zero. 404 is bad hex or a bad `asof`.
       parameters:
         - { $ref: "#/components/parameters/Scripthash" }
         - { $ref: "#/components/parameters/AsOf" }
@@ -385,6 +391,7 @@ paths:
         Live: matches Electrum `listunspent` (adds mempool funding and drops
         confirmed outputs spent in the mempool).
         With `?asof=`: the UTXO set for this script as of that block, with no mempool.
+        A valid address with no unspent outputs is 200 `[]`. 404 is a bad address or a bad `asof`.
       parameters:
         - { $ref: "#/components/parameters/Address" }
         - { $ref: "#/components/parameters/AsOf" }
@@ -447,6 +454,7 @@ paths:
     get:
       tags: [addresses]
       summary: Next 25 confirmed txs after `last_seen_txid`
+      description: A well-formed txid that is not in this script's confirmed history is 422 `after_txid not found`. 404 is a bad address, bad hex, or a bad `asof`.
       parameters:
         - { $ref: "#/components/parameters/Address" }
         - { $ref: "#/components/parameters/LastSeenTxid" }
@@ -454,6 +462,7 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/TxList" }
         "404": { $ref: "#/components/responses/AsOfNotFound" }
+        "422": { $ref: "#/components/responses/AfterTxidNotFound" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /scripthash/{scripthash}/txs/chain:
     get:
@@ -470,6 +479,7 @@ paths:
     get:
       tags: [addresses]
       summary: Next 25 confirmed txs after `last_seen_txid`
+      description: A well-formed txid that is not in this script's confirmed history is 422 `after_txid not found`. 404 is bad hex or a bad `asof`.
       parameters:
         - { $ref: "#/components/parameters/Scripthash" }
         - { $ref: "#/components/parameters/LastSeenTxid" }
@@ -477,24 +487,33 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/TxList" }
         "404": { $ref: "#/components/responses/AsOfNotFound" }
+        "422": { $ref: "#/components/responses/AfterTxidNotFound" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /address/{address}/txs/mempool:
     get:
       tags: [addresses]
       summary: Mempool txs for the address (up to 50)
-      description: Does **not** accept `?asof=` (404).
+      description: |
+        Does **not** accept `?asof=` (404). A bad address is 404 `Not Found`.
+        A valid address with nothing in the mempool is 200 `[]`.
+        These responses are not chain-tip stamped.
       parameters: [{ $ref: "#/components/parameters/Address" }]
       responses:
-        "200": { $ref: "#/components/responses/TxList" }
+        "200": { $ref: "#/components/responses/MempoolTxList" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /scripthash/{scripthash}/txs/mempool:
     get:
       tags: [addresses]
       summary: Mempool txs for the scripthash (up to 50)
-      description: Does **not** accept `?asof=` (404).
+      description: |
+        Does **not** accept `?asof=` (404). Bad hex is 404 `Not Found`.
+        A valid scripthash with nothing in the mempool is 200 `[]`.
+        These responses are not chain-tip stamped.
       parameters: [{ $ref: "#/components/parameters/Scripthash" }]
       responses:
-        "200": { $ref: "#/components/responses/TxList" }
+        "200": { $ref: "#/components/responses/MempoolTxList" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /address/{address}/txs/summary:
     get:
@@ -517,6 +536,7 @@ paths:
     get:
       tags: [addresses]
       summary: Next compact page after `last_seen_txid` (rbitcoin dialect)
+      description: The cursor is the path segment only. `?after_txid=` is ignored. An unknown path txid is 422 `after_txid not found`.
       parameters:
         - { $ref: "#/components/parameters/Address" }
         - { $ref: "#/components/parameters/LastSeenTxid" }
@@ -543,6 +563,7 @@ paths:
     get:
       tags: [addresses]
       summary: Next compact page after `last_seen_txid` (rbitcoin dialect)
+      description: The cursor is the path segment only. `?after_txid=` is ignored. An unknown path txid is 422 `after_txid not found`.
       parameters:
         - { $ref: "#/components/parameters/Scripthash" }
         - { $ref: "#/components/parameters/LastSeenTxid" }
@@ -652,7 +673,7 @@ paths:
   /mempool/recent:
     get:
       tags: [mempool]
-      summary: Most recently accepted mempool txs
+      summary: Up to 10 most recently accepted mempool txs, newest first
       responses:
         "200":
           description: Recent txs in accept order
@@ -863,13 +884,19 @@ components:
       name: after_txid
       in: query
       required: false
-      description: mempool.space-style cursor. Skips through this tx (mempool, then chain). Unknown or unparseable → 422.
+      description: |
+        Query cursor on `/txs` and `/txs/summary` (not on the `/{last_seen_txid}` routes, which ignore it).
+        Skips through this tx (mempool, then chain). Unknown or unparseable → 422.
+        An empty value is treated as omitted.
       schema: { $ref: "#/components/schemas/Hash" }
     MaxTxs:
       name: max_txs
       in: query
       required: false
-      schema: { type: integer, minimum: 1, maximum: 10000, default: 10000 }
+      description: |
+        Page size. Omitted means 10000. Values above 10000 are capped at 10000, not rejected.
+        `0` returns an empty page.
+      schema: { type: integer, minimum: 0, default: 10000 }
     ClientHeader:
       name: X-Rbitcoin-Client
       in: header
@@ -908,7 +935,9 @@ components:
       description: Unknown object, malformed hash, or `pruned`
       content: { text/plain: { schema: { type: string } } }
     AsOfNotFound:
-      description: Unknown object, malformed hash, or an `asof` block that is unknown, off the best chain, or ahead of the scripthash index
+      description: |
+        Malformed address, wrong network, bad hex, or an `asof` block that is unknown, off the best chain, or ahead of the scripthash index.
+        A valid address or scripthash with no history is 200 (zero stats, or an empty array), not 404.
       content: { text/plain: { schema: { type: string } } }
     BadRequest:
       description: Bad input
@@ -917,14 +946,21 @@ components:
       description: Body too large
       content: { text/plain: { schema: { type: string } } }
     AfterTxidNotFound:
-      description: "`after_txid not found`, or `body too long` (more than 300 scripts) on POST"
+      description: |
+        Body is `after_txid not found` when a query `after_txid` or a path `last_seen_txid` is well-formed but not in that history.
+        On POST, more than 300 scripts is `body too long` with this same status.
       content: { text/plain: { schema: { type: string } } }
     Unavailable:
       description: No tip, mempool unavailable, scripthash index disabled, `--max-sh-creates` exceeded, or `chain view moved`
       content: { text/plain: { schema: { type: string } } }
     TxList:
-      description: Transactions
+      description: Transactions. Chain-tip stamped.
       headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+      content:
+        application/json:
+          schema: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
+    MempoolTxList:
+      description: Mempool transactions for one script. Not chain-tip stamped.
       content:
         application/json:
           schema: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
