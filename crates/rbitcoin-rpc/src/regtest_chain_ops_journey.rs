@@ -1184,6 +1184,12 @@ fn chain_ops_empty_template_and_proposals(ctx: &RpcContext) {
     let mut bits_bad = next.clone();
     bits_bad.header.bits = bitcoin::CompactTarget::from_consensus(469762303);
     assert_eq!(propose(ctx, &bits_bad), "bad-diffbits");
+    let mut v3 = next.clone();
+    v3.header.version = bitcoin::block::Version::from_consensus(3);
+    assert_eq!(propose(ctx, &v3), "bad-version(0x00000003)", "BIP65 floor");
+    let mut far = next.clone();
+    far.header.time = u32::MAX;
+    assert_eq!(propose(ctx, &far), "time-too-new");
     let mut old = next;
     old.header.time = 0;
     assert_eq!(propose(ctx, &old), "time-too-old");
@@ -2355,6 +2361,61 @@ fn chain_ops_proposal_spends(ctx: &RpcContext, cbs: &mut TrueCoinbases) {
     assert_eq!(
         propose(ctx, &proposal_on_tip(ctx, vec![locked])),
         "bad-txns-nonfinal"
+    );
+    // BIP113: a time lock is final only below the parent's median time,
+    // not below this block's own stamp.
+    let tip_mtp = dispatch(ctx, "getblockheader", vec![best_hash(ctx), json!(true)]).unwrap()
+        ["mediantime"]
+        .as_u64()
+        .unwrap() as u32;
+    let mut time_locked = spend.clone();
+    time_locked.lock_time = LockTime::from_time(tip_mtp).unwrap();
+    time_locked.input[0].sequence = bitcoin::Sequence::ZERO;
+    let block = proposal_on_tip(ctx, vec![time_locked.clone()]);
+    assert!(block.header.time > tip_mtp);
+    assert_eq!(propose(ctx, &block), "bad-txns-nonfinal", "BIP113");
+    time_locked.lock_time = LockTime::from_time(tip_mtp - 1).unwrap();
+    assert!(
+        propose(ctx, &proposal_on_tip(ctx, vec![time_locked])).is_null(),
+        "BIP113: one second below the median is final"
+    );
+    // BIP68: the coin at height `f` is `age` deep in the proposed block.
+    let age = tip_count(ctx) as u32 + 1 - f;
+    let mut rel = spend.clone();
+    rel.input[0].sequence = bitcoin::Sequence::from_height(age as u16);
+    assert!(propose(ctx, &proposal_on_tip(ctx, vec![rel.clone()])).is_null());
+    rel.input[0].sequence = bitcoin::Sequence::from_height(age as u16 + 1);
+    assert_eq!(
+        propose(ctx, &proposal_on_tip(ctx, vec![rel])),
+        "bad-txns-nonfinal",
+        "BIP68 height lock one block short"
+    );
+    let mut rel_time = spend.clone();
+    rel_time.input[0].sequence = bitcoin::Sequence::from_512_second_intervals(0);
+    assert!(
+        propose(ctx, &proposal_on_tip(ctx, vec![rel_time.clone()])).is_null(),
+        "a met time lock reads the coin's median time"
+    );
+    rel_time.input[0].sequence = bitcoin::Sequence::from_512_second_intervals(u16::MAX);
+    assert_eq!(
+        propose(ctx, &proposal_on_tip(ctx, vec![rel_time])),
+        "bad-txns-nonfinal",
+        "BIP68 time lock"
+    );
+    // A coin created in the proposed block is at that block's height.
+    let mut child = spend.clone();
+    child.input[0].previous_output = bitcoin::OutPoint {
+        txid: spend.compute_txid(),
+        vout: 0,
+    };
+    child.input[0].sequence = bitcoin::Sequence::from_height(0);
+    child.output[0].value = spend.output[0].value - Amount::from_sat(1_000);
+    assert!(propose(ctx, &proposal_on_tip(ctx, vec![spend.clone(), child.clone()])).is_null());
+    child.input[0].sequence = bitcoin::Sequence::from_height(1);
+    assert_eq!(
+        propose(ctx, &proposal_on_tip(ctx, vec![spend.clone(), child])),
+        "bad-txns-nonfinal",
+        "a same-block coin is zero blocks deep"
     );
     let mut ghost = spend.clone();
     ghost.input[0].previous_output.txid = Txid::from_byte_array([0xab; 32]);

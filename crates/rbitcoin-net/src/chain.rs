@@ -3601,21 +3601,27 @@ pub fn check_block_proposal_with(
     if block.header.bits.to_consensus() != expected {
         return Err("bad-diffbits".into());
     }
-    let mtp = rbitcoin_query::median_time_past(query, tip_h).unwrap_or(tip_rec.timestamp);
+    let mtp = rbitcoin_query::median_time_past_store(query, tip_h).map_err(|e| e.to_string())?;
     // Core is `<=` MTP. Proposal uses `<` so a template stamped at the
     // parent's mediantime+1 still validates after that parent is submitted
     // (new MTP often equals that stamp on an incrementing cache).
     if block.header.time < mtp {
         return Err("time-too-old".into());
     }
-    if u64::from(block.header.time) > u64::from(now).saturating_add(2 * 60 * 60) {
-        return Err("time-too-new".into());
-    }
+    rbitcoin_consensus::with_now(u64::from(now), || {
+        rbitcoin_consensus::header::check_header_version_and_future_time(
+            params,
+            Height(height),
+            &block.header,
+        )
+    })
+    .map_err(|e| rbitcoin_consensus::block_reject_reason(&e))?;
     let vctx = rbitcoin_consensus::ValidationContext::at(params, Height(height), milestone);
     if let Err(e) = rbitcoin_consensus::validate_block_structure(block, &vctx) {
         return Err(rbitcoin_consensus::block_reject_reason(&e));
     }
-    let (fees, prevouts) = proposal_connect(query, block, height, mtp, params.coinbase_maturity())?;
+    let lock_time_cutoff = rbitcoin_query::assemble_lock_time_cutoff(&vctx, block, mtp);
+    let (fees, prevouts) = proposal_connect(query, params, block, height, mtp, lock_time_cutoff)?;
     let subsidy = rbitcoin_consensus::block_subsidy(height, params) as u64;
     let mut coinbase_out = 0u64;
     for o in &block.txdata[0].output {
@@ -3671,12 +3677,16 @@ pub fn check_block_proposal_with(
 /// to cache the create height; each confirmed spend reads that fence again,
 /// and a missing or moved height is `bad-txns-inputs-missingorspent`.
 /// Spentness is still probed per input, never served from that map.
+///
+/// `mtp` is the parent's median time; `lock_time_cutoff` is the connect
+/// path's BIP113 cutoff for this block.
 fn proposal_connect(
     query: &Query,
+    params: &ChainParams,
     block: &Block,
     height: u32,
     mtp: u32,
-    maturity: u32,
+    lock_time_cutoff: u32,
 ) -> Result<(u64, Vec<Vec<TxOut>>), String> {
     if block.txdata.is_empty() {
         return Err("bad-blk-length".into());
@@ -3692,7 +3702,7 @@ fn proposal_connect(
     let mut fees = 0u64;
     let mut prevouts = Vec::with_capacity(block.txdata.len().saturating_sub(1));
     for (i, (tx, &txid)) in block.txdata.iter().zip(&txids).enumerate() {
-        if !rbitcoin_consensus::is_final_tx(tx, height, mtp.max(block.header.time)) {
+        if !rbitcoin_consensus::is_final_tx(tx, height, lock_time_cutoff) {
             return Err("bad-txns-nonfinal".into());
         }
         if i == 0 {
@@ -3709,6 +3719,7 @@ fn proposal_connect(
         }
         let mut in_val = 0u64;
         let mut tx_prevouts = Vec::with_capacity(tx.input.len());
+        let mut coin_heights = Vec::with_capacity(tx.input.len());
         for inp in &tx.input {
             let op = inp.previous_output;
             if !spent.insert(op) {
@@ -3720,11 +3731,19 @@ fn proposal_connect(
                 return Err("bad-txns-premature-spend-of-coinbase".into());
             }
             let txout = if let Some(o) = created.get(&op) {
+                coin_heights.push(height);
                 o.clone()
             } else if let Some((fk, created_h, o)) = chain_txout(query, &parents, &op) {
-                if coinbase_spend_is_immature(query, *fk, *created_h, height, maturity)? {
+                if coinbase_spend_is_immature(
+                    query,
+                    *fk,
+                    *created_h,
+                    height,
+                    params.coinbase_maturity(),
+                )? {
                     return Err("bad-txns-premature-spend-of-coinbase".into());
                 }
+                coin_heights.push(*created_h);
                 o.clone()
             } else {
                 return Err("bad-txns-inputs-missingorspent".into());
@@ -3751,6 +3770,9 @@ fn proposal_connect(
         fees = fees
             .checked_add(in_val - out_val)
             .ok_or("bad-txns-fee-outofrange")?;
+        if params.csv_active_at(height) {
+            proposal_sequence_locks(query, tx, &coin_heights, height, mtp)?;
+        }
         prevouts.push(tx_prevouts);
         for (vout, o) in tx.output.iter().enumerate() {
             created.insert(
@@ -3763,6 +3785,33 @@ fn proposal_connect(
         }
     }
     Ok((fees, prevouts))
+}
+
+/// BIP68 on a proposal, as at connect: a coin's time is the median time of
+/// the block before the one that created it, from confirmed headers only.
+/// A store fault reading it is the store error, not a reject.
+fn proposal_sequence_locks(
+    query: &Query,
+    tx: &Transaction,
+    coin_heights: &[u32],
+    height: u32,
+    mtp: u32,
+) -> Result<(), String> {
+    if !rbitcoin_consensus::block::bip68_active_for_tx(tx) {
+        return Ok(());
+    }
+    let mut coin_mtps = Vec::with_capacity(coin_heights.len());
+    for (inp, &h) in tx.input.iter().zip(coin_heights) {
+        let coin_mtp = if inp.sequence.is_time_locked() {
+            rbitcoin_query::median_time_past_store(query, Height(h.saturating_sub(1)))
+                .map_err(|e| e.to_string())?
+        } else {
+            0
+        };
+        coin_mtps.push(coin_mtp);
+    }
+    rbitcoin_consensus::block::reject_sequence_locks(tx, coin_heights, &coin_mtps, height, mtp)
+        .map_err(|e| rbitcoin_consensus::block_reject_reason(&e))
 }
 
 /// `op`'s unspent confirmed output: a per-input spentness probe, then the
@@ -8058,6 +8107,54 @@ mod tests {
             }
             other => panic!("consensus header failure must name the block, got {other}"),
         }
+    }
+
+    /// A proposal reads its medians from confirmed headers, as connect does.
+    /// With blocks 600 s apart, a coin's time is the median of the block
+    /// before the one that created it: 118 intervals pass and 119 do not,
+    /// and 118 would fail on the creating block's own median. A median the
+    /// store cannot read is that store error. The tip median does not fall
+    /// back to the tip's own time, and a coin median is not
+    /// `bad-txns-nonfinal`.
+    #[test]
+    fn check_block_proposal_reads_medians_from_confirmed_headers() {
+        let (dir, hub) = tmp_hub();
+        hub.ensure_genesis().unwrap();
+        let t0 = hub.tip_header().unwrap().time;
+        let mut tip = hub.tip_hash().unwrap();
+        for h in 1..=112u32 {
+            let b = mine(tip, t0 + 600 * h, h);
+            tip = b.block_hash();
+            hub.accept_block(b).unwrap();
+        }
+        let op_true = ScriptBuf::from_bytes(vec![0x51]);
+        let time_locked = |intervals: u16| {
+            let mut tx = mature_spend_tx(&hub, 12);
+            tx.input[0].sequence = Sequence::from_512_second_intervals(intervals);
+            hub.assemble_block_to_script(op_true.clone(), vec![tx])
+                .unwrap()
+        };
+        let met = time_locked(118);
+        assert_eq!(hub.check_block_proposal(&met), Ok(10_000));
+        assert_eq!(
+            hub.check_block_proposal(&time_locked(119)).unwrap_err(),
+            "bad-txns-nonfinal"
+        );
+        let empty = hub
+            .assemble_block_to_script(op_true.clone(), vec![])
+            .unwrap();
+
+        let missing = "missing confirmed header";
+        let confirmed = &hub.query.store().confirmed;
+        confirmed.set_raw_for_test(Height(11), 0).unwrap();
+        let err = hub.check_block_proposal(&met).unwrap_err();
+        assert!(err.contains(missing), "coin median: {err}");
+        assert_eq!(hub.check_block_proposal(&empty), Ok(0));
+        confirmed.set_raw_for_test(Height(110), 0).unwrap();
+        hub.query.store().rebuild_height_fence().unwrap();
+        let err = hub.check_block_proposal(&empty).unwrap_err();
+        assert!(err.contains(missing), "tip median: {err}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Witness sigops are not in the structure walk. Nine P2WSH inputs of
