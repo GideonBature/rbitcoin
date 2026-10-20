@@ -138,7 +138,12 @@ async fn socks_creds_offer_only_userpass() {
     server.await.unwrap();
 }
 
-async fn accept_domain_connect(listener: TcpListener, want_host: &'static [u8], want_port: u16) {
+async fn accept_domain_connect(
+    listener: TcpListener,
+    want_host: impl AsRef<[u8]> + Send,
+    want_port: u16,
+) {
+    let want_host = want_host.as_ref().to_vec();
     let (mut s, _) = listener.accept().await.unwrap();
     let mut ver_n = [0u8; 2];
     s.read_exact(&mut ver_n).await.unwrap();
@@ -494,4 +499,103 @@ async fn onion_only_dialer_keeps_clearnet_direct() {
     ));
     d.connect_net(onion).await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn connect_isolated_net_dials_ip_and_onion_and_rejects_the_rest() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version;
+    use rbitcoin_net::ephemeral::send_tx_isolated;
+    use rbitcoin_net::NetAddr;
+
+    let tx = bitcoin::Transaction {
+        version: Version::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let magic = bitcoin::Network::Bitcoin.magic();
+    let onion = NetAddr::Onion {
+        pk: [0x11; 32],
+        port: 8333,
+    };
+    let i2p = NetAddr::I2p {
+        dest: [0x22; 32],
+        port: 0,
+    };
+    let err = send_tx_isolated(&Dialer::Direct, onion, magic, tx.clone(), "/rbitcoin-test/")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("onion dial requires SOCKS"),
+        "{err}"
+    );
+    let err = send_tx_isolated(&Dialer::Direct, i2p, magic, tx, "/rbitcoin-test/")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("i2p dial requires SAM"), "{err}");
+
+    let bare = Dialer::Socks {
+        proxy: None,
+        onion: None,
+        randomize: true,
+        shared_creds: None,
+    };
+    let err = bare
+        .connect_isolated_net(NetAddr::Onion {
+            pk: [0x33; 32],
+            port: 8333,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("onion dial requires SOCKS"),
+        "{err}"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ip = listener.local_addr().unwrap();
+    let accept = tokio::spawn(async move {
+        let _ = listener.accept().await;
+    });
+    let stream = Dialer::Direct
+        .connect_isolated_net(NetAddr::Ip(ip))
+        .await
+        .unwrap();
+    assert_eq!(stream.peer_addr().unwrap(), ip);
+    drop(stream);
+    accept.await.unwrap();
+
+    let onion = NetAddr::Onion {
+        pk: [0x44; 32],
+        port: 18444,
+    };
+    let host = onion.host_str();
+    let socks = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = socks.local_addr().unwrap();
+    let server = tokio::spawn(accept_domain_connect(socks, host.into_bytes(), 18444));
+    let stream = Dialer::socks(proxy, true)
+        .connect_isolated_net(onion)
+        .await
+        .unwrap();
+    assert!(stream.peer_addr().is_ok());
+    server.await.unwrap();
+
+    let cjdns_listener = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let cjdns_addr = cjdns_listener.local_addr().unwrap();
+    let cjdns_accept = tokio::spawn(async move {
+        let _ = cjdns_listener.accept().await;
+    });
+    let stream = Dialer::Direct
+        .connect_isolated_net(NetAddr::Cjdns {
+            ip: std::net::Ipv6Addr::LOCALHOST,
+            port: cjdns_addr.port(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(stream.peer_addr().unwrap(), cjdns_addr);
+    drop(stream);
+    cjdns_accept.await.unwrap();
 }
