@@ -9,7 +9,7 @@ use std::str::FromStr;
 
 /// Electrum / Esplora display scripthash: SHA256(spk) bytes reversed, hex.
 pub fn electrum_scripthash_hex(spk: &[u8]) -> String {
-    sha256::Hash::hash(spk).to_string()
+    rbitcoin_primitives::display_hash_hex(sha256::Hash::hash(spk).to_byte_array())
 }
 
 pub const CORPUS_HOT: &str = include_str!("../corpora/hot.txt");
