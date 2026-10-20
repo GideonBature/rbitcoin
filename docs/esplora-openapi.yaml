@@ -23,9 +23,12 @@ info:
     `/scripthashes/*` stamp the scripthash-index watermark, so the JSON matches
     the join that produced it, except `/address/{address}/txs/mempool` and
     `/scripthash/{scripthash}/txs/mempool`, which are not stamped. With `?asof=`,
-    the stamp is the as-of block. Public `/mempool/*`, `/fee-estimates`,
-    `POST /tx`, and `POST /txs/package` are not stamped. `/internal/mempool/*`
-    is stamped. If two sequential fetches disagree on the hash, drop the batch
+    the stamp is the as-of block. Public `/mempool`, `/mempool/txids`, and
+    `/mempool/recent` are not stamped. `/mempool/txids/page` and
+    `/mempool/txids/page/{last_txid}` are, because the unstamped check is only
+    `/mempool` and `/mempool/{one segment}`. `/fee-estimates`, `POST /tx`, and
+    `POST /txs/package` are not stamped. `/internal/mempool/*` is stamped.
+    If two sequential fetches disagree on the hash, drop the batch
     and restart. If the pin leaves the best chain mid-request, the response is
     **503** `chain view moved`. A handler error on a route that already took a
     pin still carries the chain-tip headers. A bad `?asof=` is rejected before
@@ -360,7 +363,9 @@ paths:
         - name: txids
           in: query
           required: true
-          description: Comma-separated txids, at most 50.
+          description: |
+            Comma-separated txids, at most 50. A missing list or more than 50 ids is 400.
+            A token that is not a hash is an empty array for that slot, not 400.
           schema: { type: string }
       responses:
         "200":
@@ -673,7 +678,7 @@ paths:
       responses:
         "200":
           description: Txids
-          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Hash" } }
@@ -687,7 +692,7 @@ paths:
       responses:
         "200":
           description: Txids
-          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Hash" } }
