@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Enforce production LCOV ≥ 89% floor. CRAP --fail-above 30 after that.
+# Enforce production LCOV ≥ 91% floor. CRAP --fail-above 30 after that.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -92,7 +92,7 @@ if command -v cargo-llvm-cov >/dev/null 2>&1 || cargo llvm-cov --version >/dev/n
     --ignore-filename-regex "$IGNORE" \
     --lcov --output-path "$ROOT/coverage/lcov.info" || true
 
-  # Line gate: LCOV ≥ 89% floor (llvm-cov LH jitters; no never-falls ratchet).
+  # Line gate: LCOV ≥ 91% floor (llvm-cov LH jitters; no never-falls ratchet).
   LCOV_STATS="$(python3 - <<'PY'
 from pathlib import Path
 p = Path("coverage/lcov.info")
@@ -117,8 +117,8 @@ PY
   LCOV_PCT="$(python3 -c "print(f'{100.0*$LCOV_HIT/$LCOV_TOT:.2f}')")"
   MISS=$((LCOV_TOT > LCOV_HIT ? LCOV_TOT - LCOV_HIT : 0))
   echo "LCOV lines: ${LCOV_HIT}/${LCOV_TOT} (${LCOV_PCT}%) miss=${MISS} (production files)"
-  echo "Line coverage gate: ${LCOV_PCT}% now; pass iff unrounded LH*100 >= LF*89"
-  echo "Gate math: 89% floor (llvm-cov LH jitters; no never-falls ratchet)"
+  echo "Line coverage gate: ${LCOV_PCT}% now; pass iff unrounded LH*100 >= LF*91"
+  echo "Gate math: 91% floor (llvm-cov LH jitters; no never-falls ratchet)"
 
   # Optional HTML diagnostic (not the pass condition).
   HTML_PRESENT=0

@@ -10,6 +10,7 @@ description = "Multi-peer initial block download and confirm pipeline"
 
 [lib]
 test = false
+doctest = false
 
 [features]
 mutants = []
