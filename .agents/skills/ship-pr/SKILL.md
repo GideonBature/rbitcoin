@@ -105,15 +105,15 @@ gh pr view --repo reardencode/rbitcoin --json mergeable,mergeStateStatus
 
 Installation write: `contents`, `pull_requests`, `issues`, `workflows`,
 `actions`. Push `.github/workflows/*` with the topic branch. Do not strip a
-workflow diff to sneak a push. `gh run rerun` is in-band. CodeQL dismiss stays
-operator (`security_events` is read). An alert that only fires in `#[cfg(test)]`
-or a test module: stop. Do not rename tests or shuffle literals. Ask the
-operator to dismiss. Production CodeQL is a real finding — fix it.
+workflow diff to sneak a push. `gh run rerun` is in-band. Dismissing a
+zizmor code-scanning alert stays operator (`security_events` is read).
+A workflow finding is a real finding — fix it. The zizmor job stays green
+when it reports alerts; the Protected ruleset is what blocks on them.
 
 **Fail-fast poll.** `./scripts/pr-checks-watch.sh` exits 1 as soon as any
 required job fails, and as soon as a `--interest` job fails. On exit 1:
 stop polling, fetch that job’s log, and start the fix. `gh pr checks --watch`
-waits out `coverage` and CodeQL after a job this change already failed.
+waits out `coverage` and zizmor after a job this change already failed.
 
 ```bash
 gh api --allow-escape-sequences repos/reardencode/rbitcoin/actions/jobs/<job-id>/logs

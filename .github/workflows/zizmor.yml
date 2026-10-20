@@ -1,0 +1,51 @@
+# zizmor scans GitHub Actions workflows (and Dependabot config).
+#
+# Replaces CodeQL. Rust supply-chain advisories stay on `cargo deny` in qc.
+# This job stays green when it reports findings. SARIF upload is what the
+# Protected ruleset reads. That ruleset must name the tool `zizmor`
+# (security alerts: high or higher; other alerts: errors). It still names
+# CodeQL until an admin edits it. `v*.*.x` is in the same ruleset, so those
+# branches need this file before the tool name changes.
+#
+# No `branches:` filter on pull_request: stacked PRs target topic bases, and
+# the code-scanning ruleset evaluates every layer against `master`. A missing
+# SARIF on `refs/pull/N/merge` blocks the stack.
+#
+# https://docs.zizmor.sh/integrations/
+
+name: zizmor
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    # Weekly full scan; same slot the CodeQL cron used.
+    - cron: "23 5 * * 1"
+
+concurrency:
+  group: zizmor-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@f9597c869b2e67095f9b527070297a13a6efe928 # v0.7.0
+        with:
+          # Crate pin. The action SHA above does not pin the zizmor release.
+          version: "1.31.1"
