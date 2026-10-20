@@ -24,7 +24,7 @@ env:
 # Pin rustc to the nix-shell / crane baseline so fmt/clippy do not drift with
 # every GitHub Actions “stable” bump. Bump intentionally with the toolchain.
 #
-# `qc` is one Ubuntu runner: fmt, ast-grep, deny, scripts, clippy, then
+# `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, deny, scripts, clippy, then
 # nixos-module-eval. test, windows, and macos each have their own runner.
 # coverage waits for qc and test so a red test does not start it.
 # Mutants are not a PR check. Nightly workspace runs live in mutants.yml.
@@ -62,6 +62,10 @@ jobs:
         run: ./scripts/ast-grep.test.sh
       - name: ast-grep scan crates
         run: ./scripts/ast-grep.sh
+      - name: unwrap ratchet self-test
+        run: ./scripts/unwrap-ratchet.test.sh
+      - name: unwrap ratchet
+        run: ./scripts/unwrap-ratchet.sh
       # Prebuilt cargo-deny — do not cargo install. Pin the action commit.
       # 0.18.x cannot parse rustsec CVSS 4.0 advisories (2026).
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29

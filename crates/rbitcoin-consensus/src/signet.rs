@@ -329,7 +329,7 @@ pub fn modified_merkle_root(
     }
     while leaves.len() > 1 {
         if leaves.len() % 2 == 1 {
-            let last = *leaves.last().unwrap();
+            let last = *leaves.last().expect("signet merkle loop keeps a leaf");
             leaves.push(last);
         }
         let mut next = Vec::with_capacity(leaves.len() / 2);

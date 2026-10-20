@@ -96,6 +96,14 @@ contract is the function's `# Safety` section.
 positive is a site `#[allow(clippy::undocumented_unsafe_blocks)]` with a
 one-line reason. Do not allow it crate-wide.
 
+Bare production `.unwrap()` / `.unwrap_err()` are frozen per file in
+[`lint/unwrap-baseline.txt`](../lint/unwrap-baseline.txt).
+`./scripts/unwrap-ratchet.sh` fails when a file grows, when a new file
+gains one, and when a cleanup leaves the old count in place. The count
+skips `#[cfg(test)]` modules, `tests/`, `rbitcoin-test`, `rbitcoin-bench`,
+lock poison (`.lock()` / `.read()` / `.write()`), and `try_into().unwrap()`.
+`.expect(reason)` is not counted.
+
 **Goal:** no `[workspace.lints.clippy]` `= "allow"`. A lint that is wrong
 for one item is `#[allow(clippy::lint)]` on **that item**, with a one-line
 reason (Core-faithful opcode loop, wire layout, dispatch bag,
