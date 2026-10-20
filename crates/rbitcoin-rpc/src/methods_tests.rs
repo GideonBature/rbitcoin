@@ -1658,14 +1658,14 @@ fn getrawtransaction_verbose_mid_disconnect_has_no_block_fields() {
 
 /// Core never adds an unspendable output to the UTXO set, so `gettxout` is
 /// null for a confirmed `OP_RETURN` or a script over 10,000 bytes. A script
-/// of exactly 10,000 bytes is still a coin.
+/// of exactly 10,000 bytes is still a coin. REST `getutxos` follows.
 #[test]
 fn gettxout_unspendable_confirmed_output_is_null() {
     use bitcoin::TxOut;
     let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
-    let (_, mut spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 100_000);
+    let (_, mut spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 101_000);
     spend.output.push(TxOut {
-        value: Amount::ZERO,
+        value: Amount::from_sat(1_000),
         script_pubkey: ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x07]),
     });
     let mut big = vec![0x51];
@@ -1685,11 +1685,22 @@ fn gettxout_unspendable_confirmed_output_is_null() {
     let coin = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
     assert!(!coin.is_null(), "a spendable output is a coin");
     let boundary = dispatch(&ctx, "gettxout", vec![json!(txid), json!(3)]).unwrap();
-    assert!(!boundary.is_null(), "a 10,000-byte script is still a coin");
+    assert_eq!(
+        boundary["scriptPubKey"]["hex"].as_str().map(str::len),
+        Some(20_000),
+        "a 10,000-byte script is still a coin: {boundary}"
+    );
     for n in [1, 2] {
         let out = dispatch(&ctx, "gettxout", vec![json!(txid), json!(n)]).unwrap();
         assert!(out.is_null(), "unspendable vout {n} is not a coin: {out}");
     }
+    let (status, body) = rest_text(
+        &ctx,
+        &format!("/rest/getutxos/{txid}-0/{txid}-1/{txid}-2/{txid}-3.json"),
+        "",
+    );
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(body.contains("\"bitmap\":\"1001\""), "{body}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
