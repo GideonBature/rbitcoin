@@ -46,6 +46,9 @@ getrandom = "0.4"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [[test]]
 name = "suite"
 path = "tests/suite.rs"
