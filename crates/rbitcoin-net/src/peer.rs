@@ -455,6 +455,10 @@ impl AddrTokenBucket {
         self.tokens -= take as f64;
         take
     }
+
+    pub(crate) fn credit(&mut self, n: usize) {
+        self.tokens += n as f64;
+    }
 }
 
 #[doc(hidden)]
@@ -2148,6 +2152,7 @@ pub fn maybe_queue_addrfetch_getaddr(
     if session.conn_type != crate::peers::PeerConnType::AddrFetch {
         return false;
     }
+    session.credit_getaddr_reply();
     let _ = queue_out(out, NetworkMessage::GetAddr);
     true
 }
@@ -2971,7 +2976,7 @@ pub fn handle_peer_inventory_msg(
         return Ok(());
     }
     match payload {
-        NetworkMessage::Addr(list) => on_addr_list(follow, session, list.len())?,
+        NetworkMessage::Addr(list) => on_addr_list(session, list.len())?,
         NetworkMessage::AddrV2(list) => on_addrv2(follow, session, list)?,
         NetworkMessage::GetHeaders(gh) => on_getheaders(hub, out_tx, follow, session, gh)?,
         NetworkMessage::GetBlocks(gb) => on_getblocks(hub, out_tx, follow, session, gb)?,
@@ -3083,16 +3088,21 @@ pub fn on_sendaddrv2(follow: &mut PeerFollowState, session: Option<&crate::peers
 }
 
 #[doc(hidden)]
-pub fn on_addr_list(
-    follow: &mut PeerFollowState,
-    session: Option<&crate::peers::LivePeer>,
-    n: usize,
-) -> Result<(), NetError> {
-    if session.is_some_and(|s| s.conn_type == crate::peers::PeerConnType::AddrFetch && n > 1) {
-        punish_disconnect(&mut follow.ban_score, session);
-        return Ok(());
-    }
+pub fn on_addr_list(session: Option<&crate::peers::LivePeer>, n: usize) -> Result<(), NetError> {
+    end_addrfetch_on_reply(session, n);
     Ok(())
+}
+
+/// Core: an addr-fetch peer that answered with more than one address is
+/// done. It is disconnected, not punished.
+fn end_addrfetch_on_reply(session: Option<&crate::peers::LivePeer>, n: usize) -> bool {
+    match session {
+        Some(s) if s.conn_type == crate::peers::PeerConnType::AddrFetch && n > 1 => {
+            s.request_disconnect();
+            true
+        }
+        _ => false,
+    }
 }
 
 #[doc(hidden)]
@@ -3111,16 +3121,15 @@ pub fn on_addrv2(
         misbehaving(&mut follow.ban_score, session);
         return Ok(());
     }
-    if session.is_some_and(|s| s.conn_type == crate::peers::PeerConnType::AddrFetch && n > 1) {
-        punish_disconnect(&mut follow.ban_score, session);
-        return Ok(());
-    }
     if let Some(s) = session {
         if let Some(ph) = s.peer_hub() {
             // Node time, as the bucket's start (`connected_at`) is.
             let now_ms = s.clock_now().saturating_mul(1000);
             let allow = s.take_addr_tokens(list.len(), now_ms);
             ph.learn_addrv2(&list[..allow]);
+            if end_addrfetch_on_reply(session, n) {
+                return Ok(());
+            }
             let mut neighbors: Vec<_> = ph
                 .live_peers()
                 .into_iter()

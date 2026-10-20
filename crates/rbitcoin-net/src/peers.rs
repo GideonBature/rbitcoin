@@ -983,6 +983,15 @@ impl LivePeer {
         *self.out_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 
+    /// Core `m_addr_token_bucket += MAX_ADDR_TO_SEND` on `getaddr`: the
+    /// reply may exceed the bucket cap.
+    pub(crate) fn credit_getaddr_reply(&self) {
+        self.addr_bucket
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .credit(crate::peer::MAX_ADDR_TO_SEND);
+    }
+
     /// How many of the `want` addresses in one message this peer may have
     /// processed (learned and relayed). The rest count as rate limited. A
     /// peer with the `addr` permission spends tokens but is never limited.
