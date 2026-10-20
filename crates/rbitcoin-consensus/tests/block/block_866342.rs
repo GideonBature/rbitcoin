@@ -32,7 +32,9 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::{validate_block_structure_hashed, ScriptCheckJob, ValidationContext};
+use rbitcoin_consensus::block::{
+    validate_block_structure_hashed, ScriptCheckJob, ValidationContext,
+};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::deserialize;

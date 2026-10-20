@@ -33,7 +33,9 @@ rbitcoin-primitives = { path = "crates/rbitcoin-primitives" }
 rbitcoin-log = { path = "crates/rbitcoin-log" }
 rbitcoin-store = { path = "crates/rbitcoin-store" }
 rbitcoin-query = { path = "crates/rbitcoin-query" }
-rbitcoin-consensus = { path = "crates/rbitcoin-consensus" }
+# `default-features = false`: the `corpus` default is only for this
+# package's own suite. A node build does not compile the script assembler.
+rbitcoin-consensus = { path = "crates/rbitcoin-consensus", default-features = false }
 rbitcoin-mempool = { path = "crates/rbitcoin-mempool" }
 rbitcoin-net = { path = "crates/rbitcoin-net" }
 rbitcoin-ibd = { path = "crates/rbitcoin-ibd" }

@@ -1,4 +1,3 @@
-use super::{reject_bip30_unspent_prior, reject_one_create};
 use bitcoin::block::Block;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::script::{Script, ScriptBuf};
@@ -15,6 +14,7 @@ use rbitcoin_consensus::block::facts::{
     require_linked_parent, require_next_work, require_retarget_first, require_same_block_output,
     unresolved_parent_create,
 };
+use rbitcoin_consensus::block::{reject_bip30_unspent_prior, reject_one_create};
 use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::milestone::Milestone;
 use rbitcoin_consensus::params::ChainParams;

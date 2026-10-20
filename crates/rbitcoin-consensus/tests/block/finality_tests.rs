@@ -28,8 +28,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::{is_final_tx, sequence_locks_satisfied, LOCKTIME_THRESHOLD};
 use bitcoin::absolute::LockTime;
+use rbitcoin_consensus::block::{
+    bip68_active_for_tx, is_final_tx, sequence_locks_satisfied, LOCKTIME_THRESHOLD,
+};
 
 use bitcoin::{OutPoint, Sequence, TxIn};
 
@@ -85,7 +87,7 @@ fn bip68_disabled_by_version_1() {
 fn bip68_enforced_when_version_high_bit_set() {
     // rust-bitcoin Version(i32): -1 is wire 0xFFFFFFFF.
     let tx = bare_tx(-1, LockTime::ZERO, Sequence::from_consensus(10));
-    assert!(super::bip68_active_for_tx(&tx));
+    assert!(bip68_active_for_tx(&tx));
     // Same relative height lock as bip68_height_relative_lock — must fail at h=109.
     assert!(!sequence_locks_satisfied(&tx, &[100], &[0], 109, 0));
     assert!(sequence_locks_satisfied(&tx, &[100], &[0], 110, 0));

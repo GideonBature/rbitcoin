@@ -28,7 +28,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::bip34_height_script;
+use rbitcoin_consensus::block::bip34_height_script;
 
 #[test]
 fn small_heights_use_op_n() {

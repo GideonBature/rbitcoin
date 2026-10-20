@@ -1,4 +1,7 @@
-use super::{decode_hex, spend_shape_from_json, SpendShape};
+pub use rbitcoin_consensus::script::core_script::{
+    assemble_script, assemble_script_pubkey, credit_and_spend, decode_hex, push_core_witness_token,
+    spend_shape_from_json, SpendShape,
+};
 
 #[test]
 fn decode_hex_strips_0x_and_names_odd_length() {

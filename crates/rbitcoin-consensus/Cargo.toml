@@ -13,6 +13,9 @@ test = false
 doctest = false
 
 [features]
+# The suite links the assembler (`core_script`). Product crates depend on
+# this package with `default-features = false`, so a node build leaves it off.
+default = ["corpus"]
 # Lets script-oracle call the Core script assembler. Off for the node.
 corpus = ["dep:serde_json"]
 # Nightly cargo-mutants only. Off for the node build.

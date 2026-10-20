@@ -66,7 +66,7 @@ fn false_witness_program_is_eval_false() {
     verify_job_all_inputs(&live).expect("nonzero unknown version");
 
     let redeem = vec![0x52, 0x02, 0x00, 0x00];
-    let hash = super::crypto::hash160(&redeem);
+    let hash = rbitcoin_consensus::script::crypto::hash160(&redeem);
     let mut spk = vec![0xa9, 0x14];
     spk.extend_from_slice(hash.as_slice());
     spk.push(0x87);

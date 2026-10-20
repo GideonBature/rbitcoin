@@ -28,10 +28,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::{
+use bitcoin::absolute::LockTime;
+use rbitcoin_consensus::block::{
     last_script_push, p2sh_sigop_count, prevout_spk_sigops, tx_sigop_cost, witness_sigop_count,
 };
-use bitcoin::absolute::LockTime;
 
 use bitcoin::transaction::Version as TxVersion;
 
@@ -486,7 +486,7 @@ fn witness_p2wsh_and_nested_p2sh() {
 
 #[test]
 fn verify_one_script_job_skips_anyone_can_spend() {
-    use super::{verify_one_script_job, ScriptCheckJob};
+    use rbitcoin_consensus::block::{verify_one_script_job, ScriptCheckJob};
     let job = ScriptCheckJob::new(
         vec![TxOut {
             value: Amount::from_sat(1),
@@ -537,9 +537,9 @@ fn verify_one_script_job_skips_anyone_can_spend() {
 
 #[test]
 fn job_tx_traits_and_shared_mut_panic() {
-    use super::{block_subsidy, is_anyone_can_spend, is_final_tx, JobTx};
     use bitcoin::block::{Header, Version};
     use bitcoin::{Block, BlockHash, CompactTarget, TxMerkleNode};
+    use rbitcoin_consensus::block::{block_subsidy, is_anyone_can_spend, is_final_tx, JobTx};
     use rbitcoin_consensus::params::ChainParams;
     use std::borrow::Borrow;
     use std::sync::Arc;

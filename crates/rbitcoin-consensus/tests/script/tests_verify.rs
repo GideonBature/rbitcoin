@@ -119,8 +119,8 @@ fn p2wpkh_bad_signature_rejects() {
 /// Log: `p2wpkh ecdsa txid=969c4f11…d50d vin=0` (2026-07-25 mainnet IBD).
 #[test]
 fn mainnet_508011_nested_p2wpkh_raw_sighash_0x65() {
-    use super::core_script::decode_hex;
     use bitcoin::consensus::encode::deserialize;
+    use rbitcoin_consensus::script::core_script::decode_hex;
 
     // Wire hex from mempool.space for confirmed mainnet tx.
     let hex = include_str!("../../tests/fixtures/mainnet_508011_p2sh_p2wpkh_tx.hex").trim();
@@ -507,8 +507,8 @@ fn mainnet_block_124276_lax_der_pre_bip66() {
 /// Unit: parse_der_sig strict vs lax.
 #[test]
 fn parse_der_sig_strict_vs_lax_on_double_zero_r() {
-    use super::crypto::{is_valid_signature_encoding, parse_der_sig};
     use bitcoin::secp256k1::ecdsa::Signature;
+    use rbitcoin_consensus::script::crypto::{is_valid_signature_encoding, parse_der_sig};
     // From mainnet 124276 spend (sig push only, includes hashtype 0x01).
     let sig_raw = {
         let s = "3048022200002b83d59c1d23c08efd82ee0662fec23309c3adbcbd1f0b8695378db4b14e736602220000334a96676e58b1bb01784cb7c556dd8ce1c220171904da22e18fe1e7d1510db501";
@@ -533,8 +533,8 @@ fn parse_der_sig_strict_vs_lax_on_double_zero_r() {
 /// recovers the OpenSSL values. Preferring strict-first rejected this tip block.
 #[test]
 fn parse_der_sig_never_prefers_strict_when_lax_differs() {
-    use super::crypto::{is_valid_signature_encoding, parse_der_sig};
     use bitcoin::secp256k1::ecdsa::Signature;
+    use rbitcoin_consensus::script::crypto::{is_valid_signature_encoding, parse_der_sig};
     // scriptSig first push from mainnet tx 70f7c15c… (block 140493).
     let sig_raw = {
         let s = "304402206b5c3b1c86748dcf328b9f3a65e10085afcf5d1af5b40970d8ce3a9355e06b5b0220cdbdc23e6d3618e47056fccc60c5f73d1a542186705197e5791e97f0e6582a3201";
@@ -587,7 +587,7 @@ fn secp256k1_lax_der_corpus_parses() {
         // Append SIGHASH_ALL for our parse_der_sig helper.
         let mut with_ht = der;
         with_ht.push(0x01);
-        assert!(super::crypto::parse_der_sig(&with_ht, false).is_ok());
+        assert!(rbitcoin_consensus::script::crypto::parse_der_sig(&with_ht, false).is_ok());
     }
 }
 
@@ -798,8 +798,8 @@ fn mainnet_block_140493_high_bit_s_lax_der_p2pkh() {
     }
     fn same(job: &rbitcoin_consensus::block::ScriptCheckJob) -> (String, String) {
         let tx: &bitcoin::Transaction = &job.tx;
-        let bare = script_flag_msg(super::verify_bare(job, 0, tx));
-        let shipped = script_flag_msg(super::verify_job_all_inputs(job));
+        let bare = script_flag_msg(script::verify_bare(job, 0, tx));
+        let shipped = script_flag_msg(script::verify_job_all_inputs(job));
         (shipped, bare)
     }
 

@@ -4,7 +4,10 @@ use rbitcoin_consensus::block::ScriptCheckJob;
 use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::script::classify::is_anyone_can_spend;
 use rbitcoin_consensus::script::classify::ScriptKind;
-use rbitcoin_consensus::script::core_fixture::*;
+use std::fs;
+use std::path::PathBuf;
+
+pub use super::core_data::stage_core_json;
 
 #[test]
 fn stages_script_tests_from_submodule() {

@@ -13,9 +13,9 @@ use rbitcoin_consensus::script::classify::is_anyone_can_spend;
 use rbitcoin_consensus::script::classify::ScriptKind;
 
 use super::core_script::{assemble_script as assemble, credit_and_spend, SpendShape};
-use super::interpreter::{self, EvalContext, SigVersion};
-use super::verify_job_all_inputs;
 use rbitcoin_consensus::block::JobTx;
+use rbitcoin_consensus::script::interpreter::{self, EvalContext, SigVersion};
+use rbitcoin_consensus::script::verify_job_all_inputs;
 
 use bitcoin::script::Script;
 use bitcoin::{Amount, ScriptBuf, Witness};
@@ -740,9 +740,12 @@ fn load_corpus_rows() -> Vec<Value> {
 fn corpus_fast_paths_call_typed_verifiers() {
     use bitcoin::sighash::SighashCache;
 
-    use super::classify::{classify, witness_program, ScriptKind};
-    use super::crypto::TapSpentHashes;
-    use super::{needs_interpreted_ecdsa, p2pkh, p2tr, p2wpkh, verify_input};
+    use rbitcoin_consensus::script::classify::{classify, witness_program, ScriptKind};
+    use rbitcoin_consensus::script::crypto::TapSpentHashes;
+    use rbitcoin_consensus::script::p2pkh;
+    use rbitcoin_consensus::script::p2tr;
+    use rbitcoin_consensus::script::p2wpkh;
+    use rbitcoin_consensus::script::{needs_interpreted_ecdsa, verify_input};
 
     let rows = load_corpus_rows();
     let tap = TapSpentHashes::default();
@@ -805,7 +808,10 @@ fn corpus_fast_paths_call_typed_verifiers() {
     let owned = Transaction::clone(&job.tx);
     let mut cache = SighashCache::new(&owned);
     let err = p2pkh::verify(&job, 0, &owned, &mut cache).expect_err("collision");
-    assert!(!super::p2pkh_scriptsig_shape_error(&err), "{err}");
+    assert!(
+        !rbitcoin_consensus::script::p2pkh_scriptsig_shape_error(&err),
+        "{err}"
+    );
     let tx: &Transaction = &job.tx;
     let mut dispatch_cache = None;
     assert!(verify_input(&job, 0, tx, &mut dispatch_cache, job.pre(), &tap).is_err());

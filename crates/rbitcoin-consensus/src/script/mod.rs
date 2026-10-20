@@ -568,7 +568,11 @@ pub mod crypto {
     pub struct TapSpentHashes(std::cell::OnceCell<[[u8; 32]; 2]>);
 
     impl TapSpentHashes {
-        fn get(&self, job: &crate::block::ScriptCheckJob) -> Result<[[u8; 32]; 2], ConsensusError> {
+        #[doc(hidden)]
+        pub fn get(
+            &self,
+            job: &crate::block::ScriptCheckJob,
+        ) -> Result<[[u8; 32]; 2], ConsensusError> {
             if let Some(hashes) = self.0.get() {
                 return Ok(*hashes);
             }

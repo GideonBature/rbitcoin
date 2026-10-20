@@ -325,10 +325,10 @@ fn sighash_midstates_come_from_wire_spans() {
 
 #[test]
 fn block_tx_count_fits_uses_ten_byte_floor() {
-    assert!(super::block_tx_count_fits(1, 10));
-    assert!(super::block_tx_count_fits(0, 0));
-    assert!(!super::block_tx_count_fits(2, 15));
-    assert!(!super::block_tx_count_fits(1, 9));
+    assert!(block_tx_count_fits(1, 10));
+    assert!(block_tx_count_fits(0, 0));
+    assert!(!block_tx_count_fits(2, 15));
+    assert!(!block_tx_count_fits(1, 9));
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn decode_block_precomputes_rejects_tx_count_past_payload() {
     let mut payload = vec![0u8; 80];
     payload.push(0xff);
     payload.extend_from_slice(&u64::MAX.to_le_bytes());
-    assert!(super::decode_block_precomputes(&payload, false).is_none());
+    assert!(decode_block_precomputes(&payload, false).is_none());
 }
 
 #[test]
@@ -358,8 +358,7 @@ fn decode_block_precomputes_accepts_minimum_serialized_tx() {
     let mut payload = vec![0u8; 80];
     payload.push(1);
     payload.extend_from_slice(&raw_tx);
-    let (block, pres, _) =
-        super::decode_block_precomputes(&payload, false).expect("one minimum tx");
+    let (block, pres, _) = decode_block_precomputes(&payload, false).expect("one minimum tx");
     assert_eq!(block.txdata.len(), 1);
     assert_eq!(pres.len(), 1);
     assert!(block.txdata[0].input.is_empty());
@@ -378,7 +377,7 @@ fn flag_zero_tx_decodes_with_core_txid() {
     raw.extend_from_slice(&serialize(&legacy_1in()));
     raw.extend_from_slice(&FLAG_ZERO_TX);
     raw.extend_from_slice(&serialize(&legacy_1in()));
-    let (block, pres, _) = super::decode_block_precomputes(&raw, false).unwrap();
+    let (block, pres, _) = decode_block_precomputes(&raw, false).unwrap();
     let tx = &block.txdata[1];
     assert!(tx.input.is_empty() && tx.output.is_empty());
     assert_eq!(
@@ -402,7 +401,7 @@ fn decode_block_precomputes_hashes_payload_slices() {
     use bitcoin::Network;
     let genesis = genesis_block(Network::Regtest);
     let raw = serialize(&genesis);
-    let (block, pres, _ns) = super::decode_block_precomputes(&raw, false).expect("decode");
+    let (block, pres, _ns) = decode_block_precomputes(&raw, false).expect("decode");
     assert_eq!(block.header, genesis.header);
     assert_eq!(pres.len(), genesis.txdata.len());
     let want = TxPrecompute::from_tx_connect(&genesis.txdata[0]);
@@ -421,12 +420,12 @@ fn witness_block_wire_len_matches_payload() {
     let mut block = genesis_block(Network::Regtest);
     block.txdata = vec![p2wpkh_like(), legacy_1in()];
     let raw = serialize(&block);
-    let (decoded, pres, _) = super::decode_block_precomputes(&raw, false).expect("decode");
+    let (decoded, pres, _) = decode_block_precomputes(&raw, false).expect("decode");
     assert!(pres[0].has_witness);
     assert!(pres[0].total_size > pres[0].base_size);
     assert!(!pres[1].has_witness);
     assert_eq!(
-        super::block_wire_len_from_pres(decoded.txdata.len(), &pres),
+        block_wire_len_from_pres(decoded.txdata.len(), &pres),
         raw.len()
     );
 }
@@ -436,8 +435,7 @@ fn pres_for_tip_connects_live_and_hashes_the_rest() {
     let live = p2wpkh_like();
     let other = legacy_1in();
     let live_id = live.compute_txid().to_byte_array();
-    let (pres, skip) =
-        super::pres_for_tip(&[live.clone(), other.clone()], false, |tid| tid == live_id);
+    let (pres, skip) = pres_for_tip(&[live.clone(), other.clone()], false, |tid| tid == live_id);
     assert_eq!(pres.len(), 2);
     assert_eq!(pres[0].txid, live_id);
     assert_eq!(
@@ -456,7 +454,7 @@ fn pres_for_tip_connects_live_and_hashes_the_rest() {
 #[test]
 fn pres_for_tip_empty_live_set_uses_from_tx() {
     let tx = p2wpkh_like();
-    let (pres, skip) = super::pres_for_tip(std::slice::from_ref(&tx), true, |_| {
+    let (pres, skip) = pres_for_tip(std::slice::from_ref(&tx), true, |_| {
         panic!("empty live-set must not probe")
     });
     assert!(skip.is_empty());
