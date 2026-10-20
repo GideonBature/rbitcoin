@@ -355,6 +355,10 @@ pub struct NodeConfig {
     /// Minimum time from a session's last push to a fee push. Default 5 s.
     /// Conf and CLI set whole seconds (at least 1); tests may set the floor.
     pub sv2_tp_template_interval: Duration,
+    /// How long a changed SV2 coinbase budget waits. Default
+    /// [`rbitcoin_sv2::CONSTRAINTS_COOLDOWN`]. Not a conf key; tests that wait
+    /// on the next budget set [`rbitcoin_sv2::CONSTRAINTS_COOLDOWN_TEST`].
+    pub sv2_tp_constraints_cooldown: Duration,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
     pub milestone_height: u32,
     /// Set when conf or CLI applied `milestone` (including 0).
@@ -403,6 +407,10 @@ pub struct NodeConfig {
     pub prefill_compact: bool,
     /// `--check-blocks` window. `None` = store default (6). `<= 0` means the whole chain.
     pub check_blocks: Option<i64>,
+    /// How often a down `--connect` / `addnode` target is tried again.
+    /// Default [`rbitcoin_net::REDIAL_INTERVAL`]. Not a conf key; a test that
+    /// waits for the redial sets [`rbitcoin_net::REDIAL_INTERVAL_TEST`].
+    pub connect_redial: Duration,
 }
 
 impl Default for NodeConfig {
@@ -440,6 +448,7 @@ impl Default for NodeConfig {
             sv2_tp_stale_grace: Duration::from_secs(10),
             sv2_tp_fee_delta: rbitcoin_sv2::FEE_DELTA,
             sv2_tp_template_interval: rbitcoin_sv2::TEMPLATE_INTERVAL,
+            sv2_tp_constraints_cooldown: rbitcoin_sv2::CONSTRAINTS_COOLDOWN,
             milestone_height: 0,
             milestone_explicit: false,
             inhibit_suspend: false,
@@ -464,6 +473,7 @@ impl Default for NodeConfig {
             block_min_tx_fee_btc: None,
             prefill_compact: true,
             check_blocks: None,
+            connect_redial: rbitcoin_net::REDIAL_INTERVAL,
         }
     }
 }

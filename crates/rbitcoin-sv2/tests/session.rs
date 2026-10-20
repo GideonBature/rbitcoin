@@ -8,11 +8,14 @@ fn constraints_rebuild_at_uses_the_cooldown() {
     let built_at = Instant::now();
     let soon = built_at + CONSTRAINTS_COOLDOWN - Duration::from_millis(1);
     assert_eq!(
-        constraints_rebuild_at(built_at, soon),
+        constraints_rebuild_at(built_at, soon, CONSTRAINTS_COOLDOWN),
         Some(built_at + CONSTRAINTS_COOLDOWN)
     );
     let due = built_at + CONSTRAINTS_COOLDOWN;
-    assert_eq!(constraints_rebuild_at(built_at, due), None);
+    assert_eq!(
+        constraints_rebuild_at(built_at, due, CONSTRAINTS_COOLDOWN),
+        None
+    );
 }
 
 #[test]

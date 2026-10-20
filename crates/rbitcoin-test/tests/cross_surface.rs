@@ -3551,6 +3551,7 @@ async fn sv2_tp_bootstrap() {
     // Over the bootstrap tx's 10_000 sat fee: only the fee-push story pushes.
     cfg.sv2_tp_fee_delta = 10_001;
     cfg.sv2_tp_template_interval = Duration::from_millis(200);
+    cfg.sv2_tp_constraints_cooldown = rbitcoin_sv2::CONSTRAINTS_COOLDOWN_TEST;
     let health_addr = ephemeral_addr();
     cfg.listen.health = Some(health_addr);
     cfg.metrics = true;

@@ -28,6 +28,7 @@ async fn start_node(dir: &std::path::Path) -> P2PNode {
         q,
         ChainParams::regtest(),
         Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .expect("listen")

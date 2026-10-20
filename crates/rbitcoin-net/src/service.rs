@@ -58,6 +58,7 @@ impl P2PNode {
         query: Query,
         params: ChainParams,
         milestone: Milestone,
+        redial: Duration,
     ) -> Result<Self, NetError> {
         Self::start_with_agent(
             listen,
@@ -66,6 +67,7 @@ impl P2PNode {
             milestone,
             default_user_agent(),
             DEFAULT_MAX_INBOUND,
+            redial,
         )
         .await
     }
@@ -79,6 +81,7 @@ impl P2PNode {
         milestone: Milestone,
         user_agent: String,
         max_inbound: usize,
+        redial: Duration,
     ) -> Result<Self, NetError> {
         Self::start_with_dialer(
             listen,
@@ -88,11 +91,13 @@ impl P2PNode {
             user_agent,
             max_inbound,
             crate::socks::Dialer::Direct,
+            redial,
         )
         .await
     }
 
     /// Like [`Self::start_with_agent`] with an outbound [`crate::Dialer`].
+    #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
     pub async fn start_with_dialer(
         listen: SocketAddr,
         query: Query,
@@ -101,6 +106,7 @@ impl P2PNode {
         user_agent: String,
         max_inbound: usize,
         dialer: crate::socks::Dialer,
+        redial: Duration,
     ) -> Result<Self, NetError> {
         let bind = (max_inbound > 0).then_some(listen);
         Self::start_inner(
@@ -111,6 +117,7 @@ impl P2PNode {
             user_agent,
             max_inbound,
             dialer,
+            redial,
         )
         .await
     }
@@ -123,6 +130,7 @@ impl P2PNode {
         user_agent: String,
         max_inbound: usize,
         dialer: crate::socks::Dialer,
+        redial: Duration,
     ) -> Result<Self, NetError> {
         Self::start_inner(
             None,
@@ -132,10 +140,12 @@ impl P2PNode {
             user_agent,
             max_inbound,
             dialer,
+            redial,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
     pub async fn start_inner(
         listen: Option<SocketAddr>,
         query: Query,
@@ -144,6 +154,7 @@ impl P2PNode {
         user_agent: String,
         max_inbound: usize,
         dialer: crate::socks::Dialer,
+        redial: Duration,
     ) -> Result<Self, NetError> {
         let magic = magic_for_params(&params);
         let hub = ChainHub::into_arc(ChainHub::new(query, params, milestone));
@@ -245,7 +256,7 @@ impl P2PNode {
         let retry_shutdown = shutdown.clone();
         let mut retry_stop = stop_tx.subscribe();
         let retry_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(REDIAL_INTERVAL);
+            let mut interval = tokio::time::interval(redial);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
             loop {
@@ -609,13 +620,6 @@ pub struct PreparedOutbound {
     pub id: u64,
 }
 
-/// True on a debug build, which uses the short redial and SAM retry.
-///
-/// Release keeps the operator intervals. The node warns at startup.
-pub fn compiled_with_test_hooks() -> bool {
-    cfg!(debug_assertions)
-}
-
 /// A transient accept error should not stop the listen loop.
 ///
 /// `ConnectionAborted` is a peer that vanished during accept.
@@ -633,11 +637,12 @@ pub fn accept_error_ends_listen(err: &std::io::Error) -> bool {
 }
 
 /// How often a down `--connect` / `addnode` target is tried again.
-#[cfg(not(debug_assertions))]
-const REDIAL_INTERVAL: Duration = Duration::from_secs(2);
-/// Debug and test builds. Release keeps the 2s pass.
-#[cfg(debug_assertions)]
-const REDIAL_INTERVAL: Duration = Duration::from_millis(250);
+pub const REDIAL_INTERVAL: Duration = Duration::from_secs(2);
+/// What the suite passes to [`P2PNode::start`] so a test that waits on the
+/// tick stays at the old debug cadence. The node binary passes
+/// [`REDIAL_INTERVAL`].
+#[doc(hidden)]
+pub const REDIAL_INTERVAL_TEST: Duration = Duration::from_millis(250);
 
 /// Bound on the TCP / SOCKS / SAM connect of an outbound dial, the same 8 s
 /// as the IBD and tip-follow dials ([`crate::socks::Dialer::connect_timeout`]

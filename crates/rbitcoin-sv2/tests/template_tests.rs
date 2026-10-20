@@ -15,8 +15,8 @@ use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past
 use rbitcoin_store::merkle_root_from_txids;
 use rbitcoin_sv2::testutil::TpClient;
 use rbitcoin_sv2::{
-    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN, FEE_DELTA, SETUP_TIMEOUT, TEMPLATE_INTERVAL,
-    WRITE_TIMEOUT,
+    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, SETUP_TIMEOUT,
+    TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -190,6 +190,7 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -240,6 +241,7 @@ async fn holding_session_publishes_when_relay_turns_on() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -268,7 +270,7 @@ async fn holding_session_publishes_when_relay_turns_on() {
     tp.shutdown().await;
 }
 
-/// A later budget is published once [`CONSTRAINTS_COOLDOWN`] has elapsed.
+/// A later budget is published once [`CONSTRAINTS_COOLDOWN_TEST`] has elapsed.
 /// The heavy output is counted out under `u16::MAX`.
 #[tokio::test(flavor = "multi_thread")]
 async fn constraints_cooldown_publishes_the_next_budget() {
@@ -290,6 +292,7 @@ async fn constraints_cooldown_publishes_the_next_budget() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -308,7 +311,7 @@ async fn constraints_cooldown_publishes_the_next_budget() {
         .await
         .expect("second budget after the cooldown")
         .expect("message");
-    assert!(started.elapsed() >= CONSTRAINTS_COOLDOWN);
+    assert!(started.elapsed() >= CONSTRAINTS_COOLDOWN_TEST);
     check_template(&mut c, &tc, f, &[], false).await;
 
     tp.shutdown().await;
@@ -335,6 +338,7 @@ async fn template_resent_constraints_do_not_rebuild() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -377,6 +381,7 @@ async fn template_constraint_rebuilds_are_rate_limited() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -414,6 +419,7 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -468,6 +474,7 @@ async fn constraints_while_ibd_keep_the_last_budget() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -537,6 +544,7 @@ async fn first_template_every(tc: &TestChain, template_interval: Duration) -> Fi
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -773,6 +781,7 @@ async fn constraints_flood_closes_the_session() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -825,6 +834,7 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -923,6 +933,7 @@ async fn fee_push_after_the_interval_past_the_delta() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: 1_000,
         template_interval: interval,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -1113,6 +1124,7 @@ async fn fee_pushes_stay_an_interval_apart_under_steady_admission() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: interval,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");

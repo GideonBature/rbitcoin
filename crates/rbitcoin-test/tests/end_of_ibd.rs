@@ -98,9 +98,15 @@ fn fixture_chain() -> (Vec<bitcoin::Block>, BTreeSet<String>, BTreeSet<String>) 
 
 async fn start_miner(dir: &Path) -> P2PNode {
     let query = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    P2PNode::start(any_port(), query, ChainParams::regtest(), Milestone::NONE)
-        .await
-        .expect("miner listen")
+    P2PNode::start(
+        any_port(),
+        query,
+        ChainParams::regtest(),
+        Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
+    )
+    .await
+    .expect("miner listen")
 }
 
 fn load_chain(miner: &P2PNode, blocks: &[bitcoin::Block]) {
@@ -326,6 +332,7 @@ async fn stop_ibd_below_tip(dir: &Path, miner: SocketAddr, miner_tip: u32) -> u3
         query,
         ChainParams::regtest(),
         Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .expect("partial syncer");
@@ -548,9 +555,15 @@ async fn partial_with_miner_down(miner_dir: &Path, synced: &mut Synced) {
 async fn crash_with_class_a_above_tip(miner: &P2PNode, synced: &mut Synced) {
     let dir = TestDatadir::new().unwrap();
     let query = Query::open_or_create_tiny(dir.store_path()).unwrap();
-    let node = P2PNode::start(any_port(), query, ChainParams::regtest(), Milestone::NONE)
-        .await
-        .expect("crash syncer");
+    let node = P2PNode::start(
+        any_port(),
+        query,
+        ChainParams::regtest(),
+        Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
+    )
+    .await
+    .expect("crash syncer");
     let peers = [NetAddr::Ip(miner.local_addr)];
     rbitcoin_ibd::sync(&node, &peers, IbdConfig::for_test())
         .await
@@ -786,6 +799,7 @@ async fn contaminate_writebehind(dir: &Path, miner: &P2PNode, height: u32) {
         query,
         ChainParams::regtest(),
         Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .expect("contaminated syncer");
@@ -964,9 +978,15 @@ fn build_forks(params: &ChainParams) -> (Vec<bitcoin::Block>, Vec<bitcoin::Block
 
 async fn start_node(dir: &Path, params: ChainParams) -> P2PNode {
     let query = Query::open_or_create_tiny(dir.join("store")).unwrap();
-    let node = P2PNode::start(any_port(), query, params, Milestone::NONE)
-        .await
-        .expect("listen");
+    let node = P2PNode::start(
+        any_port(),
+        query,
+        params,
+        Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
+    )
+    .await
+    .expect("listen");
     node.hub.set_max_tip_age_secs(u64::MAX);
     node
 }
