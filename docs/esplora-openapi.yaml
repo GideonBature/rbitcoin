@@ -21,11 +21,20 @@ info:
     `X-Bitcoin-Chain-Tip-Height`. Both are CORS-exposed. Block, tx, and header
     routes stamp the live tip. `/address/*`, `/scripthash/*`, `/addresses/*`, and
     `/scripthashes/*` stamp the scripthash-index watermark, so the JSON matches
-    the join that produced it. With `?asof=`, the stamp is the as-of block.
-    Mempool, fee, broadcast, and package routes are not stamped. If two
-    sequential fetches disagree on the hash, drop the batch and restart. If
-    the pin leaves the best chain mid-request, the response is **503**
-    `chain view moved`.
+    the join that produced it, except `/address/{address}/txs/mempool` and
+    `/scripthash/{scripthash}/txs/mempool`, which are not stamped. With `?asof=`,
+    the stamp is the as-of block. Public `/mempool/*`, `/fee-estimates`,
+    `POST /tx`, and `POST /txs/package` are not stamped. `/internal/mempool/*`
+    is stamped. If two sequential fetches disagree on the hash, drop the batch
+    and restart. If the pin leaves the best chain mid-request, the response is
+    **503** `chain view moved`. A handler error on a route that already took a
+    pin still carries the chain-tip headers. A bad `?asof=` is rejected before
+    that pin and does not.
+
+    ## X-Powered-By
+    Every response, including errors, carries
+    `X-Powered-By: rbitcoin-esplora/<version>-<hex>`. `<version>` is the crate
+    version. `<hex>` is that version with each byte written as two hex digits.
 
     ## As-of (`?asof=<blockhash>`)
     Answers "what did this wallet look like at this block", for a block that is
@@ -84,7 +93,7 @@ paths:
       tags: [blocks]
       summary: Best-chain tip hash
       responses:
-        "200": { $ref: "#/components/responses/PlainHash" }
+        "200": { $ref: "#/components/responses/StampedPlainHash" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /blocks:
     get:
@@ -93,7 +102,7 @@ paths:
       responses:
         "200":
           description: Block summaries
-          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Block" } }
@@ -107,6 +116,7 @@ paths:
       responses:
         "200":
           description: Block summaries
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Block" } }
@@ -117,7 +127,7 @@ paths:
       parameters:
         - { name: height, in: path, required: true, schema: { type: integer, minimum: 0 } }
       responses:
-        "200": { $ref: "#/components/responses/PlainHash" }
+        "200": { $ref: "#/components/responses/StampedPlainHash" }
         "404": { $ref: "#/components/responses/NotFound" }
   /block/{hash}:
     get:
@@ -127,6 +137,7 @@ paths:
       responses:
         "200":
           description: Block summary
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Block" }
@@ -147,6 +158,7 @@ paths:
       responses:
         "200":
           description: Block status
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BlockStatus" }
@@ -159,6 +171,7 @@ paths:
       responses:
         "200":
           description: Consensus-serialized block
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
@@ -171,6 +184,7 @@ paths:
       responses:
         "200":
           description: Txids
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Hash" } }
@@ -183,7 +197,7 @@ paths:
         - { $ref: "#/components/parameters/BlockHash" }
         - { name: index, in: path, required: true, schema: { type: integer, minimum: 0 } }
       responses:
-        "200": { $ref: "#/components/responses/PlainHash" }
+        "200": { $ref: "#/components/responses/StampedPlainHash" }
         "404": { $ref: "#/components/responses/NotFound" }
   /block/{hash}/txs:
     get:
@@ -213,6 +227,7 @@ paths:
       responses:
         "200":
           description: Block template
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: object }
@@ -235,7 +250,7 @@ paths:
       responses:
         "200":
           description: Transaction
-          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Transaction" }
@@ -256,6 +271,7 @@ paths:
       responses:
         "200":
           description: Consensus-serialized transaction
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
@@ -274,7 +290,7 @@ paths:
       responses:
         "200":
           description: Status
-          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TxStatus" }
@@ -288,6 +304,7 @@ paths:
       responses:
         "200":
           description: Merkle proof
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MerkleProof" }
@@ -314,7 +331,7 @@ paths:
       responses:
         "200":
           description: Outspend
-          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Outspend" }
@@ -330,7 +347,7 @@ paths:
       responses:
         "200":
           description: One entry per output, in vout order
-          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Outspend" } }
@@ -348,6 +365,7 @@ paths:
       responses:
         "200":
           description: One outspend array per txid, same order
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema:
@@ -632,6 +650,7 @@ paths:
       responses:
         "200":
           description: Summary
+          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MempoolInfo" }
@@ -642,6 +661,7 @@ paths:
       responses:
         "200":
           description: Txids
+          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Hash" } }
@@ -653,6 +673,7 @@ paths:
       responses:
         "200":
           description: Txids
+          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Hash" } }
@@ -666,6 +687,7 @@ paths:
       responses:
         "200":
           description: Txids
+          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Hash" } }
@@ -677,6 +699,7 @@ paths:
       responses:
         "200":
           description: Recent txs in accept order
+          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema:
@@ -697,6 +720,7 @@ paths:
       responses:
         "200":
           description: Estimates
+          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema:
@@ -739,7 +763,8 @@ paths:
             schema: { type: array, maxItems: 25, items: { type: string, description: raw tx hex } }
       responses:
         "200":
-          description: One result per tx
+          description: One result per transaction, or one object when the batch repeats a txid
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/TestAcceptResult" } }
@@ -758,6 +783,7 @@ paths:
       responses:
         "200":
           description: Accepted txids
+          headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema:
@@ -823,6 +849,7 @@ paths:
       responses:
         "200":
           description: One array per txid, same order
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema:
@@ -841,6 +868,7 @@ paths:
       responses:
         "200":
           description: One outspend per outpoint, same order
+          headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Outspend" } }
@@ -854,6 +882,10 @@ components:
     ChainTipHeight:
       description: Height of the pinned chain view.
       schema: { type: integer }
+    PoweredBy:
+      description: |
+        `rbitcoin-esplora/<version>-<hex>` on every response. `<hex>` is the crate version with each byte written as two hex digits.
+      schema: { type: string, example: rbitcoin-esplora/0.8.0-302e382e30 }
 
   parameters:
     AsOf:
@@ -924,61 +956,75 @@ components:
   responses:
     PlainInt:
       description: Decimal integer
+      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string, pattern: "^[0-9]+$" } } }
+    StampedPlainHash:
+      description: 64-character hex hash, chain-tip stamped
+      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
+      content: { text/plain: { schema: { $ref: "#/components/schemas/Hash" } } }
     PlainHash:
       description: 64-character hex hash
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { $ref: "#/components/schemas/Hash" } } }
     PlainHex:
       description: Hex string
+      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string, pattern: "^[0-9a-f]*$" } } }
     NotFound:
       description: Unknown object, malformed hash, or `pruned`
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string } } }
     AsOfNotFound:
       description: |
         Malformed address, wrong network, bad hex, or an `asof` block that is unknown, off the best chain, or ahead of the scripthash index.
         A valid address or scripthash with no history is 200 (zero stats, or an empty array), not 404.
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string } } }
     BadRequest:
       description: Bad input
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string } } }
     TooLarge:
       description: Body too large
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string } } }
     AfterTxidNotFound:
       description: |
         Body is `after_txid not found` when a query `after_txid` or a path `last_seen_txid` is well-formed but not in that history.
         On POST, more than 300 scripts is `body too long` with this same status.
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string } } }
     Unavailable:
       description: No tip, mempool unavailable, scripthash index disabled, `--max-sh-creates` exceeded, or `chain view moved`
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content: { text/plain: { schema: { type: string } } }
     TxList:
       description: Transactions. Chain-tip stamped.
-      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content:
         application/json:
           schema: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
     MempoolTxList:
       description: Mempool transactions for one script. Not chain-tip stamped.
+      headers: { X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content:
         application/json:
           schema: { type: array, items: { $ref: "#/components/schemas/Transaction" } }
     UtxoList:
       description: Unspent outputs
-      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content:
         application/json:
           schema: { type: array, items: { $ref: "#/components/schemas/Utxo" } }
     SummaryList:
       description: Compact history rows, newest first
-      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content:
         application/json:
           schema: { type: array, items: { $ref: "#/components/schemas/TxSummary" } }
     AddressStats:
       description: Stats
-      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" } }
+      headers: { X-Bitcoin-Chain-Tip: { $ref: "#/components/headers/ChainTip" }, X-Bitcoin-Chain-Tip-Height: { $ref: "#/components/headers/ChainTipHeight" }, X-Powered-By: { $ref: "#/components/headers/PoweredBy" } }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/AddressInfo" }
