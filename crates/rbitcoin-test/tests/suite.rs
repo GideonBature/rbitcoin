@@ -6,6 +6,7 @@ mod core_analogs;
 mod cross_surface;
 mod electrum_protocol;
 mod end_of_ibd;
+mod i2p_dest;
 mod integration_multinode;
 mod jsonrpc;
 mod mine;

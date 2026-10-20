@@ -269,14 +269,7 @@ pub async fn wait_peer_network(rpc: SocketAddr, net: &str, inbound: bool, wall: 
     .await
 }
 
-/// I2P b32 hostname from a SAM `DESTINATION=` / `{datadir}/i2p/p2p.priv` blob.
-///
-/// Same host `NetAddr::host_str` reports for that destination.
-pub fn i2p_b32_from_dest(dest: &str) -> String {
-    rbitcoin_net::i2p_addr_from_sam_b64(dest)
-        .unwrap_or_else(|e| panic!("{e}"))
-        .host_str()
-}
+pub use crate::i2p_dest::i2p_b32_from_dest;
 
 pub async fn socks_http_get(proxy: SocketAddr, host: &str, port: u16, path: &str) -> (u16, String) {
     let dialer = rbitcoin_net::Dialer::socks(proxy, true);

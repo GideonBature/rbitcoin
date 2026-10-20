@@ -3,10 +3,13 @@
 //! Prefer writing scenarios in `tests/` that exercise public crate APIs.
 
 pub mod chain_fixture;
+pub mod i2p_dest;
 pub mod jsonrpc;
 pub mod mine;
 #[cfg(feature = "overlay")]
 pub mod overlay;
+
+pub use i2p_dest::i2p_b32_from_dest;
 
 pub use chain_fixture::{
     assert_reconstruct_eq, build_mature_regtest_with_spend, open_mature_regtest_with_spend,
