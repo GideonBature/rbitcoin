@@ -33,11 +33,3 @@ pub async fn sync_cancellable(
     )
     .await
 }
-
-/// IBD with default window (1024 concurrent getdata, 16/peer).
-pub async fn sync_default(
-    node: &rbitcoin_net::P2PNode,
-    peers: &[rbitcoin_net::NetAddr],
-) -> Result<u32, rbitcoin_net::NetError> {
-    sync(node, peers, ibd::IbdConfig::default()).await
-}
