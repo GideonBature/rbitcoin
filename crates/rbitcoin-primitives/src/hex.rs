@@ -8,6 +8,7 @@
 //!
 //! Errors are hex-conservative's own.
 
+use bitcoin_hashes::{sha256, Hash};
 use hex_conservative::{DisplayHex, FromHex};
 
 pub use hex_conservative::{HexToArrayError, HexToBytesError};
@@ -40,6 +41,15 @@ pub fn display_hash_hex(mut h: [u8; 32]) -> String {
     encode(h)
 }
 
+/// Electrum / Esplora scripthash: SHA256(scriptPubKey) in display order.
+///
+/// `sha256::Hash`'s `Display` prints internal byte order. `Txid` display
+/// does not. This is the spelling a client sends.
+#[inline]
+pub fn scripthash_display_hex(script: &[u8]) -> String {
+    display_hash_hex(sha256::Hash::hash(script).to_byte_array())
+}
+
 /// Parse display-order 32-byte hex → internal byte order.
 ///
 /// `0x` / `0X` is stripped here. Any other failure is [`HexToArrayError`]:
@@ -55,6 +65,7 @@ pub fn parse_display_hash32(hex: &str) -> Result<[u8; 32], HexToArrayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin_hashes::{sha256, Hash};
 
     #[test]
     fn roundtrip() {
@@ -79,6 +90,20 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn p2a_scripthash_display_is_reversed_sha256_not_hash_display() {
+        // bc1pfeessrawgf. sha256::Hash Display is internal order.
+        let spk = [0x51, 0x02, 0x4e, 0x73];
+        let got = scripthash_display_hex(&spk);
+        assert_eq!(
+            got,
+            "c5d0fb3863474a90cfe5b26801e66cb45fdc046b40e6829788eaf1b8770ffea6"
+        );
+        let digest = sha256::Hash::hash(&spk);
+        assert_ne!(got, digest.to_string());
+        assert_eq!(got, display_hash_hex(digest.to_byte_array()));
     }
 
     #[test]

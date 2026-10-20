@@ -11,7 +11,7 @@ use rbitcoin_net::{BlockingRegion, MempoolHub};
 use rbitcoin_primitives::{Fk, Height};
 
 use rbitcoin_query::{ChainView, ChainViewKind, HistoryFilter, Query, ShJoinSlot};
-use rbitcoin_store::{script_hash, StoreError};
+use rbitcoin_store::StoreError;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -2617,8 +2617,7 @@ fn scripthash_status_full_slot(
 
 /// Helper to compute electrum scripthash hex (reversed) from script bytes.
 pub fn electrum_scripthash_hex(script: &[u8]) -> String {
-    let h = script_hash(script);
-    hash_hex_rev(&h)
+    rbitcoin_primitives::scripthash_display_hex(script)
 }
 
 #[cfg(test)]
