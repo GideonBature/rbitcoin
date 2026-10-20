@@ -75,6 +75,8 @@ assert_ok "ci coverage job has a wall timeout" \
   bash -c 'awk "/^  coverage:/{p=1} p&&/timeout-minutes:/{print; exit}" "$1" | grep -q timeout-minutes' _ "$ROOT/.github/workflows/ci.yml"
 assert_ok "required test job excludes rbitcoin-bench" \
   grep -q 'cargo test --workspace --exclude rbitcoin-bench' "$ROOT/.github/workflows/ci.yml"
+assert_ok "required test job still pins the bench scripthash" \
+  grep -q 'cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a' "$ROOT/.github/workflows/ci.yml"
 assert_ok "gitignore ignores apilog jsonl" \
   bash -c 'grep -q "apilog\\*\\.jsonl" "$1/.gitignore" && git -C "$1" check-ignore -q -- apilog.jsonl && git -C "$1" check-ignore -q -- apilog-old.jsonl' _ "$ROOT"
 

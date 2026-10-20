@@ -138,6 +138,10 @@ jobs:
         run: df -h /dev/shm && free -m
       - name: cargo test
         run: cargo test --workspace --exclude rbitcoin-bench
+      # The workspace exclude stays (coverage.test.sh). This one lib test is
+      # the address-corpus pin: sha256::Hash Display is internal order.
+      - name: bench scripthash pin
+        run: cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a -- --quiet
 
   # Windows IOCP store + mmap fuse + query confirm + --smoke. Required. Not a CRT-static snapshot.
   windows:

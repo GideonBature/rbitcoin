@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 pub const SEQSIGWIT_RELOC_NAME: &str = "seqsigwit.reloc";
 
 /// Index directories that live next to seqsigwit when the store is split.
-const COLD_INDEX_DIRS: &[&str] = &[
+#[doc(hidden)]
+pub const COLD_INDEX_DIRS: &[&str] = &[
     "blockfilter.idx",
     "blockfilter.body",
     "sp_tweaks.idx",
@@ -114,7 +115,8 @@ impl StoreLayout {
     }
 }
 
-fn rename_legacy_pairs(dir: &Path, pairs: &[(&str, &str)]) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn rename_legacy_pairs(dir: &Path, pairs: &[(&str, &str)]) -> Result<(), StoreError> {
     if !dir.exists() {
         return Ok(());
     }
@@ -137,7 +139,7 @@ fn rename_legacy_pairs(dir: &Path, pairs: &[(&str, &str)]) -> Result<(), StoreEr
     Ok(())
 }
 
-pub(crate) fn rename_legacy_input_files(dir: &Path) -> Result<(), StoreError> {
+pub fn rename_legacy_input_files(dir: &Path) -> Result<(), StoreError> {
     rename_legacy_pairs(
         dir,
         &[
@@ -148,7 +150,7 @@ pub(crate) fn rename_legacy_input_files(dir: &Path) -> Result<(), StoreError> {
     )
 }
 
-pub(crate) fn rename_legacy_inwit_files(dir: &Path) -> Result<(), StoreError> {
+pub fn rename_legacy_inwit_files(dir: &Path) -> Result<(), StoreError> {
     rename_legacy_pairs(
         dir,
         &[
@@ -164,31 +166,8 @@ pub(crate) fn rename_legacy_inwit_files(dir: &Path) -> Result<(), StoreError> {
     )
 }
 
-#[cfg(test)]
-mod legacy_rename_tests {
-    use super::*;
-
-    #[test]
-    fn legacy_names_rename_and_both_exist_errors() {
-        let dir = crate::testutil::TempDir::labeled("legacy-rename").unwrap();
-        std::fs::write(dir.join("inputs.loc"), b"loc").unwrap();
-        std::fs::write(dir.join("inwit.body"), b"body").unwrap();
-        rename_legacy_input_files(dir.path()).unwrap();
-        rename_legacy_inwit_files(dir.path()).unwrap();
-        assert_eq!(std::fs::read(dir.join("input.loc")).unwrap(), b"loc");
-        assert_eq!(std::fs::read(dir.join("seqsigwit.body")).unwrap(), b"body");
-        assert!(!dir.join("inputs.loc").exists());
-        std::fs::write(dir.join("inputs.off"), b"old").unwrap();
-        std::fs::write(dir.join("input.off"), b"new").unwrap();
-        let err = rename_legacy_input_files(dir.path()).unwrap_err();
-        assert!(
-            matches!(err, StoreError::Layout(ref m) if m.contains("both exist")),
-            "{err}"
-        );
-    }
-}
-
-fn refuse_cold_index_dirs(hot: &Path, cold: &Path) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn refuse_cold_index_dirs(hot: &Path, cold: &Path) -> Result<(), StoreError> {
     for name in COLD_INDEX_DIRS {
         let on_hot = hot.join(name);
         let on_cold = cold.join(name);
@@ -211,20 +190,23 @@ fn refuse_cold_index_dirs(hot: &Path, cold: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn seqsigwit_files_present(dir: &Path) -> bool {
+#[doc(hidden)]
+pub fn seqsigwit_files_present(dir: &Path) -> bool {
     dir.join("seqsigwit.body").exists()
         || dir.join("seqsigwit.loc").exists()
         || dir.join("seqsigwit.idx").exists()
 }
 
-fn seqsigwit_reloc_path(hot: &Path) -> PathBuf {
+#[doc(hidden)]
+pub fn seqsigwit_reloc_path(hot: &Path) -> PathBuf {
     hot.join(SEQSIGWIT_RELOC_NAME)
 }
 
 /// Decide the seqsigwit VarTable directory. Split stores refuse leftovers in hot
 /// and dual copies; a reloc marker without `--datadir-cold` is a layout error
 /// (not `Corrupt`).
-fn resolve_seqsigwit_dir(layout: &StoreLayout) -> Result<PathBuf, StoreError> {
+#[doc(hidden)]
+pub fn resolve_seqsigwit_dir(layout: &StoreLayout) -> Result<PathBuf, StoreError> {
     rename_legacy_inwit_files(&layout.dir)?;
     rename_legacy_input_files(&layout.dir)?;
     if !layout.is_split() {
@@ -261,7 +243,8 @@ fn resolve_seqsigwit_dir(layout: &StoreLayout) -> Result<PathBuf, StoreError> {
     }
 }
 
-fn dir_file_bytes(root: &Path) -> u64 {
+#[doc(hidden)]
+pub fn dir_file_bytes(root: &Path) -> u64 {
     fn walk(p: &Path, acc: &mut u64) {
         let Ok(rd) = std::fs::read_dir(p) else {
             return;
@@ -283,7 +266,8 @@ fn dir_file_bytes(root: &Path) -> u64 {
     n
 }
 
-fn write_seqsigwit_reloc(hot: &Path) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn write_seqsigwit_reloc(hot: &Path) -> Result<(), StoreError> {
     let p = seqsigwit_reloc_path(hot);
     if p.exists() {
         return Ok(());
@@ -293,10 +277,10 @@ fn write_seqsigwit_reloc(hot: &Path) -> Result<(), StoreError> {
 
 /// Top-level store handle for a datadir `store/` directory.
 pub struct Store {
-    path: PathBuf,
+    pub path: PathBuf,
     /// `{datadir-cold}/store` when append-only files are split; `None` = they live in [`Self::path`].
-    cold_path: Option<PathBuf>,
-    head_scale: HeadScale,
+    pub cold_path: Option<PathBuf>,
+    pub head_scale: HeadScale,
     pub headers: HeaderTable,
     pub txs: TxTable,
     /// Multi-spender overflow (`spent.ovf`). Sole spends live on create outputs.
@@ -308,35 +292,35 @@ pub struct Store {
     /// Confirmed heights resolve txs via `confirmed[h]` → this list.
     pub header_txs: HeaderTxsTable,
     /// Resident create-height fence (confirmed[] + header_txs). No `tx_height.body`.
-    height_fence: std::sync::RwLock<HeightFence>,
+    pub height_fence: std::sync::RwLock<HeightFence>,
     /// BIP113 window at the fence tip (extend O(1); pop rebuilds).
-    mtp_ring: std::sync::RwLock<MtpRing>,
+    pub mtp_ring: std::sync::RwLock<MtpRing>,
     /// Latest confirm height plus one. Zero means no snapshot yet.
-    spend_snapshot: std::sync::atomic::AtomicU64,
+    pub spend_snapshot: std::sync::atomic::AtomicU64,
     /// Serializes spend-marker publishes so a checkpoint cannot overwrite a clamp.
-    spend_marker: std::sync::Mutex<()>,
+    pub spend_marker: std::sync::Mutex<()>,
     /// First height of a confirm write whose spend annotate has not finished,
     /// plus one. Zero means none.
-    spend_annotate_from: std::sync::atomic::AtomicU64,
+    pub spend_annotate_from: std::sync::atomic::AtomicU64,
     /// Disconnects since process start. A checkpoint publishes only when this
     /// word is unchanged across its `sync_data` window.
-    spend_reorg_gen: std::sync::atomic::AtomicU64,
+    pub spend_reorg_gen: std::sync::atomic::AtomicU64,
     /// Even while confirmed spentness is stable. Odd while a confirm annotate
     /// or a disconnect is publishing a change.
-    utxo_view: std::sync::atomic::AtomicU64,
+    pub utxo_view: std::sync::atomic::AtomicU64,
     /// Confirm readers wait here while a `--datadir-hdd` write holds the spindle.
     /// Flag off never locks, so [`Self::spindle_wait`] returns immediately.
-    spindle: std::sync::Mutex<()>,
+    pub spindle: std::sync::Mutex<()>,
 }
 
 /// Held across one rotating-media write burst. Drop releases [`Store::spindle_wait`].
 pub struct SpindleHold<'a> {
-    _guard: Option<std::sync::MutexGuard<'a, ()>>,
+    pub _guard: Option<std::sync::MutexGuard<'a, ()>>,
 }
 
 /// Holds [`Store::utxo_view`] odd until drop.
 pub struct UtxoViewGuard<'a> {
-    view: &'a std::sync::atomic::AtomicU64,
+    pub view: &'a std::sync::atomic::AtomicU64,
 }
 
 impl Drop for UtxoViewGuard<'_> {
@@ -393,7 +377,7 @@ impl Store {
         Self::create_layout_with_head(layout, head)
     }
 
-    pub(crate) fn create_layout_with_head(
+    pub fn create_layout_with_head(
         layout: StoreLayout,
         head: crate::address_head::HeadLayout,
     ) -> Result<Self, StoreError> {
@@ -552,15 +536,18 @@ impl Store {
         self.confirmed.tip_height()
     }
 
-    fn fence(&self) -> std::sync::RwLockReadGuard<'_, HeightFence> {
+    #[doc(hidden)]
+    pub fn fence(&self) -> std::sync::RwLockReadGuard<'_, HeightFence> {
         self.height_fence.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn fence_write(&self) -> std::sync::RwLockWriteGuard<'_, HeightFence> {
+    #[doc(hidden)]
+    pub fn fence_write(&self) -> std::sync::RwLockWriteGuard<'_, HeightFence> {
         self.height_fence.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn mtp_write(&self) -> std::sync::RwLockWriteGuard<'_, MtpRing> {
+    #[doc(hidden)]
+    pub fn mtp_write(&self) -> std::sync::RwLockWriteGuard<'_, MtpRing> {
         self.mtp_ring.write().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -572,7 +559,8 @@ impl Store {
             .window_at(height.0)
     }
 
-    fn mtp_push(&self, height: u32, time: u32) {
+    #[doc(hidden)]
+    pub fn mtp_push(&self, height: u32, time: u32) {
         let pushed = self.mtp_write().try_push(height, time);
         if pushed {
             return;
@@ -581,7 +569,8 @@ impl Store {
         let _ = self.mtp_write().try_push(height, time);
     }
 
-    fn rebuild_mtp_ring(&self) -> Result<(), StoreError> {
+    #[doc(hidden)]
+    pub fn rebuild_mtp_ring(&self) -> Result<(), StoreError> {
         let Some(tip) = self.confirmed.tip_height() else {
             self.mtp_write().clear();
             return Ok(());
@@ -1552,7 +1541,8 @@ impl Store {
         self.repair_strong_not_on_fence()
     }
 
-    fn repair_strong_not_on_fence(&self) -> Result<u64, StoreError> {
+    #[doc(hidden)]
+    pub fn repair_strong_not_on_fence(&self) -> Result<u64, StoreError> {
         let t0 = std::time::Instant::now();
         let after = self.fence().max_connected_fk();
         let holes = self.fence().unconnected_ranges(after);
@@ -1580,7 +1570,8 @@ impl Store {
 
     /// Exclusive end fk of leftover 1s after `start_fk`, stopping at a 64 KiB
     /// all-zero bit page so slab padding is not rewritten.
-    fn strong_suffix_end_fk(&self, start_fk: u64, n_bits: u64) -> Result<u64, StoreError> {
+    #[doc(hidden)]
+    pub fn strong_suffix_end_fk(&self, start_fk: u64, n_bits: u64) -> Result<u64, StoreError> {
         if start_fk == 0 || start_fk.saturating_sub(1) >= n_bits {
             return Ok(start_fk);
         }
@@ -1605,7 +1596,8 @@ impl Store {
         Ok(last_one_end.max(start_fk))
     }
 
-    fn clear_class_c_run(&self, start: u64, end: u64) -> Result<u64, StoreError> {
+    #[doc(hidden)]
+    pub fn clear_class_c_run(&self, start: u64, end: u64) -> Result<u64, StoreError> {
         if end <= start {
             return Ok(0);
         }
@@ -1633,7 +1625,8 @@ impl Store {
     /// Order: `strong_tx` → `header_txs`. Used so a mid-barrier kill can leave
     /// strong durable **above** tip (repairable) without advancing tip. Prefer
     /// [`Self::flush_class_c_tip`] for the full barrier.
-    fn flush_class_c_pre_tip(&self) -> Result<(), StoreError> {
+    #[doc(hidden)]
+    pub fn flush_class_c_pre_tip(&self) -> Result<(), StoreError> {
         // Tip-as-commit: never flush confirmed here.
         // Headers first so conf tip cannot reference a non-durable header_fk.
         self.headers.flush()?;
@@ -1682,7 +1675,13 @@ impl Store {
     ///
     /// A disconnect bumps [`Self::spend_reorg_gen`] before it takes the same
     /// lock. A publish sampled at `gen` writes nothing when that word moved.
-    fn store_spend_marker(&self, annotated: u32, durable: u32, gen: u64) -> Result<(), StoreError> {
+    #[doc(hidden)]
+    pub fn store_spend_marker(
+        &self,
+        annotated: u32,
+        durable: u32,
+        gen: u64,
+    ) -> Result<(), StoreError> {
         use std::sync::atomic::Ordering;
         let _g = self.spend_marker.lock().unwrap_or_else(|e| e.into_inner());
         if self.spend_reorg_gen.load(Ordering::Acquire) != gen {
@@ -1843,7 +1842,8 @@ impl Store {
         self.observe_spend_checkpoint(|_| {}, |_| {})
     }
 
-    fn observe_spend_checkpoint(
+    #[doc(hidden)]
+    pub fn observe_spend_checkpoint(
         &self,
         after_first_read: impl FnOnce(&Self),
         during_sync: impl FnOnce(&Self),
@@ -1860,7 +1860,8 @@ impl Store {
     /// Appends above `height` do not bump the disconnect generation, so a
     /// block connected in `between` still allows the snapshot to publish.
     /// A disconnect in `between` does not.
-    fn spend_through_checkpoint(
+    #[doc(hidden)]
+    pub fn spend_through_checkpoint(
         &self,
         height: u32,
         between: impl FnOnce(&Self),
@@ -1870,7 +1871,8 @@ impl Store {
         self.sync_spend_checkpoint(height, gen, between)
     }
 
-    fn sync_spend_checkpoint(
+    #[doc(hidden)]
+    pub fn sync_spend_checkpoint(
         &self,
         height: u32,
         gen: u64,
@@ -1901,8 +1903,8 @@ impl Store {
 
     /// [`Self::checkpoint_observed_spend`] with hooks around the two reads
     /// and the sync.
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub(crate) fn checkpoint_observed_spend_gap(
+    #[cfg(debug_assertions)]
+    pub fn checkpoint_observed_spend_gap(
         &self,
         after_first_read: impl FnOnce(&Self),
         during_sync: impl FnOnce(&Self),
@@ -1912,8 +1914,8 @@ impl Store {
 
     /// [`Self::checkpoint_spend_through`] with `between` invoked after
     /// `sync_data` and before the marker publish.
-    #[cfg(any(test, feature = "test-hooks"))]
-    pub(crate) fn checkpoint_spend_through_between(
+    #[cfg(debug_assertions)]
+    pub fn checkpoint_spend_through_between(
         &self,
         height: u32,
         between: impl FnOnce(&Self),
@@ -2012,7 +2014,8 @@ impl Store {
     }
 }
 
-fn write_meta(dir: &Path) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn write_meta(dir: &Path) -> Result<(), StoreError> {
     let path = dir.join("meta");
     let mut f = OpenOptions::new()
         .write(true)
@@ -2028,7 +2031,8 @@ fn write_meta(dir: &Path) -> Result<(), StoreError> {
 }
 
 /// Overwrite store `meta` with current [`SCHEMA_VERSION`].
-fn rewrite_meta_current(dir: &Path) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn rewrite_meta_current(dir: &Path) -> Result<(), StoreError> {
     let path = dir.join("meta");
     let tmp = path.with_extension("meta.tmp");
     {
@@ -2048,7 +2052,8 @@ fn rewrite_meta_current(dir: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn unlink_leftover_spent_off(dir: &Path) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn unlink_leftover_spent_off(dir: &Path) -> Result<(), StoreError> {
     let path = dir.join("spent.off");
     if !path.exists() {
         return Ok(());
@@ -2062,7 +2067,8 @@ fn unlink_leftover_spent_off(dir: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn open_layout_refuse_old(path: &Path, meta_ver: u16) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn open_layout_refuse_old(path: &Path, meta_ver: u16) -> Result<(), StoreError> {
     if (24..=25).contains(&meta_ver) {
         HeaderTable::rewrite_v24_body_to_88(path)?;
     }
@@ -2070,7 +2076,8 @@ fn open_layout_refuse_old(path: &Path, meta_ver: u16) -> Result<(), StoreError> 
     Ok(())
 }
 
-fn drop_unread_store_leftovers(path: &Path) {
+#[doc(hidden)]
+pub fn drop_unread_store_leftovers(path: &Path) {
     let leftover_epoch = path.join("archive_epoch");
     if leftover_epoch.exists() {
         eprintln!(
@@ -2092,7 +2099,8 @@ fn drop_unread_store_leftovers(path: &Path) {
     }
 }
 
-fn drop_leftover_tx_height(path: &Path) {
+#[doc(hidden)]
+pub fn drop_leftover_tx_height(path: &Path) {
     let leftover_h = path.join("tx_height.body");
     if leftover_h.exists() {
         eprintln!(
@@ -2102,7 +2110,8 @@ fn drop_leftover_tx_height(path: &Path) {
     }
 }
 
-fn open_layout_rewrite_current(path: &Path, meta_ver: u16) -> Result<(), StoreError> {
+#[doc(hidden)]
+pub fn open_layout_rewrite_current(path: &Path, meta_ver: u16) -> Result<(), StoreError> {
     if meta_ver < SCHEMA_VERSION {
         rewrite_meta_current(path)?;
     }
@@ -2110,7 +2119,8 @@ fn open_layout_rewrite_current(path: &Path, meta_ver: u16) -> Result<(), StoreEr
 }
 
 /// Validate store magic + schema. Returns on-disk version when openable.
-fn check_meta(dir: &Path) -> Result<u16, StoreError> {
+#[doc(hidden)]
+pub fn check_meta(dir: &Path) -> Result<u16, StoreError> {
     let path = dir.join("meta");
     let bytes = std::fs::read(&path).map_err(|e| StoreError::io(&path, e))?;
     if bytes.len() < 6 {
@@ -2130,7 +2140,7 @@ fn check_meta(dir: &Path) -> Result<u16, StoreError> {
 }
 
 /// One wipe-and-IBD line for every store `meta` older than schema 22.
-const PRE22_WIPE: &str = "schema before 22 refuses this datadir; wipe datadir and redo IBD";
+pub const PRE22_WIPE: &str = "schema before 22 refuses this datadir; wipe datadir and redo IBD";
 
 #[cfg(test)]
 mod tests {

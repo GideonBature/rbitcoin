@@ -3,7 +3,6 @@
 use crate::cache::BlockCache;
 use crate::chain::{AcceptOutcome, ChainHub};
 use crate::error::NetError;
-use crate::ibd::IbdConfig;
 use crate::peer::{
     connect_and_handshake_timed, inbound_connect_and_handshake, peer_session_with,
     FollowSessionMeta, HandshakePolicy, HANDSHAKE_TIMEOUT,
@@ -31,17 +30,17 @@ pub struct P2PNode {
     pub query: Arc<Query>,
     pub hub: Arc<ChainHub>,
     pub local_addr: SocketAddr,
-    magic: Magic,
-    shutdown: Arc<AtomicBool>,
+    pub magic: Magic,
+    pub shutdown: Arc<AtomicBool>,
     /// Live outbound tip-follow sessions (inc/dec inside session task).
-    follow_live: Arc<AtomicUsize>,
-    tasks: Vec<JoinHandle<()>>,
+    pub follow_live: Arc<AtomicUsize>,
+    pub tasks: Vec<JoinHandle<()>>,
     /// Nested inbound / dial session tasks (not in `tasks` so accept/dial
     /// abort does not leave them running through process exit).
-    session_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    pub session_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Live sessions for RPC getpeerinfo / addnode / disconnectnode.
     pub peers: Arc<PeerHub>,
-    user_agent: String,
+    pub user_agent: String,
     /// Inbound session cap used by the accept loop (not process env).
     pub max_inbound: usize,
     /// Shared inbound slots across all listen sockets.
@@ -137,7 +136,7 @@ impl P2PNode {
         .await
     }
 
-    async fn start_inner(
+    pub async fn start_inner(
         listen: Option<SocketAddr>,
         query: Query,
         params: ChainParams,
@@ -334,44 +333,13 @@ impl P2PNode {
         }
     }
 
-    /// IBD / catch-up: multi-peer densify across `peers`.
-    ///
-    /// This is the only history-sync path. Tip-follow is [`Self::follow_from`].
-    pub async fn sync(&self, peers: &[crate::NetAddr], cfg: IbdConfig) -> Result<u32, NetError> {
-        self.sync_cancellable(peers, cfg, None).await
-    }
-
-    /// IBD with optional cooperative cancel flag (SIGINT / SIGTERM path).
-    pub async fn sync_cancellable(
-        &self,
-        peers: &[crate::NetAddr],
-        cfg: IbdConfig,
-        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Result<u32, NetError> {
-        crate::ibd::ibd_cancellable(
-            self.hub.clone(),
-            self.magic,
-            self.local_addr,
-            peers,
-            cfg,
-            cancel,
-            Some(Arc::clone(&self.peers)),
-        )
-        .await
-    }
-
-    /// IBD with default window (1024 concurrent getdata, 16/peer).
-    pub async fn sync_default(&self, peers: &[crate::NetAddr]) -> Result<u32, NetError> {
-        self.sync(peers, IbdConfig::default()).await
-    }
-
     /// Persistent outbound peer: tip-follow + announce for the session lifetime.
     ///
     /// Handshake completes on this task (so an 8s connect timeout is meaningful);
     /// the session itself is spawned so the caller does not sit in the read loop.
     /// After handshake the session sends `getheaders` from our tip locator so
     /// any gap (e.g. blocks mined during SH materialize) is filled actively.
-    /// Call [`Self::sync`] first when far behind (multi-thousand height IBD).
+    /// Call `rbitcoin_ibd::sync` first when far behind (multi-thousand height IBD).
     pub async fn follow_from(&mut self, peer: SocketAddr) -> Result<(), NetError> {
         self.follow_from_net(crate::NetAddr::Ip(peer)).await
     }
@@ -497,7 +465,8 @@ impl Drop for P2PNode {
     }
 }
 
-fn push_session_task(bag: &Mutex<Vec<JoinHandle<()>>>, h: JoinHandle<()>) {
+#[doc(hidden)]
+pub fn push_session_task(bag: &Mutex<Vec<JoinHandle<()>>>, h: JoinHandle<()>) {
     if let Ok(mut g) = bag.lock() {
         g.retain(|t| !t.is_finished());
         g.push(h);
@@ -505,7 +474,8 @@ fn push_session_task(bag: &Mutex<Vec<JoinHandle<()>>>, h: JoinHandle<()>) {
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
-fn spawn_inbound_accept(
+#[doc(hidden)]
+pub fn spawn_inbound_accept(
     listener: TcpListener,
     local_addr: SocketAddr,
     hub: Arc<ChainHub>,
@@ -620,29 +590,30 @@ fn spawn_inbound_accept(
     })
 }
 
-fn default_user_agent() -> String {
+#[doc(hidden)]
+pub fn default_user_agent() -> String {
     rbitcoin_primitives::rbitcoin_subversion(env!("CARGO_PKG_VERSION"), &[] as &[&str])
         .unwrap_or_else(|_| format!("/rbitcoin:{}/", env!("CARGO_PKG_VERSION")))
 }
 
-struct PreparedOutbound {
-    peer_hint: SocketAddr,
-    magic: Magic,
-    hub: Arc<ChainHub>,
-    peers: Arc<PeerHub>,
-    follow_live: Arc<AtomicUsize>,
-    reader: V2Reader,
-    writer: V2Writer,
-    sess: Arc<LivePeer>,
-    id: u64,
+#[doc(hidden)]
+pub struct PreparedOutbound {
+    pub peer_hint: SocketAddr,
+    pub magic: Magic,
+    pub hub: Arc<ChainHub>,
+    pub peers: Arc<PeerHub>,
+    pub follow_live: Arc<AtomicUsize>,
+    pub reader: V2Reader,
+    pub writer: V2Writer,
+    pub sess: Arc<LivePeer>,
+    pub id: u64,
 }
 
-/// True when this crate was compiled with the `test-hooks` feature.
+/// True on a debug build, which uses the short redial and SAM retry.
 ///
-/// Journeys turn that on. A workspace build unifies it into the node binary,
-/// which then uses the short redial and SAM retry. The node warns at startup.
+/// Release keeps the operator intervals. The node warns at startup.
 pub fn compiled_with_test_hooks() -> bool {
-    cfg!(feature = "test-hooks")
+    cfg!(debug_assertions)
 }
 
 /// A transient accept error should not stop the listen loop.
@@ -661,10 +632,10 @@ pub(crate) fn accept_error_ends_listen(err: &std::io::Error) -> bool {
 }
 
 /// How often a down `--connect` / `addnode` target is tried again.
-#[cfg(not(any(test, feature = "test-hooks")))]
+#[cfg(not(debug_assertions))]
 const REDIAL_INTERVAL: Duration = Duration::from_secs(2);
-/// Crate tests and journeys. The node binary keeps the 2s pass.
-#[cfg(any(test, feature = "test-hooks"))]
+/// Debug and test builds. Release keeps the 2s pass.
+#[cfg(debug_assertions)]
 const REDIAL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Bound on the TCP / SOCKS / SAM connect of an outbound dial, the same 8 s
@@ -672,13 +643,15 @@ const REDIAL_INTERVAL: Duration = Duration::from_millis(250);
 /// longer). Without it a proxy that accepts and never answers holds the
 /// dial, and its [`crate::peers::DialInFlight`] mark, for good, so the
 /// redial pass would never try that target again.
-#[cfg(not(test))]
-const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-#[cfg(test)]
-const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(debug_assertions))]
+#[doc(hidden)]
+pub const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
-async fn prepare_outbound_session(
+pub async fn prepare_outbound_session(
     peer: DialTarget,
     in_flight: Option<crate::peers::DialInFlight>,
     magic: Magic,
@@ -785,7 +758,7 @@ async fn prepare_outbound_session(
     })
 }
 
-async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), NetError> {
+pub async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), NetError> {
     let tip_rx = prepared.hub.subscribe_tips();
     let meta = FollowSessionMeta {
         peer: Some(prepared.peer_hint),
@@ -806,7 +779,7 @@ async fn run_prepared_outbound(prepared: PreparedOutbound) -> Result<(), NetErro
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
-async fn run_outbound_session_with_abort(
+pub async fn run_outbound_session_with_abort(
     peer: DialTarget,
     in_flight: Option<crate::peers::DialInFlight>,
     magic: Magic,
@@ -867,454 +840,5 @@ pub fn magic_for_params(params: &ChainParams) -> Magic {
     match params.signet_challenge.as_ref() {
         Some(challenge) => Magic::from_bytes(signet_magic(challenge.as_script())),
         None => Magic::from(params.network),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accept_retries_a_full_fd_table_and_stops_on_a_dead_listener() {
-        let aborted = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "reset");
-        let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "signal");
-        let emfile = std::io::Error::from_raw_os_error(24);
-        let enfile = std::io::Error::from_raw_os_error(23);
-        let dead = std::io::Error::new(std::io::ErrorKind::InvalidInput, "closed");
-        assert!(!accept_error_ends_listen(&aborted));
-        assert!(!accept_error_ends_listen(&interrupted));
-        assert!(!accept_error_ends_listen(&emfile));
-        assert!(!accept_error_ends_listen(&enfile));
-        assert!(accept_error_ends_listen(&dead));
-    }
-
-    #[test]
-    fn magic_for_all_networks() {
-        assert_eq!(
-            magic_for_params(&ChainParams::mainnet()),
-            Magic::from(bitcoin::Network::Bitcoin)
-        );
-        assert_eq!(
-            magic_for_params(&ChainParams::testnet()),
-            Magic::from(bitcoin::Network::Testnet)
-        );
-        assert_eq!(
-            magic_for_params(&ChainParams::signet()),
-            Magic::from(bitcoin::Network::Signet)
-        );
-        assert_eq!(magic_for_params(&ChainParams::regtest()), Magic::REGTEST);
-    }
-
-    #[test]
-    fn custom_signet_uses_challenge_derived_magic() {
-        use bitcoin::ScriptBuf;
-
-        let challenge = ScriptBuf::from_bytes(vec![0x51]);
-        let params = ChainParams::custom_signet(challenge, 60).unwrap();
-        assert_eq!(
-            magic_for_params(&params),
-            Magic::from_bytes([0x54, 0xd2, 0x6f, 0xbd])
-        );
-    }
-
-    /// A feeler does not use `prepare_outbound_session`. It still must not
-    /// open a socket to an address that misbehaved.
-    #[tokio::test]
-    async fn feeler_does_not_dial_a_discouraged_address() {
-        let peers = crate::peers::PeerHub::new();
-        peers.set_mock_now(1_700_000_000);
-        let addr = std::net::SocketAddr::from(([1, 2, 3, 4], 8333));
-        peers.note_misbehavior_addr(addr.ip());
-        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("feeler-discouraged");
-        let (_tx, rx) = tokio::sync::oneshot::channel();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            run_outbound_session_with_abort(
-                crate::peers::DialTarget::Socket(addr),
-                None,
-                Magic::REGTEST,
-                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-                std::sync::Arc::new(hub),
-                peers,
-                "/rbitcoin:test/".into(),
-                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                crate::peers::PeerConnType::Feeler,
-                rx,
-                crate::socks::Dialer::Direct,
-            ),
-        )
-        .await;
-        let _ = std::fs::remove_dir_all(dir.path());
-        let err = result
-            .expect("a refused feeler returns before the connect")
-            .unwrap_err();
-        assert!(
-            matches!(err, NetError::Protocol("discouraged")),
-            "feeler dialed a discouraged address, got {err:?}"
-        );
-    }
-
-    /// `--proxy` turns the DNS seeds into addr-fetch dials by name. The
-    /// proxy resolves the name, so the node holds no address for it.
-    #[tokio::test]
-    async fn proxied_dns_seed_dials_by_name_through_socks() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy = listener.local_addr().unwrap();
-        let socks = tokio::spawn(async move {
-            let (mut s, _) = listener.accept().await.unwrap();
-            let mut greeting = [0u8; 2];
-            s.read_exact(&mut greeting).await.unwrap();
-            let mut methods = vec![0u8; greeting[1] as usize];
-            s.read_exact(&mut methods).await.unwrap();
-            if methods.contains(&0x02) {
-                s.write_all(&[5, 0x02]).await.unwrap();
-                let mut ulen = [0u8; 2];
-                s.read_exact(&mut ulen).await.unwrap();
-                let mut user = vec![0u8; ulen[1] as usize];
-                s.read_exact(&mut user).await.unwrap();
-                let mut plen = [0u8; 1];
-                s.read_exact(&mut plen).await.unwrap();
-                let mut pass = vec![0u8; plen[0] as usize];
-                s.read_exact(&mut pass).await.unwrap();
-                s.write_all(&[1, 0]).await.unwrap();
-            } else {
-                s.write_all(&[5, 0x00]).await.unwrap();
-            }
-            let mut req = [0u8; 5];
-            s.read_exact(&mut req).await.unwrap();
-            assert_eq!(req[3], 3, "ATYP domain");
-            let mut host = vec![0u8; req[4] as usize];
-            s.read_exact(&mut host).await.unwrap();
-            let mut port = [0u8; 2];
-            s.read_exact(&mut port).await.unwrap();
-            s.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
-            (String::from_utf8(host).unwrap(), u16::from_be_bytes(port))
-        });
-        let peers = crate::peers::PeerHub::new();
-        let (dir, hub) = crate::chain::tiny_regtest_hub_labeled("proxied-dns-seed");
-        let (_tx, rx) = tokio::sync::oneshot::channel();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            run_outbound_session_with_abort(
-                crate::peers::DialTarget::Domain {
-                    host: "seed.example".into(),
-                    port: 8333,
-                },
-                None,
-                Magic::REGTEST,
-                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-                std::sync::Arc::new(hub),
-                peers,
-                "/rbitcoin:test/".into(),
-                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                crate::peers::PeerConnType::AddrFetch,
-                rx,
-                crate::socks::Dialer::socks(proxy, false),
-            ),
-        )
-        .await;
-        let _ = std::fs::remove_dir_all(dir.path());
-        assert!(
-            result
-                .expect("the session ends when the proxy closes")
-                .is_err(),
-            "the proxy closed before VERSION"
-        );
-        assert_eq!(socks.await.unwrap(), ("seed.example".to_string(), 8333));
-    }
-
-    /// Dial and connect-retry block on a channel and a tick. Shutdown must
-    /// wake them; the grace is only for a session that is still unwinding.
-    #[tokio::test]
-    async fn shutdown_finishes_without_the_dial_grace() {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-shutdown-grace-{n}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        let node = P2PNode::start_outbound_only(
-            Query::open_or_create_tiny(&dir).unwrap(),
-            ChainParams::regtest(),
-            Milestone::NONE,
-            "/rbitcoin:test/".into(),
-            0,
-            crate::socks::Dialer::Direct,
-        )
-        .await
-        .unwrap();
-        let t0 = tokio::time::Instant::now();
-        node.shutdown().await;
-        let elapsed = t0.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "dial and retry must observe shutdown, took {elapsed:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// One datadir, two node lifetimes. The first is dropped without
-    /// shutdown. The second binds loopback as with onion listen, adds a
-    /// second listener, and shuts down with one session task that finishes
-    /// in the grace window and one that would linger.
-    #[tokio::test]
-    async fn service_listen_shutdown() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let dir = std::env::temp_dir().join(format!(
-            "rbitcoin-p2p-listen-shutdown-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let node = P2PNode::start(
-            "127.0.0.1:0".parse().unwrap(),
-            Query::open_or_create_tiny(&dir).unwrap(),
-            ChainParams::regtest(),
-            Milestone::NONE,
-        )
-        .await
-        .unwrap();
-        assert!(node.hub.shared_arc().is_some());
-        let t0 = std::time::Instant::now();
-        drop(node);
-        assert!(
-            t0.elapsed() < Duration::from_secs(2),
-            "dropping the node must abort connect-retry without waiting out the runtime"
-        );
-
-        let mut node = P2PNode::start_with_dialer(
-            "127.0.0.1:0".parse().unwrap(),
-            Query::open_or_create_tiny(&dir).unwrap(),
-            ChainParams::regtest(),
-            Milestone::NONE,
-            "/rbitcoin:0.1.0(onion)/".into(),
-            crate::DEFAULT_MAX_INBOUND,
-            crate::socks::Dialer::Direct,
-        )
-        .await
-        .unwrap();
-        assert_eq!(node.local_addr.ip(), std::net::Ipv4Addr::LOCALHOST);
-        assert_ne!(node.local_addr.port(), 0);
-        let extra = node
-            .add_listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
-        assert_ne!(extra, node.local_addr);
-        assert!(std::net::TcpStream::connect(extra).is_ok());
-
-        let done = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&done);
-        node.tasks.push(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            flag.store(true, Ordering::SeqCst);
-        }));
-        node.tasks.push(tokio::spawn(async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }));
-        let t0 = std::time::Instant::now();
-        node.shutdown().await;
-        assert!(
-            done.load(Ordering::SeqCst),
-            "shutdown lets a task that finishes within the grace window finish"
-        );
-        assert!(
-            t0.elapsed() < Duration::from_secs(2),
-            "shutdown must not wait out a 30s session task"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn p2p_outbound_only_dials_without_listener() {
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-outbound-only-{n}"));
-        std::fs::create_dir_all(dir.join("seed")).unwrap();
-        std::fs::create_dir_all(dir.join("follow")).unwrap();
-        let qa = Query::open_or_create_tiny(dir.join("seed")).unwrap();
-        let qb = Query::open_or_create_tiny(dir.join("follow")).unwrap();
-        let params = ChainParams::regtest();
-        let seeder = P2PNode::start_with_agent(
-            "127.0.0.1:0".parse().unwrap(),
-            qa,
-            params.clone(),
-            Milestone::NONE,
-            "/rbitcoin:0.1.0(seed)/".into(),
-            crate::DEFAULT_MAX_INBOUND,
-        )
-        .await
-        .unwrap();
-        let mut follower = P2PNode::start_outbound_only(
-            qb,
-            params,
-            Milestone::NONE,
-            "/rbitcoin:0.1.0(follow)/".into(),
-            0,
-            crate::socks::Dialer::Direct,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            follower.local_addr,
-            "127.0.0.1:0".parse().unwrap(),
-            "outbound-only must not bind a P2P port"
-        );
-        assert_eq!(follower.max_inbound, 0);
-        let inbound_err = follower
-            .peers
-            .addconnection(seeder.local_addr, PeerConnType::Inbound)
-            .unwrap_err();
-        assert!(
-            inbound_err.contains("inbound"),
-            "addconnection inbound must refuse: {inbound_err}"
-        );
-
-        follower.follow_from(seeder.local_addr).await.unwrap();
-        let mut linked = false;
-        for _ in 0..100 {
-            if follower.follow_live_count() >= 1 && !seeder.peers.snapshot().is_empty() {
-                linked = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        seeder.shutdown().await;
-        follower.shutdown().await;
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(linked, "outbound-only follower must handshake the seeder");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn listen_onion_loopback_inbound_handshake() {
-        use crate::peer::{connect_and_handshake_timed, HandshakePolicy};
-        use bitcoin::p2p::Magic;
-        use tokio::net::TcpStream;
-
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-listen-onion-hs-{n}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let q = Query::open_or_create_tiny(&dir).unwrap();
-        let node = P2PNode::start_with_dialer(
-            "127.0.0.1:0".parse().unwrap(),
-            q,
-            ChainParams::regtest(),
-            Milestone::NONE,
-            "/rbitcoin:0.1.0(onion)/".into(),
-            crate::DEFAULT_MAX_INBOUND,
-            crate::socks::Dialer::Direct,
-        )
-        .await
-        .unwrap();
-        let stream = TcpStream::connect(node.local_addr).await.unwrap();
-        let _hs = connect_and_handshake_timed(
-            Duration::from_secs(5),
-            stream,
-            Magic::REGTEST,
-            node.local_addr,
-            node.local_addr,
-            0,
-            false,
-            "/rbitcoin:test/",
-            HandshakePolicy::plain(),
-        )
-        .await
-        .unwrap();
-        let mut inbound = false;
-        for _ in 0..200 {
-            if node.peers.snapshot().iter().any(|p| p.inbound) {
-                inbound = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        node.shutdown().await;
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            inbound,
-            "loopback client must show as inbound in getpeerinfo"
-        );
-    }
-
-    /// The 2 s redial pass must not stack a dial that is still connecting,
-    /// and must not lose the target to one that never finishes. A SOCKS
-    /// proxy that accepts and never answers holds the first dial in
-    /// `connect_net`: later passes skip it until the connect times out, then
-    /// dial again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn redial_skips_a_connect_target_still_dialling() {
-        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_addr = proxy.local_addr().unwrap();
-        let accepts = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::clone(&accepts);
-        let stall = tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((sock, _)) = proxy.accept().await {
-                seen.fetch_add(1, Ordering::SeqCst);
-                held.push(sock);
-            }
-        });
-        let n = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rbitcoin-redial-in-flight-{n}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let node = P2PNode::start_outbound_only(
-            Query::open_or_create_tiny(&dir).unwrap(),
-            ChainParams::regtest(),
-            Milestone::NONE,
-            "/rbitcoin:0.1.0(redial)/".into(),
-            0,
-            crate::socks::Dialer::socks(proxy_addr, false),
-        )
-        .await
-        .unwrap();
-        node.peers
-            .set_connect_addrs(vec![crate::NetAddr::Ip("127.0.0.1:18444".parse().unwrap())]);
-        node.peers.redial_remembered();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while accepts.load(Ordering::SeqCst) == 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the first dial never reached the proxy"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        for _ in 0..3 {
-            node.peers.redial_remembered();
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(
-            accepts.load(Ordering::SeqCst),
-            1,
-            "a dial still connecting must not be dialled again"
-        );
-        // The stalled connect times out and frees the target for the next pass.
-        let deadline = std::time::Instant::now() + OUTBOUND_CONNECT_TIMEOUT * 3;
-        while accepts.load(Ordering::SeqCst) < 2 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "a connect that never finishes must time out and be redialled"
-            );
-            node.peers.redial_remembered();
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        stall.abort();
-        drop(node);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

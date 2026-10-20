@@ -25,7 +25,7 @@ pub enum P2pListen {
 }
 
 /// Parse Core BTC/kvB (`0.00000001`) to sat/kvB. Negatives and junk fail.
-pub(crate) fn parse_btc_to_sat(s: &str) -> Result<u64, &'static str> {
+pub fn parse_btc_to_sat(s: &str) -> Result<u64, &'static str> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty");
@@ -575,7 +575,8 @@ impl NodeConfig {
         t
     }
 
-    fn push_p2p_listen(&mut self, addr: SocketAddr) -> Result<(), NodeError> {
+    #[doc(hidden)]
+    pub fn push_p2p_listen(&mut self, addr: SocketAddr) -> Result<(), NodeError> {
         if self.listen.p2p == P2pListen::Socket(addr) || self.listen.p2p_extra.contains(&addr) {
             return Err(NodeError::Init("Duplicate binding configuration".into()));
         }
@@ -678,7 +679,8 @@ impl NodeConfig {
 
     /// Check `--rpc-cookie-file` at startup. RPC itself only binds after
     /// catch-up, so a bad cookie found there would be a warning a day late.
-    fn validate_rpc_cookie(&self) -> Result<(), NodeError> {
+    #[doc(hidden)]
+    pub fn validate_rpc_cookie(&self) -> Result<(), NodeError> {
         let Some(path) = &self.rpc.cookie_file else {
             return Ok(());
         };
@@ -692,7 +694,8 @@ impl NodeConfig {
             .map_err(NodeError::Config)
     }
 
-    fn validate_only_net(&self) -> Result<(), NodeError> {
+    #[doc(hidden)]
+    pub fn validate_only_net(&self) -> Result<(), NodeError> {
         if self.listen.only_net.contains(&rbitcoin_net::OnlyNet::Onion)
             && self.listen.proxy.is_none()
             && self.listen.onion.is_none()
@@ -729,7 +732,8 @@ impl NodeConfig {
         Ok(())
     }
 
-    fn validate_hidden_inbound(&self) -> Result<(), NodeError> {
+    #[doc(hidden)]
+    pub fn validate_hidden_inbound(&self) -> Result<(), NodeError> {
         if self.listen.i2p_accept_incoming {
             if self.listen.i2p_sam.is_none() {
                 return Err(NodeError::Config(
@@ -793,7 +797,8 @@ impl NodeConfig {
     }
 
     /// Owner-only mode for a directory this process just created.
-    fn restrict_new_dir(path: &Path) -> Result<(), NodeError> {
+    #[doc(hidden)]
+    pub fn restrict_new_dir(path: &Path) -> Result<(), NodeError> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1532,13 +1537,14 @@ pub enum ConfApply {
     Unknown(String),
 }
 
-pub(crate) fn parse_signet_challenge(value: &str) -> Result<ScriptBuf, String> {
+pub fn parse_signet_challenge(value: &str) -> Result<ScriptBuf, String> {
     Vec::<u8>::from_hex(value)
         .map(ScriptBuf::from_bytes)
         .map_err(|e| format!("must be hexadecimal: {e}"))
 }
 
-fn parse_required_socket(val: &str, key: &str) -> Result<SocketAddr, NodeError> {
+#[doc(hidden)]
+pub fn parse_required_socket(val: &str, key: &str) -> Result<SocketAddr, NodeError> {
     if val.is_empty() {
         return Err(NodeError::Config(format!("conf {key}: empty")));
     }
@@ -1546,14 +1552,16 @@ fn parse_required_socket(val: &str, key: &str) -> Result<SocketAddr, NodeError> 
         .map_err(|e| NodeError::Config(format!("conf {key}: {e}")))
 }
 
-fn is_listen_off(val: &str) -> bool {
+#[doc(hidden)]
+pub fn is_listen_off(val: &str) -> bool {
     matches!(
         val.to_ascii_lowercase().as_str(),
         "0" | "false" | "off" | "no"
     )
 }
 
-fn is_conf_true(val: &str) -> bool {
+#[doc(hidden)]
+pub fn is_conf_true(val: &str) -> bool {
     matches!(
         val.to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on" | ""
@@ -1562,7 +1570,8 @@ fn is_conf_true(val: &str) -> bool {
 
 /// 64 hex, or SRI `key-utils` `Secp256k1SecretKey` base58check (the raw 32 bytes).
 /// The error never echoes `val`: it is a secret.
-fn parse_authority_sec(key: &str, val: &str) -> Result<Sv2AuthoritySecret, NodeError> {
+#[doc(hidden)]
+pub fn parse_authority_sec(key: &str, val: &str) -> Result<Sv2AuthoritySecret, NodeError> {
     <[u8; 32]>::from_hex(val)
         .ok()
         .or_else(|| bitcoin::base58::decode_check(val).ok()?.try_into().ok())
@@ -1576,7 +1585,8 @@ fn parse_authority_sec(key: &str, val: &str) -> Result<Sv2AuthoritySecret, NodeE
 }
 
 /// Parse `1`/`true`/`yes`/`on` → true; `0`/`false`/`no`/`off` → false.
-fn parse_conf_bool(val: &str) -> Result<bool, String> {
+#[doc(hidden)]
+pub fn parse_conf_bool(val: &str) -> Result<bool, String> {
     let v = val.to_ascii_lowercase();
     match v.as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -1606,7 +1616,8 @@ pub fn parse_minimum_chain_work(spec: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn push_connect(listen: &mut ListenOpts, val: &str) -> Result<(), NodeError> {
+#[doc(hidden)]
+pub fn push_connect(listen: &mut ListenOpts, val: &str) -> Result<(), NodeError> {
     let val = val.trim();
     if val.is_empty() {
         return Err(NodeError::Config(
@@ -1646,8 +1657,8 @@ impl NodeConfig {
 }
 
 /// Serialize tests that mutate process `RBITCOIN_*` env (CLI + config unit tests).
-#[cfg(test)]
-pub(crate) static OPERATOR_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[doc(hidden)]
+pub static OPERATOR_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
