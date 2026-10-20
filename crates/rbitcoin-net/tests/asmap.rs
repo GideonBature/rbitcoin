@@ -1,7 +1,6 @@
 use rbitcoin_net::asmap::*;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-use std::path::Path;
 
 #[test]
 fn asmap_rejected_bytecodes_fail_sanity() {

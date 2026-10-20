@@ -4,14 +4,11 @@ use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::{BlockHash, Wtxid};
-use rbitcoin_net::error::NetError;
 pub use rbitcoin_net::peers::*;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use std::net::Ipv4Addr;

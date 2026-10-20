@@ -585,7 +585,7 @@ impl TxGraph {
     }
 
     /// Insert entry and wire parent/child edges. Does **not** enforce cluster limits
-    /// (caller checks via [`cluster_of`] after insert, and may remove).
+    /// (caller checks via `cluster_of` after insert, and may remove).
     pub fn insert(&mut self, entry: TxEntry, tx: &Transaction) {
         self.invalidate_chunk_cache();
         let txid = entry.txid;
@@ -763,7 +763,7 @@ impl TxGraph {
         self.connected_weight_except(seeds, &BTreeSet::new())
     }
 
-    /// [`connected_weight`] that does not enter `except` (RBF conflicts still linked).
+    /// `connected_weight` that does not enter `except` (RBF conflicts still linked).
     pub fn connected_weight_except(
         &self,
         seeds: &BTreeSet<Txid>,

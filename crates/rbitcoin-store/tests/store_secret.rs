@@ -1,9 +1,5 @@
-use bitcoin_hashes::{sha256, Hash};
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::store_secret::*;
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
 
 fn temp_dir() -> rbitcoin_store::testutil::TempDir {
     rbitcoin_store::testutil::TempDir::labeled("secret").unwrap()

@@ -212,8 +212,15 @@ a production line already counts that line, so a second in-crate `#[test]`
 is not required to make LCOV see it. Library tests live in each crate's
 `tests/suite` and link the normal rlib, so a `#[cfg(test)]` arm in `src/`
 is no longer how those tests compile. `#[cfg(debug_assertions)]` hooks in
-production files still count. llvm-cov hit counts jitter tens of lines on the same
-tree; the floor is the gate, not a never-falls ratchet vs master.
+production files still count. Those hooks also mean the suites link only in
+the `dev` / `test` profiles: `cargo test --release` does not build. The
+release profile is compiled on every PR by `cargo check --release` in `qc`
+(workspace shape and the `-p rbitcoin-node -p rbitcoin-cli -p rbitcoin-store`
+product shape that `nix/rbitcoin.nix` and `release.yml` build) and built for
+real only at tag time. The labeled harnesses build `rbitcoin-node` in the
+`dev` profile, so no CI job executes a release binary. llvm-cov
+hit counts jitter tens of lines on the same tree; the floor is the gate,
+not a never-falls ratchet vs master.
 
 The README badge and rbitcoin.org figure are the last **green `master`**
 `coverage` job (`badges` branch `coverage.json`, Shields endpoint). The
@@ -275,11 +282,12 @@ counts that line.
 2. Prefer extending that journey over a new small test. A caller of other
    tests is not a journey.
 3. If a branch is unreachable from any real session, **delete it** or hit it
-   through a **shipped** config / error / CLI path. Do not add a `pub` or
-   `*_for_test` injector so a unit can see it
+   through a **shipped** config / error / CLI path. Do not add a
+   `#[doc(hidden)] pub` or `*_for_test` injector so a unit can see it
    ([`CONTRIBUTING.md`](./CONTRIBUTING.md) principle 11).
 4. A small unit only for the narrow case in [True journeys](#true-journeys).
-   Drive the shipped function, not a `#[cfg(test)]` wrapper around it.
+   Drive the shipped function, not a `#[cfg(debug_assertions)]` wrapper
+   around it.
 
 ### Closing a red region
 
@@ -449,8 +457,8 @@ overrides that choice; unset keeps it. A Sunday (or `workflow_dispatch`)
 job runs `asmap` and `block_wire` for 120s with `--sanitizer undefined`.
 Miri stays `rbitcoin-primitives` only.
 Treat crate-root `pub` that exists only so a fuzz target can call it as
-the same smell as a test-only export: prefer `pub(crate)` plus an in-crate
-harness, or the published `rbitcoin-node` / CLI binary, even if that costs
+the same smell as a test-only export: prefer the in-crate graph, or the
+published `rbitcoin-node` / CLI binary, even if that costs
 a little setup time, rather than growing helpers solely for fuzz. Allowlist
 what must stay `pub` for a target; do not treat `fuzz/` as a second public
 API.

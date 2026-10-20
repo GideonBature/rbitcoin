@@ -1,6 +1,5 @@
 use rbitcoin_net::error::*;
 use std::error::Error;
-use std::fmt;
 use std::io;
 
 #[test]

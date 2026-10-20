@@ -1,5 +1,4 @@
 use rbitcoin_primitives::scriptnum::*;
-use std::fmt;
 
 #[test]
 fn scriptnum_minimal_encoding() {

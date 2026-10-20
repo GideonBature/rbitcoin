@@ -1,9 +1,6 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::write_create_loc::*;
-use rbitcoin_query::Query;
 use rbitcoin_store::CreateLocPair;
-use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
 
 fn pair(n: u64) -> CreateLocPair {
     CreateLocPair {

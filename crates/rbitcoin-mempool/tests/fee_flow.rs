@@ -1,4 +1,4 @@
-use rbitcoin_mempool::fee_est::{bucket_count, bucket_index, BLOCK_WEIGHT_WU, SECONDS_PER_BLOCK};
+use rbitcoin_mempool::fee_est::{bucket_index, BLOCK_WEIGHT_WU, SECONDS_PER_BLOCK};
 use rbitcoin_mempool::fee_flow::*;
 use std::time::Instant;
 

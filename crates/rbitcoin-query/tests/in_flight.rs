@@ -2,12 +2,7 @@ use rbitcoin_primitives::Fk;
 use rbitcoin_query::archive::CreatePin;
 use rbitcoin_query::archive::CreatePinInner;
 use rbitcoin_query::in_flight::*;
-use rbitcoin_query::TxidHasher;
-use rbitcoin_query::U64Map;
 use rbitcoin_store::{OutputRecord, TxRecord};
-use std::collections::{BTreeMap, HashMap};
-use std::hash::BuildHasherDefault;
-use std::sync::Arc;
 
 fn pin(id: u64) -> CreatePin {
     let mut txid = [0u8; 32];

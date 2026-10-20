@@ -12,8 +12,6 @@ use rbitcoin_consensus::ConsensusError;
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::convert::*;
 use rbitcoin_query::ConfirmError;
-use rbitcoin_query::{Query, TxApply};
-use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 
 #[test]
 fn header_to_record_stores_caller_hash() {

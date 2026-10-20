@@ -1,4 +1,3 @@
-use bitcoin_hashes::{sha256, Hash, HashEngine};
 use rbitcoin_primitives::merkle::*;
 
 #[test]

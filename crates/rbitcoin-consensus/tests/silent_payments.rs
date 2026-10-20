@@ -1,12 +1,10 @@
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::deserialize;
-use bitcoin::hashes::{hash160, sha256, Hash, HashEngine};
-use bitcoin::key::{Parity, XOnlyPublicKey};
-use bitcoin::script::{Instruction, Script};
-use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey};
+use bitcoin::hashes::Hash;
+use bitcoin::script::Script;
+use bitcoin::secp256k1::{PublicKey, SecretKey};
 use bitcoin::{OutPoint, Transaction, TxOut, Witness};
 use rbitcoin_consensus::silent_payments::*;
-use std::sync::OnceLock;
 
 use bitcoin::script::ScriptBuf;
 

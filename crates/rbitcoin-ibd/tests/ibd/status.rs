@@ -1,7 +1,5 @@
 use rbitcoin_ibd::ibd::status::*;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::atomic::Ordering;
 
 use std::time::Duration;
 

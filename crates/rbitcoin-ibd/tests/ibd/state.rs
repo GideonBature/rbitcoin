@@ -1,14 +1,7 @@
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use rbitcoin_ibd::ibd::assign_plan::compact_ordered;
-use rbitcoin_ibd::ibd::body::{BodyPresence, BodyPresenceSizes};
-use rbitcoin_ibd::ibd::peer_io::PeerSlot;
-use rbitcoin_ibd::ibd::reorg::IbdReorgState;
 use rbitcoin_ibd::ibd::state::*;
 use rbitcoin_primitives::Fk;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
-use std::time::Instant;
 
 fn h(n: u8) -> BlockHash {
     let mut b = [0u8; 32];

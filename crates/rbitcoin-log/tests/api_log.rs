@@ -1,11 +1,6 @@
 use rbitcoin_log::PARAMS_MAX;
 use rbitcoin_log::*;
-use rbitcoin_log::{format_timestamp, trace};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::Path;
 use std::sync::Mutex;
-use std::time::SystemTime;
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 

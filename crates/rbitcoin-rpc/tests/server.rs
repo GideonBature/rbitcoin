@@ -1,32 +1,16 @@
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::middleware::{from_fn_with_state, Next};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::Router;
-use rbitcoin_log::info;
-use rbitcoin_log::warn;
-use rbitcoin_net::{BlockingRegion, MempoolHub};
+use axum::extract::State;
+use axum::http::StatusCode;
+use rbitcoin_net::MempoolHub;
 use rbitcoin_primitives::Network;
 use rbitcoin_query::Query;
-use rbitcoin_rpc::auth::{
-    parse_basic_auth, parse_bearer_auth, read_cookie_file, resolve_rpc_auth, RpcAuth, RpcCookie,
-    RpcCookiePerms,
-};
-use rbitcoin_rpc::methods::{RpcContext, RpcRegtest};
+use rbitcoin_rpc::auth::{RpcAuth, RpcCookiePerms};
 use rbitcoin_rpc::server::*;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Instant;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpListener;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::sync::Semaphore;
 
 #[test]
 fn work_queue_zero_and_omitted_are_the_default() {

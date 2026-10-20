@@ -1,12 +1,10 @@
-use rbitcoin_primitives::{Height, TableKind};
+use rbitcoin_primitives::Height;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
-use rbitcoin_store::seg_pair::{locate, SegDirs, SegPair as Seg};
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use rbitcoin_store::sp_tweaks::*;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::Path;
 
 fn tmp_dir() -> rbitcoin_store::testutil::TempDir {
     rbitcoin_store::testutil::TempDir::labeled("sptweaks").unwrap()

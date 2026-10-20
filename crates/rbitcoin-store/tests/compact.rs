@@ -1,6 +1,4 @@
-use rbitcoin_primitives::{read_compact_size, read_uleb128, write_compact_size};
 use rbitcoin_store::compact::*;
-use rbitcoin_store::error::StoreError;
 
 #[test]
 fn amount_exp_mantissa_strips_trailing_tens() {

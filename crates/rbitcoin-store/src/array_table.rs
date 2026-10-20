@@ -1,6 +1,6 @@
 //! Growable dense array of little-endian `u64` values.
 //!
-//! 0-based indexing. Used for Class C: confirmed[height], header_txs arrays, etc.
+//! 0-based indexing. Used for Class C: `confirmed[height]`, `header_txs` arrays, etc.
 //!
 //! # L2 write-behind (phase 6)
 //!
@@ -8,7 +8,7 @@
 //! [`class_c_inram_max_bytes`]) load fully into process RAM on open.
 //! `strong_tx` is always L2 (see [`crate::chain::StrongTxTable`]).
 //! Mutates update the `Vec` only and mark dirty. Disk is updated on
-//! [`Self::flush`] / barrier:
+//! `Self::flush` / barrier:
 //!
 //! - **Append-only** (dirty only at indices ≥ last flushed len): write the new
 //!   **suffix** only, then extend HWM — never overwrites published prefix bytes.

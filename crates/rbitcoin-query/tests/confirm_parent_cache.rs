@@ -1,9 +1,6 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_query::confirm_parent_cache::*;
-use rbitcoin_query::U32Map;
 use rbitcoin_store::HeaderRecord;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 fn header_rec(hash: [u8; 32]) -> HeaderRecord {
     HeaderRecord {

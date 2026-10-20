@@ -1,9 +1,6 @@
-use rbitcoin_primitives::{Fk, TableKind};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_store::txid_body::*;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn tmp() -> std::path::PathBuf {

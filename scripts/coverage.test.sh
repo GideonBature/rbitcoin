@@ -19,32 +19,38 @@ fi
 echo "ok - coverage.sh defines IGNORE"
 PASS=$((PASS + 1))
 
-python3 - "$IGNORE" <<'PY' || exit 1
-import re, sys
+python3 - "$IGNORE" "$ROOT" <<'PY' || exit 1
+import os, re, sys
 rx = re.compile(sys.argv[1])
+root = sys.argv[2]
 excluded = [
-    "/repo/crates/rbitcoin-store/src/scripthash_tests.rs",
-    "/repo/crates/rbitcoin-net/src/ibd/confirm/tests.rs",
-    "/repo/crates/rbitcoin-net/src/peer_tests.rs",
-    "/repo/crates/rbitcoin-net/tests/ibd_smoke.rs",
+    "/repo/crates/rbitcoin-store/tests/scripthash.rs",
+    "/repo/crates/rbitcoin-ibd/tests/ibd/confirm.rs",
+    "/repo/crates/rbitcoin-net/tests/peer/mod.rs",
+    "/repo/crates/rbitcoin-ibd/tests/ibd_smoke.rs",
     "/repo/crates/rbitcoin-test/src/lib.rs",
     "/repo/crates/rbitcoin-test/tests/integration_multinode.rs",
     "/repo/crates/rbitcoin-bench/src/suite.rs",
     "/repo/crates/rbitcoin-store/src/testutil.rs",
     "/repo/crates/rbitcoin-query/src/testutil.rs",
-    "/repo/crates/rbitcoin-consensus/src/script/tests_verify.rs",
+    "/repo/crates/rbitcoin-consensus/tests/script/tests_verify.rs",
     "/repo/crates/rbitcoin-node/src/main.rs",
 ]
 kept = [
     "/repo/crates/rbitcoin-store/src/scripthash.rs",
     "/repo/crates/rbitcoin-net/src/peer.rs",
-    "/repo/crates/rbitcoin-net/src/ibd/mod.rs",
+    "/repo/crates/rbitcoin-ibd/src/ibd/mod.rs",
     "/repo/crates/rbitcoin-node/src/regtest_rpc.rs",
     "/repo/crates/rbitcoin-consensus/src/regtest_pad.rs",
     "/repo/crates/rbitcoin-node/src/run.rs",
     "/repo/crates/rbitcoin-rpc/src/methods/chain.rs",
 ]
 fail = 0
+# Fixtures are real paths, so a crate move fails here instead of rotting.
+for p in excluded + kept:
+    if not os.path.exists(os.path.join(root, p.removeprefix("/repo/"))):
+        print(f"not ok - fixture path is gone {p}", file=sys.stderr)
+        fail += 1
 for p in excluded:
     if rx.search(p) is None:
         print(f"not ok - should ignore {p}", file=sys.stderr)
@@ -77,6 +83,19 @@ assert_ok "required test job excludes rbitcoin-bench" \
   grep -q 'cargo test --workspace --exclude rbitcoin-bench' "$ROOT/.github/workflows/ci.yml"
 assert_ok "required test job still pins the bench scripthash" \
   grep -q 'cargo test -p rbitcoin-bench --lib hot_corpus_includes_p2a' "$ROOT/.github/workflows/ci.yml"
+# coverage-gate.py owns the floor (FLOOR_PCT, written to gate.json). The badge
+# takes it from there; neither script carries a second copy of the number.
+assert_ok "coverage.sh reads the badge gate from gate.json, not a literal" \
+  bash -c 'grep -q -- "--gate \"\$GATE_FLOOR\"" "$1" && grep -q "GATE_FLOOR=.*gate.json\|GATE_FLOOR=.*GATE_JSON" "$1" && ! grep -qE -- "--gate [0-9]+" "$1"' _ "$COV"
+assert_ok "coverage-badge.py has no default gate" \
+  bash -c 'grep -q "\"--gate\", type=int, required=True" "$1" && ! grep -qE "default=[0-9]{2}" "$1"' _ "$ROOT/scripts/coverage-badge.py"
+# TESTING.md (Coverage): release is check-only, in both shapes CI names.
+assert_ok "qc checks the release profile compiles (workspace shape)" \
+  grep -q 'cargo check --release --workspace$' "$ROOT/.github/workflows/ci.yml"
+assert_ok "qc checks the release profile compiles (product shape)" \
+  grep -q 'cargo check --release -p rbitcoin-node -p rbitcoin-cli -p rbitcoin-store$' "$ROOT/.github/workflows/ci.yml"
+assert_ok "qc builds rustdoc for the workspace" \
+  grep -q 'cargo doc --workspace --no-deps$' "$ROOT/.github/workflows/ci.yml"
 assert_ok "gitignore ignores apilog jsonl" \
   bash -c 'grep -q "apilog\\*\\.jsonl" "$1/.gitignore" && git -C "$1" check-ignore -q -- apilog.jsonl && git -C "$1" check-ignore -q -- apilog-old.jsonl' _ "$ROOT"
 

@@ -1,4 +1,4 @@
-//! Drop-cleaning Tiny [`Query`](crate::Query) for tests. Not an operator API.
+//! Drop-cleaning Tiny [`crate::Query`] for tests. Not an operator API.
 //!
 //! TxApply → dummy [`bitcoin::Block`] conversion lives here (Q-21), not in
 //! production [`Query`] archive.

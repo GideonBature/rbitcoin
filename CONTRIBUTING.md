@@ -230,23 +230,33 @@ engineering.
     [`docs/code-shape.md`](./docs/code-shape.md). Named 0.6.0 extracts
     (**Q-61**) are Completed; residual peels:
     [`docs/quality.md`](./docs/quality.md) **R-10**.
-11. **Crate visibility is the production graph.** `pub` and crate-root
-    `pub use` exist only for names another crate actually imports, or for
-    a **documented** public library API (we do not have one). Unused `pub`
-    is forbidden: drop to `pub(crate)` or delete; workspace `-D warnings`
-    then reports truly dead items — delete those too (`#[allow(dead_code)]`
-    is not a fix). If we ever ship an out-of-tree library surface, write
-    the allowlist in the owner crate rustdoc and then unused `pub` on
-    **that** surface is intentional. `#[cfg(test)]` on production items
-    is a smell: tests drive the shipped function (principle 8), not a
-    second test-only wrapper or `*_for_test` backdoor. IO-shape pins use
-    session/table instance stats or on-disk file state, not thread-local
-    `test_take_*` probes on the hot path. A tiny `#[cfg(test)]` take on
-    those instance counters is fine. Fuzz-only `pub` is the same
-    smell — prefer the in-crate `pub(crate)` graph or the published
-    **binary** surface (`rbitcoin-node` / CLI) even if the harness pays
-    a little extra setup, rather than exporting helpers solely for
-    `fuzz/`.
+11. **Crate visibility is the production graph; the suite reads it through
+    `#[doc(hidden)]`.** Library tests live in `tests/suite` and link the
+    normal rlib, so an item a test reaches is `pub` with `#[doc(hidden)]`.
+    Plain `pub` (no hidden) and crate-root `pub use` exist only for names
+    another crate actually imports, or for a **documented** public library
+    API (we do not have one). If we ever ship an out-of-tree library
+    surface, write the allowlist in the owner crate rustdoc and then unused
+    `pub` on **that** surface is intentional. rustc does not report a dead
+    hidden item, so a change that removes the last caller removes the
+    callee in the same change (code-shape rule 9); `#[allow(dead_code)]`
+    is not a fix, in `src/` or in a suite root. Test hooks in production
+    files are `#[cfg(debug_assertions)]`, and every debug node runs that
+    code, so a hook is either a bounded counter (`Cell` / atomic increment)
+    or **opt-in**: off until the test arms it on its thread. Nothing
+    accumulates unarmed (`spindle_mark` is the pattern). A
+    `cfg(debug_assertions)` gate never covers an import or re-export that
+    production code uses, and it never changes a production constant or
+    code path (the debug-only `REDIAL_INTERVAL`, `SAM_RETRY`, and
+    `CONSTRAINTS_COOLDOWN` values are the known exceptions to retire); how
+    CI compiles the release profile is in
+    [`TESTING.md`](TESTING.md#coverage). Tests drive the shipped function
+    (principle 8), not a second test-only wrapper or `*_for_test` backdoor.
+    IO-shape pins prefer session/table instance stats or on-disk file state
+    over a thread-local probe. Fuzz-only `pub` is the same smell — prefer the
+    in-crate graph or the published **binary** surface (`rbitcoin-node` /
+    CLI) even if the harness pays a little extra setup, rather than
+    exporting helpers solely for `fuzz/`.
 
 ## Workflow
 
@@ -311,9 +321,12 @@ IO; they do not package zips. GitHub Releases:
       ([`TESTING.md`](./TESTING.md#true-journeys)).
 - [ ] Core-facing RPC / P2P / Electrum / Esplora: [`COMPAT.md`](./COMPAT.md)
 - [ ] No new silent dead branches
-- [ ] No unused crate-root `pub` / `pub use` (principle 11). Tests drive
-      shipped functions, not `#[cfg(test)]` wrappers or `*_for_test`
-      backdoors. Fuzz does not grow `pub` without considering the binary
+- [ ] No unused crate-root `pub` / `pub use`; suite-only items are
+      `#[doc(hidden)]`; a removed caller removes its callee (principle 11).
+      Tests drive shipped functions, not `*_for_test` backdoors. A
+      `cfg(debug_assertions)` hook is a bounded counter or opt-in, and
+      gates no production import, constant, or code path. Fuzz does not
+      grow `pub` without considering the binary
       surface.
 - [ ] Store changes respect Class A/B/C and allocate-then-publish
 - [ ] Experimental / milestone honesty preserved in user-facing docs when relevant

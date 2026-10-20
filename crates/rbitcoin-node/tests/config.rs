@@ -1,14 +1,7 @@
-use bitcoin::hex::FromHex;
-use bitcoin::ScriptBuf;
-use rbitcoin_consensus::{default_milestone_anchor, ChainParams, Milestone};
-use rbitcoin_esplora::EsploraListen;
+use rbitcoin_consensus::Milestone;
 use rbitcoin_node::config::*;
-use rbitcoin_node::error::NodeError;
-use rbitcoin_primitives::{
-    Network, DEFAULT_ELECTRUM_PORT, DEFAULT_ESPLORA_PORT, DEFAULT_HEALTH_PORT,
-};
+use rbitcoin_primitives::Network;
 use rbitcoin_store::HeadScale;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

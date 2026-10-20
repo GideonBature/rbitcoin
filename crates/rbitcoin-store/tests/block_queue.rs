@@ -1,7 +1,4 @@
 use rbitcoin_store::block_queue::*;
-use rbitcoin_store::error::StoreError;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

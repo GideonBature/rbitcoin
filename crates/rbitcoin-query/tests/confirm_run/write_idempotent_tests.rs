@@ -1,34 +1,5 @@
 //! Confirm_run unit tests (peeled from confirm_run.rs).
-use bitcoin::hashes::Hash;
-use bitcoin::Block;
-use rbitcoin_consensus::block::{block_has_witness_from_pres, ScriptCheckJob, ValidationContext};
-use rbitcoin_consensus::header::pow_hash_meets_target;
-use rbitcoin_consensus::{ChainParams, ConsensusError, Milestone};
-use rbitcoin_primitives::Height;
-use rbitcoin_query::block_pipeline::{assemble_block_prevouts, structural_validate_spends};
-use rbitcoin_query::confirm_run::bq_resolve::{
-    confirm_bq_resolve_wave_capped, take_wave_items_for_load, BqResolveWave,
-    BQ_RESOLVE_WAVE_MAX_BLOCKS, BQ_RESOLVE_WAVE_MAX_INPUTS,
-};
-use rbitcoin_query::confirm_run::lookup::{
-    confirm_wire_load_from_plan, confirm_wire_lookup_stamp, parent_missing_from_chain,
-    ParentPinStamp, PlanStampOutcome, WireBlockIn,
-};
-use rbitcoin_query::confirm_run::phases::{assemble_run, Assembled};
-use rbitcoin_query::confirm_run::pin::{collect_spend_abs_after_fill, pin_for_wire_batch};
-use rbitcoin_query::confirm_run::scripts::{confirm_scripts_phase, drive_script_waves_with};
-use rbitcoin_query::confirm_run::write::finish_post_commit;
-use rbitcoin_query::confirm_run::write::{
-    confirm_write_phase, confirm_write_phase_or_return, finish_post_commit_hashes,
-    replay_spend_annotations,
-};
-use rbitcoin_query::header_read::validate_header_hashed;
-use rbitcoin_query::ConfirmError;
-use rbitcoin_query::{FkMap, Query, U32Map, U64Map};
-use rbitcoin_store::{StoreError, WriteIoBackend};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Instant;
+use rbitcoin_consensus::{ChainParams, Milestone};
 
 use rbitcoin_query::confirm_run::{
     confirm_archive_kind, write_batch_vs_tip, write_height_needed, ConfirmArchiveKind,
@@ -3491,13 +3462,36 @@ fn assert_spindle_schedule(trace: &[&str], hdd: bool, expect_class_a: bool) {
     }
 }
 
+/// A debug node runs `spindle_mark` on every confirm batch. The trace must
+/// stay empty until a test arms it, or the write thread grows a Vec forever.
+#[test]
+fn spindle_mark_records_only_while_armed() {
+    use rbitcoin_query::confirm_run::write::{
+        spindle_mark, spindle_trace_arm, spindle_trace_clear, spindle_trace_snapshot,
+    };
+
+    // Fresh test thread: the default state must already be off.
+    spindle_mark("unarmed");
+    assert!(spindle_trace_snapshot().is_empty());
+
+    spindle_trace_arm();
+    spindle_mark("armed");
+    assert_eq!(spindle_trace_snapshot(), vec!["armed"]);
+
+    spindle_trace_clear();
+    spindle_mark("after-clear");
+    assert!(spindle_trace_snapshot().is_empty());
+}
+
 #[test]
 fn datadir_hdd_submits_head_after_annotate() {
     use bitcoin::hashes::Hash;
     use rbitcoin_consensus::mine_empty_regtest;
     use rbitcoin_primitives::{Fk, Height};
     use rbitcoin_query::accept_and_connect_block;
-    use rbitcoin_query::confirm_run::write::{spindle_trace_clear, spindle_trace_snapshot};
+    use rbitcoin_query::confirm_run::write::{
+        spindle_trace_arm, spindle_trace_clear, spindle_trace_snapshot,
+    };
     use rbitcoin_query::confirm_run::{
         confirm_scripts_phase, confirm_wire_load_from_plan, confirm_wire_lookup_stamp,
         confirm_write_phase, finish_post_commit_hashes, ScriptPreverified,
@@ -3524,15 +3518,16 @@ fn datadir_hdd_submits_head_after_annotate() {
         )
         .expect("load");
         let ok = confirm_scripts_phase(mat.batch).expect("scripts");
-        spindle_trace_clear();
+        spindle_trace_arm();
         confirm_write_phase(&q, &params, Milestone::NONE, ok.batch).expect("write");
         assert_spindle_schedule(&spindle_trace_snapshot(), hdd, true);
 
         let txid = b1.txdata[0].compute_txid().to_byte_array();
         q.store().txs.head_note_pending(&[(txid, Fk(2))]);
-        spindle_trace_clear();
+        spindle_trace_arm();
         finish_post_commit_hashes(&q, &[(1, b1.block_hash().to_byte_array())]).expect("finish");
         assert_spindle_schedule(&spindle_trace_snapshot(), hdd, false);
+        spindle_trace_clear();
         let _ = std::fs::remove_dir_all(&path);
     }
 }

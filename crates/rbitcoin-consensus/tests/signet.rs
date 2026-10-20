@@ -1,10 +1,8 @@
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::deserialize;
-use bitcoin::consensus::{serialize, Encodable};
-use bitcoin::hashes::{sha256d, Hash};
+use bitcoin::hashes::Hash;
 use bitcoin::script::{Script, ScriptBuf};
 use bitcoin::{Amount, Block, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
-use rbitcoin_consensus::block::ScriptCheckJob;
 use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::signet::*;
 

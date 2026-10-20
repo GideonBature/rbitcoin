@@ -1,9 +1,6 @@
-use bitcoin::hashes::{sha256d, Hash};
 use rbitcoin_net::fee_history::HistoricalFeeBlock;
 use rbitcoin_net::fee_history_file::*;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::path::Path;
+use std::io::Write;
 
 fn dir() -> std::path::PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

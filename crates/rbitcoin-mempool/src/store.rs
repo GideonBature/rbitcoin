@@ -450,7 +450,7 @@ impl Mempool {
     ///
     /// Copies existing packed payload ranges (does not re-serialize). Returns
     /// `(live_after, body_bytes_after)`. Callers must rebuild RAM indexes with
-    /// the new slot numbers from [`load_live_txs`].
+    /// the new slot numbers from `load_live_txs`.
     pub fn compact(&mut self) -> Result<(u32, usize), MempoolError> {
         let logical = body_logical_len(&self.body)?;
         let mut new_body = vec![0u8; BODY_HEADER];

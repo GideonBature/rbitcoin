@@ -1,7 +1,5 @@
 use rbitcoin_net::peer_dos::*;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
 
 #[test]
 fn rate_limiter_allows_under_budget() {

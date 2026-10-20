@@ -1,25 +1,14 @@
-use bip324::futures::{Protocol, ProtocolReader, ProtocolSessionReader, ProtocolWriter};
-use bip324::io::{Payload, ProtocolError, ProtocolFailureSuggestion};
-use bip324::{Error as Bip324Error, InboundCipher, PacketType, Role};
-use bitcoin::consensus::serialize;
+use bip324::futures::Protocol;
+use bip324::io::Payload;
+use bip324::{PacketType, Role};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::Magic;
 use bitcoin::Network;
-use rbitcoin_net::codec::{
-    command_bytes_ok, encode_is_cpu_heavy, FramedMessage, MAX_HEADERS_RESULTS, MAX_INV_SIZE,
-    MAX_LOCATOR_SZ, MAX_PROTOCOL_MESSAGE_LENGTH,
-};
 use rbitcoin_net::error::NetError;
 use rbitcoin_net::v2::*;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll};
 use tokio::io::duplex;
 use tokio::io::AsyncWriteExt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, BufReader};
 
 fn signet_magic() -> Magic {
     Magic::from(Network::Signet)

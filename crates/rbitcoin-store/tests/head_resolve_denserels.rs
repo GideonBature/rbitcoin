@@ -2,15 +2,10 @@ use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::head_resolve_denserels::*;
 use rbitcoin_store::height_fence::HeightFence;
-use rbitcoin_store::io_backend::{self, ReadIoBackend};
-use rbitcoin_store::segmented_head::HeadProbeWave;
 use rbitcoin_store::tx_table::TxTable;
 use rbitcoin_store::tx_table::{InputRecord, OutputRecord, TxRecord};
-use rbitcoin_store::txid_body::TxidBody;
-use rbitcoin_store::uring_session::UringSession;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 fn tmp(name: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);

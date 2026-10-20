@@ -1,14 +1,7 @@
-use bitcoin::absolute::LockTime;
-use bitcoin::block::{Header, Version};
-use bitcoin::hashes::Hash;
-use bitcoin::transaction::Version as TxVersion;
-use bitcoin::{
-    Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Target, Transaction,
-    TxIn, TxMerkleNode, TxOut, Witness,
-};
-use rbitcoin_consensus::block::apply_witness_commitment;
+use bitcoin::block::Version;
+use bitcoin::{Amount, Block, CompactTarget, ScriptBuf, Target};
 use rbitcoin_consensus::regtest_pad::*;
-use rbitcoin_consensus::{bip34_height_script, block_has_witness, block_subsidy, ChainParams};
+use rbitcoin_consensus::ChainParams;
 
 #[test]
 fn mine_regtest_paying_sets_coinbase_script() {

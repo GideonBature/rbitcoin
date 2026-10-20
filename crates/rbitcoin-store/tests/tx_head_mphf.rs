@@ -1,8 +1,7 @@
 use rbitcoin_store::bdz::BdzMphf;
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::tx_head_mphf::*;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rbitcoin_store::uring_session::{IoCtx, SessionKind, UringSession};
 

@@ -1,25 +1,13 @@
 use bitcoin::p2p::Magic;
-use bitcoin::Block;
-use bitcoin::BlockHash;
-use rbitcoin_consensus::{signet_magic, ChainParams, Milestone};
-use rbitcoin_net::cache::BlockCache;
-use rbitcoin_net::chain::{AcceptOutcome, ChainHub};
+use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_net::error::NetError;
-use rbitcoin_net::peer::{
-    connect_and_handshake_timed, inbound_connect_and_handshake, peer_session_with,
-    FollowSessionMeta, HandshakePolicy, HANDSHAKE_TIMEOUT,
-};
-use rbitcoin_net::peer_dos::{inbound_semaphore, DEFAULT_MAX_INBOUND};
-use rbitcoin_net::peers::{DialRequest, DialTarget, LivePeer, PeerConnType, PeerHub};
+use rbitcoin_net::peers::PeerConnType;
 use rbitcoin_net::service::*;
-use rbitcoin_net::v2::{V2Reader, V2Writer};
 use rbitcoin_query::Query;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 
 #[test]
 fn magic_for_all_networks() {

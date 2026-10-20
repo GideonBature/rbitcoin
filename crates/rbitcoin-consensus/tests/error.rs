@@ -1,6 +1,4 @@
 use rbitcoin_consensus::error::*;
-use rbitcoin_primitives::ScriptNumError;
-use std::fmt;
 
 #[test]
 fn block_reject_reason_bip113_and_bip112_needles() {

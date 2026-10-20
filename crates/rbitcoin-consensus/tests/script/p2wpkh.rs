@@ -1,10 +1,6 @@
-use bitcoin::script::Script;
 use bitcoin::Transaction;
 use rbitcoin_consensus::block::ScriptCheckJob;
-use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::script::p2wpkh::*;
-use rbitcoin_consensus::script::{crypto, interpreter, p2wsh};
-use rbitcoin_consensus::TxPrecompute;
 
 use bitcoin::absolute::LockTime;
 use bitcoin::script::ScriptBuf;

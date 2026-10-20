@@ -1,9 +1,7 @@
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use rbitcoin_ibd::ibd::body::BodyPresence;
-use rbitcoin_net::chain::ChainHub;
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn h(n: u8) -> BlockHash {
     let mut b = [0u8; 32];

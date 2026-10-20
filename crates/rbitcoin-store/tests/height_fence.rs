@@ -1,8 +1,5 @@
-use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_store::chain::{ConfirmedTable, HeaderTxsTable};
-use rbitcoin_store::error::StoreError;
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::height_fence::*;
-use std::sync::Arc;
 
 fn run(first: u64, count: u32, height: u32) -> FenceRun {
     FenceRun {

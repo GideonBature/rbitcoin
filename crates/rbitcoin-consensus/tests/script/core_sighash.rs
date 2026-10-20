@@ -4,12 +4,7 @@
 //! Digests come from [`bitcoin::sighash::SighashCache::legacy_signature_hash`]
 //! with the **raw** hashType byte (same as P2PKH / interpreter CHECKSIG).
 #![cfg(test)]
-use bitcoin::hashes::Hash;
 use bitcoin::Transaction;
-use rbitcoin_consensus::block::ScriptCheckJob;
-use rbitcoin_consensus::error::ConsensusError;
-use rbitcoin_consensus::script::classify::is_anyone_can_spend;
-use rbitcoin_consensus::script::classify::ScriptKind;
 
 use super::core_script::decode_hex;
 use bitcoin::consensus::deserialize;

@@ -1,8 +1,5 @@
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::readonly_map::*;
-use std::fs::File;
-use std::path::Path;
-use std::ptr;
 
 fn tmp() -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(

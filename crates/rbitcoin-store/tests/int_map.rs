@@ -1,7 +1,6 @@
 use rbitcoin_primitives::Fk;
 use rbitcoin_store::int_map::*;
-use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::Hasher;
 
 #[test]
 fn u64_identity_hasher_is_raw_key_and_map_roundtrips_pack_scale() {

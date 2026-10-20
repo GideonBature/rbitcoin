@@ -1,11 +1,4 @@
-use bitcoin::consensus::encode::serialize_hex;
-use bitcoin::hashes::Hash;
-use bitcoin::{OutPoint, Transaction, Txid};
-use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::Height;
 use rbitcoin_rpc::methods::mempool::*;
-use rbitcoin_rpc::methods::*;
-use serde_json::{json, Value};
 
 /// A session answers only once fee history or flow is warm (thousands
 /// of blocks or a minute of relay), so the success shape is pinned here.

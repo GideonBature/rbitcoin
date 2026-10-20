@@ -32,7 +32,7 @@ pub const COLD_INDEX_DIRS: &[&str] = &[
 /// and (once enabled) `blockfilter.*` and `sp_tweaks.*`. The pin set stays
 /// in `dir`.
 ///
-/// [`Self::single`] / [`Self::with_cold`] are **Mainnet** scale (production).
+/// [`Self::single`] / `Self::with_cold` are **Mainnet** scale (production).
 /// Tests use [`Self::tiny`]. Scale is not read from `RBITCOIN_HEAD_SCALE`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreLayout {
@@ -1645,7 +1645,7 @@ impl Store {
     /// skips those heights and `repair_class_c_above_tip` only clears leftover
     /// strong not on the fence — permanent unstrong tip txs.
     ///
-    /// After confirmed is durable, publish soft [`crate::TIP_SEAL_NAME`] so open
+    /// After confirmed is durable, publish soft `crate::TIP_SEAL_NAME` so open
     /// can clamp an incomplete extension that never finished this barrier.
     /// Height whose spend annotations were `sync_data`'d. Missing means none.
     pub fn spend_annotated_through(&self) -> Result<Option<u32>, StoreError> {

@@ -1,12 +1,8 @@
 use rbitcoin_cli::*;
 use rbitcoin_primitives::Network;
-use serde_json::Value;
-use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use std::net::TcpListener;
 

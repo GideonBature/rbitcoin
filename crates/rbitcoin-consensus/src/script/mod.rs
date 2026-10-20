@@ -300,7 +300,7 @@ pub mod crypto {
 
     /// Parse DER signature + **raw** sighash type byte (as `u32`).
     ///
-    /// Important: do **not** run the type through [`EcdsaSighashType::from_consensus`]
+    /// Important: do **not** run the type through `EcdsaSighashType::from_consensus`
     /// before legacy `SignatureHash`. That maps `0 → SIGHASH_ALL(1)`, but mainnet
     /// has historical spends signed with hashtype **0** (block 110300 and others).
     /// Core hashes with the raw byte; we must too. (**RB-002** in
@@ -522,8 +522,8 @@ pub mod crypto {
 
     /// P2WPKH BIP143 hash: `script_pubkey` is native spk **or** nested redeem (`00 14 <20>`).
     ///
-    /// Fast path: when `raw_ty` round-trips through [`EcdsaSighashType`] (standard
-    /// 0x01/02/03/81/82/83), use rust-bitcoin's [`SighashCache`] midstate
+    /// Fast path: when `raw_ty` round-trips through `EcdsaSighashType` (standard
+    /// 0x01/02/03/81/82/83), use rust-bitcoin's `SighashCache` midstate
     /// (hashPrevouts/hashSequence/hashOutputs once per tx). Slow path: non-standard
     /// raw types (e.g. mainnet `0x65`) need our raw-uint32 encoder.
     pub fn bip143_p2wpkh_signature_hash(

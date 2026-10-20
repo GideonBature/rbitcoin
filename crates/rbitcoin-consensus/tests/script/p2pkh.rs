@@ -1,11 +1,8 @@
-use bitcoin::hashes::Hash;
-use bitcoin::script::{Instruction, Script};
+use bitcoin::script::Script;
 use bitcoin::sighash::SighashCache;
 use bitcoin::Transaction;
 use rbitcoin_consensus::block::ScriptCheckJob;
-use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::script::p2pkh::*;
-use rbitcoin_consensus::script::{crypto, interpreter};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::script::ScriptBuf;

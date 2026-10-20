@@ -1,30 +1,16 @@
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
 use bitcoin::{
-    Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Target, Transaction, TxOut, Txid,
-    Work,
+    Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Target, Transaction, TxOut, Work,
 };
-use rbitcoin_consensus::{
-    genesis_block, mine_op_true_signet_paying, mine_regtest_paying, validate_header_on_parent,
-    ChainParams, Milestone,
-};
-use rbitcoin_log::{debug, info, warn};
-use rbitcoin_net::cache::BlockCache;
+use rbitcoin_consensus::{genesis_block, mine_regtest_paying, ChainParams, Milestone};
 use rbitcoin_net::chain::*;
 use rbitcoin_net::error::NetError;
 use rbitcoin_net::most_work::work_better;
 use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_query::Query;
-use rbitcoin_query::{
-    accept_and_connect_block_preverified, confirm_wire_load_from_plan as consensus_load_from_plan,
-    confirm_wire_load_phase_pipelined, confirm_write_phase, header_to_record, validate_header,
-    PlanStampOutcome, ScriptOkBatch, ScriptPreverified, WireLoadPipeline,
-};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::RwLock;
-use tokio::sync::{broadcast, Notify};
 
 #[test]
 fn fork_tips_drop_the_oldest_at_the_cap() {

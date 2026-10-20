@@ -1,18 +1,5 @@
-use bitcoin::block::Block;
-use bitcoin::hashes::Hash;
-use bitcoin::ScriptBuf;
-use bitcoin::{Amount, OutPoint, Transaction, TxOut};
-use rbitcoin_consensus::block::{
-    JobPrevouts, PendingCreates, ScriptCheckJob, ScriptVerifyFlags, TxidMap,
-};
-use rbitcoin_consensus::ChainParams;
 use rbitcoin_primitives::Fk;
-use rbitcoin_primitives::Height;
 use rbitcoin_query::block_pipeline::RunCreateHeight;
-use rbitcoin_query::{ConfirmError, FkMap, Query, U32Map, U64Map};
-use std::hash::BuildHasherDefault;
-use std::sync::Arc;
-use std::time::Instant;
 
 fn fk(id: u64) -> Fk {
     Fk(id)

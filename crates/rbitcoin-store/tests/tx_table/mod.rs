@@ -1,18 +1,13 @@
 //! Tx table unit tests (peeled).
-use rbitcoin_primitives::{read_uleb128, write_uleb128, Fk, TableKind};
+use rbitcoin_primitives::{read_uleb128, write_uleb128, Fk};
 use rbitcoin_store::address_head::HeadLayout;
 use rbitcoin_store::compact::{
-    amount_exp_mantissa, decode_output_amount, decode_script_kind_v17, encode_script_kind_v17,
-    input_flags, output_flags, script_kind_v17_disk_used, split_output_flags,
+    decode_script_kind_v17, encode_script_kind_v17, input_flags, output_flags,
 };
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::hashhead::HeadOpenOpts;
-use rbitcoin_store::segmented_head::SegmentedTxHead;
 use rbitcoin_store::tx_table::packed::*;
-use rbitcoin_store::tx_table::pending_head::PENDING_HEAD_CAP;
-use rbitcoin_store::var_table::VarTable;
 use std::path::Path;
-use std::sync::Arc;
 
 use rbitcoin_primitives::write_compact_size;
 use rbitcoin_store::compact::{

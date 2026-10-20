@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
 mod address_head;
 mod array_table;
 mod bdz;

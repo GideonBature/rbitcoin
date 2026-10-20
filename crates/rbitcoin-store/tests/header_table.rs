@@ -1,11 +1,8 @@
-use bitcoin_hashes::{sha256, Hash, HashEngine};
 use rbitcoin_primitives::{Fk, TableKind};
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_store::hashhead::{initial_slots_for, HashHead, HeadScale};
 use rbitcoin_store::header_table::*;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
 
 fn tmp() -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(

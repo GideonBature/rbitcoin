@@ -1,12 +1,8 @@
 use rbitcoin_primitives::Fk;
-use rbitcoin_store::bulk_io::{self, ReadOp};
-use rbitcoin_store::error::StoreError;
 use rbitcoin_store::idx_body_pipeline::*;
-use rbitcoin_store::io_backend::ReadIoBackend;
 use rbitcoin_store::tx_table::{
     decode_packed_tx_outs_with_spender_rels, InputRecord, OutputRecord, TxRecord, TxTable,
 };
-use rbitcoin_store::var_table::VarTable;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -4,7 +4,6 @@ use rbitcoin_query::sp_tweaks::*;
 use rbitcoin_query::Query;
 use rbitcoin_query::*;
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-use rbitcoin_store::{SpTweaksTable, TrimLast};
 
 use rbitcoin_query::testutil::FixtureChain;
 fn tmp_q() -> (rbitcoin_query::testutil::TempDir, Query) {

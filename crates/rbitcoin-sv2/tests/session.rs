@@ -1,38 +1,6 @@
-use binary_sv2::{Seq064K, Str0255, B016M, B064K};
-use bitcoin::hashes::Hash;
-use bitcoin::{block, Block, BlockHash, CompactTarget, Transaction, TxMerkleNode, Witness};
-use common_messages_sv2::{
-    Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
-    ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
-    ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS,
-    ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_PROTOCOL, MESSAGE_TYPE_SETUP_CONNECTION,
-    MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
-};
-use noise_sv2::Responder;
-use rbitcoin_net::{BlockingRegion, ChainHub};
 use rbitcoin_sv2::session::{constraints_rebuild_at, Templates};
-use rbitcoin_sv2::template;
-use rbitcoin_sv2::transport::{Frame, NoiseConn, NoiseWriter};
-use rbitcoin_sv2::Sv2TpStats;
 use rbitcoin_sv2::CONSTRAINTS_COOLDOWN;
-use std::collections::VecDeque;
-use std::io;
-use std::sync::Arc;
 use std::time::Duration;
-use template_distribution_sv2::{
-    CoinbaseOutputConstraints, RequestTransactionData, RequestTransactionDataError,
-    RequestTransactionDataSuccess, SubmitSolution,
-    ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
-    ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND,
-    MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, MESSAGE_TYPE_NEW_TEMPLATE,
-    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
-    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, MESSAGE_TYPE_SET_NEW_PREV_HASH,
-    MESSAGE_TYPE_SUBMIT_SOLUTION,
-};
-use tokio::net::TcpStream;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 #[test]

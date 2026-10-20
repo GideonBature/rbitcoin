@@ -72,7 +72,7 @@ pub fn bq_assign_stop_bytes() -> u64 {
 ///   `path_lo .. path_lo+window-1` (clamped to `densify_hi`). Rate cold →
 ///   only `path_lo` (tip-adjacent).
 ///
-/// **Never** gates peer TCP reads or [`Query::block_queue_offer`].
+/// **Never** gates peer TCP reads or `Query::block_queue_offer`.
 pub fn soft_densify_band_hi(
     path_lo: u32,
     densify_hi: u32,

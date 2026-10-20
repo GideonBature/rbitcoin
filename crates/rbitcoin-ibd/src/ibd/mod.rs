@@ -165,9 +165,9 @@ pub const PRE_HOLE_MAX_PEERS: usize = 2;
 ///
 /// Mainnet DNS seeds already return ~300–400 addrs. 256 refused all getaddr
 /// once the seed book was larger than the cap. [`rbitcoin_net::seeds::MAX_ADDR_MAN`]
-/// holds seeds plus learned addrs; [`AddrMan::add_learned`] evicts
+/// holds seeds plus learned addrs; `AddrMan::add_learned` evicts
 /// incompatible/failed then oldest new when full so discovery continues.
-/// `--connect` / DNS [`AddrMan::add`] may briefly exceed the cap when only
+/// `--connect` / DNS `AddrMan::add` may briefly exceed the cap when only
 /// tried addrs remain.
 pub const MAX_PEER_POOL: usize = rbitcoin_net::seeds::MAX_ADDR_MAN;
 /// Pending (framed, not Class A) longer than this → re-getdata.

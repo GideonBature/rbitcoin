@@ -1,16 +1,11 @@
-use rbitcoin_consensus::ConsensusError;
 use rbitcoin_log::progress;
 use rbitcoin_primitives::Fk;
 use rbitcoin_primitives::Height;
-use rbitcoin_query::index_rows::{self, IndexHeightOut, IndexRows};
 use rbitcoin_query::index_writebehind::*;
-use rbitcoin_query::sp_read::tweak_records_from_window;
-use rbitcoin_query::ConfirmError;
 use rbitcoin_query::Query;
-use rbitcoin_store::IndexWindow;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::sync_channel;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Info lines from one `io_loop`. A loop that waits out `budget` is the

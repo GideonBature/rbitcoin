@@ -1,16 +1,7 @@
 //! tests (peeled from ibd/confirm.rs).
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use rbitcoin_ibd::ibd::body::BodyPresence;
-use rbitcoin_ibd::ibd::status::LoopStats;
-use rbitcoin_log::{debug, info, warn};
-use rbitcoin_net::chain::ChainHub;
-use rbitcoin_query::WireLoadPipeline;
-use std::cell::Cell;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use rbitcoin_ibd::ibd::confirm::{
     format_conf_q, format_queue_depth, format_stamp_reject_missing_prevout, inflight_prune_height,

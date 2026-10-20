@@ -1,7 +1,6 @@
 use rbitcoin_net::versionbits_warn::*;
 use rbitcoin_primitives::{Height, Network};
 use rbitcoin_query::Query;
-use std::sync::Mutex;
 
 /// Core `WarningBitsConditionChecker`: mainnet keeps 1815 of 2016 (BIP
 /// 341's 90%), test chains take 75% of the difficulty interval, and each

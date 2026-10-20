@@ -773,7 +773,7 @@ impl AsRef<Transaction> for JobTx {
 ///
 /// Field reads in the interpreter stay a direct bool test (no extra per-opcode
 /// branch). Production confirm uses [`Self::consensus_at`]; Core JSON fixtures
-/// use [`Self::ALL`] or an explicit struct literal.
+/// use an explicit struct literal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScriptVerifyFlags {
     pub bip65_active: bool,

@@ -70,11 +70,17 @@ pub use lookup::{
     confirm_wire_load_from_plan, confirm_wire_lookup_stamp, parent_missing_from_chain,
     ParentPinStamp, PlanStampOutcome, WireBlockIn,
 };
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use phases::expected_bits_extending;
+#[doc(hidden)]
+pub use phases::post_commit;
 use phases::{assemble_run, Assembled};
+#[cfg(debug_assertions)]
 #[doc(hidden)]
-pub use phases::{expected_bits_extending, post_commit};
+pub use pin::ensure_spend_abs_layouts;
 #[doc(hidden)]
-pub use pin::{collect_spend_abs_after_fill, ensure_spend_abs_layouts, pin_for_wire_batch};
+pub use pin::{collect_spend_abs_after_fill, pin_for_wire_batch};
 pub use scripts::{confirm_scripts_phase, drive_script_waves_with};
 pub use write::finish_post_commit;
 pub use write::{
@@ -169,7 +175,7 @@ pub struct WireLoadPipeline<'a> {
 ///
 /// `Send` so IBD can hand off load → scripts threads.
 /// Sparse spent-filtered parents ride on the batch (not tip-GCed).
-/// When [`archive_plan`] is `Some`, commit stage appends Class A before
+/// When `archive_plan` is `Some`, commit stage appends Class A before
 /// structural / annotate (single ordered commit era).
 pub struct LoadedBatch {
     pub prepared: Vec<Prepared>,

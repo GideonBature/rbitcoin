@@ -124,7 +124,7 @@ pub fn pow_hash_meets_target(
 /// BIP34/66/65 `nVersion` floors and the 2-hour future-time cap (wall clock).
 ///
 /// Core `ContextualCheckBlockHeader`. Assemble uses this instead of a second
-/// [`validate_header`] (MTP walk + header rehash).
+/// `validate_header` (MTP walk + header rehash).
 pub fn check_header_version_and_future_time(
     params: &ChainParams,
     height: Height,

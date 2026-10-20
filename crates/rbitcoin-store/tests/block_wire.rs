@@ -1,4 +1,3 @@
-use rbitcoin_primitives::read_compact_size;
 use rbitcoin_store::block_wire::*;
 
 fn header() -> Vec<u8> {

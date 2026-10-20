@@ -205,7 +205,7 @@ pub struct ConfirmFeedInner {
     pub ready: std::collections::BTreeMap<u32, BlockHash>,
     /// Claimed by load; not yet written or released. Offer must not re-note.
     pub inflight: std::collections::HashSet<u32>,
-    /// Height → lookup epoch when load claimed it (survives [`Self::clear`]).
+    /// Height → lookup epoch when load claimed it (survives `Self::clear`).
     pub claimed_epoch: HashMap<u32, u64>,
 }
 

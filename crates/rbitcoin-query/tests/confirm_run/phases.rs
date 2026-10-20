@@ -1,7 +1,5 @@
 use bitcoin::hashes::Hash;
 use rbitcoin_query::confirm_run::*;
-use rbitcoin_query::FkMap;
-use rbitcoin_query::Query;
 
 use bitcoin::blockdata::constants;
 use bitcoin::ScriptBuf;

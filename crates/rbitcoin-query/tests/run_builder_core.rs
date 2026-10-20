@@ -1,6 +1,4 @@
 use rbitcoin_query::run_builder_core::*;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 #[test]
 fn clear_runs_dir_keeps_seal() {

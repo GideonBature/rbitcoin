@@ -1,20 +1,12 @@
-use bitcoin::secp256k1::{Keypair, Secp256k1};
 use bitcoin::{Network, Txid};
 use rbitcoin_consensus::{ChainParams, Milestone};
+use rbitcoin_net::ChainHub;
 use rbitcoin_net::MempoolHub;
-use rbitcoin_net::{ChainHub, RequestMeter};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::testutil::{tiny_query_labeled, TempDir};
 use rbitcoin_query::{accept_and_connect_block, pad_empty_from};
-use rbitcoin_sv2::transport::Frame;
-use std::io;
-use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
+use std::sync::Arc;
 
 pub(crate) struct TestChain {
     pub _dir: TempDir,

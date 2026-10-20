@@ -84,14 +84,14 @@ pub struct RpcContext {
     pub stop: Arc<AtomicBool>,
     /// Best-effort live peer count (updated by node; 0 if unknown).
     pub connections: Arc<AtomicU64>,
-    /// Fallback IBD flag when no [`ChainHub`] is attached (tests / smoke RPC).
-    /// `getblockchaininfo` prefers [`ChainHub::in_ibd`] (relay-inhibited:
+    /// Fallback IBD flag when no `ChainHub` is attached (tests / smoke RPC).
+    /// `getblockchaininfo` prefers `ChainHub::in_ibd` (relay-inhibited:
     /// `--min-chain-work` + `--max-tip-age` after densify; Core RPC name
     /// `initialblockdownload`).
     pub initial_block_download: Arc<AtomicBool>,
     /// `getnetworkinfo.subversion` (BIP14 / Core `-uacomment` shape).
     pub subversion: String,
-    /// Regtest generate/submitblock. Node attaches [`ChainHub`] via this trait.
+    /// Regtest generate/submitblock. Node attaches `ChainHub` via this trait.
     pub regtest: Option<Arc<dyn RpcRegtest>>,
     /// Live P2P sessions (`getpeerinfo` / `addnode` / `disconnectnode`).
     pub peers: Option<Arc<rbitcoin_net::PeerHub>>,

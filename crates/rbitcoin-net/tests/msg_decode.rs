@@ -1,13 +1,10 @@
 use bitcoin::p2p::message::NetworkMessage;
-use bitcoin::p2p::message::RawNetworkMessage;
 use bitcoin::p2p::Magic;
 use bitcoin::Network;
 use rbitcoin_net::codec::FramedMessage;
-use rbitcoin_net::error::NetError;
 use rbitcoin_net::msg_decode::*;
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::{Arc, OnceLock};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 fn verack_frame() -> FramedMessage {
     FramedMessage {

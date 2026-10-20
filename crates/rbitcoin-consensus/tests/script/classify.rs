@@ -1,4 +1,3 @@
-use bitcoin::script::Script;
 use bitcoin::script::ScriptBuf;
 use rbitcoin_consensus::script::classify::*;
 

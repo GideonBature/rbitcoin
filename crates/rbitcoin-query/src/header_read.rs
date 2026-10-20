@@ -81,7 +81,7 @@ pub fn median_time_past(query: &Query, height: Height) -> Result<u32, ConfirmErr
 
 /// Timestamps ending at `height` for [`median_time_past`]. A missing plan above
 /// the confirmed tip stays a retryable load fault. A gap at or below the tip
-/// is [`ConsensusError::BadPrev`].
+/// is `ConsensusError::BadPrev`.
 pub fn mtp_times_ending_at(query: &Query, height: Height) -> Result<Vec<u32>, ConfirmError> {
     if let Some((n, buf)) = query.store().mtp_times_at(height) {
         return Ok(buf[..n as usize].to_vec());

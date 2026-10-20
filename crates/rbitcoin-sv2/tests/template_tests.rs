@@ -1,8 +1,6 @@
 use crate::test_chain::{padded_chain_with, shared_regtest, TestChain};
-use binary_sv2::{Seq0255, B0255, B064K, U256};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::{sha256d, Hash};
-use bitcoin::secp256k1::{Keypair, Secp256k1};
 use bitcoin::{
     absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence, Transaction,
     TxIn, TxOut, Txid, Witness,
@@ -12,23 +10,16 @@ use rbitcoin_consensus::{
     bip34_height_script, block_subsidy, mine_empty_regtest, mine_regtest_paying,
     witness_commitment_script, ChainParams,
 };
-use rbitcoin_net::{ChainHub, RequestMeter};
 use rbitcoin_primitives::Height;
 use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
 use rbitcoin_sv2::testutil::TpClient;
-use rbitcoin_sv2::transport::Frame;
 use rbitcoin_sv2::{
     run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN, FEE_DELTA, SETUP_TIMEOUT, TEMPLATE_INTERVAL,
     WRITE_TIMEOUT,
 };
-use std::io;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
 
 use template_distribution_sv2::{
     NewTemplate, SetNewPrevHash, MESSAGE_TYPE_NEW_TEMPLATE, MESSAGE_TYPE_SET_NEW_PREV_HASH,

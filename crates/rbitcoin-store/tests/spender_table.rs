@@ -1,10 +1,7 @@
-use rbitcoin_primitives::{Fk, TableKind};
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use rbitcoin_store::spender_table::*;
-use rbitcoin_store::tx_table::{pack_spent_field, unpack_spent_field};
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
 fn append_get_chain() {

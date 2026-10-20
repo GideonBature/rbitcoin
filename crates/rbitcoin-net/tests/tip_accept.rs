@@ -1,11 +1,5 @@
 use rbitcoin_net::tip_accept::*;
-use std::future::Future;
-use std::panic::{self, AssertUnwindSafe};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
 use std::thread;
 
 #[test]

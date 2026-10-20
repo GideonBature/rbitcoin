@@ -1,34 +1,21 @@
-use bitcoin_hashes::{sha256, Hash};
-use rbitcoin_primitives::{uleb128_len, Fk, TableKind};
+use rbitcoin_primitives::{Fk, TableKind};
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{GrowPolicy, TableFile, FILE_HEADER_LEN};
+use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
 use rbitcoin_store::fuse8_filter::SealedFuse8;
-use rbitcoin_store::hashhead::{sh_main_shard_count, HeadScale};
-use rbitcoin_store::io_backend::ReadIoBackend;
+use rbitcoin_store::hashhead::HeadScale;
 use rbitcoin_store::scripthash::*;
-use rbitcoin_store::scripthash_head::{prefix_shard_of, ScriptHashHead};
+use rbitcoin_store::scripthash_head::prefix_shard_of;
 use rbitcoin_store::scripthash_layout::{
-    head_key_from_full, pack8, pack8_bytes, payload_start, slab_bytes, ShHeadValue,
-    SH_ALLOC_HEADER_LEN, SH_ALLOC_MAGIC, SH_ALLOC_VERSION, SH_INLINE_CAP, SH_MAX_CLASS,
-    SH_MAX_SLAB_CLASS, SH_PAGE_SLAB_CLASS,
+    head_key_from_full, pack8_bytes, payload_start, ShHeadValue, SH_ALLOC_HEADER_LEN,
+    SH_ALLOC_MAGIC, SH_ALLOC_VERSION, SH_MAX_CLASS, SH_PAGE_SLAB_CLASS,
 };
 use rbitcoin_store::scripthash_mphf::{mix_key16, MphfHead};
-use rbitcoin_store::scripthash_overflow::wipe_legacy_fullsize_overflow;
 use rbitcoin_store::scripthash_pages::{
-    sh_page_as_array, sh_page_chunk_ranges, sh_page_decode_slice_into, sh_page_extent,
-    sh_page_first_off, sh_page_is_last, sh_page_last_fk, sh_page_next,
-    sh_page_pack_extent_last_fks, sh_page_pack_fks, sh_page_set_next, sh_page_try_append,
-    SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
+    sh_page_as_array, sh_page_extent, sh_page_set_next, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
-use rbitcoin_store::scripthash_slabs::{
-    decode_slab_payload_into, encode_slab_payload_into, slab_class_for_n_fks_with_slack,
-    slab_class_for_packed_len, SH_MEGAKEY_MIN_FKS,
-};
-use rbitcoin_store::scripthash_sorted_head::SortedHead;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 
 use rbitcoin_store::scripthash_layout::SH_HEAD_VALUE_LEN;
 use rbitcoin_store::scripthash_materialize::{

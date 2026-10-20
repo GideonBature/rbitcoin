@@ -1,9 +1,6 @@
 use rbitcoin_node::config::NodeConfig;
 use rbitcoin_node::error::NodeError;
 use rbitcoin_node::lock::*;
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 

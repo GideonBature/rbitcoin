@@ -1,22 +1,18 @@
 use bitcoin::absolute::LockTime;
-use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
 use bitcoin::key::XOnlyPublicKey;
 use bitcoin::key::{TapTweak, TweakedKeypair};
-use bitcoin::script::Script;
+use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
-use bitcoin::secp256k1::{Message, Parity};
 use bitcoin::sighash::TapSighashType;
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::taproot::{ControlBlock, LeafVersion, TaprootBuilder};
-use bitcoin::taproot::{TapLeafHash, TapNodeHash, TapTweakHash};
+use bitcoin::taproot::{TapLeafHash, TapNodeHash};
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut};
 use bitcoin::{Transaction, Witness};
 use rbitcoin_consensus::block::ScriptCheckJob;
-use rbitcoin_consensus::error::ConsensusError;
 use rbitcoin_consensus::script;
 use rbitcoin_consensus::script::crypto;
-use rbitcoin_consensus::script::interpreter::{self, EvalContext, SigVersion};
 use rbitcoin_consensus::script::p2tr::*;
 
 fn owned_prevout_mut(job: &mut ScriptCheckJob) -> &mut TxOut {

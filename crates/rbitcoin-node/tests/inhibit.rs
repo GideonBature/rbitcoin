@@ -1,6 +1,4 @@
-use rbitcoin_log::{info, warn};
 use rbitcoin_node::inhibit::*;
-use std::process::{Child, Command, Stdio};
 
 #[test]
 fn try_start_and_drop_is_safe() {

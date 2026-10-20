@@ -2,23 +2,15 @@ use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, ScriptBuf, Sequence, TxIn, Witness};
-use bitcoin::{OutPoint, Transaction, TxOut, Txid, Wtxid};
-use rbitcoin_consensus::policy::{self, PolicyResult};
+use bitcoin::{OutPoint, Transaction, TxOut, Txid};
+use rbitcoin_consensus::policy::{self};
 use rbitcoin_mempool::accept::*;
 use rbitcoin_mempool::error::MempoolError;
-use rbitcoin_mempool::graph::{
-    sigops_adjusted_weight, SelectBudget, Selected, TxEntry, TxGraph, MAX_BLOCK_SIGOPS_COST,
-};
 use rbitcoin_mempool::graph::{MAX_CLUSTER_COUNT, MAX_CLUSTER_VSIZE, MAX_CLUSTER_WEIGHT};
-use rbitcoin_mempool::orphanage::Orphanage;
-use rbitcoin_mempool::packed::VinAux;
-use rbitcoin_mempool::store::Mempool;
-use rbitcoin_primitives::Fk;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 fn tmp_dir() -> rbitcoin_store::testutil::TempDir {
     rbitcoin_store::testutil::TempDir::labeled("mempool-accept").unwrap()

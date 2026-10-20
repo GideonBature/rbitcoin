@@ -1,11 +1,7 @@
-use bitcoin::hashes::{sha256, Hash};
 use rbitcoin_net::error::NetError;
 use rbitcoin_net::i2p_sam::*;
-use std::io::Write;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[tokio::test(flavor = "current_thread")]

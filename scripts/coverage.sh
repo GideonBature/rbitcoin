@@ -147,8 +147,9 @@ PY
     exit 1
   fi
   SHA="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+  GATE_FLOOR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["floor"])' "$GATE_JSON")"
   python3 "$ROOT/scripts/coverage-badge.py" \
-    --lh "$LCOV_HIT" --lf "$LCOV_TOT" --gate 89 \
+    --lh "$LCOV_HIT" --lf "$LCOV_TOT" --gate "$GATE_FLOOR" \
     --sha "$SHA" --scope production \
     --lcov "$ROOT/coverage/lcov.info" \
     --out "$ROOT/coverage/badge.json"

@@ -1,4 +1,3 @@
-use bitcoin::Block;
 use rbitcoin_query::resolved_wire::*;
 use rbitcoin_query::TxPrecompute;
 use std::sync::Arc;

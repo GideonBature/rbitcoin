@@ -1,9 +1,7 @@
 use rbitcoin_mempool::error::*;
 use rbitcoin_primitives::PackError;
 use std::error::Error;
-use std::fmt;
 use std::io;
-use std::path::PathBuf;
 
 #[test]
 fn display_and_source_all_variants() {

@@ -1,28 +1,17 @@
-use arc_swap::ArcSwap;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid, Wtxid};
-use rbitcoin_mempool::{
-    fee_at_target_sat_kvb, fine_candidate_rates, flow_for_depth, frontier_feerate_from_chunks,
-    hold_defined_then_monotone, min_rate_for_capacity, percentile_sat, published_depth_rate,
-    weight_above_from_chunks, AcceptError, AcceptResult, ActiveMempool, ChainPrevout, ChainTipCtx,
-    Chunk, Coin, FeeFlowMeter, SelectBudget, Selected, StockAbove, UtxoProvider, BLOCK_WEIGHT_WU,
-    MAX_PACKAGE_COUNT,
-};
-use rbitcoin_net::fee_history::{FeeHistory, HistoricalFeeBlock};
+use rbitcoin_mempool::{fee_at_target_sat_kvb, AcceptError, Coin, UtxoProvider};
+use rbitcoin_net::fee_history::HistoricalFeeBlock;
 use rbitcoin_net::fee_history_file;
-use rbitcoin_net::perf_meter::{PerfCounter, PerfMax};
-use rbitcoin_net::tx_relay::parent_req::{DueParent, ParentNote};
+use rbitcoin_net::tx_relay::parent_req::ParentNote;
 use rbitcoin_net::tx_relay::*;
-use rbitcoin_primitives::{Fk, Height};
+use rbitcoin_primitives::Height;
 use rbitcoin_query::Query;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::ops::Bound;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
 
 use bitcoin::transaction::Version;
 use bitcoin::{Sequence, TxIn, Witness};

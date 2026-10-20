@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 /// | [`Direct`](IndexMode::Direct) | archive live | confirm batch after Class C | Class A collect → unsorted shards → seal at tip |
 /// | [`Tip`](IndexMode::Tip) | live | confirm batch after Class C | durable write-through after bulk |
 ///
-/// Open defaults to [`Tip`] until the node calls [`Query::enter_direct_index_mode`].
+/// Open defaults to `Tip` until the node calls [`Query::enter_direct_index_mode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IndexMode {

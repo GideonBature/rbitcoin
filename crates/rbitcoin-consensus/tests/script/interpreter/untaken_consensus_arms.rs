@@ -1,12 +1,6 @@
-use bitcoin::hashes::Hash;
-use bitcoin::script::{Instruction, Script};
-use bitcoin::sighash::SighashCache;
+use bitcoin::script::Script;
 use bitcoin::{Amount, Sequence, Transaction};
-use rbitcoin_consensus::error::ConsensusError;
-use rbitcoin_consensus::script::crypto;
-use rbitcoin_primitives::{scriptnum_decode_width, scriptnum_encode};
 use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::script::ScriptBuf;

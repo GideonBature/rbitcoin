@@ -1,17 +1,10 @@
-use rbitcoin_primitives::{deinterleave_pairs_u8x8, inclusive_u8x8_times_8, Fk, TableKind};
-use rbitcoin_store::bulk_io::ReadOp;
+use rbitcoin_primitives::Fk;
 use rbitcoin_store::create_loc::*;
-use rbitcoin_store::delta_loc::{
-    create_table_file, decode_create_pair, encode_create_ovf_row, load_create_ovf, loc_file_off,
-    loc_window, loc_within, migrate_create_ovf_v22_if_needed, open_table_file, pack_create_pair,
-    strides_from_aligned_len, CREATE_OVF_SLOT, IDX_STRIDE, LOC_WINDOW,
-};
+use rbitcoin_store::delta_loc::IDX_STRIDE;
 use rbitcoin_store::error::StoreError;
-use rbitcoin_store::file::{TableFile, FILE_HEADER_LEN};
+use rbitcoin_store::file::FILE_HEADER_LEN;
 use rbitcoin_store::IoCtx;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 
 use rbitcoin_store::testutil::TempDir;
 

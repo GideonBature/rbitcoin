@@ -1,4 +1,4 @@
-//! Open-addressed head for hybrid scripthash: key[16] → pack8 value (24 B slots).
+//! Open-addressed head for hybrid scripthash: `key[16]` → pack8 value (24 B slots).
 //!
 //! Key is the first 16 bytes of Electrum SHA256(spk). Public APIs take full 32 B
 //! hashes and truncate. Values are [`ShHeadValue`] pack8 encodings.
@@ -13,7 +13,6 @@
 
 use crate::error::StoreError;
 use crate::file::{TableFile, FILE_HEADER_LEN};
-#[cfg(debug_assertions)]
 use crate::open_address::{self, MAX_LOAD_DEN, MAX_LOAD_NUM};
 use crate::scripthash_layout::{
     head_key_from_full, pack8_bytes, unpack8_bytes, ShHeadKey, ShHeadValue, SH_HEAD_KEY_LEN,

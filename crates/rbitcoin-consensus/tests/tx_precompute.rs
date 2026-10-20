@@ -1,12 +1,9 @@
 use bitcoin::absolute::LockTime;
-use bitcoin::consensus::encode::{Encodable, VarInt};
-use bitcoin::hashes::{sha256, sha256d, Hash, HashEngine};
-use bitcoin::{Script, Transaction, TxOut};
+use bitcoin::consensus::encode::Encodable;
+use bitcoin::hashes::{sha256, sha256d, Hash};
+use bitcoin::{Transaction, TxOut};
 use rbitcoin_consensus::tx_precompute::*;
 use rbitcoin_primitives::script_sigop_count;
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::OnceLock;
 
 use bitcoin::script::ScriptBuf;
 use bitcoin::transaction::Version;

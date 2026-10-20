@@ -1,5 +1,4 @@
 use rbitcoin_net::perf_meter::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
 fn a_window_sample_leaves_the_running_total() {

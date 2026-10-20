@@ -1,10 +1,6 @@
 use rbitcoin_store::binary_fuse8::{BinaryFuse8, Fingerprints};
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::fuse8_filter::*;
-use rbitcoin_store::readonly_map::ReadonlyMap;
-use std::fs::File;
-use std::io::Write;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn tmp() -> std::path::PathBuf {

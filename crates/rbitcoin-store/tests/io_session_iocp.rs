@@ -1,11 +1,8 @@
 #![cfg(windows)]
-use rbitcoin_store::error::StoreError;
 use rbitcoin_store::io_handle::IoHandle;
 use rbitcoin_store::io_session_iocp::*;
-use std::collections::{HashSet, VecDeque};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
-use std::ptr::null_mut;
 
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 

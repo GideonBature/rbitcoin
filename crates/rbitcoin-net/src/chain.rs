@@ -1497,7 +1497,7 @@ impl ChainHub {
         self.ensure_header(header).map_err(|e| e.to_string())
     }
 
-    /// Like [`ensure_header`], but returns the header fk for the archive writer
+    /// Like `ensure_header`, but returns the header fk for the archive writer
     /// (avoids a second hash-head probe on the hot write path).
     ///
     /// **Fail closed:** non-genesis headers require the parent row to already

@@ -3,10 +3,8 @@ use rbitcoin_query::catchup::*;
 use rbitcoin_query::sh_builder::{load_seal, sh_force_rebuild, store_seal};
 use rbitcoin_query::testutil::FixtureChain;
 use rbitcoin_query::Query;
-use rbitcoin_query::*;
 use rbitcoin_store::StoreError;
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 /// Serialize FORCE_REBUILD env mutations (parallel tests share process env).

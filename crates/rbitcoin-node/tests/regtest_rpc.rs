@@ -1,7 +1,6 @@
 use bitcoin::ScriptBuf;
 use rbitcoin_consensus::{ChainParams, Milestone};
 use rbitcoin_net::ChainHub;
-use rbitcoin_node::regtest_rpc::*;
 use rbitcoin_query::Query;
 use rbitcoin_rpc::HubRegtest;
 use rbitcoin_rpc::RpcRegtest;

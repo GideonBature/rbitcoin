@@ -1,7 +1,6 @@
 use rbitcoin_consensus::id_map::*;
 use rbitcoin_primitives::Fk;
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::Hasher;
 
 #[test]
 fn txid_hasher_uses_first_8_bytes() {

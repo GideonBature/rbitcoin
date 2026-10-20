@@ -1,16 +1,7 @@
 use bitcoin::absolute::LockTime;
-use bitcoin::bip158::{BlockFilter, FilterHash, FilterHeader, GcsFilterWriter};
 use bitcoin::block::{Header, Version as BlockVersion};
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, OutPoint};
-use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_query::{Query, QueryError};
-use rbitcoin_store::{
-    read_index_window, BlockFilterRecord, BlockFilterSlot, BlockFilterTable, IndexHeight,
-    IndexWindow, StoreError,
-};
-use std::sync::atomic::Ordering;
-use std::sync::{Condvar, Mutex};
 
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};

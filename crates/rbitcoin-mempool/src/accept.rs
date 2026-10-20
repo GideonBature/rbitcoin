@@ -1079,7 +1079,7 @@ impl ActiveMempool {
         })
     }
 
-    /// Park `tx` waiting on `missing` parent txids (from [`prepare_admit`]).
+    /// Park `tx` waiting on `missing` parent txids (from `prepare_admit`).
     pub fn park_orphan(&mut self, tx: &Transaction, missing: BTreeSet<Txid>) -> AcceptError {
         self.park_orphan_from(tx, missing, None)
     }
@@ -2041,7 +2041,7 @@ impl ActiveMempool {
     ///
     /// Also drops orphanage entries that are confirmed or conflict with the block,
     /// and best-effort re-accepts orphans whose parent just confirmed (caller must
-    /// pass a UTXO view that includes the new tip — use [`remove_for_block_with_utxo`]).
+    /// pass a UTXO view that includes the new tip — use `remove_for_block_with_utxo`).
     pub fn remove_for_block(&mut self, block_txids: &[Txid]) -> Result<usize, AcceptError> {
         self.remove_for_block_with_utxo(
             block_txids,
@@ -2096,7 +2096,7 @@ impl ActiveMempool {
         Ok((n, gone))
     }
 
-    /// Like [`remove_for_block`], then promote orphans of confirmed parents via `utxos`.
+    /// Like `remove_for_block`, then promote orphans of confirmed parents via `utxos`.
     pub fn remove_for_block_with_utxo(
         &mut self,
         block_txids: &[Txid],

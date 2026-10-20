@@ -1,9 +1,5 @@
 use rbitcoin_log::progress::Snapshot;
-use rbitcoin_net::ChainHub;
 use rbitcoin_node::health::metrics::*;
-use rbitcoin_node::health::{readiness, NodeStatus, Phase};
-use std::fmt::{Display, Write};
-use std::time::UNIX_EPOCH;
 use std::time::{Duration, SystemTime};
 
 fn stage(stage: &'static str, done: u64) -> Snapshot {

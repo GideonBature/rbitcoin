@@ -1,7 +1,5 @@
-use rbitcoin_store::bulk_io;
 use rbitcoin_store::io_backend::*;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

@@ -1,8 +1,6 @@
-use rbitcoin_primitives::{Fk, Height, TableKind};
-use rbitcoin_store::array_table::ArrayTable;
+use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_store::chain::*;
 use rbitcoin_store::error::StoreError;
-use std::path::Path;
 
 fn tmp() -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(

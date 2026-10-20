@@ -1,8 +1,6 @@
 use rbitcoin_mempool::CONFIDENCE_FAR;
-use rbitcoin_mempool::{AnalogHistory, CONFIDENCE_NEAR, HISTORICAL_CONFIDENCE_FAR};
+use rbitcoin_mempool::{AnalogHistory, CONFIDENCE_NEAR};
 use rbitcoin_net::fee_history::*;
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
 
 fn block(rate: Option<u64>, bytes: u64) -> HistoricalFeeBlock {
     HistoricalFeeBlock {

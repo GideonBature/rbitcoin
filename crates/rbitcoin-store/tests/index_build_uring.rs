@@ -1,20 +1,9 @@
 use rbitcoin_primitives::{Fk, Height};
-use rbitcoin_store::create_loc::CreateLocPair;
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::index_build_uring::{
     read_index_window, require_body_hwm, IndexHeight, IndexWindow, ReadJob,
 };
-use rbitcoin_store::input::{decode_edges_span, EdgesPlan, InputEdge};
-use rbitcoin_store::io_handle::IoHandle;
-use rbitcoin_store::sp_tweaks_uring::LoadedTweakTx;
-use rbitcoin_store::tx_table::{
-    apply_input_edges, decode_packed_tx_outs_with_spender_rels_secret, decode_seqsigwit_secret,
-    OutputRecord, TxTable,
-};
-use rbitcoin_store::txid_body::{TxidBody, TXID_ENTRY_LEN};
-use rbitcoin_store::uring_session::{self, UringSession};
-use rbitcoin_store::U64Map;
-use std::path::Path;
+use rbitcoin_store::tx_table::{OutputRecord, TxTable};
 
 use rbitcoin_store::tx_table::{InputRecord, TxRecord};
 
