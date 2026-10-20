@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Per-file ceiling for bare production unwraps.
 
-Counts `.unwrap(` and `.unwrap_err(` under crates/. Skips rbitcoin-test,
-rbitcoin-bench, tests/, benches/, *tests.rs, and #[cfg(test)] modules.
-Does not count unwrap_or, lock/read/write poison unwraps, or try_into().unwrap().
+Counts each `.unwrap(` and `.unwrap_err(` under crates/, not each line.
+Skips rbitcoin-test, rbitcoin-bench, tests/, benches/, *tests.rs, and
+items marked `#[cfg(test)]`. Does not count unwrap_or. A `.lock()` /
+`.read()` / `.write()` / `try_into()` receiver is not counted, including
+when that call sits on the previous line. A later call on the same line
+still counts.
 
 lint/unwrap-baseline.txt is sorted `path<TAB>count` lines for counts above zero.
 A file above its line, a positive file with no line, or a line that is now
@@ -16,50 +19,180 @@ import re
 import sys
 
 UNWRAP_RE = re.compile(r"\.unwrap(?:_err)?\s*\(")
-LOCK_RE = re.compile(r"\.(?:lock|read|write)\s*\(\s*\)\s*\.unwrap")
+EXCLUDED_TAIL = re.compile(
+    r"(?:try_into\b[^;]*\(\s*\)|\.(?:lock|read|write)\s*\(\s*\))\s*$"
+)
+CFG_TEST_ATTR = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 SKIP_CRATES = {"rbitcoin-test", "rbitcoin-bench"}
+ITEM_WORDS = (
+    "mod ",
+    "fn ",
+    "impl ",
+    "struct ",
+    "enum ",
+    "trait ",
+    "const ",
+    "static ",
+    "type ",
+)
 
 
-def strip_code(line: str) -> str:
-    if line.lstrip().startswith("//"):
-        return ""
-    return re.sub(r"//.*", "", line)
+def _blank(chars: list[str], start: int, end: int) -> None:
+    for j in range(start, end):
+        if chars[j] != "\n":
+            chars[j] = " "
 
 
-def counts_as_bare(code: str, prev: str) -> bool:
-    if not UNWRAP_RE.search(code):
-        return False
-    if "try_into" in code or "try_into" in prev:
-        return False
-    if LOCK_RE.search(code) or LOCK_RE.search(prev + code):
-        return False
-    if re.search(r"\.(?:lock|read|write)\s*\(\s*\)\s*$", prev) and ".unwrap" in code:
-        return False
-    return True
+def _string_end(src: str, i: int) -> int | None:
+    """Index just past a string that starts at i, or None."""
+    n = len(src)
+    if i > 0 and (src[i - 1].isalnum() or src[i - 1] == "_"):
+        return None
+    k = i
+    raw = False
+    if src.startswith(("br", "bR", "Br", "BR", "cr", "cR"), i):
+        k = i + 2
+        raw = True
+    elif i + 1 < n and src[i] in "bBcC" and src[i + 1] == '"':
+        k = i + 1
+    elif src[i] in "rR":
+        k = i + 1
+        raw = True
+    elif src[i] != '"':
+        return None
+    if raw:
+        hashes = 0
+        while k < n and src[k] == "#":
+            hashes += 1
+            k += 1
+        if k >= n or src[k] != '"':
+            return None
+        k += 1
+        closer = '"' + ("#" * hashes)
+        while k < n:
+            if src.startswith(closer, k):
+                return k + len(closer)
+            k += 1
+        return n
+    if k >= n or src[k] != '"':
+        return None
+    k += 1
+    while k < n:
+        if src[k] == "\\":
+            k += 2
+            continue
+        if src[k] == '"':
+            return k + 1
+        if src[k] == "\n":
+            return None
+        k += 1
+    return n
+
+
+def _char_end(src: str, i: int) -> int | None:
+    """Index just past a char literal at i, or None for a lifetime."""
+    n = len(src)
+    j = i + 1
+    if j >= n:
+        return None
+    if src[j] == "\\":
+        j += 1
+        if j >= n:
+            return None
+        if src[j] == "x":
+            j += 3
+        elif src[j] == "u":
+            j += 1
+            if j >= n or src[j] != "{":
+                return None
+            while j < n and src[j] != "}":
+                j += 1
+            j += 1
+        else:
+            j += 1
+    else:
+        j += 1
+    if j < n and src[j] == "'":
+        return j + 1
+    return None
+
+
+def blank_non_code(src: str) -> str:
+    """Spaces out comments, strings, and char literals. Newlines stay."""
+    chars = list(src)
+    n = len(src)
+    i = 0
+    while i < n:
+        if src.startswith("//", i):
+            j = i
+            while j < n and src[j] != "\n":
+                j += 1
+            _blank(chars, i, j)
+            i = j
+            continue
+        if src.startswith("/*", i):
+            depth = 1
+            j = i + 2
+            while j < n and depth:
+                if src.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif src.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            _blank(chars, i, j)
+            i = j
+            continue
+        if src[i] == "'":
+            end = _char_end(src, i)
+            if end is not None:
+                _blank(chars, i, end)
+                i = end
+                continue
+        end = _string_end(src, i)
+        if end is not None:
+            _blank(chars, i, end)
+            i = end
+            continue
+        i += 1
+    return "".join(chars)
+
+
+def bare_on_line(code: str, prev: str) -> int:
+    n = 0
+    for match in UNWRAP_RE.finditer(code):
+        before = code[: match.start()].rstrip()
+        receiver = before if before else prev.rstrip()
+        if EXCLUDED_TAIL.search(receiver):
+            continue
+        n += 1
+    return n
 
 
 def file_count(path: str) -> int:
-    lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    lines = blank_non_code(open(path, encoding="utf-8", errors="replace").read()).splitlines()
     depth = 0
     test_stack: list[int] = []
     pending = False
     prev = ""
     n = 0
     for line in lines:
-        code = strip_code(line)
-        if "cfg(test)" in code:
+        code = line
+        if CFG_TEST_ATTR.search(code):
             pending = True
-        if not test_stack and counts_as_bare(code, prev):
-            n += 1
-        opens = code.count("{")
-        closes = code.count("}")
+        in_test = bool(test_stack)
         if pending and "{" in code:
             test_stack.append(depth)
             pending = False
+            in_test = True
         elif pending and code.strip() and not code.strip().startswith("#"):
-            if not any(k in code for k in ("mod ", "fn ", "impl ", "struct ")):
+            if not any(word in code for word in ITEM_WORDS):
                 pending = False
-        depth += opens - closes
+        if not in_test:
+            n += bare_on_line(code, prev)
+        depth += code.count("{") - code.count("}")
         while test_stack and depth <= test_stack[-1]:
             test_stack.pop()
         if depth < 0:
@@ -83,9 +216,9 @@ def scan(root: str) -> dict[str, int]:
             if not name.endswith(".rs") or name.endswith("tests.rs"):
                 continue
             rel = f"{rel_dir}/{name}"
-            n = file_count(os.path.join(dirpath, name))
-            if n:
-                counts[rel] = n
+            got = file_count(os.path.join(dirpath, name))
+            if got:
+                counts[rel] = got
     return counts
 
 
@@ -105,8 +238,8 @@ def read_baseline(path: str) -> dict[str, int]:
 def write_baseline(path: str, counts: dict[str, int]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     lines = [f"{p}\t{counts[p]}\n" for p in sorted(counts)]
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
 
 
 def check(counts: dict[str, int], base: dict[str, int]) -> list[str]:

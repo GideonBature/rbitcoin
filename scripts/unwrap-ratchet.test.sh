@@ -22,6 +22,18 @@ assert_fail "count below the baseline fails" \
   python3 "$PY" --root "$FIX/under"
 assert_ok "a matching count passes" \
   python3 "$PY" --root "$FIX/match"
+assert_fail "unwrap on the line after lock is counted" \
+  python3 "$PY" --root "$FIX/after-lock"
+assert_fail "second unwrap on a lock line is counted" \
+  python3 "$PY" --root "$FIX/same-line"
+assert_fail "unwrap on the line after try_into is counted" \
+  python3 "$PY" --root "$FIX/after-try"
+assert_fail "two unwraps on one line count as two" \
+  python3 "$PY" --root "$FIX/two-calls"
+assert_fail "cfg(test) inside a string does not open a skip" \
+  python3 "$PY" --root "$FIX/cfg-string"
+assert_fail "cfg(test) inside a block comment does not open a skip" \
+  python3 "$PY" --root "$FIX/cfg-block"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "unwrap-ratchet.test.sh: $PASS passed, $FAIL failed"
