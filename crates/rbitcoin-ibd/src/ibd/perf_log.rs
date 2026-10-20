@@ -763,6 +763,7 @@ pub fn read_platform_rss() -> ProcessRss {
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub fn fill_rss_from_rusage(out: &mut ProcessRss) {
+    // SAFETY: all-zero is a valid `rusage_info_v0`.
     let mut info: libc::rusage_info_v0 = unsafe { std::mem::zeroed() };
     // SAFETY: RUSAGE_INFO_V0 selects the `rusage_info_v0` layout being written
     // here; an unsupported flavor returns non-zero without touching `info`.

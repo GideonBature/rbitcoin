@@ -31,7 +31,7 @@ pub struct ReadonlyMap {
 // writer `pwrite`s the same inode through another fd. That caller reads the
 // map only by atomic loads from `as_ptr` and never forms `as_file_bytes`.
 unsafe impl Send for ReadonlyMap {}
-// SAFETY: same as `Send`. Shared references do not alias a writer in this process.
+// SAFETY: same as `Send`: atomic loads from `as_ptr`, never `as_file_bytes`.
 unsafe impl Sync for ReadonlyMap {}
 
 impl std::fmt::Debug for ReadonlyMap {

@@ -44,8 +44,9 @@ pub struct Apply {
     pub ctx: *const (),
 }
 
-// SAFETY: workers dereference `ctx` only while `in_wave > 0`. The publisher
-// waits for `in_wave == 0` before returning, so the stack `ctx` is still live.
+// SAFETY: workers dereference `ctx` only while `in_wave > 0`. `ctx` points
+// at `OwnedWave`'s box. `Drop` and `finish` wait until `in_wave == 0`
+// before that box is freed.
 unsafe impl Send for Apply {}
 // SAFETY: same lifetime as `Send`: `ctx` stays live until `in_wave` hits 0.
 unsafe impl Sync for Apply {}
