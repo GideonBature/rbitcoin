@@ -41,8 +41,10 @@ pub fn inclusive_u8x8_times_8_scalar(st: &[u8; 8], no: &[u8; 8]) -> ([u32; 8], [
 /// Split 16 interleaved `(stride, n_out)` bytes. `true` if any lane is 0 (overflow slot).
 pub fn deinterleave_pairs_u8x8(buf: [u8; 16]) -> ([u8; 8], [u8; 8], bool) {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: `buf` is 16 bytes; `sse2_deinterleave_pairs_u8x8` reads exactly that.
     let out = unsafe { sse2_deinterleave_pairs_u8x8(buf.as_ptr()) };
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `buf` is 16 bytes; `neon_deinterleave_pairs_u8x8` reads exactly that.
     let out = unsafe { neon_deinterleave_pairs_u8x8(buf.as_ptr()) };
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let out = deinterleave_pairs_u8x8_scalar(&buf);
@@ -52,6 +54,7 @@ pub fn deinterleave_pairs_u8x8(buf: [u8; 16]) -> ([u8; 8], [u8; 8], bool) {
 /// Inclusive prefix of eight `u8 << 3` values (create.loc stride-8 window; fits u32).
 pub fn inclusive_u8x8_times_8(st: &[u8; 8], no: &[u8; 8]) -> ([u32; 8], [u32; 8]) {
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: `st` and `no` are 8 bytes; each call reads exactly that.
     let out = unsafe {
         (
             sse2_u8x8_times_8_inclusive(st.as_ptr()),
@@ -59,6 +62,7 @@ pub fn inclusive_u8x8_times_8(st: &[u8; 8], no: &[u8; 8]) -> ([u32; 8], [u32; 8]
         )
     };
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `st` and `no` are 8 bytes; each call reads exactly that.
     let out = unsafe {
         (
             neon_u8x8_times_8_inclusive(st.as_ptr()),

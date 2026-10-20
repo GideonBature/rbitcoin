@@ -84,6 +84,7 @@ pub fn try_exclusive(file: &File) -> Result<(), LockBusy> {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
+        // SAFETY: `file` is open. `LOCK_NB` returns instead of blocking.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {
             Ok(())

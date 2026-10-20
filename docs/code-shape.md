@@ -86,6 +86,11 @@ block in those libraries fails the build. Integration tests are separate
 crates and are not covered. Store, net, consensus, primitives, node, query,
 ibd, and sv2 stay open: they call FFI.
 
+`undocumented_unsafe_blocks` is workspace deny. Each `unsafe` block and
+`unsafe impl` has a `// SAFETY:` comment on the preceding line. A wrong
+positive is a site `#[allow(clippy::undocumented_unsafe_blocks)]` with a
+one-line reason. Do not allow it crate-wide.
+
 **Goal:** no `[workspace.lints.clippy]` `= "allow"`. A lint that is wrong
 for one item is `#[allow(clippy::lint)]` on **that item**, with a one-line
 reason (Core-faithful opcode loop, wire layout, dispatch bag,

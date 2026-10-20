@@ -44,9 +44,10 @@ pub struct Apply {
     pub ctx: *const (),
 }
 
-// Workers only dereference `ctx` while `in_wave > 0`; the publisher waits
-// for `in_wave == 0` before returning, so the stack `ctx` is still live.
+// SAFETY: workers dereference `ctx` only while `in_wave > 0`. The publisher
+// waits for `in_wave == 0` before returning, so the stack `ctx` is still live.
 unsafe impl Send for Apply {}
+// SAFETY: same lifetime as `Send`: `ctx` stays live until `in_wave` hits 0.
 unsafe impl Sync for Apply {}
 
 #[doc(hidden)]
@@ -111,12 +112,12 @@ impl Wave {
 
     #[doc(hidden)]
     pub fn run_chunk(&self, range: Range<usize>) {
-        // SAFETY: `in_wave` was incremented before `next`; publisher keeps
-        // `ctx` live until `is_complete` (then `OwnedWave` Drop unpublished).
         for i in range {
             if self.failed.load(Ordering::Acquire) {
                 break;
             }
+            // SAFETY: `in_wave` was incremented before `next`. The publisher
+            // keeps `ctx` live until `is_complete` (then `OwnedWave` drops it).
             let r = unsafe { (self.apply.f)(self.apply.ctx, i) };
             if let Err(e) = r {
                 self.failed.store(true, Ordering::Release);
@@ -273,7 +274,9 @@ pub struct ApplyCtx<T> {
     pub f: fn(&T) -> Result<(), ConsensusError>,
 }
 
+// SAFETY: `items` points at `OwnedWave`'s box. `T: Sync` so workers may share it.
 unsafe impl<T: Sync> Send for ApplyCtx<T> {}
+// SAFETY: same as `Send`: the box outlives every worker that reads `items`.
 unsafe impl<T: Sync> Sync for ApplyCtx<T> {}
 
 /// Publisher-owned job list + live wave. Safe to move; heap allocation is stable.
@@ -379,7 +382,10 @@ pub fn start_wave<T: Sync>(
         f,
     });
     pub unsafe fn apply<T>(ptr: *const (), i: usize) -> Result<(), ConsensusError> {
+        // SAFETY: `ptr` is the `ApplyCtx` published for this wave, live until
+        // `in_wave` returns to 0. `i` is inside `0..n`.
         let ctx = unsafe { &*(ptr as *const ApplyCtx<T>) };
+        // SAFETY: `items` has `n` elements and `i < n` (the wave claims that range).
         (ctx.f)(unsafe { &*ctx.items.add(i) })
     }
     let wave = Arc::new(Wave {

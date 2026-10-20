@@ -89,6 +89,7 @@ unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)'] }
 # Nursery opt-in: Core-faithful loops fail CI unless site-allowed.
 [workspace.lints.clippy]
 cognitive_complexity = "warn"
+undocumented_unsafe_blocks = "deny"
 
 # Workspace crates keep line tables (panic file and line). `*` matches
 # dependencies only and compiles them with no debug info. `test` inherits

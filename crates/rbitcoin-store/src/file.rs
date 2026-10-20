@@ -867,6 +867,7 @@ impl TableFile {
         use std::os::unix::io::AsRawFd;
         let file = self.file.lock().unwrap();
         let fd = file.as_raw_fd();
+        // SAFETY: `fd` is the live file held by `self.file`. Advice is whole-file.
         let rc = unsafe { libc::posix_fadvise(fd, 0, 0, advice) };
         if rc != 0 {
             rbitcoin_log::trace!(
@@ -886,6 +887,7 @@ impl TableFile {
             use std::os::unix::io::AsRawFd;
             let file = self.file.lock().unwrap();
             let fd = file.as_raw_fd();
+            // SAFETY: `fd` is the live file. `offset` and `len` are the caller's range.
             let rc = unsafe {
                 libc::posix_fadvise(
                     fd,
@@ -926,6 +928,7 @@ pub fn ensure_nofile_budget_at_least(want_soft: u64) -> (u64, u64) {
             rlim_cur: 0,
             rlim_max: 0,
         };
+        // SAFETY: `rlim` is a local `rlimit` the call writes.
         if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
             rbitcoin_log::warn!(
                 "store: getrlimit(NOFILE) failed: {}",
@@ -943,6 +946,7 @@ pub fn ensure_nofile_budget_at_least(want_soft: u64) -> (u64, u64) {
         let target = want_soft.min(hard_cap).max(soft);
         if target > soft {
             rlim.rlim_cur = target as libc::rlim_t;
+            // SAFETY: `rlim` was filled by `getrlimit` and only `rlim_cur` changed.
             if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) } != 0 {
                 rbitcoin_log::warn!(
                     "store: setrlimit(NOFILE) soft {soft}→{target} failed (hard={hard}): {}",
@@ -974,6 +978,7 @@ pub fn try_fallocate(file: &File, len: u64) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;
+        // SAFETY: `file` is open. Mode 0 allocates `[0, len)`.
         let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as i64) };
         if rc == 0 {
             return Ok(());
@@ -996,6 +1001,7 @@ pub fn try_punch_hole(file: &File, offset: u64, len: u64) -> std::io::Result<()>
     {
         use std::os::unix::io::AsRawFd;
         const PUNCH: i32 = 0x02 | 0x01;
+        // SAFETY: `file` is open. `PUNCH` drops `[offset, offset+len)`.
         let rc = unsafe { libc::fallocate(file.as_raw_fd(), PUNCH, offset as i64, len as i64) };
         if rc == 0 {
             return Ok(());

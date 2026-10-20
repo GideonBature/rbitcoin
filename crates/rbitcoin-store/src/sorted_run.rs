@@ -50,14 +50,17 @@ pub fn mem_available_from_darwin_vm(
 #[doc(hidden)]
 pub fn mem_available_from_darwin_host() -> Option<u64> {
     let page_size = {
+        // SAFETY: `sysconf` reads the process page size. It takes no pointer.
         let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if n <= 0 {
             return None;
         }
         n as u64
     };
+    // SAFETY: the zeroed struct is the `host_statistics64` out-buffer filled below.
     let mut vm = unsafe { std::mem::zeroed::<libc::vm_statistics64>() };
     let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: `vm` and `count` are locals. `mach_host_self` is this process.
     let kr = unsafe {
         // SAFETY: process host port; HOST_VM_INFO64 writes into this stack vm_statistics64.
         #[allow(deprecated)]
