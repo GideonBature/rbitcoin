@@ -97,20 +97,27 @@ impl StoreSecret {
         Ok(Self { bytes })
     }
 
-    /// Load if present; generate+write if create path and file missing.
-    pub fn load_or_create(store_dir: &Path, create: bool) -> Result<Self, StoreError> {
+    /// Load an existing secret, or generate and write one on datadir create.
+    pub fn load_or_create(store_dir: &Path) -> Result<Self, StoreError> {
         let path = secret_path(store_dir);
         if path.exists() {
             return Self::load_from_store_dir(store_dir);
         }
-        if !create {
+        let s = Self::generate();
+        s.write_to_store_dir(store_dir)?;
+        Ok(s)
+    }
+
+    /// Load a secret that must already exist. A missing file is corruption,
+    /// never a fresh key: regenerating it would silently unread every stored
+    /// script and invalidate the keyed `tx.head` probes.
+    pub fn load_existing(store_dir: &Path) -> Result<Self, StoreError> {
+        if !secret_path(store_dir).exists() {
             return Err(StoreError::Corrupt(
                 "store.secret missing (schema 12+ requires wipe or recreate)",
             ));
         }
-        let s = Self::generate();
-        s.write_to_store_dir(store_dir)?;
-        Ok(s)
+        Self::load_from_store_dir(store_dir)
     }
 
     /// Stream byte for XOR of script/witness at absolute payload offset `off`.

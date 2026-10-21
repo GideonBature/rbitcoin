@@ -1012,7 +1012,7 @@ impl TxTable {
         if seqsigwit_dir != dir {
             std::fs::create_dir_all(seqsigwit_dir).map_err(|e| StoreError::io(seqsigwit_dir, e))?;
         }
-        let secret = crate::store_secret::StoreSecret::load_or_create(dir, true)?;
+        let secret = crate::store_secret::StoreSecret::load_or_create(dir)?;
         let layout = HeadLayout::new(layout.bits)?;
         let (seal_bits, workers) = Self::resolve_open_opts(opts);
         Ok(Self {
@@ -1248,7 +1248,7 @@ impl TxTable {
                 }
             }
         };
-        let secret = crate::store_secret::StoreSecret::load_or_create(dir, true)?;
+        let secret = crate::store_secret::StoreSecret::load_existing(dir)?;
         let t = Self {
             body,
             seqsigwit,
