@@ -38,6 +38,11 @@ meshes are the **`overlay-functional`** labeled / nightly / ship job
 ([`docs/overlay-functional.md`](docs/overlay-functional.md)), not default
 `cargo test`.
 
+The Linux `pread` job runs the same store and query suites with
+`RBITCOIN_IO=pread` after `qc` and `test`, in parallel with `coverage`.
+The `test` job does not set `RBITCOIN_IO`, so it stays on io_uring.
+`pread` is Actions-only. It is not part of the local gate list.
+
 When adding or folding a pin:
 
 | Do | Do not |

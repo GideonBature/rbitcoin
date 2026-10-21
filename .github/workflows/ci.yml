@@ -26,7 +26,9 @@ env:
 #
 # `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, deny, scripts, clippy, then
 # nixos-module-eval. test, windows, and macos each have their own runner.
-# coverage waits for qc and test so a red test does not start it.
+# coverage and pread wait for qc and test so a red test does not start them.
+# pread is the Linux libc backend (`RBITCOIN_IO=pread`) for store and query.
+# `test` leaves that variable unset, so Linux stays on io_uring.
 # Mutants are not a PR check. Nightly workspace runs live in mutants.yml.
 # nixos-module-runtime is a labeled job (nixos-module-runtime.yml), not this file.
 # Operator binaries are GitHub Releases (release.yml), not this workflow.
@@ -205,6 +207,31 @@ jobs:
           workspaces: ". -> target/dev"
       - name: store + node smoke
         run: ./scripts/ci-os-smoke.sh
+
+  # Linux libc pread. Same wait as coverage: a red `test` does not compile it.
+  # Store and query own bulk IO. The `test` job does not set `RBITCOIN_IO`.
+  pread:
+    name: pread
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [qc, test]
+    env:
+      CARGO_TARGET_DIR: target/dev
+      RBITCOIN_IO: pread
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: ${{ github.workspace }}/scripts/tmpfs-test-runner.sh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 1.95.0 branch tip. a5f673d0 still says toolchain 1.95.0 but is no
+      # longer on that branch, so zizmor reports it as an impostor commit.
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-pread
+          workspaces: ". -> target/dev"
+      - name: cargo test store and query
+        run: cargo test -p rbitcoin-store -p rbitcoin-query
 
   # Line-coverage 91% floor + CRAP --fail-above 30 (allowlist in .cargo-crap.toml).
   # Slow; waits for qc and test so a red check does not start

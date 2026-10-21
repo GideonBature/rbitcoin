@@ -17,6 +17,7 @@ REQUIRED=(
   windows
   macos
   coverage
+  pread
 )
 
 usage() {

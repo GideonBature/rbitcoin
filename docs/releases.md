@@ -142,7 +142,7 @@ show as `core-functional / core-functional` and so on.
 
 | Check | Who |
 |-------|-----|
-| `qc` `test` `windows` `macos` `coverage` | Every PR (`ci.yml`). `qc` runs fmt, ast-grep, unwrap-ratchet, deny, script self-tests, clippy, then nixos-module-eval. |
+| `qc` `test` `windows` `macos` `coverage` `pread` | Every PR (`ci.yml`). `qc` runs fmt, ast-grep, unwrap-ratchet, deny, script self-tests, clippy, then nixos-module-eval. `pread` is `RBITCOIN_IO=pread cargo test -p rbitcoin-store -p rbitcoin-query` on Ubuntu. It `needs` `qc` and `test`, so it starts with `coverage`. The `test` job leaves `RBITCOIN_IO` unset (io_uring). |
 | `mutants` | Nightly `47 0 * * *` (17:47 Pacific during PDT) and `workflow_dispatch` (`mutants.yml`). Workspace tests. New mutants until half of the first job's budget, then the backlog; the second job does not open another new window. 8 hour budget in two jobs. Not required. Cursor and `MISSED` lines are on the `mutants-state` branch. |
 | `core-functional` | Nightly, `workflow_dispatch`, label **`core-functional`**; via `release-gate.yml` on label **`release`** **or** ship version |
 | `overlay-functional` | Nightly (`42 6`), `workflow_dispatch`, label **`overlay-functional`**; via `release-gate.yml` on label **`release`** **or** ship version |
