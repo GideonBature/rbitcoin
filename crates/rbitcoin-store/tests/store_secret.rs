@@ -67,10 +67,34 @@ fn mix_txid_not_identity_and_stable() {
 #[test]
 fn load_or_create_and_missing() {
     let dir = temp_dir();
-    assert!(StoreSecret::load_or_create(&dir, false).is_err());
-    let s = StoreSecret::load_or_create(&dir, true).unwrap();
-    let s2 = StoreSecret::load_or_create(&dir, false).unwrap();
+    assert!(StoreSecret::load_existing(&dir).is_err());
+    let s = StoreSecret::load_or_create(&dir).unwrap();
+    let s2 = StoreSecret::load_existing(&dir).unwrap();
     assert_eq!(s, s2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn open_refuses_missing_store_secret() {
+    let dir = temp_dir();
+    {
+        let store = rbitcoin_store::Store::create_tiny(&dir).unwrap();
+        assert!(store.path().join(SECRET_FILE).is_file());
+    }
+    let path = dir.join(SECRET_FILE);
+    std::fs::remove_file(&path).unwrap();
+
+    match rbitcoin_store::Store::open_tiny(&dir) {
+        Err(StoreError::Corrupt(msg)) => {
+            assert!(msg.contains("store.secret missing"), "{msg}");
+        }
+        Ok(_) => panic!("Store::open regenerated a missing store.secret"),
+        Err(other) => panic!("{other:?}"),
+    }
+    assert!(
+        !path.exists(),
+        "a failed open must not write a replacement secret"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
