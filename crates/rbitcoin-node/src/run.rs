@@ -1767,13 +1767,20 @@ pub async fn wait_for_dialable_targets(
             return None;
         }
         if proxy_seeds && Instant::now() >= next_requeue {
-            let n = queue_proxy_seed_addrfetch(peers, network);
-            if n > 0 {
-                info!("ibd: no dialable address yet — re-queued {n} seed hostname(s)");
+            let answering = peers
+                .snapshot()
+                .iter()
+                .any(|p| p.conn_type == PeerConnType::AddrFetch);
+            if !answering {
+                let n = queue_proxy_seed_addrfetch(peers, network);
+                if n > 0 {
+                    info!("ibd: no dialable address yet — re-queued {n} seed hostname(s)");
+                }
             }
             next_requeue = Instant::now() + PROXY_SEED_RETRY;
         }
-        if let Ok(g) = shared_peers.lock() {
+        {
+            let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
             if !g.is_empty() {
                 *addrman = g.clone();
             }
