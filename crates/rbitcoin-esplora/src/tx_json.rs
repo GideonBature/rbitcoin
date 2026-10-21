@@ -21,6 +21,34 @@ pub fn tx_status_json(query: &Query, tx_fk: Fk) -> Result<Value, QueryError> {
     }
 }
 
+/// Header at `height` on `view`'s chain.
+///
+/// A pin that is still `confirmed[view.height]` shares that prefix, so the
+/// confirmed index is the ancestor. A pin whose height was replaced must not
+/// read that index: the sibling now sits there. Walk `prev_fk` from the pin.
+fn header_on_view(
+    query: &Query,
+    view: &ChainView,
+    height: u32,
+) -> Result<Option<rbitcoin_store::HeaderRecord>, QueryError> {
+    if height > view.height.0 {
+        return Ok(None);
+    }
+    if view.still_live(query)? {
+        return Ok(query.header_at_height(Height(height))?.map(|(_, rec)| rec));
+    }
+    let mut rec = query.store().get_header(view.header_fk)?;
+    let mut at = view.height.0;
+    while at > height {
+        if rec.prev_fk.is_null() {
+            return Ok(None);
+        }
+        rec = query.store().get_header(rec.prev_fk)?;
+        at -= 1;
+    }
+    Ok(Some(rec))
+}
+
 /// Confirmation status as of `view`.
 pub fn tx_status_json_in(query: &Query, tx_fk: Fk, view: &ChainView) -> Result<Value, QueryError> {
     let confirmed = query
@@ -29,12 +57,14 @@ pub fn tx_status_json_in(query: &Query, tx_fk: Fk, view: &ChainView) -> Result<V
     if !confirmed {
         return Ok(json!({ "confirmed": false }));
     }
-    let height = query.store().tx_height_get(tx_fk)?.unwrap_or(0);
+    let Some(height) = query.store().tx_height_get(tx_fk)? else {
+        return Ok(json!({ "confirmed": false }));
+    };
     let mut out = json!({
         "confirmed": true,
         "block_height": height,
     });
-    if let Some((_fk, rec)) = query.header_at_height(Height(height))? {
+    if let Some(rec) = header_on_view(query, view, height)? {
         out["block_hash"] = Value::String(block_hash_hex(&rec.hash));
         out["block_time"] = json!(rec.timestamp);
     }

@@ -2375,6 +2375,101 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
     )
     .await;
 
+    // The create block is the tip. Capture that pin, replace the height, and
+    // require status to keep the pinned header rather than the sibling.
+    let parent_hash = create_blk.header.prev_blockhash.to_string();
+    let old_view = q
+        .pin_chain_view_at(&create_blk.block_hash().to_byte_array())
+        .unwrap()
+        .expect("create block is still confirmed");
+    q.disconnect_tip().unwrap();
+    let sibling = rbitcoin_consensus::mine_regtest_paying(
+        create_blk.header.prev_blockhash,
+        create_blk.header.time.wrapping_add(1),
+        102,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![create.clone()],
+    );
+    assert_ne!(sibling.block_hash(), create_blk.block_hash());
+    accept_and_connect_block(&q, &params, Height(102), &sibling, Milestone::NONE).unwrap();
+    let sibling_hash = sibling.block_hash().to_string();
+    let fk = q.tx_fk_at_height(Height(102), 1).unwrap();
+    let pinned_status = rbitcoin_esplora::tx_json::tx_status_json_in(&q, fk, &old_view).unwrap();
+    assert_eq!(
+        pinned_status["block_hash"], asof_create,
+        "status must stay on the pinned create block, not the sibling: {pinned_status}"
+    );
+    assert_eq!(
+        pinned_status["block_time"], create_blk.header.time,
+        "{pinned_status}"
+    );
+    assert_ne!(pinned_status["block_hash"], sibling_hash);
+
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/block-height/102/tx/1?asof={asof_create}"),
+    )
+    .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/tx/{create_hex}/out/0?asof={asof_create}"),
+    )
+    .await;
+    let (st, raw, body) = http_get_raw(
+        esplora.local_addr,
+        &format!("/block-height/101/tx/0?asof={parent_hash}"),
+    )
+    .await;
+    assert_eq!(
+        st, 200,
+        "ancestor pin stays live after the create height is replaced: {body}"
+    );
+    let ancestor: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ancestor["status"]["block_hash"], parent_hash, "{ancestor}");
+    assert_ne!(
+        ancestor["status"]["block_time"], sibling.header.time,
+        "{ancestor}"
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").as_deref(),
+        Some(parent_hash.as_str())
+    );
+
+    // Replace the parent. A live header read at 101 would name the new block.
+    // The stale create pin must walk prev_fk and keep the archived parent.
+    let parent_time = q
+        .header_at_height(Height(101))
+        .unwrap()
+        .expect("parent still confirmed")
+        .1
+        .timestamp;
+    q.disconnect_tip().unwrap();
+    let grand = q
+        .header_at_height(Height(100))
+        .unwrap()
+        .expect("height 100 stays the parent of the replaced block")
+        .1;
+    q.disconnect_tip().unwrap();
+    let alt = rbitcoin_consensus::mine_regtest_paying(
+        bitcoin::BlockHash::from_byte_array(grand.hash),
+        sibling.header.time.wrapping_add(1),
+        101,
+        ScriptBuf::from_bytes(vec![0x51]),
+        Vec::new(),
+    );
+    accept_and_connect_block(&q, &params, Height(101), &alt, Milestone::NONE).unwrap();
+    let alt_hash = alt.block_hash().to_string();
+    assert_ne!(alt_hash, parent_hash);
+    let alt_fk = q.tx_fk_at_height(Height(101), 0).unwrap();
+    let walked = rbitcoin_esplora::tx_json::tx_status_json_in(&q, alt_fk, &old_view).unwrap();
+    assert_eq!(walked["block_height"], 101, "{walked}");
+    assert_eq!(
+        walked["block_hash"], parent_hash,
+        "stale pin must walk prev_fk, not the live header: {walked}"
+    );
+    assert_ne!(walked["block_hash"], alt_hash);
+    assert_eq!(walked["block_time"], parent_time, "{walked}");
+
     handle.shutdown().await;
     esplora.shutdown().await;
 }
