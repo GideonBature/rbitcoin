@@ -68,7 +68,7 @@ fn index_batch_held_session_rejects_foreign_kind_leftover() {
         session.epoch(),
         0,
     );
-    // SAFETY: `leftover_buf` lives until this session drains.
+    // SAFETY: `leftover_buf` lives until the explicit drain below.
     unsafe { session.push_pread(leftover_fd, 0, &mut leftover_buf, ud) }.unwrap();
     session.submit().unwrap();
     assert!(
