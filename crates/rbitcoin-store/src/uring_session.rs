@@ -945,7 +945,7 @@ impl UringSession {
 
 impl UringSession {
     /// A frame boundary has no buffer owner. Never drain pending SQEs here.
-    /// Aborts in release; the `with_drain_hard_cap` test seam returns `Err`.
+    /// Aborts unless the `with_drain_hard_cap` test seam is active.
     fn fail_closed_boundary(&mut self) -> Result<(), StoreError> {
         self.poisoned = true;
         finish_drain_hard_cap(self.pending.len())
@@ -1046,8 +1046,7 @@ impl UringSession {
 impl Drop for AbortOnDrop<'_> {
     fn drop(&mut self) {
         if !self.session.pending.is_empty() {
-            self.session.poisoned = true;
-            let _ = finish_drain_hard_cap(self.session.pending.len());
+            let _ = self.session.fail_closed_boundary();
         }
     }
 }

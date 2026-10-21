@@ -84,8 +84,13 @@ fn index_batch_held_session_rejects_foreign_kind_leftover() {
             "held index_batch must reject leftover, got {err:?}"
         );
         assert!(session.is_poisoned());
-        drop(session);
     });
+    // The rejected index_batch never reached stream_g_pages' own drain.
+    // Drain the real pread while the buffer and file are still alive.
+    session
+        .drain_all()
+        .expect("drain the leftover pread before the buffer dies");
+    drop(session);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

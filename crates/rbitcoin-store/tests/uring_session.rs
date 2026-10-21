@@ -727,33 +727,32 @@ fn drop_after_drain_error_with_inflight_sqes_aborts() {
     );
 }
 
-/// Push a real SQE, then free its buffer before the frame returns. This is the
-/// shape a boundary drain must refuse: only the owning frame could drain it.
+/// Push a real SQE whose buffer stays mapped for the child's life. The
+/// boundary must abort before draining it; freeing the buffer would make the
+/// child's exit signal depend on an unrelated use-after-free.
 #[cfg(target_os = "linux")]
-fn arm_freed_buffer_pread(session: &mut UringSession) {
+fn arm_pending_pread(session: &mut UringSession) {
     use rbitcoin_store::io_handle::IoHandle;
     let exe = std::env::current_exe().expect("current_exe");
     let file = std::fs::File::open(exe).expect("open child exe");
     let fd = IoHandle::from_file(&file);
     std::mem::forget(file);
-    let mut buf = vec![0u8; 4];
-    // SAFETY: intentionally violated to model a prior frame that freed its
-    // buffer; the boundary must abort, not drain into it.
-    unsafe { session.push_pread(fd, 0, &mut buf, 1) }.expect("push pread");
+    let buf: &'static mut [u8] = Box::leak(vec![0u8; 4].into_boxed_slice());
+    // SAFETY: `buf` is leaked for the life of the child process.
+    unsafe { session.push_pread(fd, 0, buf, 1) }.expect("push pread");
     session.submit().expect("submit");
-    drop(buf);
 }
 
-/// `begin_batch` cannot drain a previous frame's SQEs: their buffers are gone.
+/// `begin_batch` cannot drain a previous frame's SQEs.
 #[test]
 #[cfg(target_os = "linux")]
-fn begin_batch_aborts_on_leftover_with_freed_buffer() {
+fn begin_batch_aborts_on_leftover_sqe() {
     const CHILD: &str = "RBITCOIN_URING_BEGIN_LEFTOVER_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let Ok(mut session) = UringSession::try_open_kind(SessionKind::Pool, 32) else {
             std::process::exit(77);
         };
-        arm_freed_buffer_pread(&mut session);
+        arm_pending_pread(&mut session);
         let _ = session.begin_batch();
         std::process::exit(0);
     }
@@ -761,7 +760,7 @@ fn begin_batch_aborts_on_leftover_with_freed_buffer() {
     let out = std::process::Command::new(exe)
         .args([
             "--exact",
-            "uring_session::begin_batch_aborts_on_leftover_with_freed_buffer",
+            "uring_session::begin_batch_aborts_on_leftover_sqe",
             "--nocapture",
         ])
         .env(CHILD, "1")
@@ -781,17 +780,17 @@ fn begin_batch_aborts_on_leftover_with_freed_buffer() {
     );
 }
 
-/// `with_thread_local` must not drain after `f`: `f`'s locals are gone.
+/// `with_thread_local` must not drain after `f`.
 #[test]
 #[cfg(target_os = "linux")]
-fn with_thread_local_aborts_on_leftover_with_freed_buffer() {
+fn with_thread_local_aborts_on_leftover_sqe() {
     const CHILD: &str = "RBITCOIN_URING_TLS_LEFTOVER_CHILD";
     if std::env::var_os(CHILD).is_some() {
         if !rbitcoin_store::bulk_io::io_uring_enabled() {
             std::process::exit(77);
         }
         let _ = with_thread_local(DEFAULT_ENTRIES, |session| {
-            arm_freed_buffer_pread(session);
+            arm_pending_pread(session);
         });
         std::process::exit(0);
     }
@@ -799,7 +798,7 @@ fn with_thread_local_aborts_on_leftover_with_freed_buffer() {
     let out = std::process::Command::new(exe)
         .args([
             "--exact",
-            "uring_session::with_thread_local_aborts_on_leftover_with_freed_buffer",
+            "uring_session::with_thread_local_aborts_on_leftover_sqe",
             "--nocapture",
         ])
         .env(CHILD, "1")
@@ -813,7 +812,7 @@ fn with_thread_local_aborts_on_leftover_with_freed_buffer() {
     assert_eq!(
         out.status.signal(),
         Some(6),
-        "with_thread_local with a freed SQE buffer must SIGABRT: {:?}\n{}",
+        "with_thread_local with a leftover SQE must SIGABRT: {:?}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
@@ -822,13 +821,13 @@ fn with_thread_local_aborts_on_leftover_with_freed_buffer() {
 /// Session drop cannot know whether the SQE buffers are still alive.
 #[test]
 #[cfg(target_os = "linux")]
-fn session_drop_aborts_on_leftover_with_freed_buffer() {
+fn session_drop_aborts_on_leftover_sqe() {
     const CHILD: &str = "RBITCOIN_URING_DROP_LEFTOVER_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let Ok(mut session) = UringSession::try_open_kind(SessionKind::Pool, 32) else {
             std::process::exit(77);
         };
-        arm_freed_buffer_pread(&mut session);
+        arm_pending_pread(&mut session);
         drop(session);
         std::process::exit(0);
     }
@@ -836,7 +835,7 @@ fn session_drop_aborts_on_leftover_with_freed_buffer() {
     let out = std::process::Command::new(exe)
         .args([
             "--exact",
-            "uring_session::session_drop_aborts_on_leftover_with_freed_buffer",
+            "uring_session::session_drop_aborts_on_leftover_sqe",
             "--nocapture",
         ])
         .env(CHILD, "1")
@@ -850,23 +849,25 @@ fn session_drop_aborts_on_leftover_with_freed_buffer() {
     assert_eq!(
         out.status.signal(),
         Some(6),
-        "session drop with a freed SQE buffer must SIGABRT: {:?}\n{}",
+        "session drop with a leftover SQE must SIGABRT: {:?}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
-/// The caller-frame guard must not drain either; it only aborts.
+/// The caller-frame guard must not drain either; it only aborts. A real
+/// submitted pread would be cleared by a drain, so this distinguishes them.
 #[test]
+#[cfg(target_os = "linux")]
 fn abort_guard_does_not_drain_leftover() {
     let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
-    session.pending.insert(1).unwrap();
+    arm_pending_pread(&mut session);
     with_drain_hard_cap(Duration::from_millis(200), || {
         drop(session.abort_guard());
         assert_eq!(
             session.in_flight(),
             1,
-            "abort_guard must not drain a prior frame's SQEs"
+            "abort_guard must not drain a real pending pread"
         );
         assert!(session.is_poisoned());
         drop(session);
