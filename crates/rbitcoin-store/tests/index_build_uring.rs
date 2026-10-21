@@ -1,7 +1,8 @@
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::index_build_uring::{
-    read_index_window, require_body_hwm, run_on_session, IndexHeight, IndexWindow, ReadJob,
+    read_index_window, require_body_hwm, run_on_session, with_index_error_after_push, IndexHeight,
+    IndexWindow, ReadJob,
 };
 use rbitcoin_store::tx_table::{OutputRecord, TxTable};
 
@@ -39,13 +40,10 @@ fn run_on_session_drains_leftover_sqes_on_error() {
         off: 0,
         buf: vec![0u8; 4],
     }];
-    // SAFETY: `jobs[0].buf` lives until the drain below returns.
-    unsafe { session.push_pread(handle, 0, &mut jobs[0].buf, 1) }.expect("push");
-    // Force the inner machine to fail before it can harvest or drain.
-    session.poison();
-    let err = run_on_session(&mut session, &mut jobs).unwrap_err();
+    // The seam fails the machine after it has pushed a real SQE.
+    let err = with_index_error_after_push(|| run_on_session(&mut session, &mut jobs)).unwrap_err();
     assert!(
-        matches!(&err, StoreError::Corrupt(msg) if msg.contains("poisoned")),
+        matches!(&err, StoreError::Corrupt(msg) if msg.contains("index build error")),
         "the wrapper must keep the index-build error, got {err:?}"
     );
     assert_eq!(

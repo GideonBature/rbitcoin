@@ -3,7 +3,7 @@ use rbitcoin_store::error::StoreError;
 use rbitcoin_store::tx_head_mphf::*;
 use std::path::PathBuf;
 
-use rbitcoin_store::uring_session::{IoCtx, SessionKind, UringSession};
+use rbitcoin_store::uring_session::{with_drain_hard_cap, IoCtx, SessionKind, UringSession};
 
 fn tmp(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -35,9 +35,10 @@ fn index_batch_held_session_submits_g_pages() {
 }
 
 /// Held-session leftover `KIND_BULK_PREAD` must not be harvested as a BDZ
-/// g-page CQE (`bdz g page bad slot`). Drain the foreign SQE first.
+/// g-page CQE (`bdz g page bad slot`). A new wave cannot drain a previous
+/// frame's SQEs, so it fails closed instead.
 #[test]
-fn index_batch_held_session_drains_foreign_kind_leftover() {
+fn index_batch_held_session_rejects_foreign_kind_leftover() {
     use std::io::Write;
     let dir = tmp("held-leftover");
     std::fs::create_dir_all(&dir).unwrap();
@@ -46,7 +47,6 @@ fn index_batch_held_session_drains_foreign_kind_leftover() {
     let p = dir.join("t.mphf");
     ram.write_packed_to(&p).unwrap();
     let fd_mphf = BdzMphf::read_packed_from(&p).unwrap();
-    let serial = fd_mphf.index_batch(&keys[..8], &mut IoCtx::none()).unwrap();
 
     let leftover_path = dir.join("leftover.bin");
     let mut leftover_file = std::fs::OpenOptions::new()
@@ -68,7 +68,7 @@ fn index_batch_held_session_drains_foreign_kind_leftover() {
         session.epoch(),
         0,
     );
-    // SAFETY: `leftover_buf` lives until this session drains.
+    // SAFETY: `leftover_buf` lives until the explicit drain below.
     unsafe { session.push_pread(leftover_fd, 0, &mut leftover_buf, ud) }.unwrap();
     session.submit().unwrap();
     assert!(
@@ -76,17 +76,21 @@ fn index_batch_held_session_drains_foreign_kind_leftover() {
         "foreign SQE must still be pending when BDZ starts"
     );
 
-    let batch = {
+    with_drain_hard_cap(std::time::Duration::from_millis(200), || {
         let mut ctx = IoCtx::held(&mut session);
-        fd_mphf
-            .index_batch(&keys[..8], &mut ctx)
-            .unwrap_or_else(|e| {
-                panic!("held index_batch with leftover KIND_BULK_PREAD must drain, not {e}")
-            })
-    };
-    session.drain_all().unwrap();
-    assert_eq!(batch, serial);
-    assert_eq!(session.in_flight(), 0);
+        let err = fd_mphf.index_batch(&keys[..8], &mut ctx).unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Corrupt(msg) if msg.contains("undrained")),
+            "held index_batch must reject leftover, got {err:?}"
+        );
+        assert!(session.is_poisoned());
+    });
+    // The rejected index_batch never reached stream_g_pages' own drain.
+    // Drain the real pread while the buffer and file are still alive.
+    session
+        .drain_all()
+        .expect("drain the leftover pread before the buffer dies");
+    drop(session);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

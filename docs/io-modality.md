@@ -68,15 +68,20 @@ Pool **workers** are process-shared; each TLS session keeps its own CQE queue.
 Nested calls panic. Harvest tracks pending `(kind, epoch, slot)`. A CQE that
 is unmatched, duplicate, from a prior epoch, leftover after `drain_all`, or
 from CQ overflow is `Corrupt` — not a completion and not a TipOnly miss.
-`begin_batch` drains leftover SQEs before bumping epoch and **returns `Err`**
-if the session is poisoned or leftover cannot drain (probe / identity / BDZ
-g-pages / rel preads share the ring). Held fill on that ring fails closed on that
-error (no libc fallback on a dirty ring). Head-resolve `create.loc` is **not**
+`begin_batch` treats leftover SQEs as fatal: a previous machine's buffers are
+gone, so it aborts instead of draining them (probe / identity / BDZ g-pages /
+rel preads share the ring). Every machine drains its own wave before returning,
+or uses a `DrainOnDrop` declared **after** its buffers. `with_thread_local`
+entry/exit/growth and session `Drop` follow the same rule: no boundary drain.
+A caller-frame or backstop guard uses `abort_guard`, which never drains.
+Held fill on that ring fails closed on a boundary error (no libc fallback on a
+dirty ring). Head-resolve `create.loc` is **not**
 on the probe ring: one FdOnly batch after identity (standalone bulk; live shorts
 libc-complete; no probe recover credit). `range_batch_ctx` on a still-held
 session keeps poison fail-closed and live-ring libc-complete. Undrained / unexpected /
-wait-timeout **poisons** the session and drops the TLS ring so the next wave
-opens a new one. `submit_and_wait_one` shares the drain budget (slow-log at
+wait-timeout **poisons** the session. A drain error with pending ids aborts (the
+debug `with_drain_hard_cap` seam returns `Err`); with no pending it returns
+`Err` and the TLS ring is dropped so the next wave opens a new one. `submit_and_wait_one` shares the drain budget (slow-log at
 5 s, poison at the hard cap). Linux wait is Ready only when the CQ has a
 visible event (`io_uring_enter` returns SQEs submitted, not CQE count); an
 empty CQ is TimedOut. Live harvest loops wait, then retry; one empty harvest
@@ -84,13 +89,11 @@ is not batch death. `drain_all` on every TLS session (Linux, pool,
 IOCP) waits while CQEs keep arriving; after 5 s it logs `store: io_uring
 drain slow`. Zero completions for `RBITCOIN_URING_DRAIN_HARD_SECS` (default
 120) abort **explicit** `drain_all` / `DrainOnDrop` (buffers still pinned).
-Session `Drop` waits the same budget then poisons without aborting so a
-stalled device cannot `abort` from a destructor. There is **no** runtime
-switch to `pread`. Drain before SQE buffers drop (spend annotate
-`DrainOnDrop`). Per-op short/errno on a live session still libc-completes
-that op; libc fail is `StoreError::io`. A live unpoisoned session that fails
-the bulk batch after the wait budget (submit / leftover) is the same
-libc-complete, not a recover credit. `RBITCOIN_IO=pread` is the only
+Session `Drop` does not drain: pending ids there abort, because no buffer owner
+is known. There is **no** runtime switch to `pread`. Per-op short/errno on a
+live session still libc-completes that op; libc fail is `StoreError::io`. A live
+unpoisoned session that fails the bulk batch after the wait budget (submit)
+falls back per-op; leftover SQEs are fatal, not a recover credit. `RBITCOIN_IO=pread` is the only
 whole-batch pread fallback (session unavailable also falls back; operator
 restart after a drain abort).
 

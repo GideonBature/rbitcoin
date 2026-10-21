@@ -441,10 +441,9 @@ fn tmp_rw(tag: &str) -> (std::path::PathBuf, std::fs::File) {
     (path, f)
 }
 
-/// `begin_batch` starts a new machine wave: leftover in-flight SQEs from the
-/// previous wave must be drained first (shared TLS ring).
+/// A machine drains before the next wave; the next `begin_batch` bumps epoch.
 #[test]
-fn begin_batch_drains_leftover_before_new_epoch() {
+fn begin_batch_after_explicit_drain_bumps_epoch() {
     use std::io::Write;
     let (path, mut f) = tmp_rw("begin-batch-drain");
     f.write_all(&[0x11, 0x22, 0x33, 0x44]).unwrap();
@@ -459,12 +458,9 @@ fn begin_batch_drains_leftover_before_new_epoch() {
     unsafe { session.push_pread(fd, 0, &mut buf, ud) }.unwrap();
     session.submit().unwrap();
     assert!(session.in_flight() > 0);
+    session.drain_all().expect("drain the current wave");
+    assert_eq!(session.in_flight(), 0);
     session.begin_batch().unwrap();
-    assert_eq!(
-        session.in_flight(),
-        0,
-        "begin_batch must drain leftover before bumping epoch"
-    );
     assert_ne!(session.epoch(), epoch0);
     assert_eq!(&buf, &[0x11, 0x22, 0x33, 0x44]);
     let _ = std::fs::remove_file(&path);
@@ -729,4 +725,151 @@ fn drop_after_drain_error_with_inflight_sqes_aborts() {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// Push a real SQE whose buffer stays mapped for the child's life. The
+/// boundary must abort before draining it; freeing the buffer would make the
+/// child's exit signal depend on an unrelated use-after-free.
+#[cfg(target_os = "linux")]
+fn arm_pending_pread(session: &mut UringSession) {
+    use rbitcoin_store::io_handle::IoHandle;
+    let exe = std::env::current_exe().expect("current_exe");
+    let file = std::fs::File::open(exe).expect("open child exe");
+    let fd = IoHandle::from_file(&file);
+    std::mem::forget(file);
+    let buf: &'static mut [u8] = Box::leak(vec![0u8; 4].into_boxed_slice());
+    // SAFETY: `buf` is leaked for the life of the child process.
+    unsafe { session.push_pread(fd, 0, buf, 1) }.expect("push pread");
+    session.submit().expect("submit");
+}
+
+/// `begin_batch` cannot drain a previous frame's SQEs.
+#[test]
+#[cfg(target_os = "linux")]
+fn begin_batch_aborts_on_leftover_sqe() {
+    const CHILD: &str = "RBITCOIN_URING_BEGIN_LEFTOVER_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let Ok(mut session) = UringSession::try_open_kind(SessionKind::Pool, 32) else {
+            std::process::exit(77);
+        };
+        arm_pending_pread(&mut session);
+        let _ = session.begin_batch();
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "uring_session::begin_batch_aborts_on_leftover_sqe",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RBITCOIN_IO", "pool")
+        .output()
+        .expect("child test");
+    if out.status.code() == Some(77) {
+        return;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        out.status.signal(),
+        Some(6),
+        "begin_batch with a prior frame's SQEs must SIGABRT: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `with_thread_local` must not drain after `f`.
+#[test]
+#[cfg(target_os = "linux")]
+fn with_thread_local_aborts_on_leftover_sqe() {
+    const CHILD: &str = "RBITCOIN_URING_TLS_LEFTOVER_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        if !rbitcoin_store::bulk_io::io_uring_enabled() {
+            std::process::exit(77);
+        }
+        let _ = with_thread_local(DEFAULT_ENTRIES, |session| {
+            arm_pending_pread(session);
+        });
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "uring_session::with_thread_local_aborts_on_leftover_sqe",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RBITCOIN_IO", "pool")
+        .output()
+        .expect("child test");
+    if out.status.code() == Some(77) {
+        return;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        out.status.signal(),
+        Some(6),
+        "with_thread_local with a leftover SQE must SIGABRT: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Session drop cannot know whether the SQE buffers are still alive.
+#[test]
+#[cfg(target_os = "linux")]
+fn session_drop_aborts_on_leftover_sqe() {
+    const CHILD: &str = "RBITCOIN_URING_DROP_LEFTOVER_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let Ok(mut session) = UringSession::try_open_kind(SessionKind::Pool, 32) else {
+            std::process::exit(77);
+        };
+        arm_pending_pread(&mut session);
+        drop(session);
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "uring_session::session_drop_aborts_on_leftover_sqe",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RBITCOIN_IO", "pool")
+        .output()
+        .expect("child test");
+    if out.status.code() == Some(77) {
+        return;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        out.status.signal(),
+        Some(6),
+        "session drop with a leftover SQE must SIGABRT: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The caller-frame guard must not drain either; it only aborts. A real
+/// submitted pread would be cleared by a drain, so this distinguishes them.
+#[test]
+#[cfg(target_os = "linux")]
+fn abort_guard_does_not_drain_leftover() {
+    let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
+    arm_pending_pread(&mut session);
+    with_drain_hard_cap(Duration::from_millis(200), || {
+        drop(session.abort_guard());
+        assert_eq!(
+            session.in_flight(),
+            1,
+            "abort_guard must not drain a real pending pread"
+        );
+        assert!(session.is_poisoned());
+        drop(session);
+    });
 }
