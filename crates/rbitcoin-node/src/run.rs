@@ -1739,6 +1739,20 @@ pub fn catch_up_without_targets(awaiting_dialable: bool) -> CatchUp {
     }
 }
 
+/// No targets, with the main catch-up's no-peer policy.
+///
+/// `Redial` may wait for discovery, but an empty book has nothing to dial;
+/// enter the serve-only path instead of ending the process. `GiveUp` keeps
+/// the bounded behavior for tests, `max_run_secs`, and the tip-index
+/// supervisor path.
+pub fn catch_up_without_targets_for(awaiting_dialable: bool, peerless: Peerless) -> CatchUp {
+    if peerless == Peerless::GiveUp {
+        catch_up_without_targets(awaiting_dialable)
+    } else {
+        CatchUp::complete()
+    }
+}
+
 pub fn catch_up_after_ok(accepted: u32, tip: u32, shutdown: bool) -> CatchUp {
     if shutdown || (tip == 0 && accepted == 0) {
         CatchUp::Incomplete
@@ -1882,7 +1896,7 @@ pub async fn run_ibd_or_skip(
     peerless: Peerless,
 ) -> CatchUp {
     if ibd_targets.is_empty() {
-        let catch_up = catch_up_without_targets(awaiting_dialable);
+        let catch_up = catch_up_without_targets_for(awaiting_dialable, peerless);
         if catch_up.is_complete() {
             info!("ibd: no outbound peers; serving only (use --connect or seeds)");
         } else {

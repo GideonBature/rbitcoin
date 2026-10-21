@@ -400,6 +400,20 @@ fn startup_catch_up_waits_for_peers_only_when_a_give_up_would_exit() {
         rbitcoin_ibd::Peerless::GiveUp,
         "a capped run returns to its caller"
     );
+    assert!(
+        catch_up_without_targets_for(
+            true,
+            rbitcoin_ibd::Peerless::Redial {
+                cap: rbitcoin_ibd::PEERLESS_REDIAL_CAP
+            }
+        )
+        .is_complete(),
+        "an empty book with discovery in flight must serve, not end the process"
+    );
+    assert!(
+        !catch_up_without_targets_for(true, rbitcoin_ibd::Peerless::GiveUp).is_complete(),
+        "a capped or tip-index run keeps the bounded empty-book result"
+    );
 }
 
 #[test]
