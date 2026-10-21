@@ -42,6 +42,10 @@ assert_fail "try_into is excluded only when it is the unwrap receiver" \
   python3 "$PY" --root "$FIX/try-chain"
 assert_ok "try_into turbofish is still not counted" \
   python3 "$PY" --root "$FIX/turbofish"
+assert_fail "a block comment closes at the first */" \
+  python3 "$PY" --root "$FIX/cfg-nest"
+assert_fail "a name that only ends in try_into is counted" \
+  python3 "$PY" --root "$FIX/try-name"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "unwrap-ratchet.test.sh: $PASS passed, $FAIL failed"

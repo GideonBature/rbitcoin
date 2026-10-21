@@ -19,10 +19,11 @@ import re
 import sys
 
 UNWRAP_RE = re.compile(r"\.unwrap(?:_err)?\s*\(")
-# The excluded call is the tail of the receiver. A turbofish may contain
-# `;` (`[u8; 4]`). A later `.ok()` or `.as_ref()` is not that tail.
+# The excluded call is the tail of the receiver. The name is `try_into`,
+# not a longer identifier. A turbofish may contain `;` (`[u8; 4]`).
+# A later `.ok()` or `.as_ref()` is not that tail.
 EXCLUDED_TAIL = re.compile(
-    r"(?:try_into(?:\s*::\s*<(?:[^<>\[\]]|\[[^\]]*\]|<[^<>]*>)*>)?\s*\(\s*\)"
+    r"(?:(?<![A-Za-z0-9_])try_into(?:\s*::\s*<(?:[^<>\[\]]|\[[^\]]*\]|<[^<>]*>)*>)?\s*\(\s*\)"
     r"|\.(?:lock|read|write)\s*\(\s*\))\s*$"
 )
 CFG_TEST_ATTR = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
@@ -134,17 +135,10 @@ def blank_non_code(src: str) -> str:
             i = j
             continue
         if src.startswith("/*", i):
-            depth = 1
-            j = i + 2
-            while j < n and depth:
-                if src.startswith("/*", j):
-                    depth += 1
-                    j += 2
-                elif src.startswith("*/", j):
-                    depth -= 1
-                    j += 2
-                else:
-                    j += 1
+            # Rust ends a block comment at the first `*/`. `/*` inside it
+            # does not nest.
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
             _blank(chars, i, j)
             i = j
             continue
