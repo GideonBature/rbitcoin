@@ -477,6 +477,35 @@ fn pinned_tip(query: &Query, asof: Option<[u8; 32]>) -> Result<ChainView, Respon
     }
 }
 
+/// Position lookup shared by the single GET and every batch slot.
+/// `Ok(None)` is a missing slot (404 on a GET, `null` in a batch).
+fn output_at_height(
+    st: &AppState,
+    view: &ChainView,
+    height: u32,
+    index: u32,
+    vout: u32,
+) -> Result<Option<Value>, StoreError> {
+    if height > view.height.0 || (height == 0 && index == 0) {
+        return Ok(None);
+    }
+    let fk = match st.query.tx_fk_at_height(Height(height), index) {
+        Ok(fk) => fk,
+        Err(StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let txid = st.query.store().txs.body_txid(fk)?;
+    match output_at_view(&st.query, st.network, fk, &txid, vout, view) {
+        Ok(v) => Ok(Some(v)),
+        Err(StoreError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn json_u32(v: &Value) -> Option<u32> {
+    u32::try_from(v.as_u64()?).ok()
+}
+
 /// `GET /block-height/{height}/tx/{index}/out/{vout}`.
 pub async fn block_height_tx_out(
     State(st): State<AppState>,
@@ -488,21 +517,63 @@ pub async fn block_height_tx_out(
             Ok(v) => v,
             Err(r) => return r,
         };
-        if height > view.height.0 || (height == 0 && index == 0) {
-            return not_found();
-        }
-        let fk = match st.query.tx_fk_at_height(Height(height), index) {
-            Ok(fk) => fk,
-            Err(e) => return store_err(e),
-        };
-        let txid = match st.query.store().txs.body_txid(fk) {
-            Ok(id) => id,
-            Err(e) => return store_err(e),
-        };
-        match output_at_view(&st.query, st.network, fk, &txid, vout, &view) {
-            Ok(v) => maybe_attach_view(Json(v).into_response(), Some(view)),
+        match output_at_height(&st, &view, height, index, vout) {
+            Ok(Some(v)) => maybe_attach_view(Json(v).into_response(), Some(view)),
+            Ok(None) => not_found(),
             Err(e) => store_err(e),
         }
+    })
+    .await
+}
+
+/// `POST /block-heights/txs/outs`. One pin for every slot.
+pub async fn post_block_height_outs(
+    State(st): State<AppState>,
+    AsOf(asof): AsOf,
+    body: Bytes,
+) -> Response {
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    spawn_join(move || {
+        let parsed: Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::BAD_REQUEST, "invalid json").into_response(),
+        };
+        let Some(arr) = parsed.as_array() else {
+            return (StatusCode::BAD_REQUEST, "body must be a JSON array").into_response();
+        };
+        if arr.len() > MULTI_ADDRESS_LIMIT {
+            return body_too_long();
+        }
+        let mut slots = Vec::with_capacity(arr.len());
+        for el in arr {
+            let Some(triple) = el.as_array().filter(|t| t.len() == 3) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            let Some(height) = json_u32(&triple[0]) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            let Some(index) = json_u32(&triple[1]) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            let Some(vout) = json_u32(&triple[2]) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            slots.push((height, index, vout));
+        }
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let mut out = Vec::with_capacity(slots.len());
+        for (height, index, vout) in slots {
+            match output_at_height(&st, &view, height, index, vout) {
+                Ok(v) => out.push(v.map_or(Value::Null, |row| row)),
+                Err(e) => return store_err(e),
+            }
+        }
+        maybe_attach_view(Json(Value::Array(out)).into_response(), Some(view))
     })
     .await
 }

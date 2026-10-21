@@ -677,6 +677,43 @@ async fn confirmed_output_by_position(pad: &HttpPad) {
     assert_eq!(st, 404, "mempool-only tx has no output object: {body}");
 }
 
+/// Batch keeps order, repeats duplicates, and rejects a bad element or a long body.
+async fn batch_outputs_keep_order(pad: &HttpPad) {
+    let addr = pad.addr;
+    let (st, body) = http_post(addr, "/block-heights/txs/outs", b"[]").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body, "[]");
+
+    let mix = serde_json::to_vec(&json!([[4, 0, 0], [4, 0, 0], [4, 9, 0], [999, 0, 0]])).unwrap();
+    let (st, body) = http_post(addr, "/block-heights/txs/outs", &mix).await;
+    assert_eq!(st, 200, "{body}");
+    let rows: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows.len(), 4, "{body}");
+    assert_eq!(rows[0]["spent"], false, "unspent coinbase: {body}");
+    assert_eq!(rows[0]["scriptpubkey"], "51", "{body}");
+    assert_eq!(rows[0]["value"], json!(50_0000_0000u64), "{body}");
+    assert_eq!(rows[1], rows[0], "duplicate slot repeats: {body}");
+    assert!(rows[2].is_null(), "missing index: {body}");
+    assert!(rows[3].is_null(), "missing height: {body}");
+
+    let (st, body) = http_post(addr, "/block-heights/txs/outs", b"{\"no\":1}").await;
+    assert_eq!(st, 400, "{body}");
+    let (st, body) = http_post(addr, "/block-heights/txs/outs", b"[[1,2]]").await;
+    assert_eq!(st, 400, "{body}");
+    let (st, body) = http_post(addr, "/block-heights/txs/outs", b"[[1,2,\"x\"]]").await;
+    assert_eq!(st, 400, "{body}");
+    assert!(!body.contains("scriptpubkey"), "400 must not return a partial array: {body}");
+
+    let mut long = Vec::new();
+    for _ in 0..301 {
+        long.push(json!([2, 0, 0]));
+    }
+    let raw = serde_json::to_vec(&Value::Array(long)).unwrap();
+    let (st, body) = http_post(addr, "/block-heights/txs/outs", &raw).await;
+    assert_eq!(st, 422, "{body}");
+    assert!(body.contains("body too long"), "{body}");
+}
+
 /// One TCP Esplora on one hub: an empty chain, then a mature pad a wallet
 /// pages, a mempool spend, junk requests, a same-height tip replace, and a
 /// pruned tail once the chain grows past the prune window.
@@ -724,6 +761,7 @@ async fn esplora_tcp_wallet_mempool_and_replace() {
     chain_cursor_matches_chain_page(&pad, &spend).await;
     mempool_spend_outspends_and_hex(&pad, &spend).await;
     confirmed_output_by_position(&pad).await;
+    batch_outputs_keep_order(&pad).await;
     junk_paths_asof_and_post(pad.addr, &pad.hashes[0]).await;
     same_height_replace_restamps(&mut pad).await;
     pruned_tail_is_partial_json(&mut pad).await;

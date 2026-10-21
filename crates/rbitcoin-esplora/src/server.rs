@@ -188,6 +188,7 @@ pub fn path_accepts_asof(path: &str) -> bool {
             | ["tx", _, "outspend", _]
             | ["tx", _, "out", _]
             | ["block-height", _, "tx", _, "out", _]
+            | ["block-heights", "txs", "outs"]
             | ["address", _]
             | ["scripthash", _]
             | ["address", _, "utxo"]
@@ -824,6 +825,10 @@ pub async fn run_esplora(
             get(handlers::block_height_tx_out),
         )
         .route("/tx/{txid}/out/{vout}", get(handlers::tx_out))
+        .route(
+            "/block-heights/txs/outs",
+            post(handlers::post_block_height_outs),
+        )
         .route("/block/{hash}", get(handlers::block_json))
         .route("/block/{hash}/header", get(block_header))
         .route("/block/{hash}/status", get(handlers::block_status))
