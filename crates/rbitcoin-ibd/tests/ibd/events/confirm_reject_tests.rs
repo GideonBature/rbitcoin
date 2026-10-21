@@ -41,6 +41,82 @@ fn apply_confirm_reject(
     );
 }
 
+/// A competing fork's BadPrev frees its height even when the stamp was a
+/// multi-block wave. `isolate_if_batched` turns that wave into a cascade,
+/// which leaves the body queued and the height occupied. A parent that is
+/// this path's still-committing block stays a retry.
+#[test]
+fn batched_off_path_bad_prev_frees_the_height() {
+    let err = "unexpected previous header";
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("off-path-bad-prev");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let parent = h(0xab);
+    let child = h(0xcd);
+    assert_ne!(Some(parent), Some(tip));
+
+    let mut off = IbdWorkState::new(Vec::new(), Some(tip), Some(0));
+    off.record_height(child, 30);
+    off.ordered.push_back(child);
+    off.ordered_set.insert(child);
+    off.note_path_prev(child, parent);
+    apply_confirm_reject_class(
+        &mut off,
+        30,
+        child,
+        ConfirmRejectClass::from_err_str(err),
+        err,
+        Some(hub.query.as_ref()),
+        Some(&hub),
+        2,
+        None,
+        None,
+        RejectParent {
+            hash: Some(parent),
+            unreadable: false,
+        },
+    );
+    assert!(
+        off.height_to_hash.get(&30).is_none(),
+        "off-path BadPrev frees the height"
+    );
+    assert!(
+        !off.ordered_set.contains(&child),
+        "off-path BadPrev leaves the work path"
+    );
+    assert!(
+        !off.body.is_missing(&child),
+        "off-path BadPrev is not fetched again"
+    );
+
+    let mut committing = IbdWorkState::new(Vec::new(), Some(tip), Some(0));
+    committing.record_height(parent, 29);
+    committing.record_height(child, 30);
+    committing.note_path_prev(child, parent);
+    apply_confirm_reject_class(
+        &mut committing,
+        30,
+        child,
+        ConfirmRejectClass::from_err_str(err),
+        err,
+        Some(hub.query.as_ref()),
+        Some(&hub),
+        2,
+        None,
+        None,
+        RejectParent {
+            hash: Some(parent),
+            unreadable: false,
+        },
+    );
+    assert_eq!(
+        committing.height_to_hash.get(&30),
+        Some(&child),
+        "a parent still committing stays a retry"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// SoftWire/Cascade/EngineFault/ConsensusInvalid/Cancelled class map.
 #[test]
 fn confirm_reject_class_matches_substring_table() {

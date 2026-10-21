@@ -1216,6 +1216,16 @@ pub fn apply_confirm_reject(
         class
     };
     let class = class.isolate_if_batched(batch_len);
+    // A batched stamp isolates to Cascade and would requeue this hash.
+    // Off-path BadPrev is a competing fork: the soft arm drops the height
+    // and does not ask for the same block again. Tip and committing
+    // parents stay on the retry below.
+    if super::reorg::is_bad_prev_err(err)
+        && bad_prev_parent(st, hub, hash, height) == BadPrevParent::OffPath
+    {
+        apply_soft_wire_reject(st, height, hash, err, query, hub, sender);
+        return;
+    }
     if class == ConfirmRejectClass::Cascade && batch_len > 1 {
         if let Some(f) = feed {
             let until = height.saturating_add(batch_len as u32).saturating_sub(1);
