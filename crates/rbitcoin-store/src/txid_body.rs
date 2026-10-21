@@ -327,12 +327,12 @@ impl TxidBody {
         let mut used_session = false;
         if ctx.session().is_some() {
             use crate::bulk_io::ReadOp;
-            // SAFETY: each jobs[i].1 is a distinct Vec owned until after pread_batch_on_ctx.
             let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(jobs.len());
             for (first, blob, _) in jobs.iter_mut() {
                 let off = Self::entry_offset(*first)?;
                 let ptr = blob.as_mut_ptr();
                 let len = blob.len();
+                // SAFETY: `ptr`/`len` are this job's `Vec`, live until `pread_batch_on_ctx` returns.
                 let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
                 ops.push(ReadOp {
                     fd,

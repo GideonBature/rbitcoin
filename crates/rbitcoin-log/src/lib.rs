@@ -7,6 +7,8 @@
 //!
 //! [`progress`] keeps live done/total for long stages, readable at any level.
 
+#![forbid(unsafe_code)]
+
 #[doc(hidden)]
 pub mod api_log;
 pub mod progress;

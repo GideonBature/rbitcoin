@@ -509,6 +509,7 @@ fn pool_harvest_returns_user_data_and_drains() {
     let mut b = [0u8; 2];
     // SAFETY: `a` and `b` live until this session drains.
     unsafe { session.push_pread(fd, 0, &mut a, 10) }.expect("push a");
+    // SAFETY: `b` lives until this session drains.
     unsafe { session.push_pread(fd, 2, &mut b, 11) }.expect("push b");
     session.submit().unwrap();
     session.submit_and_wait_one().unwrap();

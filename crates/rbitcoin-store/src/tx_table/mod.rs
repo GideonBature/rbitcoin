@@ -622,13 +622,13 @@ pub fn read_spend_peek_chunk(
             }
         })
         .collect();
-    // SAFETY: each buffer is this chunk's own `storage` slot. Ops do not alias.
     let mut ops: Vec<ReadOp<'_>> = Vec::with_capacity(chunk.len());
     for (g, store) in chunk.iter().zip(storage.iter_mut()) {
         let (ptr, len) = match store {
             Store::Single(b) => (b.as_mut_ptr(), META_LEN),
             Store::Bounce(b) => (b.as_mut_ptr(), b.len()),
         };
+        // SAFETY: `ptr`/`len` are this slot's own buffer in `storage`, live for `ops`.
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
         ops.push(ReadOp {
             fd: body_fd,

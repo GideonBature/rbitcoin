@@ -422,6 +422,7 @@ async fn bind_unix_socket_does_not_strip_dir_search() {
     extern "C" {
         fn umask(mask: u32) -> u32;
     }
+    // SAFETY: `umask` is process-global. This test restores `old` before return.
     let old = unsafe { umask(0o022) };
     let stop = Arc::new(AtomicBool::new(false));
     let bare = Arc::new(AtomicBool::new(false));
@@ -463,6 +464,7 @@ async fn bind_unix_socket_does_not_strip_dir_search() {
     }
     stop.store(true, Ordering::Relaxed);
     let _ = worker.join();
+    // SAFETY: restores the umask saved at the start of this test.
     unsafe { umask(old) };
     assert!(
         !bare.load(Ordering::Relaxed),

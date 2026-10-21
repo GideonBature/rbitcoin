@@ -484,6 +484,7 @@ fn builders_paths_milestone_and_ensure() {
         }
         let fresh = dir.join("umask-fresh");
         let _ = std::fs::remove_dir_all(&fresh);
+        // SAFETY: `umask` is process-global. This test restores `prev` before the asserts.
         let prev = unsafe { umask(0o022) };
         let created = NodeConfig::default().with_datadir(&fresh).with_tiny_heads();
         created.ensure_datadir().unwrap();
@@ -491,6 +492,7 @@ fn builders_paths_milestone_and_ensure() {
         std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o755)).unwrap();
         created.ensure_datadir().unwrap();
         let kept = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        // SAFETY: restores the umask saved above.
         unsafe { umask(prev) };
         assert_eq!(mode, 0o700, "new datadir under umask 0022 is {mode:o}");
         assert_eq!(

@@ -6,6 +6,8 @@
 //! `GET …/txs/summary` is a mempool.space-shaped compact dialect (not
 //! Blockstream Esplora `API.md`). Opt-in `GET /block-template` is GBT.
 
+#![forbid(unsafe_code)]
+
 #[doc(hidden)]
 pub mod handlers;
 #[doc(hidden)]

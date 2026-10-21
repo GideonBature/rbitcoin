@@ -79,6 +79,33 @@ Do not copy the helper into a test-friendly crate and leave the original
 
 CI is `cargo clippy --workspace --all-targets -- -D warnings`.
 
+`rbitcoin-log`, `rbitcoin-mempool`, `rbitcoin-rpc`, `rbitcoin-electrum`,
+`rbitcoin-esplora`, and `rbitcoin-cli` are `#![forbid(unsafe_code)]` on
+each crate root (`lib.rs`, and `rbitcoin-cli`'s `main.rs`). A new `unsafe`
+block in those libraries fails the build. Integration tests are separate
+crates and are not covered. Store, net, consensus, primitives, node, query,
+ibd, and sv2 stay open: they call FFI.
+
+`unsafe_op_in_unsafe_fn` is workspace deny. An `unsafe fn` wraps each
+unsafe operation in its own block. The four `loc_simd` helpers are a
+site allow: the body is one target-feature intrinsic sequence, and the
+contract is the function's `# Safety` section.
+
+`undocumented_unsafe_blocks` is workspace deny. Each `unsafe` block and
+`unsafe impl` has a `// SAFETY:` comment on the preceding line. A wrong
+positive is a site `#[allow(clippy::undocumented_unsafe_blocks)]` with a
+one-line reason. Do not allow it crate-wide.
+
+Bare production `.unwrap()` / `.unwrap_err()` are frozen per file in
+[`lint/unwrap-baseline.txt`](../lint/unwrap-baseline.txt).
+`./scripts/unwrap-ratchet.sh` fails when a file grows, when a new file
+gains one, and when a cleanup leaves the old count in place. Each call
+counts as one. The count skips `#[cfg(test)]` items, `tests/`,
+`rbitcoin-test`, and `rbitcoin-bench`. A `.lock()` / `.read()` /
+`.write()` / `try_into()` receiver is skipped, including a turbofish
+and a call broken onto the previous line. A later method on that value
+still counts. `.expect(reason)` is not counted.
+
 **Goal:** no `[workspace.lints.clippy]` `= "allow"`. A lint that is wrong
 for one item is `#[allow(clippy::lint)]` on **that item**, with a one-line
 reason (Core-faithful opcode loop, wire layout, dispatch bag,

@@ -1,5 +1,7 @@
 //! Datadir socket / bearer-token JSON-RPC client for the documented node subset.
 
+#![forbid(unsafe_code)]
+
 use rbitcoin_primitives::Network;
 use serde_json::Value;
 use std::ffi::OsString;

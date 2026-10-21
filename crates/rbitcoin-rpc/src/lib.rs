@@ -2,6 +2,8 @@
 //!
 //! See `docs/rpc.md` for methods, auth, and permanent gaps.
 
+#![forbid(unsafe_code)]
+
 #[doc(hidden)]
 pub mod auth;
 #[doc(hidden)]

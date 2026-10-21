@@ -31,6 +31,7 @@ pub struct ReadonlyMap {
 // writer `pwrite`s the same inode through another fd. That caller reads the
 // map only by atomic loads from `as_ptr` and never forms `as_file_bytes`.
 unsafe impl Send for ReadonlyMap {}
+// SAFETY: same as `Send`: atomic loads from `as_ptr`, never `as_file_bytes`.
 unsafe impl Sync for ReadonlyMap {}
 
 impl std::fmt::Debug for ReadonlyMap {
@@ -123,6 +124,7 @@ impl Drop for ReadonlyMap {
 #[doc(hidden)]
 pub fn map_readonly(file: &File, len: usize) -> std::io::Result<*mut u8> {
     use std::os::fd::AsRawFd;
+    // SAFETY: `len` is the mapped prefix. `MAP_SHARED` + `PROT_READ` only.
     let ptr = unsafe {
         libc::mmap(
             ptr::null_mut(),
@@ -145,6 +147,7 @@ pub fn unmap(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }
+    // SAFETY: `ptr`/`len` came from `map_readonly` for this mapping.
     unsafe {
         libc::munmap(ptr as *mut libc::c_void, len);
     }
@@ -155,12 +158,16 @@ pub fn unmap(ptr: *mut u8, len: usize) {
 pub fn map_readonly(file: &File, len: usize) -> std::io::Result<*mut u8> {
     use std::os::windows::io::AsRawHandle;
     let handle = file.as_raw_handle() as *mut std::ffi::c_void;
-    let mapping =
-        unsafe { CreateFileMappingW(handle, ptr::null_mut(), PAGE_READONLY, 0, 0, ptr::null()) };
+    let mapping = unsafe {
+        // SAFETY: `handle` is the open file. The mapping is read-only and unnamed.
+        CreateFileMappingW(handle, ptr::null_mut(), PAGE_READONLY, 0, 0, ptr::null())
+    };
     if mapping.is_null() {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: `mapping` is the handle just created. `len` is the requested prefix.
     let view = unsafe { MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, len) };
+    // SAFETY: `mapping` is a live handle. The view keeps the mapping mapped.
     unsafe {
         CloseHandle(mapping);
     }
@@ -176,6 +183,7 @@ pub fn unmap(ptr: *mut u8, _len: usize) {
     if ptr.is_null() {
         return;
     }
+    // SAFETY: `ptr` came from `MapViewOfFile` for this mapping.
     unsafe {
         UnmapViewOfFile(ptr as *mut std::ffi::c_void);
     }

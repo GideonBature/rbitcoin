@@ -18,7 +18,7 @@ pub struct IocpEngine {
     pub associated: HashSet<isize>,
 }
 
-// IOCP handle is used only from the machine thread (same as uring TLS).
+// SAFETY: the port is used only from the machine thread, same as the uring TLS session.
 unsafe impl Send for IocpEngine {}
 
 extern "system" {
@@ -71,11 +71,15 @@ pub const INVALID: *mut core::ffi::c_void = -1isize as *mut core::ffi::c_void;
 
 impl IocpEngine {
     pub fn open(_entries: u32) -> Result<Self, StoreError> {
+        // SAFETY: creates a new port (`INVALID` file, null existing). One thread.
         let port = unsafe { CreateIoCompletionPort(INVALID, null_mut(), 0, 1) };
         if port.is_null() {
             return Err(StoreError::io(
                 Path::new("iocp"),
-                std::io::Error::from_raw_os_error(unsafe { GetLastError() } as i32),
+                std::io::Error::from_raw_os_error(
+                    // SAFETY: reads the Win32 last-error for this thread.
+                    unsafe { GetLastError() } as i32,
+                ),
             ));
         }
         Ok(Self {
@@ -92,11 +96,13 @@ impl IocpEngine {
             return Ok(());
         }
         let h = raw as *mut core::ffi::c_void;
+        // SAFETY: `h` is the caller's overlapped handle. `self.port` is open.
         let p = unsafe { CreateIoCompletionPort(h, self.port, 0, 0) };
         if p.is_null() {
             // 87 = already bound to some port, or not FILE_FLAG_OVERLAPPED.
             // We only skip the syscall for handles *this* port bound. An
             // untracked 87 is a hard error (non-overlapped or another port).
+            // SAFETY: reads the Win32 last-error for this thread.
             let err = unsafe { GetLastError() };
             return Err(StoreError::io(
                 Path::new("iocp"),
@@ -170,13 +176,17 @@ impl IocpEngine {
         let mut got = 0u32;
         let ovp = ov as *mut core::ffi::c_void;
         let ok = if write {
+            // SAFETY: `ov` is a heap `Overlapped` live until harvest. `ptr` is the caller buffer.
             unsafe { WriteFile(h, ptr, len as u32, &mut got, ovp) }
         } else {
+            // SAFETY: same as the write arm, reading into the caller buffer.
             unsafe { ReadFile(h, ptr, len as u32, &mut got, ovp) }
         };
         if ok == 0 {
+            // SAFETY: reads the Win32 last-error for this thread.
             let err = unsafe { GetLastError() };
             if err != ERROR_IO_PENDING {
+                // SAFETY: the issue failed before the kernel took `ov`, so we own it again.
                 unsafe {
                     drop(Box::from_raw(ov));
                 }
@@ -213,14 +223,17 @@ impl IocpEngine {
             let mut xfer = 0u32;
             let mut key = 0usize;
             let mut ov: *mut Overlapped = null_mut();
+            // SAFETY: `self.port` is open. `ov` is an out pointer the kernel fills.
             let ok = unsafe {
                 GetQueuedCompletionStatus(self.port, &mut xfer, &mut key, &mut ov, timeout_ms)
             };
             if ov.is_null() {
                 return;
             }
+            // SAFETY: `ov` is the `Box<Overlapped>` from `issue`, queued until this CQE.
             let boxed = unsafe { Box::from_raw(ov) };
             let res = if ok == 0 {
+                // SAFETY: reads the Win32 last-error for this thread.
                 -(unsafe { GetLastError() } as i32)
             } else {
                 xfer as i32
@@ -238,6 +251,7 @@ impl IocpEngine {
 impl Drop for IocpEngine {
     fn drop(&mut self) {
         if !self.port.is_null() {
+            // SAFETY: `self.port` is the completion port this engine owns.
             unsafe {
                 CloseHandle(self.port);
             }

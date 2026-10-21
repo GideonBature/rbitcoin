@@ -57,6 +57,7 @@ impl IoHandle {
         }
         #[cfg(unix)]
         {
+            // SAFETY: `buf` is the caller's mutable slice. `self.fd` is open.
             let n = unsafe {
                 libc::pread(
                     self.fd,
@@ -84,6 +85,7 @@ impl IoHandle {
         }
         #[cfg(unix)]
         {
+            // SAFETY: `buf` is the caller's slice. `self.fd` is open.
             let n = unsafe {
                 libc::pwrite(
                     self.fd,
@@ -137,6 +139,7 @@ impl Drop for PositionalXferEvent {
         extern "system" {
             fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
         }
+        // SAFETY: `self.0` is the event handle this guard owns.
         unsafe {
             CloseHandle(self.0);
         }
@@ -156,6 +159,7 @@ thread_local! {
                 name: *const u16,
             ) -> *mut core::ffi::c_void;
         }
+        // SAFETY: manual-reset unnamed event. The thread-local drops it.
         PositionalXferEvent(unsafe { CreateEventW(null_mut(), 1, 0, null()) })
     };
 }
@@ -202,8 +206,10 @@ pub fn win_xfer(handle: isize, offset: u64, ptr: *mut u8, len: usize, write: boo
     POSITIONAL_XFER_EVENT.with(|event| {
         let event = event.0;
         if event.is_null() {
+            // SAFETY: reads the Win32 last-error for this thread.
             return -(unsafe { GetLastError() } as i32);
         }
+        // SAFETY: `event` is the thread-local manual-reset event.
         unsafe {
             ResetEvent(event);
         }
@@ -222,14 +228,19 @@ pub fn win_xfer(handle: isize, offset: u64, ptr: *mut u8, len: usize, write: boo
         let h = handle as *mut core::ffi::c_void;
         let ovp = (&mut ov) as *mut Overlapped as *mut core::ffi::c_void;
         let ok = if write {
+            // SAFETY: `ptr`/`len` is the caller buffer. `ov` is stack-local with the low event bit set.
             unsafe { WriteFile(h, ptr, len as u32, &mut got, ovp) }
         } else {
+            // SAFETY: same overlapped transfer as the write arm, into the caller buffer.
             unsafe { ReadFile(h, ptr, len as u32, &mut got, ovp) }
         };
         if ok == 0 {
+            // SAFETY: reads the Win32 last-error for this thread.
             let err = unsafe { GetLastError() };
             if err == ERROR_IO_PENDING {
+                // SAFETY: `ov` is the stack overlapped passed to ReadFile/WriteFile. Wait is on.
                 if unsafe { GetOverlappedResult(h, ovp, &mut got, 1) } == 0 {
+                    // SAFETY: reads the Win32 last-error for this thread.
                     let err = unsafe { GetLastError() };
                     if !write && err == ERROR_HANDLE_EOF {
                         return 0;
@@ -272,6 +283,7 @@ pub fn win_set_eof(file: &std::fs::File, new_len: u64) -> std::io::Result<()> {
     let info = FileEndOfFileInfo {
         end_of_file: new_len as i64,
     };
+    // SAFETY: `info` is a local end-of-file struct. `file` is open.
     let ok = unsafe {
         SetFileInformationByHandle(
             file.as_raw_handle() as *mut core::ffi::c_void,
@@ -282,7 +294,8 @@ pub fn win_set_eof(file: &std::fs::File, new_len: u64) -> std::io::Result<()> {
     };
     if ok == 0 {
         Err(std::io::Error::from_raw_os_error(
-            unsafe { GetLastError() } as i32
+            // SAFETY: reads the Win32 last-error for this thread.
+            unsafe { GetLastError() } as i32,
         ))
     } else {
         Ok(())

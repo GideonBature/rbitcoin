@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use rbitcoin_cli::cli_main;
 use std::process::ExitCode;
 
