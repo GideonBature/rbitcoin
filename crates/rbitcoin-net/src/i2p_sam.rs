@@ -10,12 +10,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Pause before a SAM retry. Thirty-two session attempts are about 16s, so a
-/// router that is not accepting yet still comes up.
-#[cfg(not(debug_assertions))]
-const SAM_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
-/// Debug and test builds. Release keeps 500ms.
-#[cfg(debug_assertions)]
-const SAM_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+/// router that is not accepting yet still comes up. Callers pass this into
+/// [`I2pSam::connect`]. The suite passes [`SAM_RETRY_TEST`].
+pub const SAM_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+/// What the suite passes so a retryable SAM error stays at the old debug cadence.
+#[doc(hidden)]
+pub const SAM_RETRY_TEST: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[doc(hidden)]
 pub static INSTALLED: Mutex<Option<Installed>> = Mutex::new(None);
@@ -32,6 +32,8 @@ pub struct I2pSam {
     pub session_id: String,
     pub destination: String,
     pub forward_port: Option<u16>,
+    /// Pause before a retryable SAM error is tried again.
+    pub retry: std::time::Duration,
     pub _control: TcpStream,
     pub _forward: Option<TcpStream>,
 }
@@ -42,6 +44,8 @@ pub struct I2pDialer {
     pub session_id: String,
     pub destination: String,
     pub forward_port: Option<u16>,
+    /// Pause before a retryable stream error is tried again.
+    pub retry: std::time::Duration,
 }
 
 pub fn install(dialer: I2pDialer) {
@@ -164,13 +168,17 @@ pub fn clear_installed() {
 }
 
 impl I2pSam {
-    pub async fn connect(sam_addr: SocketAddr) -> Result<Self, NetError> {
-        Self::connect_session(sam_addr, None).await
+    pub async fn connect(
+        sam_addr: SocketAddr,
+        retry: std::time::Duration,
+    ) -> Result<Self, NetError> {
+        Self::connect_session(sam_addr, None, retry).await
     }
 
     pub async fn connect_persistent(
         sam_addr: SocketAddr,
         dest_path: &Path,
+        retry: std::time::Duration,
     ) -> Result<Self, NetError> {
         let stored = match std::fs::read_to_string(dest_path) {
             Ok(s) => {
@@ -189,7 +197,7 @@ impl I2pSam {
                 )));
             }
         };
-        let (sam, dest) = Self::connect_session_dest(sam_addr, stored.as_deref()).await?;
+        let (sam, dest) = Self::connect_session_dest(sam_addr, stored.as_deref(), retry).await?;
         if stored.is_none() {
             write_dest_file(dest_path, &dest)?;
         }
@@ -199,22 +207,24 @@ impl I2pSam {
     pub async fn connect_session(
         sam_addr: SocketAddr,
         dest: Option<&str>,
+        retry: std::time::Duration,
     ) -> Result<Self, NetError> {
-        let (sam, _) = Self::connect_session_dest(sam_addr, dest).await?;
+        let (sam, _) = Self::connect_session_dest(sam_addr, dest, retry).await?;
         Ok(sam)
     }
 
     pub async fn connect_session_dest(
         sam_addr: SocketAddr,
         dest: Option<&str>,
+        retry: std::time::Duration,
     ) -> Result<(Self, String), NetError> {
         let mut last = None;
         for _ in 0..32 {
-            match Self::connect_session_dest_once(sam_addr, dest).await {
+            match Self::connect_session_dest_once(sam_addr, dest, retry).await {
                 Ok(v) => return Ok(v),
                 Err(e) if sam_retry(&e) => {
                     last = Some(e);
-                    tokio::time::sleep(SAM_RETRY).await;
+                    tokio::time::sleep(retry).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -225,6 +235,7 @@ impl I2pSam {
     pub async fn connect_session_dest_once(
         sam_addr: SocketAddr,
         dest: Option<&str>,
+        retry: std::time::Duration,
     ) -> Result<(Self, String), NetError> {
         let mut control = TcpStream::connect(sam_addr)
             .await
@@ -248,6 +259,7 @@ impl I2pSam {
                 session_id,
                 destination: destination.clone(),
                 forward_port: None,
+                retry,
                 _control: control,
                 _forward: None,
             },
@@ -265,6 +277,7 @@ impl I2pSam {
             session_id: self.session_id.clone(),
             destination: self.destination.clone(),
             forward_port: self.forward_port,
+            retry: self.retry,
         }
     }
 
@@ -290,13 +303,17 @@ impl I2pSam {
                 }
                 Err(e) if stream_socket_dead(&e) => {
                     last = Some(e);
-                    let (sam, _) =
-                        Self::connect_session_dest(self.sam_addr, Some(&self.destination)).await?;
+                    let (sam, _) = Self::connect_session_dest(
+                        self.sam_addr,
+                        Some(&self.destination),
+                        self.retry,
+                    )
+                    .await?;
                     *self = sam;
                 }
                 Err(e) if stream_retry(&e) => {
                     last = Some(e);
-                    tokio::time::sleep(SAM_RETRY).await;
+                    tokio::time::sleep(self.retry).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -334,7 +351,7 @@ impl I2pDialer {
                 Err(e) if stream_socket_dead(&e) => return Err(e),
                 Err(e) if stream_retry(&e) => {
                     last = Some(e);
-                    tokio::time::sleep(SAM_RETRY).await;
+                    tokio::time::sleep(self.retry).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -364,7 +381,8 @@ impl I2pDialer {
 
     pub async fn recreate_session(&self) -> Result<(Self, TcpStream, Option<TcpStream>), NetError> {
         let (mut sam, _) =
-            I2pSam::connect_session_dest(self.sam_addr, Some(&self.destination)).await?;
+            I2pSam::connect_session_dest(self.sam_addr, Some(&self.destination), self.retry)
+                .await?;
         let forward = match self.forward_port {
             Some(port) => {
                 sam.stream_forward(port).await?;

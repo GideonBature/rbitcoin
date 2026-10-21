@@ -5,8 +5,8 @@ use common_messages_sv2::{
 };
 use rbitcoin_sv2::testutil::TpClient;
 use rbitcoin_sv2::{
-    run_sv2_tp, Sv2TpConfig, FEE_DELTA, MAX_SESSIONS, MAX_STALE_GRACE, MAX_TEMPLATE_INTERVAL,
-    MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT,
+    run_sv2_tp, Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, MAX_SESSIONS, MAX_STALE_GRACE,
+    MAX_TEMPLATE_INTERVAL, MIN_TEMPLATE_INTERVAL, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::io;
 use std::net::SocketAddr;
@@ -56,6 +56,7 @@ async fn setup_connection_success_errors_and_session_cap() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -119,6 +120,7 @@ async fn authority_key_prints_in_key_utils_base58check() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -156,6 +158,7 @@ async fn silent_sockets_are_dropped_at_the_setup_deadline() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -199,6 +202,7 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -278,6 +282,7 @@ async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -316,6 +321,7 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
         write_timeout,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -379,6 +385,7 @@ async fn oversized_client_frame_closes_the_session() {
         write_timeout: WRITE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
+        constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
     })
     .await
     .expect("listen");
@@ -439,6 +446,7 @@ async fn out_of_range_timing_refuses_to_start() {
             write_timeout: WRITE_TIMEOUT,
             fee_delta: FEE_DELTA,
             template_interval,
+            constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
         })
         .await
         .err()

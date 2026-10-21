@@ -171,6 +171,7 @@ async fn service_listen_shutdown() {
         Query::open_or_create_tiny(&dir).unwrap(),
         ChainParams::regtest(),
         Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -190,6 +191,7 @@ async fn service_listen_shutdown() {
         "/rbitcoin:0.1.0(onion)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
         rbitcoin_net::socks::Dialer::Direct,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -243,6 +245,7 @@ async fn p2p_outbound_only_dials_without_listener() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(seed)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -253,6 +256,7 @@ async fn p2p_outbound_only_dials_without_listener() {
         "/rbitcoin:0.1.0(follow)/".into(),
         0,
         rbitcoin_net::socks::Dialer::Direct,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -307,6 +311,7 @@ async fn listen_onion_loopback_inbound_handshake() {
         "/rbitcoin:0.1.0(onion)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
         rbitcoin_net::socks::Dialer::Direct,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -372,6 +377,7 @@ async fn redial_skips_a_connect_target_still_dialling() {
         0,
         rbitcoin_net::socks::Dialer::socks(proxy_addr, false)
             .with_connect_floor(OUTBOUND_CONNECT_TIMEOUT),
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -445,6 +451,7 @@ async fn shutdown_finishes_without_the_dial_grace() {
         "/rbitcoin:test/".into(),
         0,
         rbitcoin_net::socks::Dialer::Direct,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();

@@ -50,18 +50,12 @@ pub const TEMPLATE_INTERVAL: Duration = Duration::from_secs(5);
 /// A client cycling budgets costs at most one mempool-locked build per this
 /// interval. A changed budget can lag by up to this long. Tip events are
 /// not delayed.
-#[cfg(not(debug_assertions))]
 pub const CONSTRAINTS_COOLDOWN: Duration = Duration::from_secs(1);
-/// Debug and test builds. Release keeps 1s.
-#[cfg(debug_assertions)]
-pub const CONSTRAINTS_COOLDOWN: Duration = Duration::from_millis(100);
-
-/// True on a debug build, which uses the short budget cooldown.
-///
-/// Release keeps the operator interval. The node warns at startup.
-pub fn compiled_with_test_hooks() -> bool {
-    cfg!(debug_assertions)
-}
+/// What the suite passes on [`Sv2TpConfig::constraints_cooldown`] so a test
+/// that waits for the next budget stays at the old debug cadence. The node
+/// binary passes [`CONSTRAINTS_COOLDOWN`].
+#[doc(hidden)]
+pub const CONSTRAINTS_COOLDOWN_TEST: Duration = Duration::from_millis(100);
 
 /// Lower bound on [`Sv2TpConfig::template_interval`]. CPU trade: each check
 /// after a mempool change is one build under the mempool read lock, so a
@@ -100,6 +94,9 @@ pub struct Sv2TpConfig {
     /// Minimum time from a session's last push to a fee push; the mempool
     /// is checked once per interval.
     pub template_interval: Duration,
+    /// How long a changed coinbase budget waits after the previous template.
+    /// The node passes [`CONSTRAINTS_COOLDOWN`].
+    pub constraints_cooldown: Duration,
 }
 
 /// Template work across this listener's sessions, for `tip: perf` and
@@ -191,6 +188,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
         delta: config.fee_delta,
         interval: config.template_interval,
     };
+    let constraints_cooldown = config.constraints_cooldown;
     let chain = config.chain;
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
@@ -245,6 +243,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                     setup_timeout,
                     write_timeout,
                     fee_push,
+                    constraints_cooldown,
                     stats,
                 )
                 .await

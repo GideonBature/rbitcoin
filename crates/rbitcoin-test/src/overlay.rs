@@ -220,7 +220,7 @@ pub async fn wait_socks_onion(proxy: SocketAddr, host: &str, port: u16, wall: Du
 pub async fn wait_i2p_stream(sam: SocketAddr, dest_b32: &str, wall: Duration) {
     let deadline = Instant::now() + wall;
     let session = loop {
-        match rbitcoin_net::I2pSam::connect(sam).await {
+        match rbitcoin_net::I2pSam::connect(sam, rbitcoin_net::SAM_RETRY_TEST).await {
             Ok(s) => break s,
             Err(e) => {
                 if Instant::now() >= deadline {

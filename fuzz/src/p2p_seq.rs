@@ -220,6 +220,7 @@ mod tests {
                 q,
                 ChainParams::regtest(),
                 Milestone::NONE,
+                rbitcoin_net::REDIAL_INTERVAL_TEST,
             )
             .await
             .unwrap();

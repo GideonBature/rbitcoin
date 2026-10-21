@@ -300,12 +300,6 @@ pub fn run_node(config: NodeConfig) -> Result<NodeHandle, NodeError> {
 /// hold the process).
 #[allow(clippy::cognitive_complexity)] // node bring-up / P2P follow loop
 pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
-    if rbitcoin_net::compiled_with_test_hooks() || rbitcoin_sv2::compiled_with_test_hooks() {
-        warn!(
-            "node: debug build — connect redial, SAM retry, and the SV2 \
-             budget cooldown are the short test values, not the operator ones"
-        );
-    }
     let status = NodeStatus::new(config.network, config.shindex);
     let _health = match config.listen.health {
         Some(addr) => {
@@ -367,6 +361,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 p2p_ua,
                 config.listen.max_inbound as usize,
                 config.listen.dialer(),
+                config.connect_redial,
             )
             .await
         }
@@ -378,6 +373,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 p2p_ua,
                 config.listen.max_inbound as usize,
                 config.listen.dialer(),
+                config.connect_redial,
             )
             .await
         }
@@ -564,9 +560,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let mut i2p_sam = if let Some(addr) = config.listen.i2p_sam {
         let s = if config.listen.i2p_accept_incoming {
             let dest = config.datadir.path().join("i2p").join("p2p.priv");
-            rbitcoin_net::I2pSam::connect_persistent(addr, &dest).await
+            rbitcoin_net::I2pSam::connect_persistent(addr, &dest, rbitcoin_net::SAM_RETRY).await
         } else {
-            rbitcoin_net::I2pSam::connect(addr).await
+            rbitcoin_net::I2pSam::connect(addr, rbitcoin_net::SAM_RETRY).await
         }
         .map_err(|e| NodeError::Init(format!("i2p sam {addr}: {e}")))?;
         info!("i2p SAM session on {addr}");
@@ -2041,9 +2037,10 @@ pub async fn start_i2p_named_forward(
     port: u16,
 ) -> Result<rbitcoin_net::I2pSam, NodeError> {
     let dest = datadir.join("i2p").join(format!("{name}.priv"));
-    let mut sam = rbitcoin_net::I2pSam::connect_persistent(sam_addr, &dest)
-        .await
-        .map_err(|e| NodeError::Init(format!("i2p {name} session: {e}")))?;
+    let mut sam =
+        rbitcoin_net::I2pSam::connect_persistent(sam_addr, &dest, rbitcoin_net::SAM_RETRY)
+            .await
+            .map_err(|e| NodeError::Init(format!("i2p {name} session: {e}")))?;
     sam.stream_forward(port)
         .await
         .map_err(|e| NodeError::Init(format!("i2p {name} STREAM FORWARD {port}: {e}")))?;
@@ -2240,6 +2237,7 @@ pub async fn start_sv2_tp(config: &NodeConfig, hub: &Arc<ChainHub>) -> Option<Sv
         write_timeout: rbitcoin_sv2::WRITE_TIMEOUT,
         fee_delta: config.sv2_tp_fee_delta,
         template_interval: config.sv2_tp_template_interval,
+        constraints_cooldown: config.sv2_tp_constraints_cooldown,
     };
     match run_sv2_tp(cfg).await {
         Ok(h) => {

@@ -247,9 +247,9 @@ engineering.
     accumulates unarmed (`spindle_mark` is the pattern). A
     `cfg(debug_assertions)` gate never covers an import or re-export that
     production code uses, and it never changes a production constant or
-    code path (the debug-only `REDIAL_INTERVAL`, `SAM_RETRY`, and
-    `CONSTRAINTS_COOLDOWN` values are the known exceptions to retire); how
-    CI compiles the release profile is in
+    code path. The node redials, retries SAM, and defers an SV2 budget on
+    one interval each; a test that waits on that sleep passes the short
+    duration in. How CI compiles the release profile is in
     [`TESTING.md`](TESTING.md#coverage). Tests drive the shipped function
     (principle 8), not a second test-only wrapper or `*_for_test` backdoor.
     IO-shape pins prefer session/table instance stats or on-disk file state
@@ -325,7 +325,9 @@ IO; they do not package zips. GitHub Releases:
       `#[doc(hidden)]`; a removed caller removes its callee (principle 11).
       Tests drive shipped functions, not `*_for_test` backdoors. A
       `cfg(debug_assertions)` hook is a bounded counter or opt-in, and
-      gates no production import, constant, or code path. Fuzz does not
+      gates no production import, constant, or code path. A test that
+      waits on redial, SAM retry, or the SV2 cooldown passes that duration
+      in. Fuzz does not
       grow `pub` without considering the binary
       surface.
 - [ ] Store changes respect Class A/B/C and allocate-then-publish

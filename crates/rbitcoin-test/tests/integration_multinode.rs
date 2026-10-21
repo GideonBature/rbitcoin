@@ -28,6 +28,7 @@ async fn start_node(dir: &TempDir) -> P2PNode {
         q,
         ChainParams::regtest(),
         Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .expect("listen")
@@ -42,6 +43,7 @@ async fn start_node_inbound(dir: &TempDir, max_inbound: usize) -> P2PNode {
         Milestone::NONE,
         "/rbitcoin:test/".into(),
         max_inbound,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .expect("listen")
@@ -125,6 +127,7 @@ async fn start_padded(dir: &TempDir) -> P2PNode {
         q,
         ChainParams::regtest(),
         Milestone::NONE,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .expect("listen")
@@ -3056,6 +3059,7 @@ async fn node_run_p2p_short() {
             .unwrap();
         }
         cfg.max_run_secs = Some(60);
+        cfg.connect_redial = rbitcoin_net::REDIAL_INTERVAL_TEST;
         cfg.mempool.blocksonly = true;
         cfg.max_tip_age_secs = Some(u64::MAX);
 
@@ -3197,7 +3201,9 @@ async fn node_run_p2p_short() {
             .await;
 
             // Core keeps reconnecting a `-connect` address that drops.
-            let re_deadline = Instant::now() + Duration::from_secs(8);
+            // The suite passes a 250ms redial. A 2s operator tick must fail
+            // this, not merely slow it down.
+            let re_deadline = Instant::now() + Duration::from_secs(1);
             loop {
                 let peers = jsonrpc(rpc_addr, "getpeerinfo", json!([])).await;
                 let back = peers["result"].as_array().is_some_and(|rows| {

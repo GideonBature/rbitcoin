@@ -3014,6 +3014,7 @@ async fn paused_serve(label: &str, blocks: u32, agents: &[&str]) -> PausedServe 
         Milestone::NONE,
         "/rbitcoin:0.1.0(serve)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -3554,6 +3555,7 @@ async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(burst-a)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -3564,6 +3566,7 @@ async fn tip_burst_past_broadcast_capacity_still_syncs_peer() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(burst-b)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -3625,6 +3628,7 @@ async fn disconnect_clears_far_side_getpeerinfo_within_5s() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(testnode0)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -3635,6 +3639,7 @@ async fn disconnect_clears_far_side_getpeerinfo_within_5s() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(testnode1)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -3721,6 +3726,7 @@ async fn disconnect_after_tip_sync_clears_far_side_within_5s() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(testnode0)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();
@@ -3731,6 +3737,7 @@ async fn disconnect_after_tip_sync_clears_far_side_within_5s() {
         Milestone::NONE,
         "/rbitcoin:0.1.0(testnode1)/".into(),
         rbitcoin_net::DEFAULT_MAX_INBOUND,
+        rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
     .unwrap();

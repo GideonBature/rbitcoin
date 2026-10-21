@@ -14,6 +14,7 @@ async fn refused_local_sam_dial_is_not_a_dead_session() {
         session_id: "refused".into(),
         destination: "dest".into(),
         forward_port: None,
+        retry: SAM_RETRY_TEST,
     };
     let refused = dialer
         .stream_connect_once("abcdef.b32.i2p")
@@ -248,7 +249,7 @@ async fn i2p_sam_stream_connect_retries_early_eof() {
         Arc::new(Mutex::new(0)),
     )
     .await;
-    let sam = I2pSam::connect(addr).await.unwrap();
+    let sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     let dest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p";
     sam.stream_connect(dest).await.unwrap();
     let got = stream_lines(&log, "STREAM CONNECT");
@@ -268,7 +269,7 @@ async fn i2p_sam_stream_forward_retries_early_eof() {
         Arc::new(Mutex::new(0)),
     )
     .await;
-    let mut sam = I2pSam::connect(addr).await.unwrap();
+    let mut sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     sam.stream_forward(18444).await.unwrap();
     let got = stream_lines(&log, "STREAM FORWARD");
     assert_eq!(got.len(), 3, "{got:?}");
@@ -292,7 +293,7 @@ async fn i2p_sam_forward_recreates_session_on_reset() {
         Arc::new(Mutex::new(1)),
     )
     .await;
-    let mut sam = I2pSam::connect(addr).await.unwrap();
+    let mut sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     sam.stream_forward(18444).await.unwrap();
     let creates = stream_lines(&log, "SESSION CREATE");
     assert_eq!(creates.len(), 2, "{creates:?}");
@@ -333,7 +334,7 @@ fn rst_sam_socket(s: TcpStream) {
 async fn i2p_sam_stream_connect_fake() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let (addr, _live) = fake_sam(true, Arc::clone(&log)).await;
-    let sam = I2pSam::connect(addr).await.unwrap();
+    let sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     let dest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p";
     sam.stream_connect(dest).await.unwrap();
     sam.stream_connect(dest).await.unwrap();
@@ -349,7 +350,7 @@ async fn i2p_sam_stream_connect_fake() {
     }
 
     let (bad, _live) = fake_sam(false, Arc::new(Mutex::new(Vec::new()))).await;
-    let err = match I2pSam::connect(bad).await {
+    let err = match I2pSam::connect(bad, SAM_RETRY_TEST).await {
         Err(e) => e,
         Ok(_) => panic!("bad HELLO must fail"),
     };
@@ -366,7 +367,7 @@ async fn dial_i2p_uses_sam() {
     clear_installed();
     let log = Arc::new(Mutex::new(Vec::new()));
     let (addr, _live) = fake_sam(true, Arc::clone(&log)).await;
-    let sam = I2pSam::connect(addr).await.unwrap();
+    let sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     let peer = rbitcoin_net::NetAddr::I2p {
         dest: [0u8; 32],
         port: 8333,
@@ -395,7 +396,9 @@ async fn i2p_accept_incoming_forwards_to_loopback() {
             .as_nanos()
     ));
     let dest_path = dir.join("i2p").join("p2p.priv");
-    let mut sam = I2pSam::connect_persistent(addr, &dest_path).await.unwrap();
+    let mut sam = I2pSam::connect_persistent(addr, &dest_path, SAM_RETRY_TEST)
+        .await
+        .unwrap();
     sam.stream_forward(18444).await.unwrap();
     let stored = std::fs::read_to_string(&dest_path).unwrap();
     assert_eq!(stored.trim(), FAKE_DEST);
@@ -422,7 +425,9 @@ async fn i2p_accept_incoming_forwards_to_loopback() {
         "{creates:?}"
     );
 
-    let mut sam2 = I2pSam::connect_persistent(addr, &dest_path).await.unwrap();
+    let mut sam2 = I2pSam::connect_persistent(addr, &dest_path, SAM_RETRY_TEST)
+        .await
+        .unwrap();
     sam2.stream_forward(18444).await.unwrap();
     let creates = stream_lines(&log, "SESSION CREATE");
     assert!(
@@ -442,7 +447,7 @@ async fn i2p_sam_reconnects_after_invalid_id() {
     clear_installed();
     let log = Arc::new(Mutex::new(Vec::new()));
     let (addr, live) = fake_sam(true, Arc::clone(&log)).await;
-    let sam = I2pSam::connect(addr).await.unwrap();
+    let sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     rbitcoin_net::socks::install_i2p_dialer(sam.dialer());
     let peer = rbitcoin_net::NetAddr::I2p {
         dest: [0u8; 32],
@@ -494,7 +499,7 @@ async fn i2p_sam_recreates_session_when_router_resets_stream() {
         Arc::new(Mutex::new(0)),
     )
     .await;
-    let sam = I2pSam::connect(addr).await.unwrap();
+    let sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     rbitcoin_net::socks::install_i2p_dialer(sam.dialer());
     let peer = rbitcoin_net::NetAddr::I2p {
         dest: [0u8; 32],
@@ -527,7 +532,7 @@ async fn i2p_sam_recreate_restores_forward() {
     clear_installed();
     let log = Arc::new(Mutex::new(Vec::new()));
     let (addr, live) = fake_sam(true, Arc::clone(&log)).await;
-    let mut sam = I2pSam::connect(addr).await.unwrap();
+    let mut sam = I2pSam::connect(addr, SAM_RETRY_TEST).await.unwrap();
     sam.stream_forward(18444).await.unwrap();
     rbitcoin_net::socks::install_i2p_dialer(sam.dialer());
     let peer = rbitcoin_net::NetAddr::I2p {
@@ -732,6 +737,7 @@ async fn stream_status_error_is_not_retried() {
         session_id: "once".into(),
         destination: "dest".into(),
         forward_port: None,
+        retry: SAM_RETRY_TEST,
     };
     let started = std::time::Instant::now();
     let err = dialer.stream_connect("peer.b32.i2p").await.unwrap_err();
@@ -760,6 +766,7 @@ async fn stream_status_error_is_not_retried() {
         session_id: "fwd".into(),
         destination: "dest".into(),
         forward_port: None,
+        retry: SAM_RETRY_TEST,
         _control: control,
         _forward: None,
     };
