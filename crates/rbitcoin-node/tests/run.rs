@@ -400,19 +400,66 @@ fn startup_catch_up_waits_for_peers_only_when_a_give_up_would_exit() {
         rbitcoin_ibd::Peerless::GiveUp,
         "a capped run returns to its caller"
     );
-    assert!(
-        catch_up_without_targets_for(
-            true,
-            rbitcoin_ibd::Peerless::Redial {
-                cap: rbitcoin_ibd::PEERLESS_REDIAL_CAP
-            }
+}
+
+#[tokio::test]
+async fn empty_book_waits_for_a_discovered_target() {
+    let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
+    let shutdown = Shutdown::new();
+    let peers = Arc::new(rbitcoin_net::PeerHub::new());
+    let shared_task = Arc::clone(&shared);
+    let shutdown_task = Arc::clone(&shutdown);
+    let peers_task = Arc::clone(&peers);
+    let task = tokio::spawn(async move {
+        let mut book = AddrMan::new();
+        wait_for_dialable_targets(
+            &peers_task,
+            &shared_task,
+            &mut book,
+            &[],
+            2,
+            &[],
+            &shutdown_task,
+            false,
+            rbitcoin_primitives::Network::Regtest,
         )
-        .is_complete(),
-        "an empty book with discovery in flight must serve, not end the process"
-    );
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
-        !catch_up_without_targets_for(true, rbitcoin_ibd::Peerless::GiveUp).is_complete(),
-        "a capped or tip-index run keeps the bounded empty-book result"
+        !task.is_finished(),
+        "an empty book with discovery in flight must stay in catch-up"
+    );
+    shared
+        .lock()
+        .unwrap()
+        .add_addr(rbitcoin_net::NetAddr::Ip("127.0.0.1:1".parse().unwrap()));
+    let found = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("learned target wakes catch-up")
+        .expect("wait task");
+    assert_eq!(found.expect("dial targets").len(), 1);
+
+    let shutdown = Shutdown::new();
+    shutdown.request();
+    let peers = Arc::new(rbitcoin_net::PeerHub::new());
+    let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
+    let mut book = AddrMan::new();
+    assert!(
+        wait_for_dialable_targets(
+            &peers,
+            &shared,
+            &mut book,
+            &[],
+            2,
+            &[],
+            &shutdown,
+            false,
+            rbitcoin_primitives::Network::Regtest,
+        )
+        .await
+        .is_none(),
+        "shutdown ends the empty-book wait"
     );
 }
 
