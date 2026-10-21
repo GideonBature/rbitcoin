@@ -75,12 +75,15 @@ Coverage and native `windows` / `macos` stay GitHub Actions;
 
 ## Push and poll
 
-Required jobs: `qc`, `test`, `windows`, `macos`, and `coverage`. `qc` is
-fmt, ast-grep, deny, the script self-tests, clippy, then
-nixos-module-eval on one runner. Mutants run nightly with workspace
-tests (`mutants.yml`); they are not a required check. Structural scan is
-`./scripts/ast-grep.sh`. `windows` / `macos` are native store plus `--smoke`,
-not operator zips.
+Required jobs: `qc`, `test`, `windows`, `macos`, `coverage`, and `pread`.
+`qc` is fmt, ast-grep, deny, the script self-tests, clippy, then
+nixos-module-eval on one runner. `pread` is GitHub Actions only:
+`RBITCOIN_IO=pread cargo test -p rbitcoin-store -p rbitcoin-query` after
+`qc` and `test`, in parallel with `coverage`. Do not run it in the local
+gate list. The `test` job leaves `RBITCOIN_IO` unset. Mutants run nightly
+with workspace tests (`mutants.yml`); they are not a required check.
+Structural scan is `./scripts/ast-grep.sh`. `windows` / `macos` are native
+store plus `--smoke`, not operator zips.
 
 Label `core-functional` when the PR touches that harness, and on every ship
 version-bump PR. Do not label ordinary net or RPC PRs.

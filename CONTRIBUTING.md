@@ -265,8 +265,11 @@ Do not edit [`CHANGELOG.md`](./CHANGELOG.md) on a feature branch. The release
 cut folds those files in. Owner: [`docs/releases.md`](./docs/releases.md).
 
 Required **jobs** match [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)
-(`qc`, `test`, `windows`, `macos`, `coverage`). `qc` is fmt, ast-grep, deny, the script self-tests,
-clippy, then nixos-module-eval, in that order on one runner.
+(`qc`, `test`, `windows`, `macos`, `coverage`, `pread`). `qc` is fmt, ast-grep, deny, the script self-tests,
+clippy, then nixos-module-eval, in that order on one runner. `pread` is the
+Linux libc backend for `rbitcoin-store` and `rbitcoin-query`
+(`RBITCOIN_IO=pread`). It starts with `coverage`, after `qc` and `test`.
+The `test` job does not set `RBITCOIN_IO`.
 Label **`nixos-module-runtime`** to run the NixOS module qemu test (not
 eval). That job is not required.
 
