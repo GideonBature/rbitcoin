@@ -480,18 +480,21 @@ fn begin_batch_poisons_when_leftover_cannot_drain() {
     let fd = rbitcoin_store::io_handle::IoHandle::from_file(&f);
     let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
     session.pending.insert(99).unwrap();
-    match session.begin_batch() {
-        Err(StoreError::Corrupt("invariant: io_uring undrained")) => {}
-        other => panic!("begin_batch must fail closed on undrainable leftover, got {other:?}"),
-    }
-    assert!(session.is_poisoned());
-    let mut buf = [0u8; 1];
-    // SAFETY: `buf` lives until this function returns.
-    let r = unsafe { session.push_pread(fd, 0, &mut buf, pack_ud(KIND_BULK_PREAD, 1, 0)) };
-    assert!(
-        r.is_err(),
-        "push after undrainable leftover must fail, got {r:?}"
-    );
+    with_drain_hard_cap(Duration::from_millis(200), || {
+        match session.begin_batch() {
+            Err(StoreError::Corrupt("invariant: io_uring undrained")) => {}
+            other => panic!("begin_batch must fail closed on undrainable leftover, got {other:?}"),
+        }
+        assert!(session.is_poisoned());
+        let mut buf = [0u8; 1];
+        // SAFETY: `buf` lives until this function returns.
+        let r = unsafe { session.push_pread(fd, 0, &mut buf, pack_ud(KIND_BULK_PREAD, 1, 0)) };
+        assert!(
+            r.is_err(),
+            "push after undrainable leftover must fail, got {r:?}"
+        );
+        drop(session);
+    });
     let _ = std::fs::remove_file(&path);
 }
 
@@ -628,6 +631,101 @@ fn with_thread_local_aborts_when_panicking_with_inflight() {
         out.status.signal(),
         Some(6),
         "in-flight panic must SIGABRT, not unwind into freed buffers: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Leave one real (unexpected) CQE and one pending SQE for the child.
+#[cfg(target_os = "linux")]
+fn arm_unexpected_cqe_with_pending(session: &mut UringSession) {
+    use rbitcoin_store::io_handle::IoHandle;
+    let exe = std::env::current_exe().expect("current_exe");
+    let file = std::fs::File::open(exe).expect("open child exe");
+    let fd = IoHandle::from_file(&file);
+    // The SQE may outlive this frame; keep the fd and buffer alive.
+    std::mem::forget(file);
+    let buf: &'static mut [u8] = Box::leak(vec![0u8; 4].into_boxed_slice());
+    // SAFETY: `buf` is leaked for the life of the child process.
+    unsafe { session.push_pread(fd, 0, buf, 1) }.expect("push fast pread");
+    // A second pending id stands in for an SQE that has not completed, so the
+    // drain error still owns a buffer when it returns.
+    session.pending.insert(2).expect("pending");
+    session.pending.expect_cqe(1).expect("drop pending 1");
+    session.submit().expect("submit");
+}
+
+/// A drain error with another SQE still pending must abort: the caller may
+/// free that SQE's buffer as soon as the drain returns.
+#[test]
+#[cfg(target_os = "linux")]
+fn drain_error_with_inflight_sqes_aborts() {
+    const CHILD: &str = "RBITCOIN_URING_DRAIN_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let Ok(mut session) = UringSession::try_open_kind(SessionKind::Pool, 32) else {
+            std::process::exit(77);
+        };
+        arm_unexpected_cqe_with_pending(&mut session);
+        let _ = session.drain_all();
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "uring_session::drain_error_with_inflight_sqes_aborts",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RBITCOIN_IO", "pool")
+        .output()
+        .expect("child test");
+    if out.status.code() == Some(77) {
+        return;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        out.status.signal(),
+        Some(6),
+        "drain error with pending SQEs must SIGABRT: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Drop takes the same path as an error-path drain: pending SQEs must abort
+/// rather than let the ring go away and the buffers be freed underneath it.
+#[test]
+#[cfg(target_os = "linux")]
+fn drop_after_drain_error_with_inflight_sqes_aborts() {
+    const CHILD: &str = "RBITCOIN_URING_DROP_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let Ok(mut session) = UringSession::try_open_kind(SessionKind::Pool, 32) else {
+            std::process::exit(77);
+        };
+        arm_unexpected_cqe_with_pending(&mut session);
+        drop(session);
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "uring_session::drop_after_drain_error_with_inflight_sqes_aborts",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RBITCOIN_IO", "pool")
+        .output()
+        .expect("child test");
+    if out.status.code() == Some(77) {
+        return;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        out.status.signal(),
+        Some(6),
+        "drop with pending SQEs after a drain error must SIGABRT: {:?}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
