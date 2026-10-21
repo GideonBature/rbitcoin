@@ -2040,9 +2040,10 @@ fn two_peers_reserve_the_header_walk() {
         !may_serve(&st, 17, &w1.block_hash()),
         "a peer on the rewound chain is not asked for the new one"
     );
+    assert!(!st.slots[0].chain.probed(), "and is probed again");
     assert!(
         !st.slots[1].chain.left_path_by(&st.height_to_hash, 1),
-        "a peer with no record gets no split at the rewind"
+        "a peer with no record is not left stale by the rewind"
     );
     assert!(!may_serve(&st, 18, &w1.block_hash()));
     assert!(

@@ -5,7 +5,11 @@ use rbitcoin_ibd::ibd::peer_chain::PeerChain;
 use std::collections::HashMap;
 
 fn chain(n: u32, salt: u8) -> Vec<Header> {
-    let mut prev = BlockHash::from_byte_array([0u8; 32]);
+    extend(BlockHash::from_byte_array([0u8; 32]), n, salt)
+}
+
+fn extend(from: BlockHash, n: u32, salt: u8) -> Vec<Header> {
+    let mut prev = from;
     (1..=n)
         .map(|i| {
             let mut h = Header {
@@ -119,13 +123,69 @@ fn a_third_chain_split_survives_two_rewinds() {
     let confirmed = |h: u32| Some(ours[h as usize - 1].block_hash());
     let mut peer = PeerChain::default();
     peer.note_headers(&HashMap::new(), confirmed, 2, 1, &third);
-    peer.note_rewind(&path(&won), 0, ours[0].block_hash());
+    peer.note_rewind(&path(&won), 0);
     assert!(peer.left_path_by(&path(&won), 1));
-    peer.note_rewind(&path(&ours), 0, won[0].block_hash());
+    peer.note_rewind(&path(&ours), 0);
     assert!(
         peer.left_path_by(&path(&ours), 1),
         "a peer on a third chain is not taken back onto this one"
     );
+}
+
+/// A rewind leaves a record that took the rewound blocks as the peer's chain
+/// stale from the fork up, also when the peer's own split is above the fork,
+/// across further rewinds, until the peer answers again. It is probed again.
+#[test]
+fn a_rewind_leaves_a_record_stale_until_the_peer_answers() {
+    let ours = chain(2_003, 0x5c);
+    let won = extend(ours[1_996].block_hash(), 3, 0x77);
+    let third = extend(ours[1_997].block_hash(), 3, 0x91);
+    let at = |c: &[Header], from: u32| -> HashMap<u32, BlockHash> {
+        (from..).zip(c.iter().map(|h| h.block_hash())).collect()
+    };
+    let confirmed = |h: u32| (h <= 2_001).then(|| ours[h as usize - 1].block_hash());
+    // A full reply that leaves this chain at 1999, above the fork at 1998.
+    let mut reply = ours[1..1_998].to_vec();
+    reply.extend_from_slice(&third);
+    let mut peer = PeerChain::default();
+    peer.note_headers(&HashMap::new(), confirmed, 2_001, 2, &reply);
+    let on_won = at(&won, 1_998);
+    peer.note_rewind(&on_won, 1_997);
+    assert!(peer.left_path_by(&on_won, 1_998));
+    assert!(!peer.probed(), "the peer is probed again");
+    let on_ours = at(&ours[1_997..], 1_998);
+    peer.note_rewind(&on_ours, 1_997);
+    assert!(
+        peer.left_path_by(&on_ours, 2_003),
+        "it left this chain above the fork"
+    );
+    // A deeper rewind keeps it off from the lower fork.
+    let deeper = at(&extend(ours[1_988].block_hash(), 2, 0x33), 1_990);
+    peer.note_rewind(&deeper, 1_989);
+    assert!(peer.left_path_by(&deeper, 1_990));
+    // Its answer is the record again.
+    peer.note_headers(&on_ours, |_| None, 1_997, 1_998, &ours[1_997..2_000]);
+    assert!(!peer.left_path_by(&on_ours, 1_999));
+    assert!(
+        peer.left_path_by(&on_ours, 2_001),
+        "the reply ended at 2000"
+    );
+
+    // A full reply that ends below the fork says nothing there: the record
+    // stays stale and the peer is probed again.
+    let mut far = PeerChain::default();
+    let confirmed_far = |h: u32| (h <= 2_002).then(|| ours[h as usize - 1].block_hash());
+    far.note_headers(&HashMap::new(), confirmed_far, 2_002, 2_003, &ours[2_002..]);
+    let side = at(&extend(ours[2_000].block_hash(), 2, 0x44), 2_002);
+    far.note_rewind(&side, 2_001);
+    far.note_headers(&side, confirmed_far, 2_001, 1, &ours[..2_000]);
+    assert!(far.left_path_by(&side, 2_002));
+    assert!(!far.probed());
+    // A full reply that reaches the fork on the new chain answers it.
+    let mut onto = ours[3..2_001].to_vec();
+    onto.extend(extend(ours[2_000].block_hash(), 2, 0x44));
+    far.note_headers(&side, confirmed_far, 2_001, 4, &onto);
+    assert!(!far.left_path_by(&side, 2_002));
 }
 
 /// A peer that showed a stale sibling and then builds on this node's block

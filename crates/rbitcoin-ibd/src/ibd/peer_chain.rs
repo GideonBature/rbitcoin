@@ -41,6 +41,10 @@ pub struct PeerChain {
     /// That height has left the path and this node's confirmed block there
     /// is a different one.
     split_confirmed: bool,
+    /// A rewind replaced this node's chain from this height, and the record
+    /// took the old blocks as the peer's chain. The peer is not taken to hold
+    /// a block at or above it until it answers again.
+    stale_from: Option<u32>,
     /// The highest path block this peer showed through a probe that asked
     /// for headers after it. It holds every path block at or below it while
     /// the path still holds that block there.
@@ -185,7 +189,17 @@ impl PeerChain {
             break;
         }
         let short = headers.len() < ANNOUNCED_CAP;
-        self.ends = short.then(|| height.saturating_add(hashes.len() as u32).saturating_sub(1));
+        let top = height.saturating_add(hashes.len() as u32).saturating_sub(1);
+        // A stale record is answered by a reply that reaches its fork. One
+        // that ends below the fork says nothing there: ask again.
+        if let Some(stale) = self.stale_from {
+            if top >= stale {
+                self.stale_from = None;
+            } else {
+                self.probed = false;
+            }
+        }
+        self.ends = short.then_some(top);
         let drop = tip.saturating_add(1).saturating_sub(self.from) as usize;
         self.announced.drain(..drop.min(self.announced.len()));
         self.from = self.from.max(tip.saturating_add(1));
@@ -222,18 +236,15 @@ impl PeerChain {
         self.from = self.from.saturating_add(over as u32);
     }
 
-    /// This node's confirmed chain above `lca` was rewound away, `left` was
-    /// its block at `lca + 1`, and `path` is the chain planted in its place.
-    /// A record that starts past that height took the old blocks as the
-    /// peer's chain, so the peer split from the new one there. A split the
-    /// peer showed at or below that height already says where it left, and
-    /// an announced hash on the new path says the peer is on it.
-    pub fn note_rewind(&mut self, path: &HashMap<u32, BlockHash>, lca: u32, left: BlockHash) {
+    /// This node's confirmed chain above `lca` was rewound away, and `path`
+    /// is the chain planted in its place. A record that starts past the fork
+    /// took the old blocks as the peer's chain, so it is stale from the fork
+    /// up until the peer answers again, and the peer is probed. A split the
+    /// peer showed at or below the fork already says where it left, and an
+    /// announced hash on the new path says it is on the new chain.
+    pub fn note_rewind(&mut self, path: &HashMap<u32, BlockHash>, lca: u32) {
         let at = lca.saturating_add(1);
-        if self.from <= at {
-            return;
-        }
-        if self.split.is_some_and(|(h, _)| h <= at) {
+        if self.from <= at || self.split.is_some_and(|(h, _)| h <= at) {
             return;
         }
         if (self.from..)
@@ -242,8 +253,8 @@ impl PeerChain {
         {
             return;
         }
-        self.split = Some((at, left));
-        self.split_confirmed = false;
+        self.stale_from = Some(self.stale_from.map_or(at, |s| s.min(at)));
+        self.probed = false;
     }
 
     /// The recorded split's height has left the path: compare it with this
@@ -293,10 +304,13 @@ impl PeerChain {
     }
 
     /// The peer does not have the path block at `height`: its chain left this
-    /// node's chain at or below it, it holds a different block there, or its
-    /// whole chain ends below it. Two chains that differ at one height differ
-    /// above it.
+    /// node's chain at or below it, it holds a different block there, its
+    /// whole chain ends below it, or a rewind left its record stale there. Two
+    /// chains that differ at one height differ above it.
     pub fn left_path_by(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
+        if self.stale_from.is_some_and(|from| height >= from) {
+            return true;
+        }
         if let Some((at, hash)) = self.split {
             let differs = match path.get(&at) {
                 Some(p) => *p != hash,

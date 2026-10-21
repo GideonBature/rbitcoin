@@ -547,8 +547,8 @@ pub struct RewindPrep {
     pub archived: Vec<bool>,
     pub connected: Vec<bool>,
     pub fks: Vec<Option<Fk>>,
-    /// The confirmed block above the LCA before the disconnect.
-    pub left: Option<BlockHash>,
+    /// The confirmed tip was above the LCA, so blocks were disconnected.
+    pub rewound: bool,
 }
 
 /// Store side of a rewind: parent lookup and the confirmed-tip disconnect.
@@ -573,9 +573,7 @@ pub fn prepare_header_rewind(
         return Ok(None);
     };
     let tip_h = hub.tip_height().unwrap_or(0);
-    let left = (tip_h > lca_h)
-        .then(|| super::peer_chain::confirmed_at(hub, lca_h.saturating_add(1)))
-        .flatten();
+    let rewound = tip_h > lca_h;
     if tip_h.saturating_sub(lca_h) > REWIND_MAX_DEPTH {
         warn!(
             "ibd: heavier fork rewind depth {} exceeds cap {REWIND_MAX_DEPTH} (lca={lca_h} tip={tip_h})",
@@ -622,7 +620,7 @@ pub fn prepare_header_rewind(
         archived,
         connected,
         fks,
-        left,
+        rewound,
     }))
 }
 
@@ -656,9 +654,9 @@ pub fn commit_header_rewind(
         }
         prev = *hash;
     }
-    if let Some(left) = prep.left {
+    if prep.rewound {
         for slot in &mut st.slots {
-            slot.chain.note_rewind(&st.height_to_hash, prep.lca_h, left);
+            slot.chain.note_rewind(&st.height_to_hash, prep.lca_h);
         }
     }
     for h in hub.query.block_queue_queued_heights() {
