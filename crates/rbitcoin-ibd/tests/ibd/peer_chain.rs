@@ -77,6 +77,34 @@ fn a_split_is_settled_by_the_confirmed_chain() {
     );
 }
 
+/// A short reply that ends at or below the confirmed tip is all that peer
+/// has, so it is not asked above the tip. That holds for a first reply and
+/// for one that follows a short run this node has since confirmed.
+#[test]
+fn a_reply_at_or_below_the_tip_ends_the_chain_there() {
+    let headers = chain(20, 0x5c);
+    let above = |tip: u32| -> HashMap<u32, BlockHash> {
+        (tip + 1..=20)
+            .map(|h| (h, headers[h as usize - 1].block_hash()))
+            .collect()
+    };
+    let confirmed = |h: u32| Some(headers[h as usize - 1].block_hash());
+    let mut behind = PeerChain::default();
+    behind.note_headers(&above(10), confirmed, 10, 5, &headers[4..8]);
+    assert!(
+        behind.left_path_by(&above(10), 11),
+        "a first reply that ends below the tip"
+    );
+    let mut caught = PeerChain::default();
+    caught.note_headers(&above(10), confirmed, 10, 11, &headers[10..15]);
+    assert!(caught.left_path_by(&above(10), 16));
+    caught.note_headers(&above(15), confirmed, 15, 13, &headers[12..15]);
+    assert!(
+        caught.left_path_by(&above(15), 16),
+        "a reply that ends at the tip after the kept run was confirmed"
+    );
+}
+
 /// A `notfound` keeps a peer off that block for one stall window, then the
 /// peer may be asked again.
 #[test]

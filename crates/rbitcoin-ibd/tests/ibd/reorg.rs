@@ -211,6 +211,55 @@ fn consider_disconnected_from_work_path_without_resume_seed() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The walk's candidate forks below the confirmed tip, as after a retire
+/// walks back and a heavier chain arrives that forked under it. None of it
+/// is planted, so the path's next height names no fork. Its stored tip is
+/// where the rewind walks back from. A walk tip that is not stored is not,
+/// and once a path is planted the walk's tip is not read from the store.
+#[test]
+fn a_walk_candidate_forked_below_the_tip_is_rewound_to() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let l1 = mine(gen, 1_500_063_100, 1);
+    hub.accept_block(l1.clone()).unwrap();
+    let l2 = mine(l1.block_hash(), 1_500_063_200, 2);
+    hub.accept_block(l2.clone()).unwrap();
+    let w1 = distinct_sib(mine(gen, 1_500_063_101, 1), l1.block_hash());
+    let w2 = mine(w1.block_hash(), 1_500_063_201, 2);
+    let w3 = mine(w2.block_hash(), 1_500_063_301, 3);
+    for w in [&w1, &w2, &w3] {
+        hub.ensure_header(&w.header).unwrap();
+    }
+    let w4 = mine(w3.block_hash(), 1_500_063_401, 4);
+
+    let mut st =
+        rbitcoin_ibd::ibd::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+    st.header_walk.tip.hash = Some(w4.block_hash());
+    st.header_walk.tip.height = 4;
+    assert!(!consider_disconnected_heavier(&mut st, &hub).unwrap());
+    assert_eq!(
+        hub.tip_height(),
+        Some(2),
+        "an unstored walk tip is not a rewind"
+    );
+
+    st.header_walk.tip.hash = Some(w3.block_hash());
+    st.header_walk.tip.height = 3;
+    assert!(consider_disconnected_heavier(&mut st, &hub).unwrap());
+    assert_eq!(hub.tip_height(), Some(0), "rewound to the fork");
+    assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
+    assert_eq!(st.height_to_hash.get(&3), Some(&w3.block_hash()));
+    reset_parent_hash_of_count();
+    assert!(!consider_disconnected_heavier(&mut st, &hub).unwrap());
+    assert_eq!(
+        parent_hash_of_count(),
+        0,
+        "a planted path is not a store walk"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A real block whose prev is not a stored header fails the live confirm
 /// load as BadPrev. That reject is soft reget: the tip stays, the slot is
 /// evicted, and the hash is not blacklisted or fetched again.

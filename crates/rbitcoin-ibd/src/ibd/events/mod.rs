@@ -646,10 +646,18 @@ pub fn plan_header_batch(
         challenger_work_before: st.header_walk.challenger.as_ref().map(|ch| ch.tip.work),
         outer_len: headers.len(),
     };
+    if answer_probe(st, hub, peer, &headers) {
+        return (mark, HeaderPlan::Done);
+    }
     if mark.outer_len > 0 {
         note_announcement(st, peer);
         note_peer_headers(st, hub, peer, &headers);
     } else {
+        if st.header_walk.reserved != Some(peer) {
+            if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+                s.chain.forget_probe();
+            }
+        }
         super::header_walk::settle_walk_peer(
             st,
             hub,
@@ -674,7 +682,12 @@ pub fn plan_header_reply(
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
 ) -> HeaderPlan {
-    let ask = super::header_walk::take_header_ask(st, peer);
+    // A batch that crossed this peer's open probe leaves that ask in flight.
+    let ask = if st.header_walk.probe_open == Some(peer) {
+        super::header_walk::HeaderAsk::Unsolicited
+    } else {
+        super::header_walk::take_header_ask(st, peer)
+    };
     let mut inflight = super::header_walk::InFlight::capture(st);
     if headers.is_empty() {
         inflight.hold(st);
@@ -917,6 +930,53 @@ fn note_peer_headers(
             headers,
         );
     }
+}
+
+/// The reply to this peer's open probe, read into its chain record and kept
+/// from the walk. The probe asked from the confirmed chain, so its reply is
+/// empty or builds on a confirmed block; a batch that does not is an
+/// announcement that crossed the probe. True when the reply was consumed.
+fn answer_probe(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    peer: usize,
+    headers: &[bitcoin::block::Header],
+) -> bool {
+    if st.header_walk.probe_open != Some(peer) {
+        return false;
+    }
+    let tip = hub.tip_height().unwrap_or(0);
+    if let Some(first) = headers.first() {
+        let prev = first.prev_blockhash;
+        let confirmed = hub
+            .query
+            .height_of_hash(&prev.to_byte_array())
+            .ok()
+            .flatten()
+            .is_some_and(|h| h.0 <= tip && super::peer_chain::confirmed_at(hub, h.0) == Some(prev));
+        if !confirmed {
+            return false;
+        }
+    }
+    st.header_walk.probe_open = None;
+    let _ = super::header_walk::take_header_ask(st, peer);
+    if headers.is_empty() {
+        if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+            s.chain.note_ends_at(tip);
+        }
+    } else {
+        note_announcement(st, peer);
+        note_peer_headers(st, hub, peer, headers);
+        // A header this node has not seen: the peer's chain leaves this one
+        // or runs past the path. The walk asks it, as after a block inv.
+        let last = headers[headers.len() - 1].block_hash();
+        let seen = st.hash_height.contains_key(&last)
+            || matches!(hub.query.height_of_hash(&last.to_byte_array()), Ok(Some(_)));
+        if !seen {
+            super::header_walk::note_block_inv(st, peer);
+        }
+    }
+    true
 }
 
 fn note_announcement(st: &mut IbdWorkState, peer: usize) {

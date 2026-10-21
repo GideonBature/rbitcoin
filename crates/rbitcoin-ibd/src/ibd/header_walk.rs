@@ -107,6 +107,12 @@ pub struct HeaderWalk {
     pub challenge_external: bool,
     /// Challenge ask already sent. Judged when that peer replies or times out.
     pub challenge_open: Option<usize>,
+    /// Block peer owed one chain probe: a headers ask from the confirmed tip.
+    /// Not a walk ask. Not written to `header.adopt`.
+    pub probe: Option<usize>,
+    /// Probe ask already sent. Its reply is read into that peer's chain
+    /// record, not by the walk.
+    pub probe_open: Option<usize>,
     /// The one in-flight headers ask. Not written to `header.adopt`.
     pub walk: Lane,
     /// Expired asks. Not written to `header.adopt`.
@@ -550,23 +556,39 @@ pub fn note_block_inv(st: &mut IbdWorkState, peer: usize) {
 
 /// Ask one block peer that has not announced a chain for headers, so block
 /// getdata can follow what it holds. Core starts header sync with each
-/// peer. This is the block-inv challenge: one peer at a time, once per
-/// peer, never the reserved header peer.
-pub fn challenge_unprobed_peer(st: &mut IbdWorkState) {
-    if st.header_walk.challenge.is_some() || st.header_walk.challenge_open.is_some() {
+/// peer. One probe at a time, never the reserved header peer, and not a
+/// peer with a walk ask open. The probe asks from the confirmed tip, so an
+/// empty reply means nothing above it.
+pub fn probe_unprobed_peer(st: &mut IbdWorkState) {
+    let walk = &st.header_walk;
+    // A record only chooses among peers. With one live peer it would only
+    // take the header lane, and its reply would not reach the walk.
+    if walk.probe.is_some()
+        || walk.probe_open.is_some()
+        || st.slots.iter().filter(|s| s.alive).count() < 2
+    {
         return;
     }
-    let reserved = st.header_walk.reserved;
     let Some(slot) = st
         .slots
-        .iter_mut()
-        .find(|s| s.alive && Some(s.id) != reserved && !s.chain.probed())
+        .iter()
+        .find(|s| s.alive && !walk_busy(walk, s.id) && !s.chain.probed())
     else {
         return;
     };
-    slot.chain.note_probed();
-    st.header_walk.challenge = Some(slot.id);
-    st.header_walk.challenge_external = false;
+    st.header_walk.probe = Some(slot.id);
+}
+
+/// The header peer, or a peer with a walk ask open, whose late reply could
+/// be read as a probe's.
+fn walk_busy(walk: &HeaderWalk, peer: usize) -> bool {
+    [
+        walk.reserved,
+        walk.challenge_open,
+        walk.walk.peer,
+        walk.walk.prev_peer,
+    ]
+    .contains(&Some(peer))
 }
 
 /// A follow-session block inv has no IBD slot. Poke one live header peer
@@ -603,6 +625,12 @@ pub fn forget_walk_peer(st: &mut IbdWorkState, peer: usize) {
     if st.header_walk.challenge_open == Some(peer) {
         st.header_walk.challenge_open = None;
         st.header_walk.challenge_external = false;
+    }
+    if st.header_walk.probe == Some(peer) {
+        st.header_walk.probe = None;
+    }
+    if st.header_walk.probe_open == Some(peer) {
+        st.header_walk.probe_open = None;
     }
 }
 
@@ -709,12 +737,14 @@ pub enum HeaderPoll {
     Wait,
 }
 
-/// A block inv is waiting, and the walk lane is not already in flight.
+/// A block inv or a probe is waiting, and the walk lane is not already in
+/// flight.
 ///
 /// An in-flight ask keeps the challenge until the lane clears. The poll
 /// must not call `send_getheaders` on every block event during that window.
 pub fn inv_challenge_due(st: &IbdWorkState) -> bool {
-    st.header_walk.challenge.is_some() && !lane_fresh(&st.header_walk.walk)
+    (st.header_walk.challenge.is_some() || st.header_walk.probe.is_some())
+        && !lane_fresh(&st.header_walk.walk)
 }
 
 /// The queue still has room, or a gap / look-ahead still needs headers.
@@ -2405,6 +2435,14 @@ pub fn expire_header_ask(st: &mut IbdWorkState) -> Option<usize> {
         *e = e.saturating_add(1);
         *e
     };
+    if st.header_walk.probe_open == Some(peer) {
+        st.header_walk.probe_open = None;
+        if n >= HEADER_MISS_DISCONNECT {
+            st.header_walk.header_misses.remove(&peer);
+            punish_header_peer(st, peer);
+        }
+        return None;
+    }
     if st.header_walk.challenge_open == Some(peer) {
         st.header_walk.challenge_open = None;
         st.header_walk.challenge_external = false;
@@ -2455,12 +2493,12 @@ pub fn send_getheaders(
 ) -> Result<bool, rbitcoin_net::error::NetError> {
     ensure_origin(st, hub);
     super::path::append_stored_headers(st, hub);
-    if st.header_walk.challenge.is_none() && super::path::walk_successor_indexed(st, hub) {
+    let owed = st.header_walk.challenge.is_some() || st.header_walk.probe.is_some();
+    if !owed && super::path::walk_successor_indexed(st, hub) {
         release_lane(&mut st.header_walk.walk);
         return Ok(false);
     }
-    let want =
-        st.header_walk.challenge.is_some() || wants_lookahead(st) || walk_ahead_of_queue(st, hub);
+    let want = owed || wants_lookahead(st) || walk_ahead_of_queue(st, hub);
     if !want {
         release_lane(&mut st.header_walk.walk);
         return Ok(false);
@@ -2516,6 +2554,17 @@ pub fn arm_header_ask(
             return Ok(true);
         }
         st.header_walk.challenge_external = false;
+    }
+    if let Some(peer) = take_probe(st) {
+        // Only the confirmed chain: the first of its hashes the peer has is
+        // at or below the tip, so the reply is what it has above it.
+        if ask_header_peer(st, hub, peer, &[])? {
+            st.header_walk.probe_open = Some(peer);
+            if let Some(slot) = st.slots.iter_mut().find(|s| s.id == peer) {
+                slot.chain.note_probed();
+            }
+            return Ok(true);
+        }
     }
     ensure_reserved(st, above, skip);
     if st.header_walk.reserved.is_none() {
@@ -2616,6 +2665,14 @@ pub fn ensure_reserved(st: &mut IbdWorkState, above: u32, skip: Option<usize>) {
         }
     }
     st.header_walk.reserved = pick_header_peer(st, above, skip);
+}
+
+/// A probe peer who is still connected and not [`walk_busy`]. A busy peer
+/// is dropped unprobed, so it is picked again later.
+fn take_probe(st: &mut IbdWorkState) -> Option<usize> {
+    let peer = st.header_walk.probe.take()?;
+    let alive = st.slots.iter().any(|s| s.alive && s.id == peer);
+    (alive && !walk_busy(&st.header_walk, peer)).then_some(peer)
 }
 
 /// A challenge peer who is still connected and not retired.
@@ -3317,6 +3374,8 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         challenge: None,
         challenge_external: false,
         challenge_open: None,
+        probe: None,
+        probe_open: None,
         walk: Lane::default(),
         header_misses: HashMap::new(),
         base_diff,
