@@ -776,6 +776,30 @@ fn blocksonly_lists_mempool_mines_and_refuses_template() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Production `-blocksonly` never turns relay on. `generate` still mines the
+/// pool transaction and that txid is gone before the RPC returns. A strip
+/// that no-ops while relay is off would leave it listed.
+#[test]
+fn blocksonly_generate_removes_the_tx_it_mines() {
+    let (mut ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    ctx.blocksonly = true;
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = spend.compute_txid();
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let hash = hashes[0].as_str().unwrap();
+    let block = dispatch(&ctx, "getblock", vec![json!(hash)]).unwrap();
+    assert_eq!(block["nTx"].as_u64(), Some(2), "{block}");
+    assert!(
+        !ctx.mempool.as_ref().unwrap().contains(&txid),
+        "mined tx still live"
+    );
+    let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
+    assert_eq!(raw, json!([]), "{raw}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn parse_wrapped_multi_sh_wsh_and_wsh() {
     let pk = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";

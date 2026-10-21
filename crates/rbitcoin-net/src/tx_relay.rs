@@ -3155,6 +3155,43 @@ impl MempoolHub {
         Ok(accepted)
     }
 
+    /// Transactions one `generate` will put in a block, removed under this lock.
+    ///
+    /// [`Self::remove_for_block`] drops nothing while relay is off. Catch-up
+    /// must not call this (that block stays coinbase-only). Every id returned
+    /// has already left the live set, so a relay change during the mine cannot
+    /// leave a mined tx in the pool.
+    pub fn take_generate_txs(&self, min_sat_kvb: u64) -> Vec<Transaction> {
+        let deltas = self.fee_deltas.lock().unwrap().clone();
+        let (txs, ids) = {
+            let mut g = self.lock_write();
+            let budget = g.template_budget(min_sat_kvb);
+            let selected =
+                g.select_block_template(budget, |id| deltas.get(&id).copied().unwrap_or(0));
+            let bps = g.graph.bytes_per_sigop();
+            let mut txs = Vec::with_capacity(selected.len());
+            let mut ids = Vec::with_capacity(selected.len());
+            for (tx, sel) in selected {
+                if let Some(e) = g.graph.get(&sel.txid) {
+                    let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
+                        e.fee_sat,
+                        e.adjusted_weight(bps),
+                    );
+                    self.push_confirm_memory(rate);
+                }
+                ids.push(sel.txid);
+                txs.push(Transaction::clone(tx.as_ref()));
+            }
+            let _ = g.remove_live_txids(&ids);
+            (txs, ids)
+        };
+        if !ids.is_empty() {
+            self.unindex_evicted(&ids);
+        }
+        self.drop_mined_fee_deltas(&ids);
+        txs
+    }
+
     /// Remove confirmed txids (tip connect / archive confirm) and re-try orphans
     /// whose parents just confirmed (Query UTXO view).
     ///
