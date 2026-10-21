@@ -310,6 +310,114 @@ async fn inbound_holds_ellswift_until_v1_prefix_mismatch() {
     server.abort();
 }
 
+/// A BIP324 peer on the far end of `stream` runs its half of the handshake
+/// and returns how many garbage bytes our node sent before its terminator.
+/// The node's version packet must then authenticate with that garbage as AAD.
+async fn garbage_read_by_v2_peer(
+    stream: &mut tokio::net::TcpStream,
+    role: Role,
+    magic: Magic,
+) -> usize {
+    use bip324::{GarbageResult, Handshake, Initialized, ReceivedKey, VersionResult};
+
+    let mut key = vec![0u8; Handshake::<Initialized>::send_key_len(None)];
+    let peer = Handshake::<Initialized>::new(magic.to_bytes(), role)
+        .unwrap()
+        .send_key(None, &mut key)
+        .unwrap();
+    stream.write_all(&key).await.unwrap();
+    let mut node_key = [0u8; 64];
+    stream.read_exact(&mut node_key).await.unwrap();
+    let mut version = vec![0u8; Handshake::<ReceivedKey>::send_version_len(None)];
+    let mut peer = peer
+        .receive_key(node_key)
+        .unwrap()
+        .send_version(&mut version, None)
+        .unwrap();
+    stream.write_all(&version).await.unwrap();
+
+    let mut received = Vec::new();
+    loop {
+        let mut chunk = [0u8; 512];
+        let n = stream.read(&mut chunk).await.unwrap();
+        assert!(n > 0, "node closed before its garbage terminator");
+        received.extend_from_slice(&chunk[..n]);
+        match peer.receive_garbage(&received).unwrap() {
+            GarbageResult::NeedMoreData(waiting) => peer = waiting,
+            GarbageResult::FoundGarbage {
+                mut handshake,
+                consumed_bytes,
+            } => {
+                let mut packet = received[consumed_bytes..].to_vec();
+                let mut len = [0u8; 3];
+                while packet.len() < len.len() {
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    packet.extend_from_slice(&chunk[..n]);
+                }
+                len.copy_from_slice(&packet[..3]);
+                let body_len = handshake.decrypt_packet_len(len).unwrap();
+                while packet.len() < 3 + body_len {
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    packet.extend_from_slice(&chunk[..n]);
+                }
+                assert!(matches!(
+                    handshake.receive_version(&mut packet[3..3 + body_len]),
+                    Ok(VersionResult::Complete { .. })
+                ));
+                return consumed_bytes - 16;
+            }
+        }
+    }
+}
+
+fn assert_garbage_lengths_vary(direction: &str, mut samples: Vec<usize>) {
+    assert!(
+        samples.iter().all(|&n| n <= 4095),
+        "{direction} garbage lengths {samples:?}"
+    );
+    samples.sort_unstable();
+    samples.dedup();
+    assert!(
+        samples.len() > 1,
+        "{direction} sent one garbage length: {samples:?}"
+    );
+}
+
+/// Core `GenerateRandomGarbage`: each side sends 0..=4095 random garbage
+/// bytes after its ellswift key, so a v2 handshake has no fixed length. A v2
+/// peer reads that garbage from us whether we dial out or it dials in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v2_peer_reads_random_length_garbage_from_us() {
+    use tokio::net::{TcpListener, TcpStream};
+
+    let magic = Magic::from(Network::Regtest);
+    let mut outbound = Vec::new();
+    let mut inbound = Vec::new();
+    for _ in 0..4 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dial_out = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            open_v2(stream, magic, false).await.map(|_| ())
+        });
+        let (mut peer, _) = listener.accept().await.unwrap();
+        outbound.push(garbage_read_by_v2_peer(&mut peer, Role::Responder, magic).await);
+        dial_out.await.unwrap().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dial_in = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            open_v2(stream, magic, true).await.map(|_| ())
+        });
+        let mut peer = TcpStream::connect(addr).await.unwrap();
+        inbound.push(garbage_read_by_v2_peer(&mut peer, Role::Initiator, magic).await);
+        dial_in.await.unwrap().unwrap();
+    }
+    assert_garbage_lengths_vary("outbound", outbound);
+    assert_garbage_lengths_vary("inbound", inbound);
+}
+
 /// Core `test_size`: reject on the decrypted length prefix — do not wait
 /// for the 4 MiB ciphertext. Only the 3-byte length is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

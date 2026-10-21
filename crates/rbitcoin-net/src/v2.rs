@@ -565,6 +565,18 @@ pub async fn wait_v1_prefix_mismatch<R: AsyncRead + Unpin>(
     }
 }
 
+/// BIP324 garbage cap (Core `MAX_GARBAGE_LEN`).
+const MAX_GARBAGE_LEN: usize = 4095;
+
+/// Core `GenerateRandomGarbage`. A u16 modulo 4096 has no bias.
+fn handshake_garbage() -> Vec<u8> {
+    let mut len = [0u8; 2];
+    getrandom::fill(&mut len).expect("CSPRNG for BIP324 garbage length");
+    let mut garbage = vec![0u8; usize::from(u16::from_le_bytes(len)) % (MAX_GARBAGE_LEN + 1)];
+    getrandom::fill(&mut garbage).expect("CSPRNG for BIP324 garbage");
+    garbage
+}
+
 /// Complete BIP324 handshake on a connected TCP stream; return split encrypted halves.
 ///
 /// The fourth value is a cloned std TCP handle for [`std::net::TcpStream::shutdown`]
@@ -618,7 +630,8 @@ pub async fn open_v2_with_wire(
         pos: 0,
         inner: reader,
     };
-    let protocol = match Protocol::new(magic_bytes, role, None, None, reader, writer).await {
+    let garbage = Some(handshake_garbage());
+    let protocol = match Protocol::new(magic_bytes, role, garbage, None, reader, writer).await {
         Ok(p) => p,
         Err(e) => {
             let mapped = map_protocol_error(e);
