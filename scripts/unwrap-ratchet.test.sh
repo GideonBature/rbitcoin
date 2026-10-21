@@ -38,6 +38,10 @@ assert_fail "braceless cfg(test) item does not skip the next function" \
   python3 "$PY" --root "$FIX/cfg-braceless"
 assert_ok "cfg(test) function whose signature holds a semicolon is skipped" \
   python3 "$PY" --root "$FIX/cfg-header"
+assert_fail "try_into is excluded only when it is the unwrap receiver" \
+  python3 "$PY" --root "$FIX/try-chain"
+assert_ok "try_into turbofish is still not counted" \
+  python3 "$PY" --root "$FIX/turbofish"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "unwrap-ratchet.test.sh: $PASS passed, $FAIL failed"

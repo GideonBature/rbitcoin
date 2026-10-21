@@ -102,9 +102,9 @@ Bare production `.unwrap()` / `.unwrap_err()` are frozen per file in
 gains one, and when a cleanup leaves the old count in place. Each call
 counts as one. The count skips `#[cfg(test)]` items, `tests/`,
 `rbitcoin-test`, and `rbitcoin-bench`. A `.lock()` / `.read()` /
-`.write()` / `try_into()` receiver is skipped, including when that call
-is the previous line. The next statement still counts. `.expect(reason)`
-is not counted.
+`.write()` / `try_into()` receiver is skipped, including a turbofish
+and a call broken onto the previous line. A later method on that value
+still counts. `.expect(reason)` is not counted.
 
 **Goal:** no `[workspace.lints.clippy]` `= "allow"`. A lint that is wrong
 for one item is `#[allow(clippy::lint)]` on **that item**, with a one-line

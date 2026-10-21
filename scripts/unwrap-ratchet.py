@@ -5,8 +5,8 @@ Counts each `.unwrap(` and `.unwrap_err(` under crates/, not each line.
 Skips rbitcoin-test, rbitcoin-bench, tests/, benches/, *tests.rs, and
 items marked `#[cfg(test)]`. Does not count unwrap_or. A `.lock()` /
 `.read()` / `.write()` / `try_into()` receiver is not counted, including
-when that call sits on the previous line. A later call on the same line
-still counts.
+when that call sits on the previous line, including a turbofish.
+A later method on that value still counts.
 
 lint/unwrap-baseline.txt is sorted `path<TAB>count` lines for counts above zero.
 A file above its line, a positive file with no line, or a line that is now
@@ -19,8 +19,11 @@ import re
 import sys
 
 UNWRAP_RE = re.compile(r"\.unwrap(?:_err)?\s*\(")
+# The excluded call is the tail of the receiver. A turbofish may contain
+# `;` (`[u8; 4]`). A later `.ok()` or `.as_ref()` is not that tail.
 EXCLUDED_TAIL = re.compile(
-    r"(?:try_into\b[^;]*\(\s*\)|\.(?:lock|read|write)\s*\(\s*\))\s*$"
+    r"(?:try_into(?:\s*::\s*<(?:[^<>\[\]]|\[[^\]]*\]|<[^<>]*>)*>)?\s*\(\s*\)"
+    r"|\.(?:lock|read|write)\s*\(\s*\))\s*$"
 )
 CFG_TEST_ATTR = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 SKIP_CRATES = {"rbitcoin-test", "rbitcoin-bench"}
