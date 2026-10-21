@@ -2220,6 +2220,18 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         http_header_value(&raw, "x-bitcoin-chain-tip-height").as_deref(),
         Some("102")
     );
+    let (st, _, body) =
+        http_get_raw(esplora.local_addr, "/block-height/102/tx/1/out/0").await;
+    assert_eq!(st, 200, "output after the spend leaves the best chain: {body}");
+    let unspent: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(unspent["spent"], false, "{unspent}");
+    assert_eq!(unspent["scriptpubkey"], "52", "script stays: {unspent}");
+    assert!(unspent["value"].as_u64().is_some(), "{unspent}");
+    let (st, _, body) =
+        http_get_raw(esplora.local_addr, &format!("/tx/{create_hex}/out/0")).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["spent"], false);
+
     let (st, _, body) = http_get_raw(esplora.local_addr, &format!("/tx/{spend_hex}/status")).await;
     assert_eq!(st, 200, "spend status after disconnect={body}");
     let spend_st: Value = serde_json::from_str(&body).unwrap();

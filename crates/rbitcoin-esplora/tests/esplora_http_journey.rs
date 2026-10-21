@@ -423,6 +423,18 @@ async fn junk_paths_asof_and_post(addr: SocketAddr, genesis: &[u8; 32]) {
 
 /// A same-height replace restamps a scripthash read. `/mempool` never pins a view.
 async fn same_height_replace_restamps(pad: &mut HttpPad) {
+    let h = pad.tip();
+    let out_path = format!("/block-height/{h}/tx/0/out/0");
+    let (st, body) = http_get(pad.addr, &out_path).await;
+    assert_eq!(st, 200, "tip coinbase output before replace: {body}");
+    let before: Value = serde_json::from_str(&body).unwrap();
+    let old_hash = block_hash_hex(pad.hashes.last().unwrap());
+    assert_eq!(before["status"]["block_hash"], old_hash, "{before}");
+    assert_eq!(before["scriptpubkey"], "51", "{before}");
+    let missing = format!("/block-height/{h}/tx/1/out/0");
+    let (st, body) = http_get(pad.addr, &missing).await;
+    assert_eq!(st, 404, "coinbase-only block has no index 1: {body}");
+
     let sh_hex = block_hash_hex(&script_hash(&[0x51]));
     let path = format!("/scripthash/{sh_hex}/utxo");
     let (st, raw_a, _) = http_get_raw(pad.addr, &path).await;
@@ -455,6 +467,18 @@ async fn same_height_replace_restamps(pad: &mut HttpPad) {
     let tip_b = header_value(&raw_b, HDR_CHAIN_TIP).expect("tip B");
     assert_eq!(tip_b, block_hash_hex(&hb.hash));
     assert_ne!(tip_a, tip_b);
+
+    let (st, body) = http_get(pad.addr, &out_path).await;
+    assert_eq!(st, 200, "replaced tip still has index 0: {body}");
+    let after: Value = serde_json::from_str(&body).unwrap();
+    let new_hash = block_hash_hex(&hb.hash);
+    assert_eq!(after["status"]["block_hash"], new_hash, "{after}");
+    assert_ne!(after["status"]["block_hash"], old_hash);
+    assert_eq!(after["scriptpubkey"], before["scriptpubkey"], "{after}");
+    assert_eq!(after["value"], before["value"], "{after}");
+    assert_eq!(after["spent"], false, "{after}");
+    let (st, body) = http_get(pad.addr, &missing).await;
+    assert_eq!(st, 404, "replaced block still has no index 1: {body}");
 
     let (st, raw, body) = http_get_raw(pad.addr, "/mempool").await;
     assert_eq!(
