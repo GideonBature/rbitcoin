@@ -17,6 +17,9 @@ assert_ok "run-ldk skips without ldk-node or is quiet" \
 "$ROOT/scripts/lightning/bitcoin-cli.test.sh"
 assert_ok "bitcoin-cli wrapper self-test" true
 
+"$ROOT/scripts/lightning/ldk-utxo-lookup.test.sh"
+assert_ok "ldk utxo lookup doc contract" true
+
 if [[ "$FAIL" -ne 0 ]]; then
   echo "run.test.sh: $PASS passed, $FAIL failed"
   exit 1

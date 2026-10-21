@@ -111,6 +111,98 @@ BDK on-chain wallet still needs `/address/*` and `/scripthash/*` → **`--sh-ind
 | `blockchain.estimatefee` | done (10-minute product; `-1` if insufficient) |
 | `blockchain.scripthash.*` | done **only with SH** |
 
+## Gossip connector
+
+Stock `EsploraSyncClient` does not implement this. An application that
+verifies `channel_announcement` gossip copies the two functions below.
+There is no `lightning` crate in this repo. Pass only
+`channel_announcement.short_channel_id`. An alias short channel id is not
+a bit pattern these functions can reject.
+
+Check the chain hash first. A mismatch is `UnknownChain` and does not send HTTP.
+
+`spent: true` still carries the script and value. The trait means the
+funding output exists now, so the sample returns `UnknownTx`. A checker
+that only wants the historical script can read the body.
+
+A mempool spend stays `spent: false` here. The sample does not call
+outspend. A caller who must refuse that spend also reads
+`GET /tx/{txid}/outspend/{vout}`.
+
+Live gossip omits `asof`. A replay against a header adds
+`?asof=<blockhash>` to the same path. `funding_output_path` leaves that
+query off.
+
+```rust
+/// BOLT 7 waits six confirmations. LDK `GossipVerifier` uses five
+/// (`block_height + 5 > tip`).
+const CONFIRMATIONS: u32 = 6;
+const BATCH_LIMIT: usize = 300;
+
+enum Lookup {
+    TxOut { script_hex: String, value: u64 },
+    UnknownTx,
+    UnknownChain,
+    Retry,
+}
+
+fn scid_parts(scid: u64) -> (u32, u32, u32) {
+    (
+        (scid >> 40) as u32,
+        ((scid >> 16) & 0x00ff_ffff) as u32,
+        (scid & 0xffff) as u32,
+    )
+}
+
+fn funding_output_path(height: u32, index: u32, vout: u32) -> String {
+    format!("/block-height/{height}/tx/{index}/out/{vout}")
+}
+
+/// One funding output. `status` is the HTTP status. `spent: true`, a 404,
+/// and fewer than `CONFIRMATIONS` are `UnknownTx`. 5xx is `Retry`.
+fn lookup_funding_utxo(
+    status: u16,
+    spent: Option<bool>,
+    block_height: u32,
+    tip_height: u32,
+    script_hex: &str,
+    value: u64,
+) -> Lookup {
+    if status >= 500 {
+        return Lookup::Retry;
+    }
+    if status != 200 {
+        return Lookup::UnknownTx;
+    }
+    // spent: true
+    if spent != Some(false) {
+        return Lookup::UnknownTx;
+    }
+    if tip_height.saturating_sub(block_height) < CONFIRMATIONS {
+        return Lookup::UnknownTx;
+    }
+    Lookup::TxOut {
+        script_hex: script_hex.to_string(),
+        value,
+    }
+}
+
+/// Graph sync. Each inner vec is one `POST /block-heights/txs/outs` body,
+/// capped at `BATCH_LIMIT`. A null JSON slot is `UnknownTx` for that id.
+/// HTTP 422 means the chunk was longer than 300. Zip each element with
+/// `lookup_funding_utxo`.
+fn lookup_funding_utxos(scids: &[u64]) -> Vec<Vec<(u32, u32, u32)>> {
+    scids
+        .chunks(BATCH_LIMIT)
+        .map(|chunk| chunk.iter().copied().map(scid_parts).collect())
+        .collect()
+}
+```
+
+`funding_output_path` is the GET. `lookup_funding_utxo` decides the trait
+result from the response. `lookup_funding_utxos` only builds the batch
+bodies.
+
 ## LND
 
 Two chain sources exist in current LND. One can use this node. One cannot.
