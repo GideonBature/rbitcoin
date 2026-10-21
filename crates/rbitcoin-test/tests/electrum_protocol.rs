@@ -1663,6 +1663,71 @@ async fn electrum_leftover_mempool_does_not_double_count() {
     handle.shutdown().await;
 }
 
+/// Output-by-position and by outpoint at the create block hide the later spend.
+async fn assert_output_asof_hides_later_spend(
+    addr: SocketAddr,
+    asof_create: &str,
+    create_hex: &str,
+) {
+    let live = format!("/block-height/102/tx/1/out/0");
+    let (st, body) = {
+        let (st, _, body) = http_get_raw(addr, &live).await;
+        (st, body)
+    };
+    assert_eq!(st, 200, "live position output: {body}");
+    let live_out: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(live_out["spent"], true, "{live_out}");
+    assert_eq!(live_out["scriptpubkey"], "52", "{live_out}");
+    assert_eq!(live_out["status"]["block_height"], 102, "{live_out}");
+
+    let pinned = format!("/block-height/102/tx/1/out/0?asof={asof_create}");
+    let (st, raw, body) = http_get_raw(addr, &pinned).await;
+    assert_eq!(st, 200, "asof position output: {body}");
+    let pinned_out: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        pinned_out["spent"], false,
+        "spend above the pin: {pinned_out}"
+    );
+    assert_eq!(
+        pinned_out["scriptpubkey"], live_out["scriptpubkey"],
+        "{pinned_out}"
+    );
+    assert_eq!(pinned_out["value"], live_out["value"], "{pinned_out}");
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").as_deref(),
+        Some(asof_create),
+        "tip header names the pin"
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip-height").as_deref(),
+        Some("102")
+    );
+
+    let (st, _, body) =
+        http_get_raw(addr, &format!("/tx/{create_hex}/out/0?asof={asof_create}")).await;
+    assert_eq!(st, 200, "asof outpoint: {body}");
+    let by_txid: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(by_txid["spent"], false, "{by_txid}");
+
+    let (st, _, body) = http_get_raw(
+        addr,
+        &format!("/block-height/103/tx/1/out/0?asof={asof_create}"),
+    )
+    .await;
+    assert_eq!(st, 404, "height above the pin: {body}");
+
+    let (st, raw, body) = http_get_raw(
+        addr,
+        &format!("/tx/{create_hex}/out/0?asof={}", "ee".repeat(32)),
+    )
+    .await;
+    assert_eq!(st, 404, "unknown asof: {body}");
+    assert!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").is_none(),
+        "unknown asof must not stamp a tip"
+    );
+}
+
 #[allow(clippy::cognitive_complexity)] // one pad, Electrum TCP + Esplora HTTP asof
 #[tokio::test]
 async fn electrum_and_esplora_asof_hides_later_spend() {
@@ -1907,6 +1972,7 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         &create_hex,
     )
     .await;
+    assert_output_asof_hides_later_spend(esplora.local_addr, &asof_create, &create_hex).await;
 
     q.set_sh_index_enabled(false);
     let lag_blk = rbitcoin_consensus::mine_empty_regtest(
@@ -2061,6 +2127,16 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
     assert_esplora_asof_dead(
         esplora.local_addr,
         &format!("/tx/{spend_hex}/status?asof={asof_spend}"),
+    )
+    .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/block-height/102/tx/1/out/0?asof={asof_spend}"),
+    )
+    .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/tx/{create_hex}/out/0?asof={asof_spend}"),
     )
     .await;
 

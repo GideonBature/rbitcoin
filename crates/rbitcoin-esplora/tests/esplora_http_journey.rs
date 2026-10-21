@@ -581,6 +581,78 @@ async fn mempool_cursor_past_the_page_is_the_confirmed_page() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Position and outpoint output objects. Genesis and a mempool-only tx are
+/// absent. A mempool spend of a confirmed coin leaves `spent: false`.
+async fn confirmed_output_by_position(pad: &HttpPad) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize_hex;
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    let addr = pad.addr;
+    let (st, body) = http_get(addr, "/block-height/2/tx/0/out/0").await;
+    assert_eq!(st, 200, "unspent coinbase output: {body}");
+    let out: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(out["spent"], false, "{out}");
+    assert_eq!(out["value"], json!(50_0000_0000u64), "{out}");
+    assert_eq!(out["scriptpubkey"], "51", "{out}");
+    assert!(out.get("scriptpubkey_address").is_none(), "{out}");
+    assert_eq!(out["status"]["confirmed"], true, "{out}");
+    assert_eq!(out["status"]["block_height"], 2, "{out}");
+    let cb2 = block_hash_hex(&pad.cbs[2]);
+    let (st, by_txid) = http_get(addr, &format!("/tx/{cb2}/out/0")).await;
+    assert_eq!(st, 200, "{by_txid}");
+    assert_eq!(by_txid, body, "outpoint route matches the position route");
+
+    let (st, body) = http_get(addr, "/block-height/0/tx/0/out/0").await;
+    assert_eq!(st, 404, "genesis coinbase by position: {body}");
+    let genesis = block_hash_hex(&pad.cbs[0]);
+    let (st, body) = http_get(addr, &format!("/tx/{genesis}/out/0")).await;
+    assert_eq!(st, 404, "genesis coinbase by txid: {body}");
+
+    let (st, body) = http_get(addr, "/block-height/1/tx/2/out/0").await;
+    assert_eq!(st, 404, "index past the block: {body}");
+    let (st, body) = http_get(addr, "/block-height/2/tx/0/out/1").await;
+    assert_eq!(st, 404, "vout past the tx: {body}");
+    let (st, body) = http_get(addr, "/block-height/99999/tx/0/out/0").await;
+    assert_eq!(st, 404, "height past the tip: {body}");
+
+    let (st, body) = http_get(addr, "/block-height/2/tx/nope/out/0").await;
+    assert_eq!(st, 400, "non-integer index: {body}");
+    let (st, body) = http_get(addr, &format!("/tx/{cb2}/out/nope")).await;
+    assert_eq!(st, 400, "non-integer vout: {body}");
+
+    let spend = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array(pad.cbs[1]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_0000_0000 - 1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let (st, body) = http_post(addr, "/tx", serialize_hex(&spend).as_bytes()).await;
+    assert_eq!(st, 200, "POST spend of height-1 coinbase: {body}");
+    let (st, body) = http_get(addr, "/block-height/1/tx/0/out/0").await;
+    assert_eq!(st, 200, "mempool spend stays an output: {body}");
+    let out: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(out["spent"], false, "mempool spend must not flip spent: {out}");
+    assert_eq!(out["scriptpubkey"], "51", "{out}");
+    assert_eq!(out["value"], json!(50_0000_0000u64), "{out}");
+    let spend_hex = display_txid(spend.compute_txid());
+    let (st, body) = http_get(addr, &format!("/tx/{spend_hex}/out/0")).await;
+    assert_eq!(st, 404, "mempool-only tx has no output object: {body}");
+}
+
 /// One TCP Esplora on one hub: an empty chain, then a mature pad a wallet
 /// pages, a mempool spend, junk requests, a same-height tip replace, and a
 /// pruned tail once the chain grows past the prune window.
@@ -627,6 +699,7 @@ async fn esplora_tcp_wallet_mempool_and_replace() {
     let spend = mempool_spend_is_full_json(&pad).await;
     chain_cursor_matches_chain_page(&pad, &spend).await;
     mempool_spend_outspends_and_hex(&pad, &spend).await;
+    confirmed_output_by_position(&pad).await;
     junk_paths_asof_and_post(pad.addr, &pad.hashes[0]).await;
     same_height_replace_restamps(&mut pad).await;
     pruned_tail_is_partial_json(&mut pad).await;

@@ -6,7 +6,7 @@ use crate::server::{
 };
 use crate::tx_json::{
     build_tx_json, build_tx_json_from_tx, history_items_to_tx_json, tx_status_json_in,
-    utxo_list_json,
+    utxo_list_json, vout_fields,
 };
 use axum::body::Bytes;
 use axum::extract::{Path, Query as AxumQuery, State};
@@ -19,10 +19,11 @@ use bitcoin::hashes::Hash;
 use bitcoin::pow::{CompactTarget, Target};
 use bitcoin::{MerkleBlock, Network, OutPoint, Txid};
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::{median_time_past_times, Height};
+use rbitcoin_primitives::{median_time_past_times, Fk, Height};
 
 use rbitcoin_query::{
-    ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary, ShJoinSlot,
+    ChainView, ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary,
+    ShJoinSlot,
 };
 use rbitcoin_store::{script_hash, StoreError};
 use serde::Deserialize;
@@ -443,6 +444,108 @@ pub fn tx_merkleblock_proof_sync(st: AppState, txid_hex: String) -> Response {
         return (StatusCode::INTERNAL_SERVER_ERROR, "merkleblock encode").into_response();
     }
     plain_ok(rbitcoin_primitives::hex_encode(&(raw)))
+}
+
+/// One confirmed output: script, value, boolean `spent`, creating-tx `status`.
+fn output_at_view(
+    query: &Query,
+    network: Network,
+    fk: Fk,
+    txid: &[u8; 32],
+    vout: u32,
+    view: &ChainView,
+) -> Result<Value, StoreError> {
+    let out = query.tx_output_at_fk(fk, vout)?;
+    let spent = query.is_outpoint_spent_at(txid, vout, Some(view.height.0))?;
+    let mut obj = vout_fields(&out.script, out.value, network);
+    obj["spent"] = json!(spent);
+    obj["status"] = tx_status_json_in(query, fk, view)?;
+    Ok(obj)
+}
+
+fn genesis_coinbase(query: &Query, fk: Fk) -> Result<bool, StoreError> {
+    let Some(0) = query.store().tx_height_get(fk)? else {
+        return Ok(false);
+    };
+    query.is_coinbase_create(fk, 0)
+}
+
+fn pinned_tip(query: &Query, asof: Option<[u8; 32]>) -> Result<ChainView, Response> {
+    match pin_or_reject(query, ChainViewKind::Tip, asof)? {
+        Some(view) => Ok(view),
+        None => Err(not_found()),
+    }
+}
+
+/// `GET /block-height/{height}/tx/{index}/out/{vout}`.
+pub async fn block_height_tx_out(
+    State(st): State<AppState>,
+    Path((height, index, vout)): Path<(u32, u32, u32)>,
+    AsOf(asof): AsOf,
+) -> Response {
+    spawn_join(move || {
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        if height > view.height.0 || (height == 0 && index == 0) {
+            return not_found();
+        }
+        let fk = match st.query.tx_fk_at_height(Height(height), index) {
+            Ok(fk) => fk,
+            Err(e) => return store_err(e),
+        };
+        let txid = match st.query.store().txs.body_txid(fk) {
+            Ok(id) => id,
+            Err(e) => return store_err(e),
+        };
+        match output_at_view(&st.query, st.network, fk, &txid, vout, &view) {
+            Ok(v) => maybe_attach_view(Json(v).into_response(), Some(view)),
+            Err(e) => store_err(e),
+        }
+    })
+    .await
+}
+
+/// `GET /tx/{txid}/out/{vout}`. Confirmed create only. Mempool spends stay unspent.
+pub async fn tx_out(
+    State(st): State<AppState>,
+    Path((txid_hex, vout)): Path<(String, u32)>,
+    AsOf(asof): AsOf,
+) -> Response {
+    spawn_join(move || {
+        let Ok(txid) = parse_hash32(&txid_hex) else {
+            return not_found();
+        };
+        let fk = match st.query.tx_fk_by_txid(&txid) {
+            Ok(Some(fk)) => fk,
+            Ok(None) => return not_found(),
+            Err(e) => return store_err(e),
+        };
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match st
+            .query
+            .store()
+            .is_confirmed_strong_at(fk, Some(view.height.0))
+        {
+            Ok(true) => {}
+            Ok(false) => return not_found(),
+            Err(e) => return store_err(e),
+        }
+        match genesis_coinbase(&st.query, fk) {
+            Ok(true) => return not_found(),
+            Ok(false) => {}
+            Err(e) => return store_err(e),
+        }
+        match output_at_view(&st.query, st.network, fk, &txid, vout, &view) {
+            Ok(v) => maybe_attach_view(Json(v).into_response(), Some(view)),
+            Err(e) => store_err(e),
+        }
+    })
+    .await
 }
 
 pub async fn tx_outspend(

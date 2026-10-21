@@ -646,6 +646,10 @@ fn asof_query_is_gated_to_documented_routes() {
     assert!(path_accepts_asof("/scripthash/ab/txs/summary/cd"));
     assert!(!path_accepts_asof("/address/bcrt1q/txs/mempool"));
     assert!(!path_accepts_asof("/tx/ab"));
+    assert!(!path_accepts_asof("/block-height/1"));
+    assert!(path_accepts_asof("/block-height/1/tx/0/out/0"));
+    assert!(path_accepts_asof("/tx/ab/out/0"));
+    assert!(!path_accepts_asof("/block/ab/tx/0"));
     assert!(!path_accepts_asof("/mempool"));
     assert!(!path_accepts_asof("/scripthash/ab/txs/mempool"));
     assert!(path_never_pins("/mempool"));
