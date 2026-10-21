@@ -143,10 +143,26 @@ impl Query {
         Ok(ids)
     }
 
+    /// Create id at `index` in the confirmed block. A header with no Class A
+    /// span is [`StoreError::NotFound`], not corrupt. Does not expand the span.
+    pub fn tx_fk_at_height(&self, height: Height, index: u32) -> Result<Fk, QueryError> {
+        let (first, n) = match self.tx_fk_span_at_height(height) {
+            Ok(span) => span,
+            Err(StoreError::Corrupt("confirmed header missing body list")) => {
+                return Err(StoreError::NotFound);
+            }
+            Err(e) => return Err(e),
+        };
+        if index >= n {
+            return Err(StoreError::NotFound);
+        }
+        Fk::new(first.0 + u64::from(index)).ok_or(StoreError::NotFound)
+    }
+
     /// One create identity at `index` in the block (`txid.body` only).
     pub fn block_txid_at(&self, height: Height, index: usize) -> Result<[u8; 32], QueryError> {
-        let fks = self.block_tx_fks(height)?;
-        let fk = *fks.get(index).ok_or(StoreError::NotFound)?;
+        let index = u32::try_from(index).map_err(|_| StoreError::NotFound)?;
+        let fk = self.tx_fk_at_height(height, index)?;
         self.store.txs.body_txid(fk)
     }
 

@@ -1663,6 +1663,190 @@ async fn electrum_leftover_mempool_does_not_double_count() {
     handle.shutdown().await;
 }
 
+/// Output-by-position and by outpoint at the create block hide the later spend.
+async fn assert_output_asof_hides_later_spend(
+    addr: SocketAddr,
+    asof_create: &str,
+    create_hex: &str,
+) {
+    assert_output_gets_hide_later_spend(addr, asof_create, create_hex).await;
+    assert_output_batch_hides_later_spend(addr, asof_create).await;
+    assert_tx_by_position_uses_pin(addr, asof_create, create_hex).await;
+}
+
+async fn assert_output_gets_hide_later_spend(
+    addr: SocketAddr,
+    asof_create: &str,
+    create_hex: &str,
+) {
+    let live = "/block-height/102/tx/1/out/0";
+    let (st, body) = {
+        let (st, _, body) = http_get_raw(addr, live).await;
+        (st, body)
+    };
+    assert_eq!(st, 200, "live position output: {body}");
+    let live_out: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(live_out["spent"], true, "{live_out}");
+    assert_eq!(live_out["scriptpubkey"], "52", "{live_out}");
+    assert_eq!(live_out["status"]["block_height"], 102, "{live_out}");
+
+    let pinned = format!("/block-height/102/tx/1/out/0?asof={asof_create}");
+    let (st, raw, body) = http_get_raw(addr, &pinned).await;
+    assert_eq!(st, 200, "asof position output: {body}");
+    let pinned_out: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        pinned_out["spent"], false,
+        "spend above the pin: {pinned_out}"
+    );
+    assert_eq!(
+        pinned_out["scriptpubkey"], live_out["scriptpubkey"],
+        "{pinned_out}"
+    );
+    assert_eq!(pinned_out["value"], live_out["value"], "{pinned_out}");
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").as_deref(),
+        Some(asof_create),
+        "tip header names the pin"
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip-height").as_deref(),
+        Some("102")
+    );
+
+    let (st, _, body) =
+        http_get_raw(addr, &format!("/tx/{create_hex}/out/0?asof={asof_create}")).await;
+    assert_eq!(st, 200, "asof outpoint: {body}");
+    let by_txid: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(by_txid["spent"], false, "{by_txid}");
+
+    let (st, _, body) = http_get_raw(
+        addr,
+        &format!("/block-height/103/tx/1/out/0?asof={asof_create}"),
+    )
+    .await;
+    assert_eq!(st, 404, "height above the pin: {body}");
+
+    let (st, raw, body) = http_get_raw(
+        addr,
+        &format!("/tx/{create_hex}/out/0?asof={}", "ee".repeat(32)),
+    )
+    .await;
+    assert_eq!(st, 404, "unknown asof: {body}");
+    assert!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").is_none(),
+        "unknown asof must not stamp a tip"
+    );
+}
+
+async fn assert_output_batch_hides_later_spend(addr: SocketAddr, asof_create: &str) {
+    let batch =
+        serde_json::to_vec(&json!([[102, 1, 0], [102, 1, 0], [103, 1, 0], [102, 9, 0]])).unwrap();
+    let (st, _, body) = http_post_raw(addr, "/block-heights/txs/outs", &batch).await;
+    assert_eq!(st, 200, "live batch: {body}");
+    let live_rows: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        live_rows[0]["spent"], true,
+        "confirmed spend in the batch: {body}"
+    );
+    assert_eq!(live_rows[1], live_rows[0]);
+    assert_eq!(live_rows[2]["spent"], false, "spend tx output: {body}");
+    assert!(live_rows[3].is_null(), "{body}");
+
+    let (st, raw, body) = http_post_raw(
+        addr,
+        &format!("/block-heights/txs/outs?asof={asof_create}"),
+        &batch,
+    )
+    .await;
+    assert_eq!(st, 200, "asof batch: {body}");
+    let rows: Vec<Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows.len(), 4, "{body}");
+    assert_eq!(rows[0]["spent"], false, "later spend hidden: {rows:?}");
+    assert_eq!(rows[0]["scriptpubkey"], "52");
+    assert_eq!(rows[1], rows[0], "duplicate kept");
+    assert!(rows[2].is_null(), "height above the pin is null: {rows:?}");
+    assert!(rows[3].is_null(), "missing index is null");
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").as_deref(),
+        Some(asof_create)
+    );
+    let (st, raw, body) = http_post_raw(
+        addr,
+        &format!("/block-heights/txs/outs?asof={}", "ee".repeat(32)),
+        &batch,
+    )
+    .await;
+    assert_eq!(st, 404, "dead asof rejects the whole post: {body}");
+    assert!(http_header_value(&raw, "x-bitcoin-chain-tip").is_none());
+}
+
+async fn assert_tx_by_position_uses_pin(addr: SocketAddr, asof_create: &str, create_hex: &str) {
+    let (st, _, by_id) = http_get_raw(addr, &format!("/tx/{create_hex}")).await;
+    assert_eq!(st, 200, "live tx: {by_id}");
+    let (st, _, by_pos) = http_get_raw(addr, "/block-height/102/tx/1").await;
+    assert_eq!(st, 200, "position tx: {by_pos}");
+    assert_eq!(by_pos, by_id, "position tx matches GET /tx");
+
+    let (st, raw, body) =
+        http_get_raw(addr, &format!("/block-height/102/tx/1?asof={asof_create}")).await;
+    assert_eq!(st, 200, "asof position tx: {body}");
+    let pinned_tx: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pinned_tx["txid"], create_hex, "{pinned_tx}");
+    assert_eq!(pinned_tx["status"]["confirmed"], true, "{pinned_tx}");
+    assert_eq!(pinned_tx["status"]["block_height"], 102, "{pinned_tx}");
+    assert_eq!(
+        pinned_tx["status"]["block_hash"], asof_create,
+        "status names the pin block: {pinned_tx}"
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").as_deref(),
+        Some(asof_create)
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip-height").as_deref(),
+        Some("102")
+    );
+
+    let (st, _, body) =
+        http_get_raw(addr, &format!("/block-height/103/tx/0?asof={asof_create}")).await;
+    assert_eq!(st, 404, "tx height above the pin: {body}");
+    let (st, _, body) = http_get_raw(addr, "/block-height/102/tx/9").await;
+    assert_eq!(st, 404, "tx index past the block: {body}");
+    let (st, raw, body) = http_get_raw(
+        addr,
+        &format!("/block-height/102/tx/1?asof={}", "ee".repeat(32)),
+    )
+    .await;
+    assert_eq!(st, 404, "dead asof on position tx: {body}");
+    assert!(http_header_value(&raw, "x-bitcoin-chain-tip").is_none());
+}
+
+async fn http_post_raw(addr: SocketAddr, path: &str, body: &[u8]) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(addr).await.expect("esplora connect");
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let resp = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    (status, text, resp)
+}
+
 #[allow(clippy::cognitive_complexity)] // one pad, Electrum TCP + Esplora HTTP asof
 #[tokio::test]
 async fn electrum_and_esplora_asof_hides_later_spend() {
@@ -1907,6 +2091,7 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         &create_hex,
     )
     .await;
+    assert_output_asof_hides_later_spend(esplora.local_addr, &asof_create, &create_hex).await;
 
     q.set_sh_index_enabled(false);
     let lag_blk = rbitcoin_consensus::mine_empty_regtest(
@@ -2063,6 +2248,21 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         &format!("/tx/{spend_hex}/status?asof={asof_spend}"),
     )
     .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/block-height/102/tx/1/out/0?asof={asof_spend}"),
+    )
+    .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/block-height/102/tx/1?asof={asof_spend}"),
+    )
+    .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/tx/{create_hex}/out/0?asof={asof_spend}"),
+    )
+    .await;
 
     q.disconnect_tip().unwrap();
     q.apply_sh_pending().unwrap();
@@ -2144,6 +2344,22 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         http_header_value(&raw, "x-bitcoin-chain-tip-height").as_deref(),
         Some("102")
     );
+    let (st, _, body) = http_get_raw(esplora.local_addr, "/block-height/102/tx/1/out/0").await;
+    assert_eq!(
+        st, 200,
+        "output after the spend leaves the best chain: {body}"
+    );
+    let unspent: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(unspent["spent"], false, "{unspent}");
+    assert_eq!(unspent["scriptpubkey"], "52", "script stays: {unspent}");
+    assert!(unspent["value"].as_u64().is_some(), "{unspent}");
+    let (st, _, body) = http_get_raw(esplora.local_addr, &format!("/tx/{create_hex}/out/0")).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["spent"],
+        false
+    );
+
     let (st, _, body) = http_get_raw(esplora.local_addr, &format!("/tx/{spend_hex}/status")).await;
     assert_eq!(st, 200, "spend status after disconnect={body}");
     let spend_st: Value = serde_json::from_str(&body).unwrap();
@@ -2158,6 +2374,101 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
         &format!("/tx/{spend_hex}/status?asof={asof_spend}"),
     )
     .await;
+
+    // The create block is the tip. Capture that pin, replace the height, and
+    // require status to keep the pinned header rather than the sibling.
+    let parent_hash = create_blk.header.prev_blockhash.to_string();
+    let old_view = q
+        .pin_chain_view_at(&create_blk.block_hash().to_byte_array())
+        .unwrap()
+        .expect("create block is still confirmed");
+    q.disconnect_tip().unwrap();
+    let sibling = rbitcoin_consensus::mine_regtest_paying(
+        create_blk.header.prev_blockhash,
+        create_blk.header.time.wrapping_add(1),
+        102,
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![create.clone()],
+    );
+    assert_ne!(sibling.block_hash(), create_blk.block_hash());
+    accept_and_connect_block(&q, &params, Height(102), &sibling, Milestone::NONE).unwrap();
+    let sibling_hash = sibling.block_hash().to_string();
+    let fk = q.tx_fk_at_height(Height(102), 1).unwrap();
+    let pinned_status = rbitcoin_esplora::tx_json::tx_status_json_in(&q, fk, &old_view).unwrap();
+    assert_eq!(
+        pinned_status["block_hash"], asof_create,
+        "status must stay on the pinned create block, not the sibling: {pinned_status}"
+    );
+    assert_eq!(
+        pinned_status["block_time"], create_blk.header.time,
+        "{pinned_status}"
+    );
+    assert_ne!(pinned_status["block_hash"], sibling_hash);
+
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/block-height/102/tx/1?asof={asof_create}"),
+    )
+    .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/tx/{create_hex}/out/0?asof={asof_create}"),
+    )
+    .await;
+    let (st, raw, body) = http_get_raw(
+        esplora.local_addr,
+        &format!("/block-height/101/tx/0?asof={parent_hash}"),
+    )
+    .await;
+    assert_eq!(
+        st, 200,
+        "ancestor pin stays live after the create height is replaced: {body}"
+    );
+    let ancestor: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ancestor["status"]["block_hash"], parent_hash, "{ancestor}");
+    assert_ne!(
+        ancestor["status"]["block_time"], sibling.header.time,
+        "{ancestor}"
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").as_deref(),
+        Some(parent_hash.as_str())
+    );
+
+    // Replace the parent. A live header read at 101 would name the new block.
+    // The stale create pin must walk prev_fk and keep the archived parent.
+    let parent_time = q
+        .header_at_height(Height(101))
+        .unwrap()
+        .expect("parent still confirmed")
+        .1
+        .timestamp;
+    q.disconnect_tip().unwrap();
+    let grand = q
+        .header_at_height(Height(100))
+        .unwrap()
+        .expect("height 100 stays the parent of the replaced block")
+        .1;
+    q.disconnect_tip().unwrap();
+    let alt = rbitcoin_consensus::mine_regtest_paying(
+        bitcoin::BlockHash::from_byte_array(grand.hash),
+        sibling.header.time.wrapping_add(1),
+        101,
+        ScriptBuf::from_bytes(vec![0x51]),
+        Vec::new(),
+    );
+    accept_and_connect_block(&q, &params, Height(101), &alt, Milestone::NONE).unwrap();
+    let alt_hash = alt.block_hash().to_string();
+    assert_ne!(alt_hash, parent_hash);
+    let alt_fk = q.tx_fk_at_height(Height(101), 0).unwrap();
+    let walked = rbitcoin_esplora::tx_json::tx_status_json_in(&q, alt_fk, &old_view).unwrap();
+    assert_eq!(walked["block_height"], 101, "{walked}");
+    assert_eq!(
+        walked["block_hash"], parent_hash,
+        "stale pin must walk prev_fk, not the live header: {walked}"
+    );
+    assert_ne!(walked["block_hash"], alt_hash);
+    assert_eq!(walked["block_time"], parent_time, "{walked}");
 
     handle.shutdown().await;
     esplora.shutdown().await;

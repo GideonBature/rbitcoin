@@ -6,7 +6,7 @@ use crate::server::{
 };
 use crate::tx_json::{
     build_tx_json, build_tx_json_from_tx, history_items_to_tx_json, tx_status_json_in,
-    utxo_list_json,
+    utxo_list_json, vout_fields,
 };
 use axum::body::Bytes;
 use axum::extract::{Path, Query as AxumQuery, State};
@@ -19,10 +19,11 @@ use bitcoin::hashes::Hash;
 use bitcoin::pow::{CompactTarget, Target};
 use bitcoin::{MerkleBlock, Network, OutPoint, Txid};
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::{median_time_past_times, Height};
+use rbitcoin_primitives::{median_time_past_times, Fk, Height};
 
 use rbitcoin_query::{
-    ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary, ShJoinSlot,
+    ChainView, ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary,
+    ShJoinSlot,
 };
 use rbitcoin_store::{script_hash, StoreError};
 use serde::Deserialize;
@@ -313,7 +314,7 @@ pub fn block_txs_impl(st: AppState, hash_hex: &str, start: u32) -> Response {
             let page: Vec<_> = fks.into_iter().skip(start as usize).take(25).collect();
             let mut out = Vec::with_capacity(page.len());
             for fk in page {
-                match build_tx_json(&st.query, fk, st.network) {
+                match build_tx_json(&st.query, fk, st.network, None) {
                     Ok(v) => out.push(v),
                     Err(e) => return store_err(e),
                 }
@@ -443,6 +444,207 @@ pub fn tx_merkleblock_proof_sync(st: AppState, txid_hex: String) -> Response {
         return (StatusCode::INTERNAL_SERVER_ERROR, "merkleblock encode").into_response();
     }
     plain_ok(rbitcoin_primitives::hex_encode(&(raw)))
+}
+
+/// One confirmed output: script, value, boolean `spent`, creating-tx `status`.
+fn output_at_view(
+    query: &Query,
+    network: Network,
+    fk: Fk,
+    txid: &[u8; 32],
+    vout: u32,
+    view: &ChainView,
+) -> Result<Value, StoreError> {
+    let out = query.tx_output_at_fk(fk, vout)?;
+    let spent = query.is_outpoint_spent_at(txid, vout, Some(view.height.0))?;
+    let mut obj = vout_fields(&out.script, out.value, network);
+    obj["spent"] = json!(spent);
+    obj["status"] = tx_status_json_in(query, fk, view)?;
+    Ok(obj)
+}
+
+fn genesis_coinbase(query: &Query, fk: Fk) -> Result<bool, StoreError> {
+    let Some(0) = query.store().tx_height_get(fk)? else {
+        return Ok(false);
+    };
+    query.is_coinbase_create(fk, 0)
+}
+
+#[allow(clippy::result_large_err)] // axum Response, same as pin_or_reject
+fn pinned_tip(query: &Query, asof: Option<[u8; 32]>) -> Result<ChainView, Response> {
+    match pin_or_reject(query, ChainViewKind::Tip, asof)? {
+        Some(view) => Ok(view),
+        None => Err(not_found()),
+    }
+}
+
+/// Position lookup shared by the single GET and every batch slot.
+/// `Ok(None)` is a missing slot (404 on a GET, `null` in a batch).
+fn output_at_height(
+    st: &AppState,
+    view: &ChainView,
+    height: u32,
+    index: u32,
+    vout: u32,
+) -> Result<Option<Value>, StoreError> {
+    if height > view.height.0 || (height == 0 && index == 0) {
+        return Ok(None);
+    }
+    let fk = match st.query.tx_fk_at_height(Height(height), index) {
+        Ok(fk) => fk,
+        Err(StoreError::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let txid = st.query.store().txs.body_txid(fk)?;
+    match output_at_view(&st.query, st.network, fk, &txid, vout, view) {
+        Ok(v) => Ok(Some(v)),
+        Err(StoreError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn json_u32(v: &Value) -> Option<u32> {
+    u32::try_from(v.as_u64()?).ok()
+}
+
+/// `GET /block-height/{height}/tx/{index}`. Same document as `GET /tx/{txid}`.
+pub async fn block_height_tx(
+    State(st): State<AppState>,
+    Path((height, index)): Path<(u32, u32)>,
+    AsOf(asof): AsOf,
+) -> Response {
+    spawn_join(move || {
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        if height > view.height.0 {
+            return not_found();
+        }
+        let fk = match st.query.tx_fk_at_height(Height(height), index) {
+            Ok(fk) => fk,
+            Err(StoreError::NotFound) => return not_found(),
+            Err(e) => return store_err(e),
+        };
+        match build_tx_json(&st.query, fk, st.network, Some(&view)) {
+            Ok(v) => maybe_attach_view(Json(v).into_response(), Some(view)),
+            Err(e) => store_err(e),
+        }
+    })
+    .await
+}
+
+/// `GET /block-height/{height}/tx/{index}/out/{vout}`.
+pub async fn block_height_tx_out(
+    State(st): State<AppState>,
+    Path((height, index, vout)): Path<(u32, u32, u32)>,
+    AsOf(asof): AsOf,
+) -> Response {
+    spawn_join(move || {
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match output_at_height(&st, &view, height, index, vout) {
+            Ok(Some(v)) => maybe_attach_view(Json(v).into_response(), Some(view)),
+            Ok(None) => not_found(),
+            Err(e) => store_err(e),
+        }
+    })
+    .await
+}
+
+/// `POST /block-heights/txs/outs`. One pin for every slot.
+pub async fn post_block_height_outs(
+    State(st): State<AppState>,
+    AsOf(asof): AsOf,
+    body: Bytes,
+) -> Response {
+    if body.len() > st.max_body {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
+    }
+    spawn_join(move || {
+        let parsed: Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::BAD_REQUEST, "invalid json").into_response(),
+        };
+        let Some(arr) = parsed.as_array() else {
+            return (StatusCode::BAD_REQUEST, "body must be a JSON array").into_response();
+        };
+        if arr.len() > MULTI_ADDRESS_LIMIT {
+            return body_too_long();
+        }
+        let mut slots = Vec::with_capacity(arr.len());
+        for el in arr {
+            let Some(triple) = el.as_array().filter(|t| t.len() == 3) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            let Some(height) = json_u32(&triple[0]) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            let Some(index) = json_u32(&triple[1]) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            let Some(vout) = json_u32(&triple[2]) else {
+                return (StatusCode::BAD_REQUEST, "bad element").into_response();
+            };
+            slots.push((height, index, vout));
+        }
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let mut out = Vec::with_capacity(slots.len());
+        for (height, index, vout) in slots {
+            match output_at_height(&st, &view, height, index, vout) {
+                Ok(v) => out.push(v.map_or(Value::Null, |row| row)),
+                Err(e) => return store_err(e),
+            }
+        }
+        maybe_attach_view(Json(Value::Array(out)).into_response(), Some(view))
+    })
+    .await
+}
+
+/// `GET /tx/{txid}/out/{vout}`. Confirmed create only. Mempool spends stay unspent.
+pub async fn tx_out(
+    State(st): State<AppState>,
+    Path((txid_hex, vout)): Path<(String, u32)>,
+    AsOf(asof): AsOf,
+) -> Response {
+    spawn_join(move || {
+        let Ok(txid) = parse_hash32(&txid_hex) else {
+            return not_found();
+        };
+        let fk = match st.query.tx_fk_by_txid(&txid) {
+            Ok(Some(fk)) => fk,
+            Ok(None) => return not_found(),
+            Err(e) => return store_err(e),
+        };
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        match st
+            .query
+            .store()
+            .is_confirmed_strong_at(fk, Some(view.height.0))
+        {
+            Ok(true) => {}
+            Ok(false) => return not_found(),
+            Err(e) => return store_err(e),
+        }
+        match genesis_coinbase(&st.query, fk) {
+            Ok(true) => return not_found(),
+            Ok(false) => {}
+            Err(e) => return store_err(e),
+        }
+        match output_at_view(&st.query, st.network, fk, &txid, vout, &view) {
+            Ok(v) => maybe_attach_view(Json(v).into_response(), Some(view)),
+            Err(e) => store_err(e),
+        }
+    })
+    .await
 }
 
 pub async fn tx_outspend(
@@ -1835,7 +2037,7 @@ pub fn push_mempool_tx_json(
     out: &mut Vec<Value>,
 ) {
     if let Ok(Some((fk, _))) = st.query.get_tx_by_txid(&txid) {
-        if let Ok(v) = build_tx_json(&st.query, fk, st.network) {
+        if let Ok(v) = build_tx_json(&st.query, fk, st.network, None) {
             out.push(v);
             return;
         }

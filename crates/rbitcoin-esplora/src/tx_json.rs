@@ -7,7 +7,7 @@ use rbitcoin_net::MempoolHub;
 
 use rbitcoin_primitives::{Fk, Height};
 
-use rbitcoin_query::{Query, QueryError, ScriptHashHistoryItem, ScriptHashUtxo};
+use rbitcoin_query::{ChainView, Query, QueryError, ScriptHashHistoryItem, ScriptHashUtxo};
 use rbitcoin_store::InputRecord;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -21,24 +21,50 @@ pub fn tx_status_json(query: &Query, tx_fk: Fk) -> Result<Value, QueryError> {
     }
 }
 
-/// Confirmation status as of `view`.
-pub fn tx_status_json_in(
+/// Header at `height` on `view`'s chain.
+///
+/// A pin that is still `confirmed[view.height]` shares that prefix, so the
+/// confirmed index is the ancestor. A pin whose height was replaced must not
+/// read that index: the sibling now sits there. Walk `prev_fk` from the pin.
+fn header_on_view(
     query: &Query,
-    tx_fk: Fk,
-    view: &rbitcoin_query::ChainView,
-) -> Result<Value, QueryError> {
+    view: &ChainView,
+    height: u32,
+) -> Result<Option<rbitcoin_store::HeaderRecord>, QueryError> {
+    if height > view.height.0 {
+        return Ok(None);
+    }
+    if view.still_live(query)? {
+        return Ok(query.header_at_height(Height(height))?.map(|(_, rec)| rec));
+    }
+    let mut rec = query.store().get_header(view.header_fk)?;
+    let mut at = view.height.0;
+    while at > height {
+        if rec.prev_fk.is_null() {
+            return Ok(None);
+        }
+        rec = query.store().get_header(rec.prev_fk)?;
+        at -= 1;
+    }
+    Ok(Some(rec))
+}
+
+/// Confirmation status as of `view`.
+pub fn tx_status_json_in(query: &Query, tx_fk: Fk, view: &ChainView) -> Result<Value, QueryError> {
     let confirmed = query
         .store()
         .is_confirmed_strong_at(tx_fk, Some(view.height.0))?;
     if !confirmed {
         return Ok(json!({ "confirmed": false }));
     }
-    let height = query.store().tx_height_get(tx_fk)?.unwrap_or(0);
+    let Some(height) = query.store().tx_height_get(tx_fk)? else {
+        return Ok(json!({ "confirmed": false }));
+    };
     let mut out = json!({
         "confirmed": true,
         "block_height": height,
     });
-    if let Some((_fk, rec)) = query.header_at_height(Height(height))? {
+    if let Some(rec) = header_on_view(query, view, height)? {
         out["block_hash"] = Value::String(block_hash_hex(&rec.hash));
         out["block_time"] = json!(rec.timestamp);
     }
@@ -142,21 +168,36 @@ pub fn history_items_to_tx_json(
         if item.tx_fk.is_null() {
             continue;
         }
-        out.push(build_tx_json(query, item.tx_fk, network)?);
+        out.push(build_tx_json(query, item.tx_fk, network, None)?);
     }
     Ok(out)
 }
 
+fn status_for(query: &Query, tx_fk: Fk, view: Option<&ChainView>) -> Result<Value, QueryError> {
+    match view {
+        Some(view) => tx_status_json_in(query, tx_fk, view),
+        None => tx_status_json(query, tx_fk),
+    }
+}
+
 /// Full `GET /tx/:txid` body (Esplora API.md transaction format).
-pub fn build_tx_json(query: &Query, tx_fk: Fk, network: Network) -> Result<Value, QueryError> {
+///
+/// `view` is the status pin. `None` uses the live tip. The wire body is the
+/// same either way, including a pruned partial.
+pub fn build_tx_json(
+    query: &Query,
+    tx_fk: Fk,
+    network: Network,
+    view: Option<&ChainView>,
+) -> Result<Value, QueryError> {
     let wire = match query.reconstruct_tx(tx_fk) {
         Ok(w) => w,
         Err(rbitcoin_store::StoreError::Pruned { .. }) => {
-            return build_tx_json_pruned(query, tx_fk, network);
+            return build_tx_json_pruned(query, tx_fk, network, view);
         }
         Err(e) => return Err(e),
     };
-    let status = tx_status_json(query, tx_fk)?;
+    let status = status_for(query, tx_fk, view)?;
     let (_meta, stored_inputs, _outs) = query.store().get_tx_full(tx_fk)?;
     let stored_txid = query
         .store()
@@ -216,11 +257,12 @@ pub fn build_tx_json_pruned(
     query: &Query,
     tx_fk: Fk,
     network: Network,
+    view: Option<&ChainView>,
 ) -> Result<Value, QueryError> {
     let tx = query.store().get_tx(tx_fk)?;
     let (_meta, outs) = query.store().get_tx_meta_and_outputs(tx_fk)?;
     let txid = query.store().txs.body_txid(tx_fk).unwrap_or(tx.txid);
-    let status = tx_status_json(query, tx_fk)?;
+    let status = status_for(query, tx_fk, view)?;
     let vout: Vec<Value> = outs
         .iter()
         .map(|o| vout_fields(&o.script, o.value, network))

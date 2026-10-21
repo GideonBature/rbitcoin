@@ -499,7 +499,7 @@ fn build_tx_json_prevout_is_outs_only_and_txid_from_body() {
     q.connect_block(Height(2), &h2, &[ta2]).unwrap();
     let spend2_fk = q.block_tx_fks(Height(2)).unwrap()[0];
 
-    let v = build_tx_json(&q, spend2_fk, Network::Regtest).unwrap();
+    let v = build_tx_json(&q, spend2_fk, Network::Regtest, None).unwrap();
     assert_eq!(v["txid"], block_hash_hex(&spend2_txid));
     assert_eq!(v["vin"][0]["prevout"]["value"].as_i64(), Some(49_0000_0000));
     assert_eq!(v["sigops"], 4, "OP_CHECKSIG output scaled: {v}");
@@ -593,12 +593,12 @@ fn pruned_tx_json_has_fee_from_txstat() {
     q.connect_block(Height(1), &h1, &[spend]).unwrap();
     let spend_fk = q.block_tx_fks(Height(1)).unwrap()[0];
     q.set_pruneheight(Some(Height(1))).unwrap();
-    let v = build_tx_json(&q, fk, Network::Regtest).unwrap();
+    let v = build_tx_json(&q, fk, Network::Regtest, None).unwrap();
     assert_eq!(v["pruned"], true);
     assert_eq!(v["vin"][0]["is_coinbase"], true);
     assert!(v["vin"][0].get("witness").is_none(), "{v}");
     assert!(v["vin"][0].get("scriptsig").is_none(), "{v}");
-    let sv = build_tx_json(&q, spend_fk, Network::Regtest).unwrap();
+    let sv = build_tx_json(&q, spend_fk, Network::Regtest, None).unwrap();
     assert_eq!(sv["pruned"], true, "{sv}");
     assert_eq!(sv["vin"][0]["txid"], block_hash_hex(&txid));
     assert_eq!(sv["vin"][0]["vout"], 0);
@@ -623,7 +623,7 @@ fn pruned_tx_json_has_fee_from_txstat() {
             },
         )
         .unwrap();
-    let raw = build_tx_json(&q, fk, Network::Regtest).unwrap();
+    let raw = build_tx_json(&q, fk, Network::Regtest, None).unwrap();
     assert_eq!(raw["pruned"], true);
     assert_eq!(raw["vin"][0]["is_coinbase"], true, "{raw}");
     assert!(raw.get("fee").is_none(), "unstamped omits fee: {raw}");

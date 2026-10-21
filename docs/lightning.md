@@ -89,6 +89,7 @@ address index, so point BDK at Esplora or Electrum with `--sh-index`.
 | `/blocks/tip/hash`, `/blocks/tip/height` | done |
 | `/tx/:txid/raw`, `/hex`, `/status` | done |
 | `/tx/:txid/outspend/:n` | done (`spent`, optional `txid` / `vin` / `status`) |
+| `GET /block-height/:height/tx/:index/out/:vout` | `UtxoLookup`: `spent: false` is `TxOut`; anything else is `UnknownTx` |
 | `/tx/:txid/merkleblock-proof` | done (BIP37 hex; verifies against header merkle root) |
 | `/fee-estimates` | done (conf-target keys, sat/vB) |
 | `POST /tx` | done |
