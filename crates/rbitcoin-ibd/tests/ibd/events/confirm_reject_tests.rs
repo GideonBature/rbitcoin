@@ -3127,6 +3127,43 @@ fn isolated_soft_reject_does_not_count_toward_cascade_halt() {
     assert!(st.halt.is_none(), "{:?}", st.halt);
 }
 
+/// A block too far ahead of the clock is not a stale plan: its rejects at
+/// one tip do not halt IBD, while a stale plan at that tip halts on the
+/// third.
+#[test]
+fn a_block_too_far_ahead_does_not_count_toward_the_cascade_halt() {
+    let mut st = IbdWorkState::new(Vec::new(), Some(h(0)), Some(0));
+    let hash = h(1);
+    st.record_height(hash, 1);
+    let reject = |st: &mut IbdWorkState, err: &str| {
+        apply_confirm_reject_class(
+            st,
+            1,
+            hash,
+            ConfirmRejectClass::Cascade,
+            err,
+            None,
+            None,
+            1,
+            None,
+            None,
+            RejectParent::default(),
+        );
+    };
+    for _ in 0..5 {
+        reject(
+            &mut st,
+            "consensus: bad header: timestamp too far in future",
+        );
+        reject(&mut st, "time-too-new");
+    }
+    assert!(st.halt.is_none(), "{:?}", st.halt);
+    for _ in 0..3 {
+        reject(&mut st, "fk mismatch");
+    }
+    assert!(st.halt.is_some());
+}
+
 /// tip+1 and tip+2 run scripts in one wave and tip+2's script fails. The
 /// scripts reject offers the wave back and isolates it: tip+1 connects from
 /// the offered-back body with no second getdata and no stale-plan retry,
@@ -3566,6 +3603,117 @@ fn ibd_flag_zero_tx_block_is_consensus_invalid() {
     assert!(st.body.is_rejected(&hash) && st.slots[0].alive);
     assert_eq!(hub.tip_hash(), Some(gen));
 
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A block whose header a clock stepped back left more than 2 hours ahead
+/// waits. The engine holds before it tries again instead of retrying at
+/// once, those rejects do not halt IBD, and the block connects once the
+/// clock passes its time.
+#[test]
+fn a_block_too_far_ahead_waits_and_then_connects() {
+    use super::super::assign::dummy_slot;
+    use bitcoin::consensus::serialize;
+    use rbitcoin_ibd::ibd::confirm::{spawn_confirm_engine, ConfirmEvent, ConfirmFeed};
+    use rbitcoin_ibd::ibd::events::{apply_confirm_events, apply_peer_event};
+    use rbitcoin_ibd::ibd::peer_io::PeerEvent;
+    use rbitcoin_ibd::ibd::state::InflightReq;
+    use rbitcoin_ibd::ibd::status::LoopStats;
+    use rbitcoin_net::seeds::AddrMan;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::AtomicU32;
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("too-far-ahead");
+    hub.query.enter_direct_index_mode().unwrap();
+    let hub = Arc::new(hub);
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let now = rbitcoin_consensus::clock::wall_now();
+    let ahead = now + 2 * 3600 + 3;
+    let block = mine(gen, (ahead - 1_300_000_000) as u32, 1, vec![]);
+    let hash = block.block_hash();
+    // Stored while the clock was ahead.
+    let fk = rbitcoin_consensus::with_now(ahead, || hub.ensure_header_fk(&block.header)).unwrap();
+
+    let mut st = IbdWorkState::new(vec![dummy_slot(1)], Some(gen), Some(0));
+    let feed = Arc::new(ConfirmFeed::new());
+    st.record_height(hash, 1);
+    st.header_fks.insert(hash, fk);
+    st.ordered.push_back(hash);
+    st.ordered_set.insert(hash);
+    st.slots[0].in_flight.insert(hash);
+    st.inflight.insert(hash, InflightReq::new(1));
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::BlockFramed {
+            peer: 1,
+            hash,
+            payload: serialize(&block),
+            header_fk: None,
+        },
+        &AtomicU32::new(1),
+        &mut AddrMan::new(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 1),
+        Some(feed.as_ref()),
+    );
+
+    let (ev_tx, ev_rx) = channel();
+    let (engine, _queues) = spawn_confirm_engine(
+        Arc::clone(&hub),
+        Arc::clone(&feed),
+        ev_tx,
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(LoopStats::default()),
+    );
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(20);
+    let mut rejects = 0u32;
+    let connected = loop {
+        match ev_rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(ev @ ConfirmEvent::Reject { .. }) => {
+                rejects += 1;
+                let (tx, rx) = channel();
+                tx.send(ev).unwrap();
+                drop(tx);
+                apply_confirm_events(
+                    &mut st,
+                    &hub,
+                    &rx,
+                    &AtomicU32::new(1),
+                    &AtomicU32::new(0),
+                    &mut Instant::now(),
+                    Some(feed.as_ref()),
+                );
+                assert!(st.halt.is_none(), "a block too far ahead does not halt IBD");
+            }
+            Ok(ConfirmEvent::Accepted { .. }) => break true,
+            Err(RecvTimeoutError::Timeout) => {
+                if hub.tip_hash() == Some(hash) {
+                    break true;
+                }
+                if Instant::now() > deadline {
+                    break false;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break false,
+        }
+    };
+    feed.request_stop();
+    feed.notify();
+    let _ = engine.join();
+    assert!(
+        connected,
+        "the block connects once the clock passes its time"
+    );
+    let waited = started.elapsed().as_secs().max(1) as u32;
+    assert!(
+        rejects <= 3 * waited + 2,
+        "{rejects} rejects in {waited}s: the engine waits between tries"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

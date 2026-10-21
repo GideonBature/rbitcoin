@@ -1437,6 +1437,17 @@ pub fn apply_cascade_reject(
     // Leave the body queue: the plan was stale, and the confirm thread that
     // rejected offered any body it held back.
     clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+    // A block too far ahead of the clock is not a stale plan: the engine
+    // waits before it tries again, and it connects once the clock catches up.
+    if super::confirm::is_time_too_new(err) {
+        note_confirm_stuck(st);
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 3 || n.is_multiple_of(60) {
+            warn!("ibd: confirm waits @{height} {hash}: {err} (n={n})");
+        }
+        return;
+    }
     const CASCADE_HALT_AFTER: u8 = 3;
     let tip = hub
         .and_then(|h| h.tip_hash())

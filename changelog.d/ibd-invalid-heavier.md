@@ -29,4 +29,6 @@ Fixed
   kept in `store/block.invalid`; `reconsiderblock` clears one. The startup
   header scan and the IBD resume seed do not walk through them.
 - **IBD does not blacklist a block whose timestamp is too far in the
-  future.** It is requeued, as in tip-follow and Core.
+  future.** A block that a clock stepped back left more than 2 hours ahead
+  waits until the clock catches up, instead of being rejected until IBD
+  halts.
