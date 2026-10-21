@@ -17,6 +17,7 @@ Cookie file for TCP clients: [`wallets.md`](./wallets.md#tcp-rpc-cookie).
 | **CLN** stock `bcli` | `bitcoin-cli` → Core RPC | Methods exist on unix `{datadir}/rpc.sock`. Wrapper: [`scripts/lightning/bitcoin-cli`](../scripts/lightning/bitcoin-cli) (`-datadir=` → `--datadir`). Cookie/TCP `rpcauth` is not the product listen. |
 | **CLN** `sauron` | Esplora HTTP | Channel watches use tip, tx, outspend, and broadcast. Point the plugin at `--esplora-listen`. No `--sh-index`. |
 | **ldk-node Esplora** | `--esplora-listen` REST | Tip, `/tx/*` (raw/status/outspend/merkleblock-proof), `/fee-estimates`, `POST /tx` work **without** `--sh-index`. Address/scripthash: 503 `scripthash index disabled`. |
+| **LDK gossip `UtxoLookup`** | `GET /block-height/{height}/tx/{index}/out/{vout}` | Served without `--sh-index`. Stock ldk-node, CLN, and LND do not call it. The application connector is [Gossip connector](#gossip-connector). |
 | **ldk-node Electrum** | `--electrum-listen` TCP | Headers, `transaction.get` / broadcast, `estimatefee` work **without** `--sh-index`. `blockchain.scripthash.*`: JSON-RPC `scripthash index disabled`. TLS is reverse-proxy only (**Q-63**). |
 | **ldk-node bitcoind REST** | `--rpc-listen --rest` `GET /rest/block/` | Block bytes, headers, and hash-by-height. TCP `/rest/` is unauthenticated and off unless `--rest` is set. The BDK wallet still needs Esplora or Electrum with `--sh-index`. |
 | **LND** `bitcoind` + `rpcpolling` | TCP JSON-RPC, cookie file | Chain, tx, fee, and broadcast methods exist. ZMQ is not required on this path. Taproot detection falls through to `getdeploymentinfo`, which already lists buried taproot. See [LND](#lnd). |
@@ -38,15 +39,18 @@ wallets (BDK, Electrum address lists), not for Lightning channel monitors.
 |---------|--------------------------------|------------------------------------------|
 | **RPC** | chain, `getblock` / `getrawtransaction`, `gettxout`, `sendrawtransaction`, fees, mempool | none for LN |
 | **Electrum** | `server.*`, headers / `blockchain.block.header`, `transaction.get` / `get_merkle` / `broadcast`, `estimatefee` / `relayfee` / `mempool.get_info`, `outpoint.*` | `blockchain.scripthash.*`, `blockchain.tweaks.subscribe`, `blockchain.silentpayments.*`, scripthash `asof:` |
-| **Esplora REST** | tip, `/block/*`, `/tx/*` (raw / status / outspend / merkle*), `/mempool`, `/fee-estimates`, `POST /tx` | `/address/*`, `/scripthash/*`, `POST /addresses/*`, `POST /scripthashes/*` |
+| **Esplora REST** | tip, `/block/*`, `/tx/*` (raw / status / outspend / merkle*), `/mempool`, `/fee-estimates`, `POST /tx`, `GET /block-height/{height}/tx/{index}`, `GET /block-height/{height}/tx/{index}/out/{vout}`, `GET /tx/{txid}/out/{vout}`, `POST /block-heights/txs/outs` | `/address/*`, `/scripthash/*`, `POST /addresses/*`, `POST /scripthashes/*` |
 
 Fail closed (never empty history/utxo that looks like a new wallet):
 
 - Electrum SH methods: JSON-RPC error, message **`scripthash index disabled`**.
 - Esplora `/address` and `/scripthash`: HTTP **503** and that same phrase (not 404, not `[]`).
 
-Tip stamp: tx / outpoint / block routes use **live tip**. Address / scripthash
-routes use the **SH watermark** when the index is on ([`COMPAT.md`](../COMPAT.md)).
+Tip stamp: tx / outpoint / block routes use **live tip**. The four position
+routes above also accept `?asof=<blockhash>`; `X-Bitcoin-Chain-Tip` then
+names that pin. Live gossip omits `asof`. A replay against a header passes
+that header. Address / scripthash routes use the **SH watermark** when the
+index is on ([`COMPAT.md`](../COMPAT.md)).
 
 ## CLN (`bcli` → `bitcoin-cli`)
 
@@ -66,7 +70,7 @@ Wrapper [`scripts/lightning/bitcoin-cli`](../scripts/lightning/bitcoin-cli) talk
 | `getchaininfo` | `getblockchaininfo` | `chain` is bip70 (`regtest` / `signet` / `main` / `test`). `blocks`, `headers`, `initialblockdownload` present. |
 | `estimatefees` | `estimatesmartfee` 2 / 6 / 12 / 100 | Core JSON `{feerate: BTC/kvB, blocks}`, or `{errors: ["Insufficient data or no feerate found"], blocks}` with no `feerate`. Conf target 1–1008. Product is **10-minute inclusion**, not Core historical. `bcli` converts BTC/kvB → sat/kvB. |
 | `getrawblockbyheight` | `getblockhash` + `getblock` verbosity **0** | Hex string; `false` is verbosity 0. Witness included on reconstruct. |
-| `getutxout` | `gettxout` | Live coin: `value` BTC, `scriptPubKey.hex`. Spent / unknown / disconnected archive: JSON **`null`** (not RPC error). |
+| `getutxout` | `gettxout` | Live coin: `value` BTC, `scriptPubKey.hex`. Spent / unknown / disconnected archive: JSON **`null`** (not RPC error). A closed channel's announcement cannot be re-checked for script and value on this path. CLN has no hook for the position route, which still returns those fields when `spent` is true. |
 | `sendrawtransaction` | `sendrawtransaction` | `maxfeerate` is **sat/vB** (default 10000). CLN `allowhighfees` must pass **`0`**. |
 
 `rbitcoin-cli` argv is `--datadir` / `--rpc-url host:port`, not Core
@@ -89,7 +93,6 @@ address index, so point BDK at Esplora or Electrum with `--sh-index`.
 | `/blocks/tip/hash`, `/blocks/tip/height` | done |
 | `/tx/:txid/raw`, `/hex`, `/status` | done |
 | `/tx/:txid/outspend/:n` | done (`spent`, optional `txid` / `vin` / `status`) |
-| `GET /block-height/:height/tx/:index/out/:vout` | `UtxoLookup`: `spent: false` is `TxOut`; anything else is `UnknownTx` |
 | `/tx/:txid/merkleblock-proof` | done (BIP37 hex; verifies against header merkle root) |
 | `/fee-estimates` | done (conf-target keys, sat/vB) |
 | `POST /tx` | done |
@@ -153,6 +156,10 @@ and returns the same 10-minute feerate either way. `initialblockdownload`
 means relay is inhibited (`--min-chain-work` / `--max-tip-age`), not
 "headers are still downloading."
 
+`gettxout` returns JSON null once the funding output is spent, so a closed
+channel's announcement cannot be re-checked for script and value here
+either. LND has no hook for the position route.
+
 This path is read from LND's source and from this node's RPC. It has not
 been run as a channel smoke.
 
@@ -181,10 +188,12 @@ Current Eclair requires Bitcoin Core's wallet RPC and ZMQ
 wallet calls and ZMQ are both absent. An Esplora or Electrum URL is not a
 chain backend Eclair reads.
 
-## Gaps this plan still implements
+## Smoke stubs
 
-1. Optional `scripts/lightning/run-cln.sh` / `run-ldk.sh` if those binaries exist (skip 0 otherwise).
-2. Remaining LDK dialect holes found by those smokes.
+[`scripts/lightning/run-cln.sh`](../scripts/lightning/run-cln.sh) and
+[`run-ldk.sh`](../scripts/lightning/run-ldk.sh) exit 0 without funding a
+channel or syncing a wallet. They skip when `lightningd` or `ldk-node` is
+absent. A live smoke is a follow-up.
 
 ## Not this node
 
