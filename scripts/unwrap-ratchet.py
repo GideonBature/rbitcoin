@@ -135,10 +135,18 @@ def blank_non_code(src: str) -> str:
             i = j
             continue
         if src.startswith("/*", i):
-            # Rust ends a block comment at the first `*/`. `/*` inside it
-            # does not nest.
-            j = src.find("*/", i + 2)
-            j = n if j < 0 else j + 2
+            # Rust nests block comments, including `/**` and `/*!`.
+            depth_c = 1
+            j = i + 2
+            while j < n and depth_c:
+                if src.startswith("/*", j):
+                    depth_c += 1
+                    j += 2
+                elif src.startswith("*/", j):
+                    depth_c -= 1
+                    j += 2
+                else:
+                    j += 1
             _blank(chars, i, j)
             i = j
             continue
