@@ -963,13 +963,13 @@ fn push_block(params: &ChainParams, chain: &mut Vec<bitcoin::Block>, time: u32) 
 fn build_forks(params: &ChainParams) -> (Vec<bitcoin::Block>, Vec<bitcoin::Block>) {
     let mut heavy = vec![regtest_genesis()];
     let mut time = heavy[0].header.time;
-    for _ in 1..=25 {
+    for _ in 1..=89 {
         time = time.saturating_add(1);
         push_block(params, &mut heavy, time);
     }
     let mut light = heavy[..=20].to_vec();
     let step = (params.btc.pow_target_spacing as u32).saturating_mul(2) + 1;
-    for _ in 21..=32 {
+    for _ in 21..=90 {
         let prev_time = light.last().unwrap().header.time;
         push_block(params, &mut light, prev_time.saturating_add(step));
     }
@@ -1015,6 +1015,101 @@ async fn sync_heavy(
     node.shutdown().await;
 }
 
+async fn replay_full_fork(
+    dir: &Path,
+    params: ChainParams,
+    light: &[bitcoin::Block],
+    height: u32,
+    tip: BlockHash,
+) {
+    use bitcoin::p2p::{message::NetworkMessage, Magic};
+    use rbitcoin_net::peer::{connect_and_handshake, HandshakePolicy};
+    use rbitcoin_net::v2::{read_v2_frame, write_v2_msg};
+
+    let mut fork = light.to_vec();
+    let window = rbitcoin_net::codec::MAX_HEADERS_RESULTS;
+    let end = 20 + 2 * window;
+    let step = (params.btc.pow_target_spacing as u32) * 2 + 1;
+    while fork.len() <= end {
+        let time = fork.last().unwrap().header.time + step;
+        push_block(&params, &mut fork, time);
+    }
+    let batches: [Vec<_>; 2] = std::array::from_fn(|i| {
+        fork[21 + i * window..21 + (i + 1) * window]
+            .iter()
+            .map(|block| block.header)
+            .collect()
+    });
+    let fork_tips = batches
+        .each_ref()
+        .map(|batch| batch.last().unwrap().block_hash());
+    let listener = tokio::net::TcpListener::bind(any_port()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let node = start_node(dir, params).await;
+    assert!(chain_work(&fork) < node.hub.chain_work().unwrap());
+    let peer = tokio::spawn(async move {
+        let (stream, remote) = listener.accept().await.unwrap();
+        let (_, mut reader, mut writer, _, _tcp) = connect_and_handshake(
+            stream,
+            Magic::REGTEST,
+            addr,
+            remote,
+            100_000,
+            true,
+            "/full-header-replay/",
+            HandshakePolicy::plain(),
+        )
+        .await
+        .unwrap();
+        let mut replies = 0;
+        while let Ok(frame) = read_v2_frame(&mut reader, Magic::REGTEST).await {
+            let response = match frame.decode().payload() {
+                NetworkMessage::GetHeaders(request) => {
+                    if replies == 0 {
+                        assert_eq!(request.locator_hashes[0], tip);
+                    } else {
+                        assert!(
+                            request
+                                .locator_hashes
+                                .contains(&fork_tips[(replies - 1).min(1)]),
+                            "each full lighter-fork window must get a continuation request"
+                        );
+                    }
+                    let response = NetworkMessage::Headers(batches[replies.min(1)].clone());
+                    replies += 1;
+                    response
+                }
+                NetworkMessage::Ping(nonce) => NetworkMessage::Pong(*nonce),
+                NetworkMessage::GetData(items) => NetworkMessage::NotFound(items.clone()),
+                _ => continue,
+            };
+            if write_v2_msg(&mut writer, response).await.is_err() {
+                break;
+            }
+        }
+        replies
+    });
+    let result = tokio::time::timeout(
+        llvm_cov_wall(5, 20),
+        rbitcoin_ibd::sync(&node, &[NetAddr::Ip(addr)], IbdConfig::for_test()),
+    )
+    .await;
+    let actual_tip = (node.tip_height(), node.hub.tip_hash());
+    node.shutdown().await;
+    assert!(
+        result.is_ok(),
+        "replayed full headers must not keep the validated tip in IBD"
+    );
+    result
+        .unwrap()
+        .expect("finish IBD despite advertised height");
+    assert_eq!(actual_tip, (Some(height), Some(tip)));
+    assert!(
+        peer.await.unwrap() >= 3,
+        "the peer must extend the lighter fork, then replay its second full window"
+    );
+}
+
 async fn work_fork_journey() {
     let params = fork_params();
     let (mut heavy_blocks, mut light_blocks) = build_forks(&params);
@@ -1052,6 +1147,15 @@ async fn work_fork_journey() {
         syncer.path().as_path(),
         params.clone(),
         peers,
+        heavy_h,
+        heavy_hash,
+    )
+    .await;
+
+    replay_full_fork(
+        syncer.path().as_path(),
+        params.clone(),
+        &light_blocks,
         heavy_h,
         heavy_hash,
     )
