@@ -1,0 +1,3 @@
+Changed
+
+- **Catch-up waits for peers instead of exiting.** A node that still has catch-up indexes no longer stops when every peer is gone. Before, it gave up after the initial dial waves (`no peers connected`) or after four empty redial rounds mid catch-up (`all peers dead mid catch-up`), then exited with `restart to resume IBD`. Behind a SOCKS proxy that restarts, those rounds were refused within milliseconds, so the node exited before the proxy came back. It now keeps dialing, as Bitcoin Core does, waiting 1s, 2s, 4s, and so on up to 60s between empty rounds, and stops only on shutdown. A node with tip indexes still hands a peerless catch-up to the tip-follow supervisor, and the supervisor's one-wave stale-tip retry still returns on its own clock.

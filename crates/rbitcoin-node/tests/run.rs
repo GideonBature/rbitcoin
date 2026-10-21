@@ -362,6 +362,11 @@ fn catch_up_retry_config_uses_production_not_for_test() {
         cfg.initial_dial_waves, 1,
         "a stale-tip retry dials one wave"
     );
+    assert_eq!(
+        cfg.peerless,
+        rbitcoin_ibd::Peerless::GiveUp,
+        "the tip-follow supervisor owns the retry clock"
+    );
     assert!(cfg.peers.is_some());
     // Production class (main catch-up path), not for_test knobs.
     assert_eq!(cfg.window, prod.window);
@@ -374,6 +379,27 @@ fn catch_up_retry_config_uses_production_not_for_test() {
     assert_ne!(cfg.window, test.window);
     assert_ne!(cfg.stall, test.stall);
     assert_ne!(cfg.connect_timeout, test.connect_timeout);
+}
+
+#[test]
+fn startup_catch_up_waits_for_peers_only_when_a_give_up_would_exit() {
+    assert_eq!(
+        main_catch_up_peerless(false, None),
+        rbitcoin_ibd::Peerless::Redial {
+            cap: rbitcoin_ibd::PEERLESS_REDIAL_CAP
+        },
+        "a give-up with catch-up indexes would end the process"
+    );
+    assert_eq!(
+        main_catch_up_peerless(true, None),
+        rbitcoin_ibd::Peerless::GiveUp,
+        "a give-up with tip indexes enters tip follow"
+    );
+    assert_eq!(
+        main_catch_up_peerless(false, Some(0)),
+        rbitcoin_ibd::Peerless::GiveUp,
+        "a capped run returns to its caller"
+    );
 }
 
 #[test]

@@ -116,6 +116,82 @@ async fn ibd_unreachable_peer_errors() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Under `Peerless::Redial` the last initial wave is not the end of
+/// catch-up: it waits, sweeps the book again, and reaches the seed that the
+/// same one-wave `GiveUp` config never dials. With only dead addresses it
+/// keeps sweeping until cancelled, then stops without an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ibd_redial_keeps_dialing_until_a_peer_or_cancel() {
+    let seed_dir = tmp_dir("seed-redial");
+    let peer_dir = tmp_dir("peer-redial");
+    let seed = start_node(&seed_dir).await;
+    seed_chain(&seed, 2);
+    let peer = start_node(&peer_dir).await;
+    let dead: Vec<rbitcoin_net::NetAddr> = ["127.0.0.1:1", "127.0.0.1:2"]
+        .iter()
+        .map(|a| rbitcoin_net::NetAddr::Ip(a.parse().unwrap()))
+        .collect();
+    let redial_cfg = |book: rbitcoin_net::AddrMan| {
+        let mut cfg = IbdConfig::for_test();
+        cfg.target_peers = 1;
+        cfg.connect_timeout = Duration::from_millis(300);
+        cfg.initial_dial_waves = 1;
+        cfg.peerless = rbitcoin_ibd::Peerless::Redial {
+            cap: Duration::from_millis(100),
+        };
+        cfg.peers = Some(Arc::new(std::sync::Mutex::new(book)));
+        cfg
+    };
+    let mut book = rbitcoin_net::AddrMan::new();
+    for a in &dead {
+        book.add_addr(*a);
+    }
+    book.add_addr(rbitcoin_net::NetAddr::Ip(seed.local_addr));
+    let synced = tokio::time::timeout(
+        Duration::from_secs(20),
+        rbitcoin_ibd::sync(&peer, &dead, redial_cfg(book)),
+    )
+    .await
+    .expect("catch-up finishes");
+    assert!(
+        synced.is_ok(),
+        "the next sweep reaches the seed: {synced:?}"
+    );
+    assert_eq!(peer.tip_height(), Some(2));
+
+    let dark_dir = tmp_dir("peer-redial-dark");
+    let dark = start_node(&dark_dir).await;
+    let mut book = rbitcoin_net::AddrMan::new();
+    for a in &dead {
+        book.add_addr(*a);
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&cancel);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        stop.store(true, Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(20),
+        rbitcoin_ibd::sync_cancellable(&dark, &dead, redial_cfg(book), Some(cancel)),
+    )
+    .await
+    .expect("cancel ends a dark catch-up");
+    assert!(
+        started.elapsed() >= Duration::from_secs(2),
+        "dead addresses alone do not end catch-up"
+    );
+    assert_eq!(stopped.ok(), Some(0));
+    assert_eq!(dark.tip_height(), Some(0));
+    dark.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dark_dir);
+    seed.shutdown().await;
+    peer.shutdown().await;
+    let _ = std::fs::remove_dir_all(&seed_dir);
+    let _ = std::fs::remove_dir_all(&peer_dir);
+}
+
 fn logs_from_sync() -> impl Fn() -> Vec<String> {
     rbitcoin_log::capture_logs(true);
     || {

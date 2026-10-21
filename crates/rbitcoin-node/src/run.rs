@@ -5,7 +5,9 @@ use crate::regtest_rpc::HubRegtest;
 use bitcoin::consensus::Encodable;
 use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify};
 use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandle, EsploraListen};
-use rbitcoin_ibd::{read_platform_rss, tip_perf_json, IbdConfig, TipPerfLog};
+use rbitcoin_ibd::{
+    read_platform_rss, tip_perf_json, IbdConfig, Peerless, TipPerfLog, PEERLESS_REDIAL_CAP,
+};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, netgroup, sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap,
@@ -713,6 +715,14 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let awaiting_dialable = addrman.is_empty() && (reachability_removed_rows || proxy_seeds_queued);
     let mut rpc_handle: Option<RpcHandle> = None;
     status.enter(Phase::CatchUp);
+    let peerless = main_catch_up_peerless(
+        node.hub
+            .query
+            .index_mode()
+            .expect("index mode cell")
+            .is_tip(),
+        config.max_run_secs,
+    );
     let catch_up = run_ibd_or_skip(
         &node,
         &ibd_targets,
@@ -722,6 +732,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         &peers_path,
         &shutdown,
         awaiting_dialable,
+        peerless,
     )
     .await;
 
@@ -1852,6 +1863,7 @@ pub async fn run_ibd_or_skip(
     peers_path: &std::path::Path,
     shutdown: &Shutdown,
     awaiting_dialable: bool,
+    peerless: Peerless,
 ) -> CatchUp {
     if ibd_targets.is_empty() {
         let catch_up = catch_up_without_targets(awaiting_dialable);
@@ -1878,6 +1890,7 @@ pub async fn run_ibd_or_skip(
     // could deliver mid-chain blocks). Default 30s is enough.
     let ibd_cfg = IbdConfig {
         target_peers,
+        peerless,
         peers: Some(std::sync::Arc::clone(shared_peers)),
         dialer: node.dialer(),
         ..IbdConfig::default()
@@ -2408,6 +2421,21 @@ pub fn enter_tip_mode(
         query.scripthash_entry_count()
     );
     sh_tip_ready_gates(query)
+}
+
+/// No-peer policy for the startup catch-up. With tip indexes a give-up still
+/// enters tip follow, whose supervisor keeps dialing. A run capped by
+/// `max_run_secs` must return to its caller. Otherwise a give-up ends the
+/// process, so catch-up keeps dialing instead, as Bitcoin Core does.
+#[doc(hidden)]
+pub fn main_catch_up_peerless(tip_indexes: bool, max_run_secs: Option<u64>) -> Peerless {
+    if tip_indexes || max_run_secs.is_some() {
+        Peerless::GiveUp
+    } else {
+        Peerless::Redial {
+            cap: PEERLESS_REDIAL_CAP,
+        }
+    }
 }
 
 /// Production IBD knobs for a single-peer catch-up retry (stale tip, incomplete catch-up).
