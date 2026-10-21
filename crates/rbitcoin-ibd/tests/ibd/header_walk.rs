@@ -2006,6 +2006,22 @@ fn a_long_chain_on_an_invalid_block_stays_refused() {
         refuse_invalid_batch(&mut st, 0, &[side_next]),
         "a branch refused after the oldest tips is still refused past the cap"
     );
+
+    // A batch that is not one linked chain does not build on the invalid
+    // block, so its last header is not remembered: an honest header cannot
+    // be refused by sending it after one that is.
+    let honest1 = mine(gen, 7_001);
+    let honest2 = mine(honest1.block_hash(), 7_002);
+    let junk = Header {
+        prev_blockhash: bad.block_hash(),
+        ..honest1
+    };
+    assert!(!refuse_invalid_batch(&mut st, 0, &[junk, honest2]));
+    assert!(!refuse_invalid_batch(&mut st, 0, &[bad, honest1]));
+    assert!(
+        !refuse_invalid_batch(&mut st, 0, &[honest1, honest2]),
+        "the honest chain is not refused"
+    );
 }
 
 /// A peer that announced the path and then forks below the confirmed tip no

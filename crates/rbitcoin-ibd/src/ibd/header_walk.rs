@@ -882,13 +882,18 @@ fn note_invalid_tip(st: &mut IbdWorkState, hash: BlockHash) {
     }
 }
 
-/// Refuse a batch that holds or builds on a rejected block, and retire
-/// `peer` from the walk. The batch's last header is remembered, so the next
-/// batch of that chain is refused too.
+/// Refuse a linked batch that holds or builds on a rejected block, and
+/// retire `peer` from the walk. The batch's last header is remembered, so
+/// the next batch of that chain is refused too.
 pub fn refuse_invalid_batch(st: &mut IbdWorkState, peer: usize, headers: &[Header]) -> bool {
     let Some(first) = headers.first() else {
         return false;
     };
+    // An unlinked batch does not build on what it names, so its last
+    // header is not remembered. The usual checks drop it.
+    if !pow_linked(headers) {
+        return false;
+    }
     let rejected = |hash: &BlockHash| {
         st.header_walk.invalid_tips.contains(hash)
             || st.reorg.invalid.contains(hash.to_byte_array())
