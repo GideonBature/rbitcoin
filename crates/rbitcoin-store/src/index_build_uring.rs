@@ -165,7 +165,14 @@ pub fn run_on_session(
 ) -> Result<(), StoreError> {
     let out = run_on_session_inner(session, jobs);
     if out.is_err() && session.in_flight() != 0 {
-        session.drain_all()?;
+        if let Err(drain_err) = session.drain_all() {
+            if session.in_flight() != 0 {
+                // `jobs` still own the buffers these SQEs point at. Returning
+                // now would free them under the kernel, so fail closed.
+                uring_session::abort_uring_unusable("index build drain failed with in-flight SQEs");
+            }
+            return Err(drain_err);
+        }
     }
     out
 }

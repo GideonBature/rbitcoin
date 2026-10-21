@@ -593,8 +593,17 @@ fn with_thread_local_aborts_when_panicking_with_inflight() {
         if !rbitcoin_store::bulk_io::io_uring_enabled() {
             std::process::exit(77);
         }
+        let exe = std::env::current_exe().expect("current_exe");
+        let file = std::fs::File::open(exe).expect("open child exe");
+        let fd = rbitcoin_store::io_handle::IoHandle::from_file(&file);
         let _ = with_thread_local(DEFAULT_ENTRIES, |s| {
-            s.pending.insert(1).expect("pending");
+            // Production drop order: the guard outlives the SQE buffer, so the
+            // buffer is freed before the guard drops during unwind.
+            let mut guard = s.drain_guard();
+            let mut buf = vec![0u8; 8];
+            // SAFETY: the guard aborts on unwind, before the CQE can be
+            // harvested after `buf` is freed.
+            unsafe { guard.push_pread(fd, 0, &mut buf, 1) }.expect("push pread");
             panic!("in-flight panic");
         });
         std::process::exit(0);
