@@ -3,11 +3,43 @@
 //! Pure helpers so the main loop stays readable and mid-chain peer death
 //! cannot be mistaken for tip mode (mainnet tip≈161k / horizon≈958k bug).
 
+use std::time::Duration;
+
 use super::state::IbdWorkState;
 
-/// Max empty redial rounds while fully dark before giving up mid catch-up.
+/// Max empty redial rounds while fully dark before [`Peerless::GiveUp`]
+/// ends catch-up.
 #[doc(hidden)]
 pub const MAX_DARK_EMPTY_REDIALS: u32 = 4;
+
+/// Longest wait between dial rounds under [`Peerless::Redial`].
+pub const PEERLESS_REDIAL_CAP: Duration = Duration::from_secs(60);
+
+/// What catch-up does when no peer is connected and a dial round finds none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Peerless {
+    /// Return an error after the initial dial waves or
+    /// [`MAX_DARK_EMPTY_REDIALS`] dark rounds. The caller owns the retry
+    /// clock.
+    GiveUp,
+    /// Keep dialing until a peer connects or catch-up is cancelled, as
+    /// Bitcoin Core does. The wait between dark rounds doubles from 1s up
+    /// to `cap`.
+    Redial { cap: Duration },
+}
+
+impl Peerless {
+    /// Wait before the next dial round after `dark` empty rounds in a row.
+    pub fn dark_delay(self, dark: u32) -> Duration {
+        match self {
+            Self::GiveUp => Duration::ZERO,
+            Self::Redial { .. } if dark == 0 => Duration::ZERO,
+            Self::Redial { cap } => Duration::from_secs(1)
+                .saturating_mul(1 << (dark - 1).min(16))
+                .min(cap),
+        }
+    }
+}
 
 /// Highest connected best-chain height we already occupy (not competing `hash_height`).
 pub fn path_high_water(st: &IbdWorkState, tip_h: u32) -> u32 {
@@ -171,7 +203,8 @@ pub enum AllPeersDead {
     CatchupComplete,
     /// Still mid-chain; redial in flight — keep looping.
     WaitRedial,
-    /// Mid-chain and no redial hope — return Err (do **not** enter tip mode).
+    /// Mid-chain and no redial hope under [`Peerless::GiveUp`] — return Err
+    /// (do **not** enter tip mode).
     GiveUpMidCatchup,
 }
 
@@ -185,10 +218,10 @@ pub fn dark_empty_after(dark: u32, added: usize, any_alive: bool) -> u32 {
     }
 }
 
-/// A live peer can always be topped up. With none, dialing stops after
-/// [`MAX_DARK_EMPTY_REDIALS`] dark empty rounds.
-pub fn may_spawn_redial(alive_n: usize, dark: u32) -> bool {
-    alive_n > 0 || dark < MAX_DARK_EMPTY_REDIALS
+/// A live peer can always be topped up. With none, [`Peerless::GiveUp`]
+/// stops dialing after [`MAX_DARK_EMPTY_REDIALS`] dark empty rounds.
+pub fn may_spawn_redial(alive_n: usize, dark: u32, peerless: Peerless) -> bool {
+    alive_n > 0 || matches!(peerless, Peerless::Redial { .. }) || dark < MAX_DARK_EMPTY_REDIALS
 }
 
 /// Decide what to do when `slots` has no live peers.
@@ -196,12 +229,13 @@ pub fn all_peers_dead_action(
     st: &IbdWorkState,
     tip_h: u32,
     redial_in_flight: bool,
+    peerless: Peerless,
 ) -> AllPeersDead {
     if ibd_caught_up(st, tip_h) {
         return AllPeersDead::CatchupComplete;
     }
-    if !redial_in_flight {
-        return AllPeersDead::GiveUpMidCatchup;
+    if redial_in_flight || matches!(peerless, Peerless::Redial { .. }) {
+        return AllPeersDead::WaitRedial;
     }
-    AllPeersDead::WaitRedial
+    AllPeersDead::GiveUpMidCatchup
 }

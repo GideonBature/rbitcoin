@@ -81,6 +81,7 @@ use exit::{
     header_lag_behind_peers, ibd_caught_up, may_spawn_redial, path_drained,
     should_unlatch_headers_done, AllPeersDead,
 };
+pub use exit::{Peerless, PEERLESS_REDIAL_CAP};
 #[cfg(debug_assertions)]
 pub use header_walk::{
     candidate_tip, candidate_work, forget_walk_peer, header_poll, header_status_view,
@@ -213,6 +214,8 @@ pub struct IbdConfig {
     /// dials the next untried book rows; every miss is noted as a failed
     /// connect, so this bounds how much of the book one startup marks.
     pub initial_dial_waves: usize,
+    /// No-peer policy for the initial dial and for a fully dark catch-up.
+    pub peerless: Peerless,
     /// Optional shared peer book (discovered addrs + flags). Seeded at start and
     /// written back on IBD exit so the node can persist across runs.
     pub peers: Option<std::sync::Arc<std::sync::Mutex<rbitcoin_net::seeds::AddrMan>>>,
@@ -234,6 +237,7 @@ impl Default for IbdConfig {
             headers_batch: MAX_HEADERS_RESULTS,
             connect_timeout: Duration::from_secs(8),
             initial_dial_waves: DEFAULT_INITIAL_DIAL_WAVES,
+            peerless: Peerless::GiveUp,
             peers: None,
             dialer: rbitcoin_net::socks::Dialer::Direct,
             assign_stop_bytes: rbitcoin_query::bq_assign_stop_bytes(),
@@ -252,6 +256,7 @@ impl IbdConfig {
             headers_batch: MAX_HEADERS_RESULTS,
             connect_timeout: Duration::from_millis(400),
             initial_dial_waves: DEFAULT_INITIAL_DIAL_WAVES,
+            peerless: Peerless::GiveUp,
             peers: None,
             dialer: rbitcoin_net::socks::Dialer::Direct,
             assign_stop_bytes: rbitcoin_query::BQ_ASSIGN_STOP_BYTES,
@@ -327,6 +332,19 @@ pub fn publish_status_snap(st: &IbdWorkState, hub: &ChainHub, board: &StatusBoar
     });
 }
 
+/// Sleep `delay` in short ticks. Returns true as soon as `cancelled` does.
+async fn sleep_unless_cancelled(delay: Duration, cancelled: impl Fn() -> bool) -> bool {
+    let until = Instant::now() + delay;
+    while !cancelled() {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(left.min(Duration::from_millis(50))).await;
+    }
+    true
+}
+
 #[allow(clippy::cognitive_complexity)] // IBD coordination: dial, confirm, headers, stall
 pub async fn ibd_cancellable(
     hub: Arc<ChainHub>,
@@ -390,12 +408,13 @@ pub async fn ibd_cancellable(
         .min(peer_sess.book().len())
         .max(1);
     // A wave that reaches no one dials the next untried addresses, up to
-    // `initial_dial_waves` waves. An exhausted book or the last wave ends
-    // catch-up here.
+    // `initial_dial_waves` waves. After the last wave, `Peerless::GiveUp`
+    // ends catch-up and `Peerless::Redial` waits and sweeps the book again.
     let mut boot_cooldown = HashMap::new();
     let mut boot_strikes = HashMap::new();
     let mut tried = HashSet::new();
     let mut waves = 0usize;
+    let mut boot_dark = 0u32;
     let initial_slots = loop {
         waves += 1;
         let wave = dial_batch(
@@ -436,7 +455,24 @@ pub async fn ibd_cancellable(
             break slots;
         }
         if wave.attempted.is_empty() || waves >= cfg.initial_dial_waves {
-            return Err(NetError::Protocol("no peers connected"));
+            if cfg.peerless == Peerless::GiveUp {
+                return Err(NetError::Protocol("no peers connected"));
+            }
+            if wave.attempted.is_empty() {
+                tried.clear();
+            }
+            waves = 0;
+            boot_dark = boot_dark.saturating_add(1);
+            let delay = cfg.peerless.dark_delay(boot_dark);
+            warn!(
+                "ibd: no peer reachable ({} tried this sweep) — dialing again in {delay:?}",
+                tried.len()
+            );
+            if sleep_unless_cancelled(delay, &cancelled).await {
+                warn!("ibd: cancel during initial dial — stopping");
+                return Ok(0);
+            }
+            continue;
         }
         info!(
             "ibd: no peer from {} dial(s) ({} tried) — dialing the next wave",
@@ -852,17 +888,20 @@ pub async fn ibd_cancellable(
                         st.slots.push(s);
                         n += 1;
                     }
-                    dark_redial_empty =
-                        dark_empty_after(dark_redial_empty, n, st.slots.iter().any(|s| s.alive));
+                    let alive_now = st.slots.iter().filter(|s| s.alive).count();
+                    dark_redial_empty = dark_empty_after(dark_redial_empty, n, alive_now > 0);
                     if n > 0 {
                         st.slots.sort_by_key(|s| s.id);
-                        info!(
-                            "ibd: redial added {n} peer(s); live={}",
-                            st.slots.iter().filter(|s| s.alive).count()
-                        );
+                        info!("ibd: redial added {n} peer(s); live={alive_now}");
                         if st.ordered.is_empty() && !st.headers_done {
                             enqueue_header_cmd(st, HeaderCmd::Ask);
                         }
+                    } else if alive_now == 0 && cfg.peerless != Peerless::GiveUp {
+                        last_redial = Instant::now();
+                        warn!(
+                            "ibd: redial returned 0 peers (empty_rounds={dark_redial_empty}) — no live peer, dialing again in {:?}",
+                            cfg.peerless.dark_delay(dark_redial_empty)
+                        );
                     } else {
                         warn!("ibd: redial returned 0 peers (empty_rounds={dark_redial_empty})");
                     }
@@ -879,13 +918,13 @@ pub async fn ibd_cancellable(
             let alive_n = st.slots.iter().filter(|s| s.alive).count();
             let target = cfg.target_peers.max(1);
             let redial_interval = if alive_n == 0 {
-                Duration::from_secs(0)
+                cfg.peerless.dark_delay(dark_redial_empty)
             } else {
                 Duration::from_secs(15)
             };
             if redial_handle.is_none()
                 && alive_n < target
-                && may_spawn_redial(alive_n, dark_redial_empty)
+                && may_spawn_redial(alive_n, dark_redial_empty, cfg.peerless)
                 && !peer_sess.book().is_empty()
                 && last_redial.elapsed() >= redial_interval
             {
@@ -1049,7 +1088,7 @@ pub async fn ibd_cancellable(
             // All peers dead — never treat mid-chain peer death as catch-up complete.
             if st.slots.iter().all(|s| !s.alive) {
                 let tip_h = hub.tip_height().unwrap_or(0);
-                match all_peers_dead_action(st, tip_h, redial_handle.is_some()) {
+                match all_peers_dead_action(st, tip_h, redial_handle.is_some(), cfg.peerless) {
                     AllPeersDead::CatchupComplete => {
                         info!(
                         "ibd: catch-up complete (no live peers) tip={tip_h} max_peer_height={} max_ready={} — exiting IBD",

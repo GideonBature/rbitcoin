@@ -1,5 +1,6 @@
 use rbitcoin_ibd::ibd::exit::*;
 use rbitcoin_ibd::ibd::state::IbdWorkState;
+use std::time::Duration;
 
 #[test]
 fn redial_budget_spends_only_dark_empty_rounds_and_waits_out_a_started_dial() {
@@ -12,26 +13,54 @@ fn redial_budget_spends_only_dark_empty_rounds_and_waits_out_a_started_dial() {
 
     let mut dark = 0;
     for _ in 0..MAX_DARK_EMPTY_REDIALS {
-        assert!(may_spawn_redial(0, dark));
+        assert!(may_spawn_redial(0, dark, Peerless::GiveUp));
         dark = dark_empty_after(dark, 0, false);
     }
     assert!(
-        !may_spawn_redial(0, dark),
+        !may_spawn_redial(0, dark, Peerless::GiveUp),
         "dark empty rounds stop the next dial"
     );
-    assert!(may_spawn_redial(1, dark), "a live peer still tops up");
+    assert!(
+        may_spawn_redial(1, dark, Peerless::GiveUp),
+        "a live peer still tops up"
+    );
 
     let mut st = IbdWorkState::new(Vec::new(), None, Some(21_792));
     st.max_peer_height = 326_676;
     assert_eq!(
-        all_peers_dead_action(&st, 21_792, true),
+        all_peers_dead_action(&st, 21_792, true, Peerless::GiveUp),
         AllPeersDead::WaitRedial,
         "a dial already started is waited out"
     );
     assert_eq!(
-        all_peers_dead_action(&st, 21_792, false),
+        all_peers_dead_action(&st, 21_792, false, Peerless::GiveUp),
         AllPeersDead::GiveUpMidCatchup
     );
+
+    let redial = Peerless::Redial {
+        cap: PEERLESS_REDIAL_CAP,
+    };
+    assert!(
+        may_spawn_redial(0, u32::MAX, redial),
+        "redial keeps dialing however many dark rounds came back empty"
+    );
+    assert_eq!(
+        all_peers_dead_action(&st, 21_792, false, redial),
+        AllPeersDead::WaitRedial,
+        "redial waits mid catch-up between dial rounds"
+    );
+    st.max_peer_height = 21_792;
+    st.max_ready_height = 21_792;
+    st.headers_done = true;
+    assert_eq!(
+        all_peers_dead_action(&st, 21_792, false, redial),
+        AllPeersDead::CatchupComplete,
+        "a caught-up catch-up still completes without peers"
+    );
+
+    let delays = [0, 1, 2, 3, 7, 8, u32::MAX].map(|dark| redial.dark_delay(dark).as_secs());
+    assert_eq!(delays, [0, 1, 2, 4, 60, 60, 60]);
+    assert_eq!(Peerless::GiveUp.dark_delay(3), Duration::ZERO);
 }
 
 /// all_peers_dead + catchup_complete edge matrix (mid-chain / caught-up / tip-0).
@@ -43,11 +72,11 @@ fn exit_and_catchup_complete_surface() {
     mid.max_peer_height = 958_820;
     mid.max_ready_height = 161_000;
     assert_eq!(
-        all_peers_dead_action(&mid, 161_249, false),
+        all_peers_dead_action(&mid, 161_249, false, Peerless::GiveUp),
         AllPeersDead::GiveUpMidCatchup
     );
     assert_eq!(
-        all_peers_dead_action(&mid, 161_249, true),
+        all_peers_dead_action(&mid, 161_249, true, Peerless::GiveUp),
         AllPeersDead::WaitRedial
     );
 
@@ -57,7 +86,7 @@ fn exit_and_catchup_complete_surface() {
     done.max_ready_height = 100;
     done.headers_done = true;
     assert_eq!(
-        all_peers_dead_action(&done, 100, false),
+        all_peers_dead_action(&done, 100, false, Peerless::GiveUp),
         AllPeersDead::CatchupComplete
     );
 
@@ -80,7 +109,7 @@ fn exit_and_catchup_complete_surface() {
     assert!(!ibd_caught_up(&zero, 0));
     assert!(!ibd_caught_up(&zero, 0));
     assert_eq!(
-        all_peers_dead_action(&zero, 0, false),
+        all_peers_dead_action(&zero, 0, false, Peerless::GiveUp),
         AllPeersDead::GiveUpMidCatchup
     );
 
@@ -322,7 +351,7 @@ fn ibd_caught_up_transition_matrix() {
     zero.max_ready_height = 0;
     assert!(!ibd_caught_up(&zero, 0));
     assert_eq!(
-        all_peers_dead_action(&zero, 0, false),
+        all_peers_dead_action(&zero, 0, false, Peerless::GiveUp),
         AllPeersDead::GiveUpMidCatchup
     );
 
@@ -332,7 +361,7 @@ fn ibd_caught_up_transition_matrix() {
     done.max_ready_height = 100;
     done.headers_done = true;
     assert_eq!(
-        all_peers_dead_action(&done, 100, false),
+        all_peers_dead_action(&done, 100, false, Peerless::GiveUp),
         AllPeersDead::CatchupComplete
     );
 

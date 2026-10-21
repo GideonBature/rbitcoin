@@ -5,7 +5,9 @@ use crate::regtest_rpc::HubRegtest;
 use bitcoin::consensus::Encodable;
 use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify};
 use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandle, EsploraListen};
-use rbitcoin_ibd::{read_platform_rss, tip_perf_json, IbdConfig, TipPerfLog};
+use rbitcoin_ibd::{
+    read_platform_rss, tip_perf_json, IbdConfig, Peerless, TipPerfLog, PEERLESS_REDIAL_CAP,
+};
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, netgroup, sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap,
@@ -150,8 +152,9 @@ pub fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
     });
 }
 
-/// Bind RPC after tip entry and onion publish, so wallet RPCs and
-/// `getnetworkinfo` see a node that can already mine and list those services.
+/// Bind RPC. A catch-up that waits for peers starts it early so the
+/// operator can inspect, stop, or add a peer; the tip-follow path starts it
+/// after wallet services are published.
 pub async fn start_rpc_listener(
     config: &NodeConfig,
     node: &P2PNode,
@@ -707,12 +710,34 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let occupied = node.peers.live_outbound_full_relay_nets();
     let mut pinned = config.listen.connect.clone();
     pinned.extend(dns_resolved);
-    let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
     let awaiting_dialable = addrman.is_empty() && (reachability_removed_rows || proxy_seeds_queued);
     let mut rpc_handle: Option<RpcHandle> = None;
     status.enter(Phase::CatchUp);
+    let peerless = main_catch_up_peerless(
+        node.hub
+            .query
+            .index_mode()
+            .expect("index mode cell")
+            .is_tip(),
+        config.max_run_secs,
+    );
+    // A peerless catch-up can wait indefinitely. Bring RPC up first so
+    // `stop`, `addnode`, and status calls still work while it waits.
+    if matches!(peerless, Peerless::Redial { .. }) && !shutdown.requested() {
+        rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
+        if let Some(h) = &rpc_handle {
+            let stop = Arc::clone(&h.stop);
+            let sd = Arc::clone(&shutdown);
+            tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                sd.request();
+            });
+        }
+    }
     let catch_up = run_ibd_or_skip(
         &node,
         &ibd_targets,
@@ -722,8 +747,19 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         &peers_path,
         &shutdown,
         awaiting_dialable,
+        peerless,
+        &pinned,
+        proxy_seeds_queued,
+        config.network,
     )
     .await;
+
+    // Catch-up may have waited for a peer discovered after the startup book
+    // was read. Refresh the follow dial list before tip mode; IBD disconnects
+    // its own peers on the way out.
+    let occupied_now = node.peers.live_outbound_full_relay_nets();
+    let targets =
+        refresh_follow_targets(&pinned, &shared_peers, &mut addrman, max_out, &occupied_now);
 
     let catch_up = catch_up_with_connect(
         catch_up,
@@ -937,7 +973,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if let Some(h) = esplora_handles.first() {
         publish_listener_addr(config.datadir.path(), "esplora", h.local_addr);
     }
-    if !shutdown.requested() {
+    if rpc_handle.is_none() && !shutdown.requested() {
         rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
     }
     // The first dial is often during catch-up, before this port accepts.
@@ -1712,6 +1748,77 @@ pub fn catch_up_without_targets(awaiting_dialable: bool) -> CatchUp {
     }
 }
 
+/// Wait in catch-up until the shared book yields a dial target or shutdown.
+///
+/// Used when the process has no target but discovery is still in flight (a
+/// proxy seed fetch or reachability sweep). Re-queues proxy seed hostnames on
+/// the normal retry period and re-reads the shared book; it does not enter
+/// tip mode with a partial chain.
+#[allow(clippy::too_many_arguments)] // IO/discovery args stay unbundled
+pub async fn wait_for_dialable_targets(
+    peers: &std::sync::Arc<rbitcoin_net::PeerHub>,
+    shared_peers: &std::sync::Arc<std::sync::Mutex<AddrMan>>,
+    addrman: &mut AddrMan,
+    pinned: &[rbitcoin_net::NetAddr],
+    max_out: usize,
+    occupied: &[rbitcoin_net::NetAddr],
+    shutdown: &Shutdown,
+    proxy_seeds: bool,
+    network: Network,
+) -> Option<Vec<rbitcoin_net::NetAddr>> {
+    let candidate_n = max_out.saturating_mul(2).clamp(16, 48);
+    let mut next_requeue = Instant::now();
+    loop {
+        if shutdown.requested() {
+            return None;
+        }
+        if proxy_seeds && Instant::now() >= next_requeue {
+            let answering = peers
+                .snapshot()
+                .iter()
+                .any(|p| p.conn_type == PeerConnType::AddrFetch);
+            if !answering {
+                let n = queue_proxy_seed_addrfetch(peers, network);
+                if n > 0 {
+                    info!("ibd: no dialable address yet — re-queued {n} seed hostname(s)");
+                }
+            }
+            next_requeue = Instant::now() + PROXY_SEED_RETRY;
+        }
+        {
+            let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
+            if !g.is_empty() {
+                *addrman = g.clone();
+            }
+        }
+        let targets = follow_dial_targets(pinned, addrman, candidate_n, occupied);
+        if !targets.is_empty() {
+            return Some(targets);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Recompute the tip-follow dial list after catch-up may have learned peers.
+/// IBD disconnects its own sessions before returning, so the pre-catch-up list
+/// can be stale (or empty) even when the shared book now has rows.
+#[doc(hidden)]
+pub fn refresh_follow_targets(
+    pinned: &[rbitcoin_net::NetAddr],
+    shared_peers: &std::sync::Arc<std::sync::Mutex<AddrMan>>,
+    addrman: &mut AddrMan,
+    max_out: usize,
+    occupied: &[rbitcoin_net::NetAddr],
+) -> Vec<rbitcoin_net::NetAddr> {
+    {
+        let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.is_empty() {
+            *addrman = g.clone();
+        }
+    }
+    follow_dial_targets(pinned, addrman, max_out, occupied)
+}
+
 pub fn catch_up_after_ok(accepted: u32, tip: u32, shutdown: bool) -> CatchUp {
     if shutdown || (tip == 0 && accepted == 0) {
         CatchUp::Incomplete
@@ -1860,18 +1967,48 @@ pub async fn run_ibd_or_skip(
     peers_path: &std::path::Path,
     shutdown: &Shutdown,
     awaiting_dialable: bool,
+    peerless: Peerless,
+    pinned: &[rbitcoin_net::NetAddr],
+    proxy_seeds: bool,
+    network: Network,
 ) -> CatchUp {
-    if ibd_targets.is_empty() {
-        let catch_up = catch_up_without_targets(awaiting_dialable);
-        if catch_up.is_complete() {
-            info!("ibd: no outbound peers; serving only (use --connect or seeds)");
-        } else {
-            warn!(
-                "ibd: no dialable address yet — catch-up stays open \
-                 (reachability sweep or seed fetch still in flight)"
+    let mut targets = ibd_targets.to_vec();
+    if targets.is_empty() {
+        if awaiting_dialable && matches!(peerless, Peerless::Redial { .. }) {
+            info!("ibd: no dialable address yet — keeping catch-up open while discovery continues");
+            let occupied = node.peers.live_outbound_full_relay_nets();
+            let Some(found) = wait_for_dialable_targets(
+                &node.peers,
+                shared_peers,
+                addrman,
+                pinned,
+                max_out,
+                &occupied,
+                shutdown,
+                proxy_seeds,
+                network,
+            )
+            .await
+            else {
+                return CatchUp::Incomplete;
+            };
+            targets = found;
+            info!(
+                "ibd: discovered {} dialable target(s) — resuming catch-up",
+                targets.len()
             );
+        } else {
+            let catch_up = catch_up_without_targets(awaiting_dialable);
+            if catch_up.is_complete() {
+                info!("ibd: no outbound peers; serving only (use --connect or seeds)");
+            } else {
+                warn!(
+                    "ibd: no dialable address yet — catch-up stays open \
+                     (reachability sweep or seed fetch still in flight)"
+                );
+            }
+            return catch_up;
         }
-        return catch_up;
     }
     if shutdown.requested() {
         return CatchUp::Incomplete;
@@ -1886,13 +2023,14 @@ pub async fn run_ibd_or_skip(
     // could deliver mid-chain blocks). Default 30s is enough.
     let ibd_cfg = IbdConfig {
         target_peers,
+        peerless,
         peers: Some(std::sync::Arc::clone(shared_peers)),
         dialer: node.dialer(),
         ..IbdConfig::default()
     };
     info!(
         "ibd: catch-up candidates={} target_peers={} (window={}, per_peer={})…",
-        ibd_targets.len(),
+        targets.len(),
         ibd_cfg.target_peers,
         ibd_cfg.window,
         ibd_cfg.per_peer
@@ -1902,7 +2040,7 @@ pub async fn run_ibd_or_skip(
     // that used to drop a nested multi-thread runtime mid-async and panic
     // (`Cannot drop a runtime in an async context`), making Ctrl+C slow/noisy.
     let cancel = Some(Arc::clone(&shutdown.flag));
-    let catch_up = match rbitcoin_ibd::sync_cancellable(node, ibd_targets, ibd_cfg, cancel).await {
+    let catch_up = match rbitcoin_ibd::sync_cancellable(node, &targets, ibd_cfg, cancel).await {
         Ok(n) => {
             if shutdown.requested() {
                 warn!(
@@ -2416,6 +2554,21 @@ pub fn enter_tip_mode(
         query.scripthash_entry_count()
     );
     sh_tip_ready_gates(query)
+}
+
+/// No-peer policy for the startup catch-up. With tip indexes a give-up still
+/// enters tip follow, whose supervisor keeps dialing. A run capped by
+/// `max_run_secs` must return to its caller. Otherwise a give-up ends the
+/// process, so catch-up keeps dialing instead, as Bitcoin Core does.
+#[doc(hidden)]
+pub fn main_catch_up_peerless(tip_indexes: bool, max_run_secs: Option<u64>) -> Peerless {
+    if tip_indexes || max_run_secs.is_some() {
+        Peerless::GiveUp
+    } else {
+        Peerless::Redial {
+            cap: PEERLESS_REDIAL_CAP,
+        }
+    }
 }
 
 /// Production IBD knobs for a single-peer catch-up retry (stale tip, incomplete catch-up).

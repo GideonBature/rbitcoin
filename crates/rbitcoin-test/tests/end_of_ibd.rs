@@ -370,30 +370,25 @@ async fn stop_ibd_below_tip(dir: &Path, miner: SocketAddr, miner_tip: u32) -> u3
     tip
 }
 
-async fn expect_process_exit_without_electrum(
+async fn expect_process_stays_up_without_electrum(
     node: tokio::task::JoinHandle<Result<(), rbitcoin_node::NodeError>>,
     dir: &Path,
 ) {
     let electrum = published_path(dir, "electrum");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
+    let rpc = published_listener(dir, "rpc", Duration::from_secs(30)).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
         assert!(
             !electrum.exists(),
             "Electrum listened before the chain was complete"
         );
-        if node.is_finished() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!("syncer with the miner down stayed up");
-        }
+        assert!(
+            !node.is_finished(),
+            "syncer with the miner down exited instead of waiting for peers"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    match node.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => panic!("incomplete run_p2p: {e}"),
-        Err(e) => panic!("incomplete join: {e}"),
-    }
+    stop_run_p2p(rpc, node).await;
 }
 
 async fn extend_one(
@@ -534,7 +529,7 @@ async fn partial_with_miner_down(miner_dir: &Path, synced: &mut Synced) {
 
     miner.shutdown().await;
     let held = spawn_run_p2p(syncer_cfg(held_dir.path().as_path(), miner_addr));
-    expect_process_exit_without_electrum(held, held_dir.path().as_path()).await;
+    expect_process_stays_up_without_electrum(held, held_dir.path().as_path()).await;
     let held_tip = store_tip(&held_dir.store_path());
     assert!(
         held_tip > 0 && held_tip < synced.height,
