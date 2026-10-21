@@ -53,6 +53,38 @@ fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("chain")
 }
 
+/// A full `block.invalid` drops its oldest hash for a new failure, so the
+/// newest one survives restart.
+#[test]
+fn a_full_invalid_file_keeps_the_newest_failure() {
+    let (dir, hub) = tmp_hub();
+    drop(hub);
+    let mut full = b"rbtcinv1".to_vec();
+    full.extend_from_slice(&4_096u32.to_le_bytes());
+    for i in 0..4_096u32 {
+        let mut raw = [0u8; 32];
+        raw[..4].copy_from_slice(&i.to_le_bytes());
+        raw[31] = 0xaa;
+        full.extend_from_slice(&raw);
+    }
+    let marks = dir.path().join("block.invalid");
+    std::fs::write(&marks, &full).unwrap();
+    let q = rbitcoin_query::Query::open_or_create_tiny(dir.path()).unwrap();
+    let hub = ChainHub::new(q, ChainParams::regtest(), Milestone::NONE);
+    let newest = BlockHash::from_byte_array([0xbb; 32]);
+    hub.note_failed_connect(newest);
+    let kept = std::fs::read(&marks).unwrap();
+    assert_eq!(kept.len(), full.len(), "the file stays at its cap");
+    assert!(
+        kept.windows(32).any(|w| w == newest.as_byte_array()),
+        "the newest failure is kept"
+    );
+    assert!(
+        !kept.windows(32).any(|w| w == &full[12..44]),
+        "the oldest one gives way"
+    );
+}
+
 #[test]
 fn ancestor_walk_stops_at_cap() {
     let hashes: Vec<BlockHash> = (0..9u8)
@@ -4090,12 +4122,36 @@ fn reconsider_skips_a_branch_that_fails() {
     rbitcoin_consensus::grind_regtest_pow(&mut bad5.header);
     let bad5_hash = bad5.block_hash();
     assert!(hub.accept_received_block(bad5).is_err());
+    let marks = dir.path().join("block.invalid");
+    let kept = |marks: &std::path::Path| {
+        std::fs::read(marks)
+            .unwrap()
+            .windows(32)
+            .any(|w| w == bad5_hash.as_byte_array())
+    };
+    assert!(kept(&marks), "a connect failure is kept across restart");
     let a5 = mine_distinct(a[3], t0 + 31, 5, &[bad5_hash]);
     let a6 = mine(a5.block_hash(), t0 + 32, 6);
     hub.accept_block(a5).unwrap();
     hub.accept_block(a6).unwrap();
     hub.invalidate_block(bad5_hash).unwrap();
     hub.reconsider_block(bad5_hash).unwrap();
+    assert!(!kept(&marks), "reconsiderblock forgets the kept failure");
+    let tip_block = hub
+        .block_at_height(hub.tip_height().unwrap())
+        .unwrap()
+        .unwrap();
+    let tip_hash = tip_block.block_hash();
+    hub.invalidate_block(tip_hash).unwrap();
+    assert!(hub.accept_received_block(tip_block).is_err());
+    assert!(
+        !std::fs::read(&marks)
+            .unwrap()
+            .windows(32)
+            .any(|w| w == tip_hash.as_byte_array()),
+        "a block refused as already invalidated is not a connect failure"
+    );
+    hub.reconsider_block(tip_hash).unwrap();
     assert!(
         !hub.fork_tips.read().unwrap().iter().any(|h| h == bad5_hash),
         "a block that never connected is not kept as a fork tip"

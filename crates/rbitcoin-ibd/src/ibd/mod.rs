@@ -37,6 +37,8 @@ pub mod header_walk;
 #[doc(hidden)]
 pub mod path;
 #[doc(hidden)]
+pub mod peer_chain;
+#[doc(hidden)]
 pub mod peer_io;
 #[doc(hidden)]
 pub mod perf_log;
@@ -471,6 +473,11 @@ pub async fn ibd_cancellable(
     let window = cfg.window;
 
     let mut st = IbdWorkState::new(initial_slots, hub.tip_hash(), hub.tip_height());
+    for hash in hub.invalid_blocks() {
+        st.reorg
+            .invalid
+            .mark(bitcoin::hashes::Hash::to_byte_array(hash));
+    }
     st.addr_cooldown = boot_cooldown;
     st.addr_strikes = boot_strikes;
     st.perms = perms;
@@ -696,6 +703,7 @@ pub async fn ibd_cancellable(
             if hub.header_inv_challenge_pending() && header_walk::note_external_block_inv(st) {
                 hub.clear_header_inv_challenge();
             }
+            header_walk::probe_unprobed_peer(st, hub.as_ref());
             let challenge_due = header_walk::inv_challenge_due(st);
             if cadence.headers_due(now_cadence, path_empty, challenge_due) {
                 let live = st.ordered_set.len();

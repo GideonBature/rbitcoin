@@ -2416,13 +2416,15 @@ impl Query {
     ///
     /// The sibling search climbs to genesis. IBD seeding keeps the 32-hop cap;
     /// startup uses this so a deep stored fork still stays in catch-up.
-    /// A tip hash with no header row is an empty path (`Ok(false)`).
+    /// A tip hash with no header row is an empty path (`Ok(false)`). A path
+    /// through an `exclude` hash (a known-invalid block) does not count.
     pub fn has_heavier_header_chain_than_tip(
         &self,
         tip_hash: [u8; 32],
         tip_height: u32,
+        exclude: &[[u8; 32]],
     ) -> Result<bool, QueryError> {
-        let path = self.resume_work_path_limited(tip_hash, tip_height, 1, &[], u32::MAX)?;
+        let path = self.resume_work_path_limited(tip_hash, tip_height, 1, exclude, u32::MAX)?;
         Ok(!path.is_empty())
     }
 

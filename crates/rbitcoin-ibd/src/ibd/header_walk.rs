@@ -80,6 +80,11 @@ pub struct HeaderWalk {
     pub origin: bool,
     /// Look-ahead tips that every peer left empty before the work floor.
     pub dead_ends: HashSet<BlockHash>,
+    /// The last header of each refused batch that built on a rejected block.
+    /// A batch that builds on one is refused too.
+    pub invalid_tips: HashSet<BlockHash>,
+    /// `invalid_tips` in insertion order, so the cap drops the oldest.
+    pub invalid_tip_order: std::collections::VecDeque<BlockHash>,
     /// Peers that have answered empty at the current tip.
     pub emptied: HashSet<usize>,
     /// Checkpoint work has reached the milestone floor.
@@ -102,6 +107,15 @@ pub struct HeaderWalk {
     pub challenge_external: bool,
     /// Challenge ask already sent. Judged when that peer replies or times out.
     pub challenge_open: Option<usize>,
+    /// Block peer owed one chain probe: a headers ask from the confirmed tip.
+    /// Not a walk ask. Not written to `header.adopt`.
+    pub probe: Option<usize>,
+    /// Probe ask already sent. Its reply is read into that peer's chain
+    /// record, not by the walk.
+    pub probe_open: Option<usize>,
+    /// The path top the open probe asked headers after; none when it asked
+    /// from the confirmed tip.
+    pub probe_top: Option<(u32, BlockHash)>,
     /// The one in-flight headers ask. Not written to `header.adopt`.
     pub walk: Lane,
     /// Expired asks. Not written to `header.adopt`.
@@ -135,6 +149,9 @@ pub const LOOKAHEAD_ASK: Duration = Duration::from_secs(5);
 pub const HEADER_MISS_DISCONNECT: u8 = 2;
 #[doc(hidden)]
 pub const DEAD_END_CAP: usize = 1024;
+/// Past the cap the oldest refused tip gives way, so the newest is kept: the
+/// next batch of a long invalid chain links to it.
+const INVALID_TIP_CAP: usize = 1024;
 
 impl HeaderWalk {
     pub fn tip_height(&self) -> u32 {
@@ -540,6 +557,55 @@ pub fn note_block_inv(st: &mut IbdWorkState, peer: usize) {
     }
 }
 
+/// Heights above the confirmed tip a peer's record should decide before it
+/// is probed again.
+const PROBE_AHEAD: u32 = 4_096;
+
+/// Ask one block peer for headers, so block getdata follows what it holds:
+/// one that has not announced a chain (Core starts header sync with each
+/// peer), or one whose record no longer decides the next blocks. One probe
+/// at a time, never the reserved header peer, and not a peer with a walk ask
+/// open.
+pub fn probe_unprobed_peer(st: &mut IbdWorkState, hub: &ChainHub) {
+    use super::peer_io::PeerSlot;
+    let walk = &st.header_walk;
+    // A record only chooses among peers. With one live peer it would only
+    // take the header lane, and its reply would not reach the walk.
+    if walk.probe.is_some()
+        || walk.probe_open.is_some()
+        || st.slots.iter().filter(|s| s.alive).count() < 2
+    {
+        return;
+    }
+    let tip = hub.tip_height().unwrap_or(0);
+    let ahead = tip.saturating_add(PROBE_AHEAD).min(st.max_ordered_height);
+    let now = Instant::now();
+    let due = |s: &PeerSlot| {
+        !s.chain.probed() || (ahead > tip && s.chain.needs_refresh(&st.height_to_hash, ahead, now))
+    };
+    let Some(slot) = st
+        .slots
+        .iter()
+        .find(|s| s.alive && !walk_busy(walk, s.id) && due(s))
+    else {
+        return;
+    };
+    st.header_walk.probe = Some(slot.id);
+}
+
+/// The header peer, or a peer with a walk ask open or expired and not yet
+/// answered, whose late reply could be read as a probe's.
+fn walk_busy(walk: &HeaderWalk, peer: usize) -> bool {
+    [
+        walk.reserved,
+        walk.challenge_open,
+        walk.walk.peer,
+        walk.walk.prev_peer,
+    ]
+    .contains(&Some(peer))
+        || walk.header_misses.contains_key(&peer)
+}
+
 /// A follow-session block inv has no IBD slot. Poke one live header peer
 /// the same way [`note_block_inv`] does. Returns false when nobody is live
 /// yet, so the caller keeps the flag.
@@ -574,6 +640,13 @@ pub fn forget_walk_peer(st: &mut IbdWorkState, peer: usize) {
     if st.header_walk.challenge_open == Some(peer) {
         st.header_walk.challenge_open = None;
         st.header_walk.challenge_external = false;
+    }
+    if st.header_walk.probe == Some(peer) {
+        st.header_walk.probe = None;
+    }
+    if st.header_walk.probe_open == Some(peer) {
+        st.header_walk.probe_open = None;
+        st.header_walk.probe_top = None;
     }
 }
 
@@ -612,21 +685,45 @@ pub fn note_reservation(
     }
 }
 
-/// Peers that may receive block getdata. The reserved header peer is left
-/// out while another peer is connected. A single peer still does both.
-pub fn peers_for_blocks(st: &IbdWorkState) -> Vec<usize> {
-    let alive: Vec<usize> = st.slots.iter().filter(|s| s.alive).map(|s| s.id).collect();
-    let Some(reserved) = st.header_walk.reserved else {
-        return alive;
+/// Whether block `hash` may be asked of `peer`. As in Core, a peer is asked
+/// only for a block its chain showed (`PeerChain::shows`), and not for one it
+/// answered `notfound`. The reserved header peer is asked only when no other
+/// peer shows the block. A single peer still does both.
+pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
+    use super::peer_io::PeerSlot;
+    let height = st.hash_height.get(hash).copied();
+    let now = super::peer_io::ibd_mono_ms();
+    let path = &st.height_to_hash;
+    let askable = |s: &PeerSlot| s.alive && !s.chain.lacks(hash, now);
+    let shows = |s: &PeerSlot| askable(s) && height.is_some_and(|ht| s.chain.shows(path, ht));
+    let open =
+        |s: &PeerSlot| askable(s) && !height.is_some_and(|ht| s.chain.left_path_by(path, ht));
+    let Some(slot) = st.slots.iter().find(|s| s.id == peer) else {
+        return false;
     };
-    if alive.len() <= 1 {
-        return alive;
-    }
-    let rest: Vec<usize> = alive.iter().copied().filter(|&id| id != reserved).collect();
-    if rest.is_empty() {
-        alive
+    // With no peer that shows the block, a record can be stale: a peer whose
+    // chain has not left the path is asked, else any peer that did not answer
+    // `notfound`, the header peer too. Otherwise the header peer stays on
+    // headers while another peer can fetch the block.
+    let tier: &dyn Fn(&PeerSlot) -> bool = if st.slots.iter().any(&shows) {
+        &shows
+    } else if st.slots.iter().any(&open) {
+        &open
     } else {
-        rest
+        return askable(slot);
+    };
+    tier(slot)
+        && (st.header_walk.reserved != Some(peer)
+            || !st.slots.iter().any(|s| s.id != peer && tier(s)))
+}
+
+/// Settle each peer's recorded split against this node's confirmed chain once
+/// that height has left the path. Runs before block assignment.
+pub fn settle_peer_splits(st: &mut IbdWorkState, hub: &ChainHub) {
+    let path = &st.height_to_hash;
+    for slot in &mut st.slots {
+        slot.chain
+            .settle_split(path, |ht| super::peer_chain::confirmed_at(hub, ht));
     }
 }
 
@@ -649,12 +746,20 @@ pub enum HeaderPoll {
     Wait,
 }
 
-/// A block inv is waiting, and the walk lane is not already in flight.
+/// A block inv or a probe is waiting, or an open probe is past its window,
+/// and the walk lane is not already in flight.
 ///
 /// An in-flight ask keeps the challenge until the lane clears. The poll
 /// must not call `send_getheaders` on every block event during that window.
 pub fn inv_challenge_due(st: &IbdWorkState) -> bool {
-    st.header_walk.challenge.is_some() && !lane_fresh(&st.header_walk.walk)
+    probe_or_challenge_owed(st) && !lane_fresh(&st.header_walk.walk)
+}
+
+/// A challenge or probe waits to be sent, or a probe waits to be answered
+/// or expire. Either keeps the lane.
+fn probe_or_challenge_owed(st: &IbdWorkState) -> bool {
+    let walk = &st.header_walk;
+    walk.challenge.is_some() || walk.probe.is_some() || walk.probe_open.is_some()
 }
 
 /// The queue still has room, or a gap / look-ahead still needs headers.
@@ -772,6 +877,137 @@ pub fn note_dead(st: &mut IbdWorkState, hash: BlockHash) {
 }
 
 #[doc(hidden)]
+fn note_invalid_tip(st: &mut IbdWorkState, hash: BlockHash) {
+    let walk = &mut st.header_walk;
+    if !walk.invalid_tips.insert(hash) {
+        return;
+    }
+    walk.invalid_tip_order.push_back(hash);
+    if walk.invalid_tip_order.len() > INVALID_TIP_CAP {
+        if let Some(oldest) = walk.invalid_tip_order.pop_front() {
+            walk.invalid_tips.remove(&oldest);
+        }
+    }
+}
+
+/// Refuse a linked batch that holds or builds on a rejected block, and
+/// retire `peer` from the walk. The batch's last header is remembered, so
+/// the next batch of that chain is refused too.
+pub fn refuse_invalid_batch(st: &mut IbdWorkState, peer: usize, headers: &[Header]) -> bool {
+    let Some(first) = headers.first() else {
+        return false;
+    };
+    // An unlinked batch does not build on what it names, so its last
+    // header is not remembered. The usual checks drop it.
+    if !pow_linked(headers) {
+        return false;
+    }
+    let rejected = |hash: &BlockHash| {
+        st.header_walk.invalid_tips.contains(hash)
+            || st.reorg.invalid.contains(hash.to_byte_array())
+    };
+    if !rejected(&first.prev_blockhash) && !headers.iter().any(|h| rejected(&h.block_hash())) {
+        return false;
+    }
+    if let Some(last) = headers.last() {
+        note_invalid_tip(st, last.block_hash());
+    }
+    st.header_walk.walk_quiet.insert(peer);
+    if st.header_walk.reserved == Some(peer) {
+        st.header_walk.reserved = None;
+    }
+    true
+}
+
+/// The block at `height` failed consensus. When the download path holds it,
+/// the path above its parent is dropped and every peer may be asked for
+/// headers again. A candidate built on it falls back to that parent.
+pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, height: u32) {
+    if !st.is_on_path(&hash, height) {
+        return;
+    }
+    let Some(parent) = hub.header_of(&hash).map(|h| h.prev_blockhash) else {
+        return;
+    };
+    let parent_h = height.saturating_sub(1);
+    drop_dead_path(st, hub, parent_h);
+    if !st.header_walk.origin || st.header_walk.tip_height() < height {
+        return;
+    }
+    let tip = cut_back_to(st, hub, parent, parent_h);
+    if st.header_walk.base_height > parent_h {
+        st.header_walk.base_hash = tip.hash;
+        st.header_walk.base_height = parent_h;
+        st.header_walk.base_work = tip.work.to_be_bytes();
+        st.header_walk.base_diff = tip.diff;
+    }
+    st.header_walk.tip = tip;
+    // `header.adopt` restores the tip from the last checkpoint.
+    if st
+        .header_walk
+        .checkpoints
+        .last()
+        .is_none_or(|c| c.height < parent_h)
+    {
+        let at_parent = checkpoint_at(&st.header_walk.tip);
+        st.header_walk.checkpoints.push(at_parent);
+    }
+    // A challenger's headers are not stored, and its fork can sit below the
+    // confirmed tip. Peers are asked again from the parent, and a heavier
+    // chain comes back as headers that are stored and can be rewound onto.
+    st.header_walk.challenger = None;
+    rbitcoin_log::warn!(
+        "ibd: header candidate retired at {hash} height={height}; walk back to {parent} height={parent_h}"
+    );
+    publish_work(st, hub);
+    save_adopt(st, hub);
+}
+
+/// Forget the download path above `keep`: queued hashes, bodies waiting in
+/// the body queue, the confirm plan, and the densify cursor. Every peer may
+/// be asked for headers again.
+fn drop_dead_path(st: &mut IbdWorkState, hub: &ChainHub, keep: u32) {
+    st.clear_path_above(keep);
+    drop_queue_above(st, keep, &HashSet::new());
+    for queued in hub.query.block_queue_queued_heights() {
+        if queued > keep {
+            let _ = hub.query.block_queue_dequeue_height(queued);
+        }
+    }
+    st.confirm_quiesce = true;
+    st.max_ready_height = st.max_ready_height.min(keep);
+    let next = keep.saturating_add(1);
+    st.densify_scan_lo = st.densify_scan_lo.min(next);
+    st.densify_ready_through = st.densify_ready_through.min(next);
+    st.header_walk.reserved = None;
+    st.header_walk.walk_quiet.clear();
+    st.header_walk.emptied.clear();
+    clear_off_path(st);
+}
+
+/// A walk tip at stored `hash`, `height` on the candidate. Checkpoints and a
+/// milestone above it are dropped.
+fn cut_back_to(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, height: u32) -> WalkTip {
+    let mut tip = WalkTip {
+        hash: Some(hash),
+        height,
+        work: work_at(st, hub, hash).unwrap_or(Work::from_be_bytes([0; 32])),
+        header: parent_header(st, hub, hash),
+        times: times_ending_at(st, hub, hash),
+        diff: diff_at(st, hub, hash),
+        milestone_hash: st.header_walk.tip.milestone_hash,
+        milestone_prev: st.header_walk.tip.milestone_prev,
+        milestone_header: st.header_walk.tip.milestone_header,
+    };
+    forget_milestone_below(st, hub, height);
+    if height < hub.milestone.height {
+        tip.milestone_hash = None;
+        tip.milestone_header = None;
+    }
+    st.header_walk.checkpoints.retain(|c| c.height <= height);
+    tip
+}
+
 pub fn rewind_above(st: &mut IbdWorkState, hub: &ChainHub, height: u32) {
     rewind_to(st, hub, height, None);
 }
@@ -1446,26 +1682,8 @@ pub fn adopt_heavier(
         return;
     };
     // Capture the fork's period and timestamps before the challenger is dropped.
-    let mut tip = WalkTip {
-        hash: Some(prev),
-        height: fork_height,
-        work: work_at(st, hub, prev).unwrap_or(Work::from_be_bytes([0; 32])),
-        header: parent_header(st, hub, prev),
-        times: times_ending_at(st, hub, prev),
-        diff: diff_at(st, hub, prev),
-        milestone_hash: st.header_walk.tip.milestone_hash,
-        milestone_prev: st.header_walk.tip.milestone_prev,
-        milestone_header: st.header_walk.tip.milestone_header,
-    };
+    let mut tip = cut_back_to(st, hub, prev, fork_height);
     st.header_walk.challenger = None;
-    forget_milestone_below(st, hub, fork_height);
-    if fork_height < hub.milestone.height {
-        tip.milestone_hash = None;
-        tip.milestone_header = None;
-    }
-    st.header_walk
-        .checkpoints
-        .retain(|c| c.height <= fork_height);
     let mut link = prev;
     for hdr in headers {
         if !push_header(&mut tip, hub, hdr) {
@@ -2237,6 +2455,15 @@ pub fn expire_header_ask(st: &mut IbdWorkState) -> Option<usize> {
         *e = e.saturating_add(1);
         *e
     };
+    if st.header_walk.probe_open == Some(peer) {
+        st.header_walk.probe_open = None;
+        st.header_walk.probe_top = None;
+        if n >= HEADER_MISS_DISCONNECT {
+            st.header_walk.header_misses.remove(&peer);
+            punish_header_peer(st, peer);
+        }
+        return None;
+    }
     if st.header_walk.challenge_open == Some(peer) {
         st.header_walk.challenge_open = None;
         st.header_walk.challenge_external = false;
@@ -2287,12 +2514,12 @@ pub fn send_getheaders(
 ) -> Result<bool, rbitcoin_net::error::NetError> {
     ensure_origin(st, hub);
     super::path::append_stored_headers(st, hub);
-    if st.header_walk.challenge.is_none() && super::path::walk_successor_indexed(st, hub) {
+    let owed = probe_or_challenge_owed(st);
+    if !owed && super::path::walk_successor_indexed(st, hub) {
         release_lane(&mut st.header_walk.walk);
         return Ok(false);
     }
-    let want =
-        st.header_walk.challenge.is_some() || wants_lookahead(st) || walk_ahead_of_queue(st, hub);
+    let want = owed || wants_lookahead(st) || walk_ahead_of_queue(st, hub);
     if !want {
         release_lane(&mut st.header_walk.walk);
         return Ok(false);
@@ -2348,6 +2575,45 @@ pub fn arm_header_ask(
             return Ok(true);
         }
         st.header_walk.challenge_external = false;
+    }
+    if let Some(peer) = take_probe(st) {
+        // After the path top alone: a reply that builds on it shows the
+        // whole path. A peer that did not show it is asked with the
+        // confirmed chain only, whose first hash it has is at or below the
+        // tip, so the reply is what it has above it.
+        let tip_h = hub.tip_height().unwrap_or(0);
+        let from_tip = st
+            .slots
+            .iter()
+            .any(|s| s.id == peer && s.chain.probe_from_tip());
+        let top = path_top(st, hub).filter(|&(_, h)| h > tip_h && !from_tip);
+        let sent = match top {
+            Some((hash, height)) => {
+                let sent = super::dial::request_headers_from(
+                    &st.slots,
+                    peer,
+                    &mut st.header_req_seq,
+                    vec![hash],
+                )?;
+                if sent {
+                    note_lane(st, peer);
+                }
+                st.header_walk.probe_top = sent.then_some((height, hash));
+                sent
+            }
+            None => {
+                st.header_walk.probe_top = None;
+                ask_header_peer(st, hub, peer, &[])?
+            }
+        };
+        if sent {
+            st.header_walk.probe_open = Some(peer);
+            let now = Instant::now();
+            if let Some(slot) = st.slots.iter_mut().find(|s| s.id == peer) {
+                slot.chain.note_probe_sent(now, top.is_none());
+            }
+            return Ok(true);
+        }
     }
     ensure_reserved(st, above, skip);
     if st.header_walk.reserved.is_none() {
@@ -2448,6 +2714,14 @@ pub fn ensure_reserved(st: &mut IbdWorkState, above: u32, skip: Option<usize>) {
         }
     }
     st.header_walk.reserved = pick_header_peer(st, above, skip);
+}
+
+/// A probe peer who is still connected and not [`walk_busy`]. A busy peer
+/// is dropped unprobed, so it is picked again later.
+fn take_probe(st: &mut IbdWorkState) -> Option<usize> {
+    let peer = st.header_walk.probe.take()?;
+    let alive = st.slots.iter().any(|s| s.alive && s.id == peer);
+    (alive && !walk_busy(&st.header_walk, peer)).then_some(peer)
 }
 
 /// A challenge peer who is still connected and not retired.
@@ -2747,6 +3021,20 @@ pub const ADOPT_MAGIC: &[u8; 8] = b"rbtchdr1";
 pub const DIFF_SNAP_LEN: usize = 4 + 80 + 4 + 4;
 
 #[doc(hidden)]
+/// Drop `header.adopt`; the next start walks again from the confirmed tip.
+pub fn forget_adopt(hub: &ChainHub) {
+    let path = adopt_path(hub);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            if let Some(dir) = path.parent() {
+                let _ = rbitcoin_store::file::fsync_parent_dir(dir);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => rbitcoin_log::warn!("ibd: remove {}: {e}", path.display()),
+    }
+}
+
 pub fn adopt_path(hub: &ChainHub) -> std::path::PathBuf {
     hub.query.store().path().join("header.adopt")
 }
@@ -2829,7 +3117,7 @@ pub fn base_conflicts(st: &IbdWorkState, hub: &ChainHub, walk: &HeaderWalk) -> b
 pub fn on_confirmed_rewind(st: &mut IbdWorkState, hub: &ChainHub, lca_h: u32) {
     if st.header_walk.base_hash.is_some() && lca_h < st.header_walk.base_height {
         st.header_walk = HeaderWalk::default();
-        let _ = std::fs::remove_file(adopt_path(hub));
+        forget_adopt(hub);
         return;
     }
     if hub.milestone.height == 0 || !st.header_walk.origin {
@@ -2865,6 +3153,12 @@ pub fn on_confirmed_rewind(st: &mut IbdWorkState, hub: &ChainHub, lca_h: u32) {
 #[doc(hidden)]
 pub fn save_adopt(st: &IbdWorkState, hub: &ChainHub) {
     if !st.header_walk.origin {
+        return;
+    }
+    // A walk saved while a failure is not on disk could resume onto the
+    // invalid chain. No walk is the resume point until the mark is.
+    if !hub.invalid_marks_on_disk() {
+        forget_adopt(hub);
         return;
     }
     let mut buf = Vec::new();
@@ -2959,12 +3253,35 @@ pub fn retire_adopt_if_confirmed(st: &mut IbdWorkState, hub: &ChainHub) {
     }
     hub.query
         .note_milestone_checkpoint_work(tip_h, work.to_be_bytes());
-    let _ = std::fs::remove_file(adopt_path(hub));
+    forget_adopt(hub);
 }
 
 /// Read `header.adopt`. A file that does not parse does not restore
 /// checkpoints. Headers already queued and linked from the confirmed tip are
 /// still noted on the milestone path.
+/// Ancestors walked to find a stored failure's height.
+const FAILURE_HEIGHT_WALK: usize = 64;
+
+/// A stored failure that a walk saved from `base_height` may build on: one
+/// above that base, or one whose height is not found within a few headers
+/// of the best chain. The chain at or below the base is the confirmed one.
+fn failure_above(hub: &ChainHub, base_height: u32) -> bool {
+    hub.invalid_blocks()
+        .into_iter()
+        .any(|hash| failure_height(hub, hash).is_none_or(|h| h > base_height))
+}
+
+fn failure_height(hub: &ChainHub, hash: BlockHash) -> Option<u32> {
+    let path =
+        super::reorg::header_hashes_to_best_ancestor_n(hub, hash, FAILURE_HEIGHT_WALK).ok()?;
+    let join = super::reorg::parent_hash_of(hub, *path.first()?).ok()??;
+    if !hub.is_connected(&join) {
+        return None;
+    }
+    let join_h = hub.query.height_of_hash(&join.to_byte_array()).ok()??.0;
+    Some(join_h.saturating_add(path.len() as u32))
+}
+
 pub fn restore_adopt(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
     retire_adopt_if_confirmed(st, hub);
     let started = std::time::Instant::now();
@@ -2991,6 +3308,16 @@ pub fn restore_adopt(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
         rbitcoin_log::info!(
             "ibd: headers resume refused height={} took={took:?}",
             parsed.base_height
+        );
+        renote_stored_path(st, hub);
+        return false;
+    }
+    // A saved candidate above the confirmed tip may build on a block marked
+    // invalid after it was saved. The walk starts again from the tip.
+    if parsed.tip.height > hub.tip_height().unwrap_or(0) && failure_above(hub, parsed.base_height) {
+        rbitcoin_log::info!(
+            "ibd: headers resume refused height={}: invalid blocks are stored",
+            parsed.tip.height
         );
         renote_stored_path(st, hub);
         return false;
@@ -3107,6 +3434,8 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         },
         origin: true,
         dead_ends: HashSet::new(),
+        invalid_tips: HashSet::new(),
+        invalid_tip_order: std::collections::VecDeque::new(),
         emptied: HashSet::new(),
         proven: false,
         off_path: std::collections::HashMap::new(),
@@ -3117,6 +3446,9 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         challenge: None,
         challenge_external: false,
         challenge_open: None,
+        probe: None,
+        probe_open: None,
+        probe_top: None,
         walk: Lane::default(),
         header_misses: HashMap::new(),
         base_diff,

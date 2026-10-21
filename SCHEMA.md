@@ -222,6 +222,7 @@ itself changed.
     meta                         # store magic + schema version
     header.body / header.head    # Class A headers + hash index (overflow: header.head.gN)
     header.adopt                     # IBD checkpoint list + milestone hash (not a header-chain copy)
+    block.invalid                    # blocks that failed connect, kept across restart
     txout.body / create.loc / create.off / create.loc.ovf   # Class A outs (hot loc)
     seqsigwit.body / seqsigwit.loc / seqsigwit.off / seqsigwit.loc.ovf       # Class A inputs+witness (cold loc)
     seqsigwit.prune                  # optional: u32 LE pruneheight sidecar (`--prune-seqsigwit`; missing = off)
@@ -392,7 +393,19 @@ then     milestone hash [u8; 32] (zeros if none)
 
 Each checkpoint is 285 bytes. The tail is 364 bytes. Length is exact: `12 + count × 285 + 364`. An older or shorter file does not parse, and the script skip stays off.
 
-Each checkpoint is the hash, height, and total work at the end of one look-ahead reply past the download queue, plus that reply's last header, up to 11 timestamps ending there, and the difficulty period after that header. `ntimes` is how many of those 11 slots are live, oldest first. The milestone hash is the header at the anchored milestone height when the walk passed it. The base is the stored header the checkpoints were built on. On restart, if that height already has a different hash, the file is ignored. A reorg below the base deletes the file. The per-checkpoint header, timestamps, and period-start header let the next look-ahead, a fork from that hash, or a rewind onto it check `nBits` and median time without a row in `header.body`. Full-difficulty height and bits are the last header in the period whose `nBits` are not the minimum-difficulty limit, so a restart can walk testnet difficulty back. The same pair is stored again for the base, for when every checkpoint has been rewound. The tail's period fields are the walk tip. Headers between the queue and that tip are not in this file.
+Each checkpoint is the hash, height, and total work at the end of one look-ahead reply past the download queue, plus that reply's last header, up to 11 timestamps ending there, and the difficulty period after that header. `ntimes` is how many of those 11 slots are live, oldest first. The milestone hash is the header at the anchored milestone height when the walk passed it. The base is the stored header the checkpoints were built on. On restart, if that height already has a different hash, the file is ignored. A reorg below the base deletes the file. While `block.invalid` lists a block above the saved base, or one whose height is not found within 64 headers of the best chain, a saved candidate above the confirmed tip is not restored: it may build on that block, so the walk starts again from the tip. A listed block at or below the base is on no chain that walk can take. The per-checkpoint header, timestamps, and period-start header let the next look-ahead, a fork from that hash, or a rewind onto it check `nBits` and median time without a row in `header.body`. Full-difficulty height and bits are the last header in the period whose `nBits` are not the minimum-difficulty limit, so a restart can walk testnet difficulty back. The same pair is stored again for the base, for when every checkpoint has been rewound. The tail's period fields are the walk tip. Headers between the queue and that tip are not in this file.
+
+### `block.invalid`
+
+Sidecar of blocks that failed connect on a consensus rule, so a restart does not adopt a stored header chain through them again. Not a schema bump: missing is none. A file that does not parse is none and is replaced at the next mark. The whole file is written again (synced temp file, rename, directory sync) for each new failure and when `reconsiderblock` clears one. An IBD failure is written here before the retired walk goes to `header.adopt`. While a failure is not on disk, no walk is saved to `header.adopt` and an existing one is removed, and every later mark tries the write again. A restart while the write still fails has no record of that block and validates it again.
+
+```text
+0..8     magic b"rbtcinv1"
+8..12    u32 LE count (at most 4096)
+repeat   block hash [u8; 32]
+```
+
+Length is exact: `12 + count × 32`. Oldest first. Past 4096 the oldest hash gives way, so the newest failure survives restart. Mutated bodies, a header timestamp too far in the future, store and engine faults, and operator `invalidateblock` are not written. A descendant is invalid through its ancestor: the startup header scan and the IBD resume seed do not walk through a listed hash.
 
 ---
 

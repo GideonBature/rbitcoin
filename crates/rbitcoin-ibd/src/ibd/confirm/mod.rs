@@ -198,6 +198,9 @@ pub struct ConfirmFeed {
     pub epoch: AtomicU64,
     /// Isolate until confirmed tip reaches this height (`u32::MAX` = off).
     pub force_single_until: AtomicU32,
+    /// Lookup selects nothing until this IBD mono ms (0: no hold): a block
+    /// was too far ahead of the clock to connect.
+    pub hold_until_ms: AtomicU64,
 }
 
 pub struct ConfirmFeedInner {
@@ -227,7 +230,19 @@ impl ConfirmFeed {
             stop: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             force_single_until: AtomicU32::new(u32::MAX),
+            hold_until_ms: AtomicU64::new(0),
         }
+    }
+
+    /// Lookup waits `for_` before it selects a body again.
+    pub fn hold_for(&self, for_: Duration) {
+        let until = super::peer_io::ibd_mono_ms().saturating_add(for_.as_millis() as u64);
+        self.hold_until_ms.store(until, Ordering::Release);
+    }
+
+    /// A hold from [`Self::hold_for`] has not passed.
+    pub fn held(&self) -> bool {
+        super::peer_io::ibd_mono_ms() < self.hold_until_ms.load(Ordering::Acquire)
     }
 
     pub fn epoch(&self) -> u64 {
@@ -375,6 +390,9 @@ impl ConfirmRejectClass {
         if s.contains("missing retarget first header") {
             return Self::SoftWire;
         }
+        if s.contains("timestamp too far in future") {
+            return Self::Cascade;
+        }
         if s.contains("fk mismatch")
             || s.contains("plan not committed in order")
             || s.contains("connect height not tip+1")
@@ -415,6 +433,7 @@ impl ConfirmRejectClass {
                 Self::SoftWire
             }
             ConsensusError::BadHeader("missing retarget first header") => Self::SoftWire,
+            ConsensusError::BadHeader("timestamp too far in future") => Self::Cascade,
             ConsensusError::Internal(m) => Self::from_err_str(m),
             ConsensusError::BadBlock(_)
             | ConsensusError::BadTx(_)
@@ -897,6 +916,16 @@ pub fn publish_confirm_progress(query: &rbitcoin_query::Query) {
     publish_confirm_progress_at(query, Instant::now());
 }
 
+/// Pause before a block too far ahead of the clock is tried again.
+pub const TIME_TOO_NEW_HOLD: Duration = Duration::from_secs(1);
+
+/// A reject for a block more than 2 hours ahead of the clock: it is valid
+/// once the clock catches up.
+pub fn is_time_too_new(err: &str) -> bool {
+    let s = err.to_ascii_lowercase();
+    s.contains("timestamp too far in future") || s.contains("time-too-new")
+}
+
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 #[doc(hidden)]
 pub fn emit_confirm_reject(
@@ -911,6 +940,11 @@ pub fn emit_confirm_reject(
     parent: RejectParent,
 ) -> Result<(), std::sync::mpsc::SendError<ConfirmEvent>> {
     let class = class.isolate_if_batched(batch_len);
+    // A clock stepped back can leave a stored header more than 2 hours
+    // ahead. Try it again after a pause, not at once.
+    if is_time_too_new(&err) {
+        feed.hold_for(TIME_TOO_NEW_HOLD);
+    }
     if class == ConfirmRejectClass::Cascade && batch_len > 1 {
         let until = height.saturating_add(batch_len as u32).saturating_sub(1);
         feed.request_single_block(until);
@@ -2818,6 +2852,14 @@ pub fn spawn_confirm_engine(
             loop {
                 if feed.stopped() {
                     break;
+                }
+                if feed.held() {
+                    let g = feed.inner.lock().unwrap_or_else(|err| err.into_inner());
+                    let _ = feed
+                        .cv
+                        .wait_timeout(g, Duration::from_millis(20))
+                        .unwrap_or_else(|err| err.into_inner());
+                    continue;
                 }
                 if hub.query.take_disconnect(&mut disco_seen).is_some() {
                     hub.query.set_lookup_taken_hi(None);

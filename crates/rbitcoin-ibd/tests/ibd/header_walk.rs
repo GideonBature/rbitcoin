@@ -57,6 +57,7 @@ fn slot(id: usize) -> (PeerSlot, mpsc::UnboundedReceiver<PeerCmd>) {
             first_data_ms: 0,
             bytes_rx_total: Arc::new(AtomicU64::new(0)),
             rate: Default::default(),
+            chain: Default::default(),
             alive: true,
             task,
         },
@@ -1312,6 +1313,63 @@ fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
         !skips(&hub, 1, h1.block_hash().as_byte_array()),
         "a file that does not parse does not skip scripts by height"
     );
+
+    // A candidate retired on a failed block restarts at its parent.
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retire");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let p1 = mine(gen, 61);
+    let p2 = mine(p1.block_hash(), 62);
+    let p3 = mine(p2.block_hash(), 63);
+    let (s1, _rx1) = slot(1);
+    let mut st = IbdWorkState::new(vec![s1], Some(gen), Some(0));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    apply(&mut st, &hub, 1, vec![p1, p2, p3]);
+    assert!(st.is_on_path(&p3.block_hash(), 3));
+    retire_invalid(&mut st, &hub, p3.block_hash(), 3);
+    st.header_walk = HeaderWalk::default();
+    assert!(restore_adopt(&mut st, &hub));
+    assert_eq!(st.header_walk.tip_hash(), Some(p2.block_hash()));
+    assert_eq!(st.header_walk.tip_height(), 2);
+    // Once a failed block is stored, a saved candidate above the confirmed
+    // tip may build on it and is not restored.
+    hub.note_failed_connect(p3.block_hash());
+    st.header_walk = HeaderWalk::default();
+    assert!(!restore_adopt(&mut st, &hub));
+}
+
+/// A failure stored at or below the saved walk's base is on no chain that
+/// walk can take, so the walk is restored. One whose height is not found may
+/// be on it.
+#[test]
+fn a_failure_below_the_saved_base_keeps_the_resume() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-resume-below");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let b1 = mine_block(gen, 1);
+    hub.accept_block(b1.clone()).unwrap();
+    let b2 = mine_block(b1.block_hash(), 2);
+    hub.accept_block(b2.clone()).unwrap();
+    let stale = mine(gen, 64);
+    hub.ensure_header(&stale).unwrap();
+    assert!(hub.note_failed_connect(stale.block_hash()));
+    let (s2, _rx2) = slot(2);
+    let mut st = IbdWorkState::new(vec![s2], hub.tip_hash(), hub.tip_height());
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let q3 = mine(b2.block_hash(), 65);
+    let q4 = mine(q3.block_hash(), 66);
+    apply(&mut st, &hub, 2, vec![q3, q4]);
+    save_adopt(&st, &hub);
+    st.header_walk = HeaderWalk::default();
+    assert!(
+        restore_adopt(&mut st, &hub),
+        "a failure below the walk's base does not stop the resume"
+    );
+    assert_eq!(st.header_walk.tip_hash(), Some(q4.block_hash()));
+    // A failure whose height is not found may be on it.
+    assert!(hub.note_failed_connect(BlockHash::from_byte_array([0x5a; 32])));
+    st.header_walk = HeaderWalk::default();
+    assert!(!restore_adopt(&mut st, &hub));
 }
 
 #[test]
@@ -1434,6 +1492,35 @@ fn two_peers_reserve_the_header_walk() {
     );
     assert!(matches!(slow_rx.try_recv(), Ok(PeerCmd::GetData { .. })));
     assert!(fast_rx.try_recv().is_err());
+
+    apply_peer_event(
+        &mut st,
+        &hub,
+        PeerEvent::NotFound {
+            peer: 0,
+            hashes: vec![hash],
+        },
+        &AtomicU32::new(0),
+        &mut AddrMan::new(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+        None,
+    );
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(
+        st.slots[1].in_flight.contains(&hash),
+        "the header peer takes a block the other peer does not have"
+    );
+    assert!(slow_rx.try_recv().is_err(), "notfound is not asked again");
+    assert!(matches!(fast_rx.try_recv(), Ok(PeerCmd::GetData { .. })));
+    let _ = st.slots[1].track_remove(&hash);
+    st.inflight.remove(&hash);
 
     st.ordered.clear();
     st.ordered_set.clear();
@@ -1558,6 +1645,621 @@ fn two_peers_reserve_the_header_walk() {
     assert!(!st.slots[0].alive);
     assert!(st.addr_cooldown.contains_key(&addr));
     assert!(matches!(rx.try_recv(), Ok(PeerCmd::Shutdown)));
+
+    // A fourth, because the header peer must hold the path: a block peer
+    // that never announced a chain is asked for headers once. Its reply
+    // forks below the path, so it is not asked for path blocks.
+    let (mut head, mut head_rx) = slot(5);
+    let (mut other, mut other_rx) = slot(6);
+    let (mut short, _short_rx) = slot(7);
+    // Asked once, and answered nothing yet.
+    let (mut unknown, _unknown_rx) = slot(12);
+    head.first_data_ms = 50;
+    other.first_data_ms = 5_000;
+    short.first_data_ms = 6_000;
+    unknown.first_data_ms = 7_000;
+    unknown.chain.note_probe_sent(Instant::now(), true);
+    let mut st = IbdWorkState::new(vec![head, other, short, unknown], Some(gen), Some(0));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    assert_eq!(drain_getheaders(&mut head_rx), 1);
+    let path = [mine(gen, 41), mine(mine(gen, 41).block_hash(), 42)];
+    apply(&mut st, &hub, 5, path.to_vec());
+    assert_eq!(st.header_walk.reserved, Some(5));
+    let _ = take_header_ask(&mut st, 5);
+    probe_unprobed_peer(&mut st, &hub);
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    assert_eq!(
+        drain_getheaders(&mut other_rx),
+        1,
+        "the silent peer is asked once"
+    );
+    assert_eq!(drain_getheaders(&mut head_rx), 0);
+    let fork = mine(gen, 43);
+    apply(&mut st, &hub, 6, vec![fork, mine(fork.block_hash(), 46)]);
+    // A short reply is everything that peer has: its chain ends at height 1.
+    apply(&mut st, &hub, 7, vec![path[0]]);
+    probe_unprobed_peer(&mut st, &hub);
+    assert!(st.header_walk.probe.is_none(), "a peer is probed once");
+    for h in &path {
+        st.body.mark_missing(h.block_hash());
+    }
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(
+        st.slots[1].in_flight.is_empty(),
+        "a peer whose chain left the path below a block is not asked for it"
+    );
+    assert!(
+        !st.slots[2].in_flight.contains(&path[1].block_hash()),
+        "a peer whose whole chain ends below a block is not asked for it"
+    );
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(!st.slots[2].in_flight.contains(&path[1].block_hash()));
+    assert!(
+        may_serve(&st, 5, &path[1].block_hash()),
+        "a peer that announced nothing does not keep the header peer from a block it showed"
+    );
+    assert!(
+        [0, 3]
+            .iter()
+            .any(|&i| st.slots[i].in_flight.contains(&path[1].block_hash())),
+        "the header peer, or a peer with no record, takes what no other peer holds"
+    );
+
+    // With no peer that holds the block by what it announced, a peer that
+    // did not answer `notfound` is still asked.
+    st.slots[0].chain.note_notfound(
+        path[1].block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    st.slots[2].chain.note_notfound(
+        path[1].block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    st.slots[3].chain.note_notfound(
+        path[1].block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    assert!(may_serve(&st, 6, &path[1].block_hash()));
+
+    // A batch stored after one of its blocks failed is not planted, and does
+    // not grow the candidate again.
+    let late0 = mine(path[1].block_hash(), 44);
+    let late = [late0, mine(late0.block_hash(), 45)];
+    st.reorg.invalid.mark(late[0].block_hash().to_byte_array());
+    let tip = st.header_walk.tip_hash();
+    let (fks, work) = rbitcoin_ibd::ibd::events::prepare_header_store(&hub, &late);
+    let added =
+        rbitcoin_ibd::ibd::events::on_headers_batch(&mut st, &hub, 5, late.to_vec(), &fks, work);
+    assert_eq!(added, 0);
+    assert!(!st.ordered_set.contains(&late[1].block_hash()));
+    assert_eq!(st.header_walk.tip_hash(), tip);
+
+    // A fifth, on its own hub, because this node takes the forked peer's
+    // chain: once the fork height is confirmed and leaves the path, that peer
+    // holds the next path block again, also while a peer that announced
+    // nothing is up.
+    let (_dir5, hub5) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-taken");
+    hub5.ensure_genesis().unwrap();
+    let gen5 = hub5.tip_hash().unwrap();
+    let (mut head, _head_rx) = slot(8);
+    let (forked, _forked_rx) = slot(9);
+    let (silent, _silent_rx) = slot(10);
+    let (other_fork, _other_rx) = slot(11);
+    head.first_data_ms = 50;
+    let mut st = IbdWorkState::new(vec![head, forked, silent, other_fork], Some(gen5), Some(0));
+    assert!(send_getheaders(&mut st, &hub5).unwrap());
+    let lost0 = mine(gen5, 81);
+    apply(&mut st, &hub5, 8, vec![lost0, mine(lost0.block_hash(), 82)]);
+    let taken1 = mine_block(gen5, 1);
+    let taken2 = mine_block(taken1.block_hash(), 2);
+    apply(&mut st, &hub5, 9, vec![taken1.header, taken2.header]);
+    let elsewhere = mine(gen5, 83);
+    apply(
+        &mut st,
+        &hub5,
+        11,
+        vec![elsewhere, mine(elsewhere.block_hash(), 84)],
+    );
+    hub5.accept_block(taken1.clone()).unwrap();
+    st.height_to_hash.remove(&1);
+    st.height_to_hash.insert(2, taken2.block_hash());
+    st.record_height(taken2.block_hash(), 2);
+    st.body.mark_missing(taken2.block_hash());
+    rbitcoin_ibd::ibd::assign::assign_work_ordered(
+        &mut st,
+        &hub5,
+        &cfg,
+        &stats,
+        rbitcoin_ibd::ibd::assign::AssignDepth::Full,
+        None,
+    );
+    assert!(
+        may_serve(&st, 9, &taken2.block_hash()),
+        "the peer whose chain this node took is asked again"
+    );
+    assert!(
+        !may_serve(&st, 11, &taken2.block_hash()),
+        "a peer that left where this node confirmed a different block has still left"
+    );
+    // With no peer that holds a block by what it announced, the header peer
+    // is asked too.
+    st.slots[1].chain.note_notfound(
+        taken2.block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    st.slots[2].chain.note_notfound(
+        taken2.block_hash(),
+        rbitcoin_ibd::ibd::peer_io::ibd_mono_ms(),
+    );
+    assert!(may_serve(&st, 8, &taken2.block_hash()));
+
+    // A sixth, on its own hub, because a probe must say what a peer has. It
+    // asks after the path top alone, and a reply on that top shows the whole
+    // path. A peer that does not show it is asked from the confirmed tip,
+    // where an empty reply is a chain that ends there. The probe is not a
+    // walk answer, and a reply with a header the walk has not seen gets the
+    // walk's own ask. An empty reply to a walk ask is a caught-up peer as well
+    // as one behind, so that peer is probed again.
+    let (_dir6, hub6) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-probe");
+    hub6.ensure_genesis().unwrap();
+    let gen6 = hub6.tip_hash().unwrap();
+    let (mut head, mut head_rx) = slot(13);
+    let (mut caught, mut caught_rx) = slot(14);
+    let (mut behind, mut behind_rx) = slot(15);
+    let (mut fallback, mut fallback_rx) = slot(26);
+    let (mut side, mut side_rx) = slot(16);
+    head.first_data_ms = 50;
+    caught.first_data_ms = 5_000;
+    behind.first_data_ms = 6_000;
+    fallback.first_data_ms = 6_500;
+    side.first_data_ms = 7_000;
+    let mut st = IbdWorkState::new(
+        vec![head, caught, behind, fallback, side],
+        Some(gen6),
+        Some(0),
+    );
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert_eq!(drain_getheaders(&mut head_rx), 1);
+    let path = [mine(gen6, 51), mine(mine(gen6, 51).block_hash(), 52)];
+    apply(&mut st, &hub6, 13, path.to_vec());
+    assert_eq!(st.header_walk.reserved, Some(13));
+    let _ = take_header_ask(&mut st, 13);
+
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    let locator = getheaders_locator(&mut caught_rx).expect("the caught-up peer is probed");
+    assert_eq!(
+        locator,
+        vec![path[1].block_hash()],
+        "the probe asks after the path top alone"
+    );
+    // An announcement that crosses the probe is not its reply.
+    let stray = mine(BlockHash::from_byte_array([0x77; 32]), 53);
+    apply(&mut st, &hub6, 14, vec![stray]);
+    assert_eq!(
+        st.header_walk.walk.peer,
+        Some(14),
+        "the probe ask stays open, so it can still expire"
+    );
+    // That stray batch went to the walk, which retired the peer from it.
+    st.header_walk.walk_quiet.remove(&14);
+    // At the top the peer has nothing after it, so it is asked again from
+    // the tip.
+    apply(&mut st, &hub6, 14, Vec::new());
+    assert_eq!(st.header_walk.probe_open, None);
+    assert!(
+        !st.header_walk.walk_quiet.contains(&14),
+        "a probe reply is not a walk answer"
+    );
+    assert_eq!(st.header_walk.reserved, Some(13));
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    let locator = getheaders_locator(&mut caught_rx).expect("the peer is asked again");
+    assert_eq!(locator.first(), Some(&gen6), "then from the confirmed tip");
+    assert!(
+        !st.slots[1].chain.probe_from_tip(),
+        "and the probe after that asks after the top again"
+    );
+    apply(&mut st, &hub6, 14, path.to_vec());
+    assert!(may_serve(&st, 14, &path[1].block_hash()));
+
+    // A peer without the top answers from genesis: this node sends genesis
+    // itself, Core the header after it. One that stops at or below the tip
+    // is asked again from the tip, where an empty reply is a chain that ends
+    // there.
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert_eq!(getheaders_locator(&mut behind_rx).map(|l| l.len()), Some(1));
+    apply(&mut st, &hub6, 15, vec![hub6.header_of(&gen6).unwrap()]);
+    assert_eq!(st.header_walk.probe_open, None);
+    assert!(st.slots[2].chain.probe_from_tip());
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert!(getheaders_locator(&mut behind_rx).is_some());
+    apply(&mut st, &hub6, 15, Vec::new());
+    assert!(
+        st.slots[2].chain.left_path_by(&st.height_to_hash, 1),
+        "a peer with nothing above the tip does not hold a path block"
+    );
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert!(getheaders_locator(&mut fallback_rx).is_some());
+    // A reply from genesis that already goes past the tip says what a probe
+    // from the tip would.
+    apply(&mut st, &hub6, 26, vec![mine(gen6, 55)]);
+    assert_eq!(st.header_walk.probe_open, None);
+    assert!(!st.slots[3].chain.probe_from_tip());
+    assert!(st.slots[3].chain.left_path_by(&st.height_to_hash, 1));
+    st.header_walk.challenge = None;
+
+    // A reply on the path top shows the path below it. Its new header is one
+    // the walk has not seen, so that peer gets the walk's own ask.
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert!(getheaders_locator(&mut side_rx).is_some());
+    apply(&mut st, &hub6, 16, vec![mine(path[1].block_hash(), 54)]);
+    assert!(st.slots[4].chain.shows(&st.height_to_hash, 1));
+    assert_eq!(st.header_walk.challenge, Some(16));
+    st.header_walk.challenge = None;
+
+    // A block inv's ask carries the path top, so an empty reply is a peer at
+    // that top as well as one behind it.
+    note_block_inv(&mut st, 14);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert!(getheaders_locator(&mut caught_rx).is_some());
+    apply(&mut st, &hub6, 14, Vec::new());
+    assert!(
+        may_serve(&st, 14, &path[1].block_hash()),
+        "an empty walk reply does not take a caught-up peer off the path"
+    );
+    assert!(
+        !st.slots[1].chain.probed(),
+        "an empty walk reply is followed by a probe"
+    );
+
+    // A late reply to a walk ask could be read as the probe's, so a peer
+    // with one out is neither picked nor asked.
+    st.header_walk.walk.peer = None;
+    st.header_walk.walk.at = None;
+    st.header_walk.walk.prev_peer = Some(14);
+    probe_unprobed_peer(&mut st, &hub6);
+    assert_ne!(st.header_walk.probe, Some(14));
+    st.header_walk.probe = Some(14);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert_eq!(st.header_walk.probe, None);
+    assert_ne!(st.header_walk.probe_open, Some(14));
+    assert!(!st.slots[1].chain.probed(), "it is picked again later");
+    // Neither is a peer with an expired walk ask that it has not answered,
+    // after another peer's expiry took the lane's last slot for it.
+    st.header_walk.walk.prev_peer = None;
+    st.header_walk.header_misses.insert(14, 1);
+    probe_unprobed_peer(&mut st, &hub6);
+    assert_ne!(st.header_walk.probe, Some(14));
+    st.header_walk.header_misses.clear();
+
+    // An open probe keeps the lane until it is answered or expires, also
+    // when the walk has nothing left to ask.
+    for s in &mut st.slots {
+        s.peer_height = 0;
+    }
+    st.header_walk.walk.peer = None;
+    st.header_walk.walk.at = None;
+    probe_unprobed_peer(&mut st, &hub6);
+    assert_eq!(st.header_walk.probe, Some(14));
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert_eq!(st.header_walk.probe_open, Some(14));
+    let _ = send_getheaders(&mut st, &hub6);
+    assert_eq!(
+        st.header_walk.walk.peer,
+        Some(14),
+        "the probe keeps its lane"
+    );
+    // With header sync otherwise done, the poll still asks once the probe is
+    // past its window, so the ask that expires it is sent.
+    st.headers_done = true;
+    let quiet = || HeaderPollIn {
+        live: 0,
+        need_ready_headroom: false,
+        lag: 0,
+        min_cache: 0,
+        fan: 0,
+    };
+    assert!(matches!(header_poll(&st, quiet()), HeaderPoll::Wait));
+    age_header_ask(&mut st);
+    assert!(
+        matches!(header_poll(&st, quiet()), HeaderPoll::Ask),
+        "a probe past its window is polled"
+    );
+    let _ = send_getheaders(&mut st, &hub6);
+    assert_eq!(
+        st.header_walk.probe_open, None,
+        "an unanswered probe expires"
+    );
+
+    // A seventh, on its own hub, because a rewind replaces the confirmed
+    // blocks a peer's record took as its chain: that peer is not asked for
+    // the new chain's blocks, and one that had shown the new chain, all of
+    // it or only its top, is.
+    let (_dir7, hub7) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-rewound");
+    hub7.ensure_genesis().unwrap();
+    let gen7 = hub7.tip_hash().unwrap();
+    let l1 = mine_block(gen7, 1);
+    hub7.accept_block(l1.clone()).unwrap();
+    let l2 = mine_block(l1.block_hash(), 2);
+    hub7.accept_block(l2.clone()).unwrap();
+    let w1 = mine(gen7, 71);
+    let w2 = mine(w1.block_hash(), 72);
+    let w3 = mine(w2.block_hash(), 73);
+    for w in [&w1, &w2, &w3] {
+        hub7.ensure_header(w).unwrap();
+    }
+    let (old, _old_rx) = slot(17);
+    let (fresh, _fresh_rx) = slot(18);
+    let (taken, _taken_rx) = slot(19);
+    let (suffix, _suffix_rx) = slot(20);
+    let mut st = IbdWorkState::new(
+        vec![old, fresh, taken, suffix],
+        hub7.tip_hash(),
+        hub7.tip_height(),
+    );
+    let confirmed = |h| rbitcoin_ibd::ibd::peer_chain::confirmed_at(&hub7, h);
+    let l3 = mine(l2.block_hash(), 74);
+    st.slots[0].chain.note_headers(
+        &st.height_to_hash,
+        confirmed,
+        2,
+        1,
+        &[l1.header, l2.header, l3],
+    );
+    st.slots[2]
+        .chain
+        .note_headers(&st.height_to_hash, confirmed, 2, 1, &[w1, w2]);
+    // Announced only the new chain's top, above the old tip.
+    st.slots[3]
+        .chain
+        .note_headers(&st.height_to_hash, confirmed, 2, 3, &[w3]);
+    st.header_walk.tip.hash = Some(w3.block_hash());
+    st.header_walk.tip.height = 3;
+    assert!(rbitcoin_ibd::ibd::reorg::consider_disconnected_heavier(&mut st, &hub7).unwrap());
+    assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
+    assert!(
+        !may_serve(&st, 17, &w1.block_hash()),
+        "a peer on the rewound chain is not asked for the new one"
+    );
+    assert!(!st.slots[0].chain.probed(), "and is probed again");
+    assert!(
+        !st.slots[1].chain.left_path_by(&st.height_to_hash, 1),
+        "a peer with no record is not left stale by the rewind"
+    );
+    assert!(!may_serve(&st, 18, &w1.block_hash()));
+    assert!(
+        may_serve(&st, 19, &w1.block_hash()),
+        "a peer whose split is the new chain's block shows it"
+    );
+    assert!(
+        may_serve(&st, 20, &w3.block_hash()),
+        "a peer that announced the new chain is asked for it"
+    );
+
+    // An eighth, because a block is asked only of a peer whose chain showed
+    // it: a peer whose full reply ended below the block, or one with no
+    // record, is not asked for it while another peer shows it. With no peer
+    // that shows a block, a peer that has not left the path is asked first.
+    let (_dir8, hub8) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-shown");
+    hub8.ensure_genesis().unwrap();
+    let gen8 = hub8.tip_hash().unwrap();
+    let (head, _head_rx) = slot(22);
+    let (full, _full_rx) = slot(23);
+    let (blank, _blank_rx) = slot(24);
+    let (left, _left_rx) = slot(25);
+    let mut st = IbdWorkState::new(vec![head, full, blank, left], Some(gen8), Some(0));
+    let mut prev = gen8;
+    let mut chain8 = Vec::new();
+    for n in 0..2_004u32 {
+        let h = mine(prev, 90_000 + n);
+        prev = h.block_hash();
+        chain8.push(h);
+    }
+    for (i, h) in chain8.iter().enumerate() {
+        st.record_height(h.block_hash(), i as u32 + 1);
+        st.height_to_hash.insert(i as u32 + 1, h.block_hash());
+    }
+    st.header_walk.reserved = Some(22);
+    let none = |_| None;
+    let path8 = st.height_to_hash.clone();
+    st.slots[0]
+        .chain
+        .note_headers(&path8, none, 0, 1, &chain8[..2_003]);
+    st.slots[1]
+        .chain
+        .note_headers(&path8, none, 0, 1, &chain8[..2_000]);
+    let fork = mine(chain8[0].block_hash(), 99_999);
+    st.slots[3].chain.note_headers(&path8, none, 0, 2, &[fork]);
+    let at = |h: u32| chain8[h as usize - 1].block_hash();
+    assert!(may_serve(&st, 23, &at(100)));
+    assert!(
+        !may_serve(&st, 22, &at(100)),
+        "the header peer stays on headers while another peer shows the block"
+    );
+    assert!(
+        !may_serve(&st, 23, &at(2_003)),
+        "a full reply that ended below a block does not show it"
+    );
+    assert!(
+        !may_serve(&st, 24, &at(2_003)),
+        "a peer with no record is not asked for a block another peer shows"
+    );
+    assert!(
+        may_serve(&st, 22, &at(2_003)),
+        "the header peer shows it alone"
+    );
+    assert!(may_serve(&st, 24, &at(2_004)));
+    assert!(
+        !may_serve(&st, 25, &at(2_004)),
+        "with nobody showing a block, a peer that left the path is not asked"
+    );
+    // A peer whose record stops short of the next blocks is probed again; one
+    // probed just now is not.
+    st.max_ordered_height = 2_004;
+    probe_unprobed_peer(&mut st, &hub8);
+    assert_eq!(st.header_walk.probe, Some(23));
+    st.header_walk.probe = None;
+    st.slots[1].chain.note_probe_sent(Instant::now(), true);
+    probe_unprobed_peer(&mut st, &hub8);
+    assert_eq!(
+        st.header_walk.probe,
+        Some(24),
+        "the next is the peer with no record"
+    );
+}
+
+/// A long chain on an invalid block stays refused past the cap on
+/// remembered tips: the newest link is kept.
+#[test]
+fn a_long_chain_on_an_invalid_block_stays_refused() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-refuse-cap");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let (s0, _rx0) = slot(0);
+    let mut st = IbdWorkState::new(vec![s0], Some(gen), Some(0));
+    let bad = mine(gen, 1);
+    st.reorg.invalid.mark(bad.block_hash().to_byte_array());
+    let mut prev = bad.block_hash();
+    let mut branch = None;
+    for n in 0..1_100u32 {
+        let next = mine(prev, 2 + n);
+        assert!(
+            refuse_invalid_batch(&mut st, 0, &[next]),
+            "batch {n} builds on the refused chain"
+        );
+        prev = next.block_hash();
+        if n == 100 {
+            // A second branch off the invalid block, refused once.
+            let side = mine(bad.block_hash(), 5_000);
+            assert!(refuse_invalid_batch(&mut st, 0, &[side]));
+            branch = Some(side.block_hash());
+        }
+    }
+    let side_next = mine(branch.unwrap(), 5_001);
+    assert!(
+        refuse_invalid_batch(&mut st, 0, &[side_next]),
+        "a branch refused after the oldest tips is still refused past the cap"
+    );
+
+    // A batch that is not one linked chain does not build on the invalid
+    // block, so its last header is not remembered: an honest header cannot
+    // be refused by sending it after one that is.
+    let honest1 = mine(gen, 7_001);
+    let honest2 = mine(honest1.block_hash(), 7_002);
+    let junk = Header {
+        prev_blockhash: bad.block_hash(),
+        ..honest1
+    };
+    assert!(!refuse_invalid_batch(&mut st, 0, &[junk, honest2]));
+    assert!(!refuse_invalid_batch(&mut st, 0, &[bad, honest1]));
+    assert!(
+        !refuse_invalid_batch(&mut st, 0, &[honest1, honest2]),
+        "the honest chain is not refused"
+    );
+}
+
+/// A peer that announced the path and then forks below the confirmed tip no
+/// longer shows path blocks, so it does not keep the header peer that
+/// announced them from them.
+#[test]
+fn a_peer_that_forks_below_the_tip_does_not_keep_the_header_peer_off() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-fork-below");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let b1 = mine_block(gen, 1);
+    hub.accept_block(b1.clone()).unwrap();
+    let b2 = mine_block(b1.block_hash(), 2);
+    hub.accept_block(b2.clone()).unwrap();
+    let (mut head, _head_rx) = slot(0);
+    let (mut other, _other_rx) = slot(1);
+    head.first_data_ms = 50;
+    other.first_data_ms = 5_000;
+    let mut st = IbdWorkState::new(vec![head, other], Some(b2.block_hash()), Some(2));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let h3 = mine(b2.block_hash(), 3);
+    let path = [h3, mine(h3.block_hash(), 4)];
+    apply(&mut st, &hub, 0, path.to_vec());
+    apply(&mut st, &hub, 1, path.to_vec());
+    assert_eq!(st.header_walk.reserved, Some(0));
+    assert!(st.slots[1].chain.shows(&st.height_to_hash, 3));
+    apply(&mut st, &hub, 1, vec![mine(b1.block_hash(), 92)]);
+    assert!(
+        !st.slots[1].chain.shows(&st.height_to_hash, 3),
+        "a peer that left the path does not show a block on it"
+    );
+    assert!(
+        may_serve(&st, 0, &path[0].block_hash()),
+        "the header peer that announced the block is still asked"
+    );
+}
+
+/// When the failure cannot be written, this process still retires the
+/// candidate, but the retired walk is not left on disk as the resume point.
+#[test]
+fn a_retire_whose_failure_is_not_written_leaves_no_resume_point() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-retire-unsaved");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let store = hub.query.store().path().to_path_buf();
+    std::fs::create_dir(store.join("block.invalid")).unwrap();
+    let (s1, _rx1) = slot(1);
+    let mut st = IbdWorkState::new(vec![s1], Some(gen), Some(0));
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let p1 = mine(gen, 61);
+    apply(&mut st, &hub, 1, vec![p1, mine(p1.block_hash(), 62)]);
+    assert!(st.is_on_path(&p1.block_hash(), 1));
+    rbitcoin_ibd::ibd::events::apply_consensus_invalid_reject(
+        &mut st,
+        1,
+        p1.block_hash(),
+        "bad block: coinbase excess value",
+        Some(hub.query.as_ref()),
+        Some(&hub),
+    );
+    assert_eq!(st.header_walk.tip_height(), 0, "the candidate is retired");
+    assert!(
+        !store.join("header.adopt").exists(),
+        "a retired walk is not the resume point while its failure is not on disk"
+    );
+    assert!(
+        !hub.note_failed_connect(p1.block_hash()),
+        "a mark whose write failed is still not on disk"
+    );
+    save_adopt(&st, &hub);
+    assert!(
+        !store.join("header.adopt").exists(),
+        "no walk is saved while a failure is not on disk"
+    );
+    std::fs::remove_dir(store.join("block.invalid")).unwrap();
+    assert!(
+        hub.note_failed_connect(p1.block_hash()),
+        "once the file can be written the pending mark goes to disk"
+    );
+    assert!(std::fs::read(store.join("block.invalid"))
+        .unwrap()
+        .windows(32)
+        .any(|w| w == p1.block_hash().as_byte_array()));
+    save_adopt(&st, &hub);
+    assert!(store.join("header.adopt").exists());
 }
 
 #[test]
@@ -1969,6 +2671,16 @@ fn a_heavier_header_chain_keeps_its_context() {
                 hub.query.milestone_header_at(41),
                 Some(side[20].block_hash().to_byte_array())
             );
+        }
+    }
+}
+
+fn getheaders_locator(rx: &mut mpsc::UnboundedReceiver<PeerCmd>) -> Option<Vec<BlockHash>> {
+    loop {
+        match rx.try_recv() {
+            Ok(PeerCmd::GetHeaders { locator }) => return Some(locator),
+            Ok(_) => {}
+            Err(_) => return None,
         }
     }
 }

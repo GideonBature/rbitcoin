@@ -363,12 +363,30 @@ pub fn consider_disconnected_heavier(
     st: &mut super::state::IbdWorkState,
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
-    let cands = connecting_search_candidates(st, hub)?;
+    let mut cands = connecting_search_candidates(st, hub)?;
+    if cands.is_empty() {
+        cands.extend(unplanted_walk_tip(st, hub));
+    }
     let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
     let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
         return Ok(false);
     };
     apply_header_rewind(st, hub, &path)
+}
+
+/// The walk's candidate while nothing is planted above the confirmed tip. A
+/// retire walks back to the parent, and a heavier chain that forked under
+/// the tip then takes no path slots, so tip+1 names no fork. The main loop
+/// rewinds to it; the header thread's rewind does not see it. A candidate
+/// that is not stored has no parent, so no rewind is prepared for it.
+fn unplanted_walk_tip(st: &super::state::IbdWorkState, hub: &ChainHub) -> Option<BlockHash> {
+    let tip_h = hub.tip_height()?;
+    let planted =
+        !st.ordered.is_empty() || st.height_to_hash.contains_key(&tip_h.saturating_add(1));
+    if planted || st.header_walk.tip_height() <= tip_h {
+        return None;
+    }
+    st.header_walk.tip_hash()
 }
 
 /// Header tips on known competing forks that do not contain an invalid hash.
@@ -529,6 +547,8 @@ pub struct RewindPrep {
     pub archived: Vec<bool>,
     pub connected: Vec<bool>,
     pub fks: Vec<Option<Fk>>,
+    /// The confirmed tip was above the LCA, so blocks were disconnected.
+    pub rewound: bool,
 }
 
 /// Store side of a rewind: parent lookup and the confirmed-tip disconnect.
@@ -553,6 +573,7 @@ pub fn prepare_header_rewind(
         return Ok(None);
     };
     let tip_h = hub.tip_height().unwrap_or(0);
+    let rewound = tip_h > lca_h;
     if tip_h.saturating_sub(lca_h) > REWIND_MAX_DEPTH {
         warn!(
             "ibd: heavier fork rewind depth {} exceeds cap {REWIND_MAX_DEPTH} (lca={lca_h} tip={tip_h})",
@@ -599,6 +620,7 @@ pub fn prepare_header_rewind(
         archived,
         connected,
         fks,
+        rewound,
     }))
 }
 
@@ -631,6 +653,11 @@ pub fn commit_header_rewind(
             st.body.mark_archived(*hash);
         }
         prev = *hash;
+    }
+    if prep.rewound {
+        for slot in &mut st.slots {
+            slot.chain.note_rewind(&st.height_to_hash, prep.lca_h);
+        }
     }
     for h in hub.query.block_queue_queued_heights() {
         if h > prep.lca_h {

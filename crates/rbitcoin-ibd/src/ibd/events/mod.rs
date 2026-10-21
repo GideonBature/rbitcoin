@@ -325,6 +325,11 @@ pub fn on_headers_batch(
     fks: &[rbitcoin_primitives::Fk],
     work: Option<bitcoin::Work>,
 ) -> usize {
+    // A block in this batch can fail while its headers are written outside
+    // the lock. The retire already dropped that path.
+    if super::header_walk::refuse_invalid_batch(st, peer, &headers) {
+        return 0;
+    }
     let accepted = accepted_headers(&headers, fks);
     let mut added = 0usize;
     let mut batch_prev: Option<(BlockHash, u32)> = None;
@@ -467,6 +472,7 @@ pub fn apply_peer_event(
         PeerEvent::NotFound { peer, hashes } => apply_notfound(st, peer, hashes),
         PeerEvent::BlocksInv { peer, hashes } => {
             if !hashes.is_empty() {
+                note_announcement(st, peer);
                 super::header_walk::note_block_inv(st, peer);
             }
         }
@@ -640,7 +646,18 @@ pub fn plan_header_batch(
         challenger_work_before: st.header_walk.challenger.as_ref().map(|ch| ch.tip.work),
         outer_len: headers.len(),
     };
-    if mark.outer_len == 0 {
+    if answer_probe(st, hub, peer, &headers) {
+        return (mark, HeaderPlan::Done);
+    }
+    if mark.outer_len > 0 {
+        note_announcement(st, peer);
+        note_peer_headers(st, hub, peer, &headers);
+    } else {
+        if st.header_walk.reserved != Some(peer) {
+            if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+                s.chain.forget_probe();
+            }
+        }
         super::header_walk::settle_walk_peer(
             st,
             hub,
@@ -665,7 +682,12 @@ pub fn plan_header_reply(
     peer: usize,
     headers: Vec<bitcoin::block::Header>,
 ) -> HeaderPlan {
-    let ask = super::header_walk::take_header_ask(st, peer);
+    // A batch that crossed this peer's open probe leaves that ask in flight.
+    let ask = if st.header_walk.probe_open == Some(peer) {
+        super::header_walk::HeaderAsk::Unsolicited
+    } else {
+        super::header_walk::take_header_ask(st, peer)
+    };
     let mut inflight = super::header_walk::InFlight::capture(st);
     if headers.is_empty() {
         inflight.hold(st);
@@ -677,6 +699,9 @@ pub fn plan_header_reply(
         } else {
             HeaderPlan::Done
         };
+    }
+    if super::header_walk::refuse_invalid_batch(st, peer, &headers) {
+        return HeaderPlan::Done;
     }
     let class = super::header_walk::classify(st, hub, ask, &headers);
     let mut headers = headers;
@@ -882,12 +907,116 @@ pub fn apply_block_decode_failed(st: &mut IbdWorkState, peer: usize, hash: Block
 }
 
 #[doc(hidden)]
+fn note_peer_headers(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    peer: usize,
+    headers: &[bitcoin::block::Header],
+) {
+    let Some(height) = headers
+        .first()
+        .and_then(|h| parent_height(&st.hash_height, hub, h.prev_blockhash))
+    else {
+        return;
+    };
+    let tip = hub.tip_height().unwrap_or(0);
+    let path = &st.height_to_hash;
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+        s.chain.note_headers(
+            path,
+            |ht| super::peer_chain::confirmed_at(hub, ht),
+            tip,
+            height,
+            headers,
+        );
+    }
+}
+
+/// The reply to this peer's open probe, read into its chain record and kept
+/// from the walk. A probe after the path top is answered empty, on that top,
+/// or from genesis when the peer does not have it. A probe from the
+/// confirmed chain is answered empty or on a confirmed block. A batch of
+/// another shape is an announcement that crossed the probe. True when the
+/// reply was consumed.
+fn answer_probe(
+    st: &mut IbdWorkState,
+    hub: &ChainHub,
+    peer: usize,
+    headers: &[bitcoin::block::Header],
+) -> bool {
+    if st.header_walk.probe_open != Some(peer) {
+        return false;
+    }
+    let tip = hub.tip_height().unwrap_or(0);
+    let top = st.header_walk.probe_top;
+    if let Some(first) = headers.first() {
+        let prev = first.prev_blockhash;
+        let confirmed_h = hub
+            .query
+            .height_of_hash(&prev.to_byte_array())
+            .ok()
+            .flatten()
+            .map(|h| h.0)
+            .filter(|&h| h <= tip && super::peer_chain::confirmed_at(hub, h) == Some(prev));
+        let shaped = match top {
+            Some((_, hash)) => {
+                prev == hash || prev.to_byte_array() == [0u8; 32] || confirmed_h == Some(0)
+            }
+            None => confirmed_h.is_some(),
+        };
+        if !shaped {
+            return false;
+        }
+    }
+    st.header_walk.probe_open = None;
+    st.header_walk.probe_top = None;
+    let _ = super::header_walk::take_header_ask(st, peer);
+    let past_tip = headers.first().is_some_and(|first| {
+        parent_height(&st.hash_height, hub, first.prev_blockhash)
+            .is_some_and(|h| h.saturating_add(headers.len() as u32) > tip.saturating_add(1))
+    });
+    if !headers.is_empty() {
+        note_announcement(st, peer);
+        note_peer_headers(st, hub, peer, headers);
+        // A header this node has not seen: the peer's chain leaves this one
+        // or runs past the path. The walk asks it, as after a block inv.
+        let last = headers[headers.len() - 1].block_hash();
+        let seen = st.hash_height.contains_key(&last)
+            || matches!(hub.query.height_of_hash(&last.to_byte_array()), Ok(Some(_)));
+        if !seen {
+            super::header_walk::note_block_inv(st, peer);
+        }
+    }
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+        match top {
+            Some((height, hash)) if headers.first().map(|h| h.prev_blockhash) == Some(hash) => {
+                s.chain.note_reaches(height, hash);
+            }
+            // A reply from genesis that goes past the tip says what a probe
+            // from the tip would. Empty is also a peer that sends nothing
+            // below the minimum work.
+            Some(_) if past_tip => {}
+            Some(_) => s.chain.note_lacks_top(),
+            None if headers.is_empty() => s.chain.note_ends_at(tip),
+            None => {}
+        }
+    }
+    true
+}
+
+fn note_announcement(st: &mut IbdWorkState, peer: usize) {
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+        s.chain.note_announcement();
+    }
+}
+
 pub fn apply_notfound(st: &mut IbdWorkState, peer: usize, hashes: Vec<BlockHash>) {
     note_block_progress(&mut st.slots, peer);
     let mut freed = Vec::new();
     if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
         for h in &hashes {
             s.track_remove(h);
+            s.chain.note_notfound(*h, super::peer_io::ibd_mono_ms());
             let empty = st
                 .inflight
                 .get_mut(h)
@@ -1333,6 +1462,17 @@ pub fn apply_cascade_reject(
     // Leave the body queue: the plan was stale, and the confirm thread that
     // rejected offered any body it held back.
     clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+    // A block too far ahead of the clock is not a stale plan: the engine
+    // waits before it tries again, and it connects once the clock catches up.
+    if super::confirm::is_time_too_new(err) {
+        note_confirm_stuck(st);
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 3 || n.is_multiple_of(60) {
+            warn!("ibd: confirm waits @{height} {hash}: {err} (n={n})");
+        }
+        return;
+    }
     const CASCADE_HALT_AFTER: u8 = 3;
     let tip = hub
         .and_then(|h| h.tip_hash())
@@ -1405,6 +1545,13 @@ pub fn apply_consensus_invalid_reject(
     }
     st.body.mark_rejected(hash);
     st.reorg.invalid.mark(hash.to_byte_array());
+    if let Some(h) = hub {
+        // The failure goes to disk before the retired walk does: a walk saved
+        // with its failure lost would resume onto the invalid chain, and
+        // `save_adopt` saves none while a mark is not on disk.
+        let _ = h.note_failed_connect(hash);
+        super::header_walk::retire_invalid(st, h, hash, height);
+    }
     if st.height_to_hash.get(&height) == Some(&hash) {
         st.height_to_hash.remove(&height);
     }
