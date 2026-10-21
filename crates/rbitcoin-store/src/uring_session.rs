@@ -651,12 +651,22 @@ impl UringSession {
 
     #[doc(hidden)]
     pub fn drain_all_inner(&mut self, fail_closed: bool) -> Result<(), StoreError> {
-        self.drain_all_harvest(fail_closed)?;
+        if let Err(e) = self.drain_all_harvest(fail_closed) {
+            if fail_closed && !self.pending.is_empty() {
+                // Returning would let the caller free buffers these SQEs own.
+                self.poisoned = true;
+                return finish_drain_hard_cap(self.pending.len());
+            }
+            return Err(e);
+        }
         if let Err(e) = self.pending.assert_drained() {
             let already = self.poisoned;
             self.poisoned = true;
             if !already {
                 self.note_invariant(UringInvariant::Undrained);
+            }
+            if fail_closed && !self.pending.is_empty() {
+                return finish_drain_hard_cap(self.pending.len());
             }
             return Err(e);
         }
@@ -937,10 +947,10 @@ impl UringSession {
     /// `fail_closed` aborts unless this thread is inside [`with_drain_hard_cap`].
     /// Leftover ids stay in `pending`.
     ///
-    /// During an unwind the buffers may already be gone: production machines
-    /// declare [`UringSession::drain_guard`] before the frame that owns them,
-    /// so a drop drain would complete the kernel into freed memory. Abort
-    /// instead; only a non-panicking drop may drain.
+    /// During an unwind the buffers may already be gone when the guard is in a
+    /// caller frame (for example `read_index_window`). Abort instead of
+    /// draining in that case. A guard that shares the buffer frame must be
+    /// declared after those buffers so it drops first.
     #[doc(hidden)]
     pub fn drop_drain(&mut self) {
         if std::thread::panicking() && self.in_flight() != 0 {
@@ -948,6 +958,10 @@ impl UringSession {
         }
         if let Err(err) = self.drain_all_inner(true) {
             note_drop_drain_error(&err);
+        }
+        if !self.pending.is_empty() {
+            // A failed drain left SQEs that may still own caller buffers.
+            let _ = finish_drain_hard_cap(self.pending.len());
         }
     }
 }
@@ -970,11 +984,12 @@ impl Drop for UringSession {
     }
 }
 
-/// Abort on unwind with in-flight SQEs, drain otherwise.
+/// Drain the session when dropped.
 ///
-/// Declare before the frame that owns the SQE buffers: that frame unwinds
-/// first, so the buffers are already freed when this drops. Draining then
-/// would write completions into freed memory, so a panic must abort.
+/// Declare **after** SQE buffers owned by the same frame so this drops first
+/// and drains while they are still live. A guard in a caller frame cannot
+/// outlive buffers owned by a callee: if SQEs are still in flight on unwind,
+/// it aborts instead of draining into freed memory.
 pub struct DrainOnDrop<'a> {
     pub session: &'a mut UringSession,
 }
@@ -1047,10 +1062,10 @@ pub fn uring_recover_count() -> u64 {
 ///   `with_thread_local` while holding the session — fold IO into the outer
 ///   machine instead (e.g. plan `STAGE_IDX` for body_range).
 /// - Drains stray in-flight CQEs before handing the session to `f`.
-/// - A panic after `f` queued SQEs aborts. A guard installed inside `f` aborts
-///   first while unwinding; this frame is the backstop for callers without one
-///   (bulk_io's buffers outlive `f`, but an inner frame may have freed its own).
-///   Neither a drain nor session reuse is safe.
+/// - A panic after `f` queued SQEs aborts. A guard inside `f` (declared after
+///   its SQE buffers) aborts first while unwinding; this frame is the backstop
+///   for callers without one (bulk_io's buffers outlive `f`, but an inner frame
+///   may have freed its own). Neither a drain nor session reuse is safe.
 ///
 /// Returns `Err` if io_uring is unavailable or setup fails. Callers that prefer
 /// a silent fallback can map `Err` themselves (bulk_io does).
