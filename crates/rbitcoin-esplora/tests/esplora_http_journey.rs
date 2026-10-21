@@ -502,6 +502,9 @@ async fn pruned_tail_is_partial_json(pad: &mut HttpPad) {
     let tx0 = block_hash_hex(&pad.cbs[0]);
     let (st, body) = http_get(pad.addr, &format!("/tx/{tx0}")).await;
     assert_eq!(st, 200, "{body}");
+    let (st, by_pos) = http_get(pad.addr, "/block-height/0/tx/0").await;
+    assert_eq!(st, 200, "pruned position tx: {by_pos}");
+    assert_eq!(by_pos, body, "pruned position tx matches GET /tx");
     let row: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(row["txid"], tx0);
     assert_eq!(row["pruned"], true);
@@ -677,6 +680,31 @@ async fn confirmed_output_by_position(pad: &HttpPad) {
     assert_eq!(st, 404, "mempool-only tx has no output object: {body}");
 }
 
+/// Whole tx at a block position matches `GET /tx/{txid}` with no asof.
+/// Genesis is returned here; the output routes 404 it.
+async fn tx_by_position_matches_get_tx(pad: &HttpPad) {
+    let pay = block_hash_hex(&pay_txid(0x11));
+    let (st, by_id) = http_get(pad.addr, &format!("/tx/{pay}")).await;
+    assert_eq!(st, 200, "{by_id}");
+    let (st, by_pos) = http_get(pad.addr, "/block-height/1/tx/1").await;
+    assert_eq!(st, 200, "position tx: {by_pos}");
+    assert_eq!(by_pos, by_id, "position tx matches GET /tx");
+
+    let (st, body) = http_get(pad.addr, "/block-height/1/tx/2").await;
+    assert_eq!(st, 404, "index past the block: {body}");
+    let (st, body) = http_get(pad.addr, "/block-height/99999/tx/0").await;
+    assert_eq!(st, 404, "height past the tip: {body}");
+    let (st, body) = http_get(pad.addr, "/block-height/1/tx/nope").await;
+    assert_eq!(st, 400, "non-integer index: {body}");
+
+    let genesis = block_hash_hex(&pad.cbs[0]);
+    let (st, by_id) = http_get(pad.addr, &format!("/tx/{genesis}")).await;
+    assert_eq!(st, 200, "{by_id}");
+    let (st, by_pos) = http_get(pad.addr, "/block-height/0/tx/0").await;
+    assert_eq!(st, 200, "genesis full tx by position: {by_pos}");
+    assert_eq!(by_pos, by_id, "genesis position matches GET /tx");
+}
+
 /// Batch keeps order, repeats duplicates, and rejects a bad element or a long body.
 async fn batch_outputs_keep_order(pad: &HttpPad) {
     let addr = pad.addr;
@@ -761,6 +789,7 @@ async fn esplora_tcp_wallet_mempool_and_replace() {
     chain_cursor_matches_chain_page(&pad, &spend).await;
     mempool_spend_outspends_and_hex(&pad, &spend).await;
     confirmed_output_by_position(&pad).await;
+    tx_by_position_matches_get_tx(&pad).await;
     batch_outputs_keep_order(&pad).await;
     junk_paths_asof_and_post(pad.addr, &pad.hashes[0]).await;
     same_height_replace_restamps(&mut pad).await;

@@ -314,7 +314,7 @@ pub fn block_txs_impl(st: AppState, hash_hex: &str, start: u32) -> Response {
             let page: Vec<_> = fks.into_iter().skip(start as usize).take(25).collect();
             let mut out = Vec::with_capacity(page.len());
             for fk in page {
-                match build_tx_json(&st.query, fk, st.network) {
+                match build_tx_json(&st.query, fk, st.network, None) {
                     Ok(v) => out.push(v),
                     Err(e) => return store_err(e),
                 }
@@ -504,6 +504,33 @@ fn output_at_height(
 
 fn json_u32(v: &Value) -> Option<u32> {
     u32::try_from(v.as_u64()?).ok()
+}
+
+/// `GET /block-height/{height}/tx/{index}`. Same document as `GET /tx/{txid}`.
+pub async fn block_height_tx(
+    State(st): State<AppState>,
+    Path((height, index)): Path<(u32, u32)>,
+    AsOf(asof): AsOf,
+) -> Response {
+    spawn_join(move || {
+        let view = match pinned_tip(&st.query, asof) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        if height > view.height.0 {
+            return not_found();
+        }
+        let fk = match st.query.tx_fk_at_height(Height(height), index) {
+            Ok(fk) => fk,
+            Err(StoreError::NotFound) => return not_found(),
+            Err(e) => return store_err(e),
+        };
+        match build_tx_json(&st.query, fk, st.network, Some(&view)) {
+            Ok(v) => maybe_attach_view(Json(v).into_response(), Some(view)),
+            Err(e) => store_err(e),
+        }
+    })
+    .await
 }
 
 /// `GET /block-height/{height}/tx/{index}/out/{vout}`.
@@ -2009,7 +2036,7 @@ pub fn push_mempool_tx_json(
     out: &mut Vec<Value>,
 ) {
     if let Ok(Some((fk, _))) = st.query.get_tx_by_txid(&txid) {
-        if let Ok(v) = build_tx_json(&st.query, fk, st.network) {
+        if let Ok(v) = build_tx_json(&st.query, fk, st.network, None) {
             out.push(v);
             return;
         }

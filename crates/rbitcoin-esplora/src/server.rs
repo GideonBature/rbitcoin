@@ -176,8 +176,9 @@ pub fn path_uses_sh_view(path: &str) -> bool {
         || path.starts_with("/scripthashes/")
 }
 
-/// COMPAT.md: `?asof=` on tx status/outspend(s) and address/scripthash
-/// `/`, `/utxo`, `/txs`, `/txs/chain`, `/txs/summary` (not `/txs/mempool`).
+/// COMPAT.md: `?asof=` on tx status/outspend(s), confirmed output and
+/// tx-by-position reads, and address/scripthash `/`, `/utxo`, `/txs`,
+/// `/txs/chain`, `/txs/summary` (not `/txs/mempool`, not `GET /tx/{txid}`).
 #[doc(hidden)]
 pub fn path_accepts_asof(path: &str) -> bool {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -187,6 +188,7 @@ pub fn path_accepts_asof(path: &str) -> bool {
             | ["tx", _, "outspends"]
             | ["tx", _, "outspend", _]
             | ["tx", _, "out", _]
+            | ["block-height", _, "tx", _]
             | ["block-height", _, "tx", _, "out", _]
             | ["block-heights", "txs", "outs"]
             | ["address", _]
@@ -821,6 +823,10 @@ pub async fn run_esplora(
         .route("/blocks/{start}", get(handlers::blocks_from_height))
         .route("/block-height/{height}", get(block_height))
         .route(
+            "/block-height/{height}/tx/{index}",
+            get(handlers::block_height_tx),
+        )
+        .route(
             "/block-height/{height}/tx/{index}/out/{vout}",
             get(handlers::block_height_tx_out),
         )
@@ -1049,7 +1055,7 @@ pub async fn tx_full(State(st): State<AppState>, Path(txid_hex): Path<String>) -
             return not_found();
         };
         match st.query.get_tx_by_txid(&txid) {
-            Ok(Some((fk, _))) => match build_tx_json(&st.query, fk, st.network) {
+            Ok(Some((fk, _))) => match build_tx_json(&st.query, fk, st.network, None) {
                 Ok(v) => Json(v).into_response(),
                 Err(e) => store_err(e),
             },

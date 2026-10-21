@@ -1766,6 +1766,45 @@ async fn assert_output_asof_hides_later_spend(
     .await;
     assert_eq!(st, 404, "dead asof rejects the whole post: {body}");
     assert!(http_header_value(&raw, "x-bitcoin-chain-tip").is_none());
+
+    let (st, _, by_id) = http_get_raw(addr, &format!("/tx/{create_hex}")).await;
+    assert_eq!(st, 200, "live tx: {by_id}");
+    let (st, _, by_pos) = http_get_raw(addr, "/block-height/102/tx/1").await;
+    assert_eq!(st, 200, "position tx: {by_pos}");
+    assert_eq!(by_pos, by_id, "position tx matches GET /tx");
+
+    let (st, raw, body) =
+        http_get_raw(addr, &format!("/block-height/102/tx/1?asof={asof_create}")).await;
+    assert_eq!(st, 200, "asof position tx: {body}");
+    let pinned_tx: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(pinned_tx["txid"], create_hex, "{pinned_tx}");
+    assert_eq!(pinned_tx["status"]["confirmed"], true, "{pinned_tx}");
+    assert_eq!(pinned_tx["status"]["block_height"], 102, "{pinned_tx}");
+    assert_eq!(
+        pinned_tx["status"]["block_hash"], asof_create,
+        "status names the pin block: {pinned_tx}"
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip").as_deref(),
+        Some(asof_create)
+    );
+    assert_eq!(
+        http_header_value(&raw, "x-bitcoin-chain-tip-height").as_deref(),
+        Some("102")
+    );
+
+    let (st, _, body) =
+        http_get_raw(addr, &format!("/block-height/103/tx/0?asof={asof_create}")).await;
+    assert_eq!(st, 404, "tx height above the pin: {body}");
+    let (st, _, body) = http_get_raw(addr, "/block-height/102/tx/9").await;
+    assert_eq!(st, 404, "tx index past the block: {body}");
+    let (st, raw, body) = http_get_raw(
+        addr,
+        &format!("/block-height/102/tx/1?asof={}", "ee".repeat(32)),
+    )
+    .await;
+    assert_eq!(st, 404, "dead asof on position tx: {body}");
+    assert!(http_header_value(&raw, "x-bitcoin-chain-tip").is_none());
 }
 
 async fn http_post_raw(addr: SocketAddr, path: &str, body: &[u8]) -> (u16, String, String) {
@@ -2198,6 +2237,11 @@ async fn electrum_and_esplora_asof_hides_later_spend() {
     assert_esplora_asof_dead(
         esplora.local_addr,
         &format!("/block-height/102/tx/1/out/0?asof={asof_spend}"),
+    )
+    .await;
+    assert_esplora_asof_dead(
+        esplora.local_addr,
+        &format!("/block-height/102/tx/1?asof={asof_spend}"),
     )
     .await;
     assert_esplora_asof_dead(
