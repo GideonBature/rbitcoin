@@ -77,7 +77,7 @@ fn batched_off_path_bad_prev_frees_the_height() {
         },
     );
     assert!(
-        off.height_to_hash.get(&30).is_none(),
+        !off.height_to_hash.contains_key(&30),
         "off-path BadPrev frees the height"
     );
     assert!(
