@@ -1887,8 +1887,6 @@ pub fn sat_vb(btc_kb: f64) -> Option<f64> {
 
 /// Esplora `/fee-estimates`: confirm target → sat/vB. Targets without an
 /// estimate are left out (electrs); `None` when no target has one.
-/// `fee_estimates_sync` turns that `None` into HTTP 200 `{}` off mainnet
-/// and HTTP 503 on mainnet.
 #[doc(hidden)]
 pub fn fee_estimates_from(pairs: &[(u32, f64)]) -> Option<Value> {
     let map: serde_json::Map<String, Value> = pairs
@@ -1907,9 +1905,7 @@ pub fn fee_estimates_sync(st: &AppState) -> Response {
         .unwrap_or_default();
     match fee_estimates_from(&pairs) {
         Some(v) => Json(v).into_response(),
-        // LDK Node treats a 503 as a failed fee update and aborts startup.
-        // Off mainnet an empty map is success: the client applies its own
-        // fallback. Mainnet stays 503 so a cold node is not a priced `{}`.
+        // LDK aborts startup on a failed fee update and must not be handed an invented rate.
         None if st.network != Network::Bitcoin => Json(json!({})).into_response(),
         None => (StatusCode::SERVICE_UNAVAILABLE, "fee estimates unavailable").into_response(),
     }
