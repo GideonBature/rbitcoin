@@ -936,8 +936,16 @@ impl UringSession {
     /// Drop must not ignore a hard cap and then free caller buffers.
     /// `fail_closed` aborts unless this thread is inside [`with_drain_hard_cap`].
     /// Leftover ids stay in `pending`.
+    ///
+    /// During an unwind the buffers may already be gone: production machines
+    /// declare [`UringSession::drain_guard`] before the frame that owns them,
+    /// so a drop drain would complete the kernel into freed memory. Abort
+    /// instead; only a non-panicking drop may drain.
     #[doc(hidden)]
     pub fn drop_drain(&mut self) {
+        if std::thread::panicking() && self.in_flight() != 0 {
+            abort_uring_unusable("panic with in-flight SQEs during drop");
+        }
         if let Err(err) = self.drain_all_inner(true) {
             note_drop_drain_error(&err);
         }
@@ -962,8 +970,11 @@ impl Drop for UringSession {
     }
 }
 
-/// Drain the session when dropped. Declare **after** SQE buffers so drop
-/// order drains while those buffers are still live.
+/// Abort on unwind with in-flight SQEs, drain otherwise.
+///
+/// Declare before the frame that owns the SQE buffers: that frame unwinds
+/// first, so the buffers are already freed when this drops. Draining then
+/// would write completions into freed memory, so a panic must abort.
 pub struct DrainOnDrop<'a> {
     pub session: &'a mut UringSession,
 }
@@ -1036,6 +1047,10 @@ pub fn uring_recover_count() -> u64 {
 ///   `with_thread_local` while holding the session — fold IO into the outer
 ///   machine instead (e.g. plan `STAGE_IDX` for body_range).
 /// - Drains stray in-flight CQEs before handing the session to `f`.
+/// - A panic after `f` queued SQEs aborts. A guard installed inside `f` aborts
+///   first while unwinding; this frame is the backstop for callers without one
+///   (bulk_io's buffers outlive `f`, but an inner frame may have freed its own).
+///   Neither a drain nor session reuse is safe.
 ///
 /// Returns `Err` if io_uring is unavailable or setup fails. Callers that prefer
 /// a silent fallback can map `Err` themselves (bulk_io does).
@@ -1093,18 +1108,36 @@ pub fn with_thread_local<R>(
                 if session.in_flight() != 0 {
                     session.drain_all()?;
                 }
-                let out = f(session);
-                let poisoned = session.is_poisoned();
-                if session.in_flight() != 0 {
-                    let d = session.drain_all();
-                    if d.is_err() || session.is_poisoned() {
-                        let _ = slot.take();
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session)));
+                match out {
+                    Ok(out) => {
+                        let poisoned = session.is_poisoned();
+                        if session.in_flight() != 0 {
+                            let d = session.drain_all();
+                            if d.is_err() || session.is_poisoned() {
+                                let _ = slot.take();
+                            }
+                            d?;
+                        } else if poisoned {
+                            let _ = slot.take();
+                        }
+                        Ok(out)
                     }
-                    d?;
-                } else if poisoned {
-                    let _ = slot.take();
+                    Err(payload) => {
+                        // Unwinding may already have freed buffers the SQEs
+                        // point at; callers without a drain guard (bulk_io)
+                        // still own theirs, but we cannot tell them apart here.
+                        // Abort rather than drain into memory an inner frame
+                        // may have freed, and never reuse this session.
+                        if session.in_flight() != 0 {
+                            abort_uring_unusable("panic with in-flight SQEs");
+                        }
+                        if session.is_poisoned() {
+                            let _ = slot.take();
+                        }
+                        std::panic::resume_unwind(payload)
+                    }
                 }
-                Ok(out)
             });
             out
         })

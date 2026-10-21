@@ -582,3 +582,53 @@ fn default_kind_follows_os_when_env_unset() {
         SessionKind::Iocp
     );
 }
+
+/// A panic while SQEs are in flight frees the closure's buffers. The kernel
+/// may still complete into them, so the process must abort instead of
+/// unwinding and leaving the TLS session to be reused.
+#[test]
+#[cfg(target_os = "linux")]
+fn with_thread_local_aborts_when_panicking_with_inflight() {
+    const CHILD: &str = "RBITCOIN_URING_INFLIGHT_PANIC_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        if !rbitcoin_store::bulk_io::io_uring_enabled() {
+            std::process::exit(77);
+        }
+        let exe = std::env::current_exe().expect("current_exe");
+        let file = std::fs::File::open(exe).expect("open child exe");
+        let fd = rbitcoin_store::io_handle::IoHandle::from_file(&file);
+        let _ = with_thread_local(DEFAULT_ENTRIES, |s| {
+            // Production drop order: the guard outlives the SQE buffer, so the
+            // buffer is freed before the guard drops during unwind.
+            let mut guard = s.drain_guard();
+            let mut buf = vec![0u8; 8];
+            // SAFETY: the guard aborts on unwind, before the CQE can be
+            // harvested after `buf` is freed.
+            unsafe { guard.push_pread(fd, 0, &mut buf, 1) }.expect("push pread");
+            panic!("in-flight panic");
+        });
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "uring_session::with_thread_local_aborts_when_panicking_with_inflight",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RBITCOIN_IO", "pool")
+        .output()
+        .expect("child test");
+    if out.status.code() == Some(77) {
+        return;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        out.status.signal(),
+        Some(6),
+        "in-flight panic must SIGABRT, not unwind into freed buffers: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

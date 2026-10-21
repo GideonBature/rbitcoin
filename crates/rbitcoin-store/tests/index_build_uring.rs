@@ -1,7 +1,7 @@
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::index_build_uring::{
-    read_index_window, require_body_hwm, IndexHeight, IndexWindow, ReadJob,
+    read_index_window, require_body_hwm, run_on_session, IndexHeight, IndexWindow, ReadJob,
 };
 use rbitcoin_store::tx_table::{OutputRecord, TxTable};
 
@@ -18,6 +18,44 @@ fn tmp(name: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// An inner error must drain leftover SQEs while `jobs` still own the buffers
+/// they point at. Without the drain in `run_on_session`, the session keeps the
+/// `user_data` and the caller frees `jobs[0].buf` underneath the worker.
+#[test]
+fn run_on_session_drains_leftover_sqes_on_error() {
+    use rbitcoin_store::io_handle::IoHandle;
+    use rbitcoin_store::uring_session::{SessionKind, UringSession};
+    let dir = tmp("drain-on-error");
+    let path = dir.join("body");
+    std::fs::write(&path, [0x5Au8; 4]).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let handle = IoHandle::from_file(&file);
+    let mut session = UringSession::try_open_kind(SessionKind::Pool, 32).expect("pool");
+    let mut jobs = vec![ReadJob {
+        fd: handle,
+        path: path.as_path(),
+        off: 0,
+        buf: vec![0u8; 4],
+    }];
+    // SAFETY: `jobs[0].buf` lives until the drain below returns.
+    unsafe { session.push_pread(handle, 0, &mut jobs[0].buf, 1) }.expect("push");
+    // Force the inner machine to fail before it can harvest or drain.
+    session.poison();
+    let err = run_on_session(&mut session, &mut jobs).unwrap_err();
+    assert!(
+        matches!(&err, StoreError::Corrupt(msg) if msg.contains("poisoned")),
+        "the wrapper must keep the index-build error, got {err:?}"
+    );
+    assert_eq!(
+        session.in_flight(),
+        0,
+        "the error path must drain before `jobs` drops their buffers"
+    );
+    drop(jobs);
+    drop(file);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
