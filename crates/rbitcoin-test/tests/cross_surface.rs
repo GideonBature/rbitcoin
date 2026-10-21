@@ -3395,7 +3395,12 @@ async fn enter_tip_mode_indexes() {
         cfg.shindex = shindex;
         cfg.listen.electrum = Some(electrum_addr);
         cfg.rpc.listen = Some(rpc_addr);
-        cfg.max_run_secs = Some(60);
+        // Coverage instrumentation blows the uninstrumented 60s backstop.
+        cfg.max_run_secs = Some(if std::env::var_os("CARGO_LLVM_COV").is_some() {
+            180
+        } else {
+            60
+        });
         spawn_run_p2p(cfg)
     };
     let op_true = electrum_scripthash_hex(&[0x51]);
