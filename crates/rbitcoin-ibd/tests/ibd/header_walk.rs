@@ -1869,10 +1869,57 @@ fn two_peers_reserve_the_header_walk() {
     assert_eq!(st.header_walk.probe, None);
     assert_ne!(st.header_walk.probe_open, Some(14));
     assert!(!st.slots[1].chain.probed(), "it is picked again later");
+    // Neither is a peer with an expired walk ask that it has not answered,
+    // after another peer's expiry took the lane's last slot for it.
+    st.header_walk.walk.prev_peer = None;
+    st.header_walk.header_misses.insert(14, 1);
+    probe_unprobed_peer(&mut st);
+    assert_ne!(st.header_walk.probe, Some(14));
+    st.header_walk.header_misses.clear();
+
+    // An open probe keeps the lane until it is answered or expires, also
+    // when the walk has nothing left to ask.
+    for s in &mut st.slots {
+        s.peer_height = 0;
+    }
+    st.header_walk.walk.peer = None;
+    st.header_walk.walk.at = None;
+    probe_unprobed_peer(&mut st);
+    assert_eq!(st.header_walk.probe, Some(14));
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert_eq!(st.header_walk.probe_open, Some(14));
+    let _ = send_getheaders(&mut st, &hub6);
+    assert_eq!(
+        st.header_walk.walk.peer,
+        Some(14),
+        "the probe keeps its lane"
+    );
+    // With header sync otherwise done, the poll still asks once the probe is
+    // past its window, so the ask that expires it is sent.
+    st.headers_done = true;
+    let quiet = || HeaderPollIn {
+        live: 0,
+        need_ready_headroom: false,
+        lag: 0,
+        min_cache: 0,
+        fan: 0,
+    };
+    assert!(matches!(header_poll(&st, quiet()), HeaderPoll::Wait));
+    age_header_ask(&mut st);
+    assert!(
+        matches!(header_poll(&st, quiet()), HeaderPoll::Ask),
+        "a probe past its window is polled"
+    );
+    let _ = send_getheaders(&mut st, &hub6);
+    assert_eq!(
+        st.header_walk.probe_open, None,
+        "an unanswered probe expires"
+    );
 
     // A seventh, on its own hub, because a rewind replaces the confirmed
     // blocks a peer's record took as its chain: that peer is not asked for
-    // the new chain's blocks, and one that had shown the new chain is.
+    // the new chain's blocks, and one that had shown the new chain, all of
+    // it or only its top, is.
     let (_dir7, hub7) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-rewound");
     hub7.ensure_genesis().unwrap();
     let gen7 = hub7.tip_hash().unwrap();
@@ -1889,7 +1936,12 @@ fn two_peers_reserve_the_header_walk() {
     let (old, _old_rx) = slot(17);
     let (fresh, _fresh_rx) = slot(18);
     let (taken, _taken_rx) = slot(19);
-    let mut st = IbdWorkState::new(vec![old, fresh, taken], hub7.tip_hash(), hub7.tip_height());
+    let (suffix, _suffix_rx) = slot(20);
+    let mut st = IbdWorkState::new(
+        vec![old, fresh, taken, suffix],
+        hub7.tip_hash(),
+        hub7.tip_height(),
+    );
     let confirmed = |h| rbitcoin_ibd::ibd::peer_chain::confirmed_at(&hub7, h);
     let l3 = mine(l2.block_hash(), 74);
     st.slots[0].chain.note_headers(
@@ -1902,6 +1954,10 @@ fn two_peers_reserve_the_header_walk() {
     st.slots[2]
         .chain
         .note_headers(&st.height_to_hash, confirmed, 2, 1, &[w1, w2]);
+    // Announced only the new chain's top, above the old tip.
+    st.slots[3]
+        .chain
+        .note_headers(&st.height_to_hash, confirmed, 2, 3, &[w3]);
     st.header_walk.tip.hash = Some(w3.block_hash());
     st.header_walk.tip.height = 3;
     assert!(rbitcoin_ibd::ibd::reorg::consider_disconnected_heavier(&mut st, &hub7).unwrap());
@@ -1912,6 +1968,10 @@ fn two_peers_reserve_the_header_walk() {
     );
     assert!(may_serve(&st, 18, &w1.block_hash()));
     assert!(may_serve(&st, 19, &w2.block_hash()));
+    assert!(
+        may_serve(&st, 20, &w3.block_hash()),
+        "a peer that announced the new chain is asked for it"
+    );
 }
 
 /// A long chain on an invalid block stays refused past the cap on

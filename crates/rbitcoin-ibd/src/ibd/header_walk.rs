@@ -579,8 +579,8 @@ pub fn probe_unprobed_peer(st: &mut IbdWorkState) {
     st.header_walk.probe = Some(slot.id);
 }
 
-/// The header peer, or a peer with a walk ask open, whose late reply could
-/// be read as a probe's.
+/// The header peer, or a peer with a walk ask open or expired and not yet
+/// answered, whose late reply could be read as a probe's.
 fn walk_busy(walk: &HeaderWalk, peer: usize) -> bool {
     [
         walk.reserved,
@@ -589,6 +589,7 @@ fn walk_busy(walk: &HeaderWalk, peer: usize) -> bool {
         walk.walk.prev_peer,
     ]
     .contains(&Some(peer))
+        || walk.header_misses.contains_key(&peer)
 }
 
 /// A follow-session block inv has no IBD slot. Poke one live header peer
@@ -737,14 +738,20 @@ pub enum HeaderPoll {
     Wait,
 }
 
-/// A block inv or a probe is waiting, and the walk lane is not already in
-/// flight.
+/// A block inv or a probe is waiting, or an open probe is past its window,
+/// and the walk lane is not already in flight.
 ///
 /// An in-flight ask keeps the challenge until the lane clears. The poll
 /// must not call `send_getheaders` on every block event during that window.
 pub fn inv_challenge_due(st: &IbdWorkState) -> bool {
-    (st.header_walk.challenge.is_some() || st.header_walk.probe.is_some())
-        && !lane_fresh(&st.header_walk.walk)
+    probe_or_challenge_owed(st) && !lane_fresh(&st.header_walk.walk)
+}
+
+/// A challenge or probe waits to be sent, or a probe waits to be answered
+/// or expire. Either keeps the lane.
+fn probe_or_challenge_owed(st: &IbdWorkState) -> bool {
+    let walk = &st.header_walk;
+    walk.challenge.is_some() || walk.probe.is_some() || walk.probe_open.is_some()
 }
 
 /// The queue still has room, or a gap / look-ahead still needs headers.
@@ -2493,7 +2500,7 @@ pub fn send_getheaders(
 ) -> Result<bool, rbitcoin_net::error::NetError> {
     ensure_origin(st, hub);
     super::path::append_stored_headers(st, hub);
-    let owed = st.header_walk.challenge.is_some() || st.header_walk.probe.is_some();
+    let owed = probe_or_challenge_owed(st);
     if !owed && super::path::walk_successor_indexed(st, hub) {
         release_lane(&mut st.header_walk.walk);
         return Ok(false);

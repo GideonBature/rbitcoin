@@ -634,11 +634,6 @@ pub fn commit_header_rewind(
     prep: &RewindPrep,
 ) {
     st.clear_path_above(prep.lca_h);
-    if let Some(left) = prep.left {
-        for slot in &mut st.slots {
-            slot.chain.note_rewind(prep.lca_h, left);
-        }
-    }
     hub.query.clear_milestone_path_above(prep.lca_h);
     super::header_walk::on_confirmed_rewind(st, hub, prep.lca_h);
     hub.query.set_lookup_taken_hi(Some(prep.lca_h));
@@ -660,6 +655,11 @@ pub fn commit_header_rewind(
             st.body.mark_archived(*hash);
         }
         prev = *hash;
+    }
+    if let Some(left) = prep.left {
+        for slot in &mut st.slots {
+            slot.chain.note_rewind(&st.height_to_hash, prep.lca_h, left);
+        }
     }
     for h in hub.query.block_queue_queued_heights() {
         if h > prep.lca_h {

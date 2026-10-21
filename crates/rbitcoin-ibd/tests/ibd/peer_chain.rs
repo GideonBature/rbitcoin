@@ -105,6 +105,29 @@ fn a_reply_at_or_below_the_tip_ends_the_chain_there() {
     );
 }
 
+/// A rewind keeps a split the peer itself showed at or below the fork. A
+/// peer on a third chain stays off both chains when this node rewinds away
+/// from its chain and back.
+#[test]
+fn a_third_chain_split_survives_two_rewinds() {
+    let ours = chain(3, 0x5c);
+    let won = chain(3, 0x77);
+    let third = chain(3, 0x91);
+    let path = |c: &[Header]| -> HashMap<u32, BlockHash> {
+        (1..).zip(c.iter().map(|h| h.block_hash())).collect()
+    };
+    let confirmed = |h: u32| Some(ours[h as usize - 1].block_hash());
+    let mut peer = PeerChain::default();
+    peer.note_headers(&HashMap::new(), confirmed, 2, 1, &third);
+    peer.note_rewind(&path(&won), 0, ours[0].block_hash());
+    assert!(peer.left_path_by(&path(&won), 1));
+    peer.note_rewind(&path(&ours), 0, won[0].block_hash());
+    assert!(
+        peer.left_path_by(&path(&ours), 1),
+        "a peer on a third chain is not taken back onto this one"
+    );
+}
+
 /// A `notfound` keeps a peer off that block for one stall window, then the
 /// peer may be asked again.
 #[test]

@@ -151,16 +151,28 @@ impl PeerChain {
         self.from = self.from.saturating_add(over as u32);
     }
 
-    /// This node's confirmed chain above `lca` was rewound away, and `left`
-    /// was its block at `lca + 1`. A record that starts past that height took
-    /// those blocks as the peer's chain, so the peer split from the new one
-    /// there. A lower split already says where it left.
-    pub fn note_rewind(&mut self, lca: u32, left: BlockHash) {
+    /// This node's confirmed chain above `lca` was rewound away, `left` was
+    /// its block at `lca + 1`, and `path` is the chain planted in its place.
+    /// A record that starts past that height took the old blocks as the
+    /// peer's chain, so the peer split from the new one there. A split the
+    /// peer showed at or below that height already says where it left, and
+    /// an announced hash on the new path says the peer is on it.
+    pub fn note_rewind(&mut self, path: &HashMap<u32, BlockHash>, lca: u32, left: BlockHash) {
         let at = lca.saturating_add(1);
-        if self.from > at && self.split.is_none_or(|(h, _)| h > at) {
-            self.split = Some((at, left));
-            self.split_confirmed = false;
+        if self.from <= at {
+            return;
         }
+        if self.split.is_some_and(|(h, _)| h <= at) {
+            return;
+        }
+        if (self.from..)
+            .zip(&self.announced)
+            .any(|(h, hash)| path.get(&h) == Some(hash))
+        {
+            return;
+        }
+        self.split = Some((at, left));
+        self.split_confirmed = false;
     }
 
     /// The recorded split's height has left the path: compare it with this
