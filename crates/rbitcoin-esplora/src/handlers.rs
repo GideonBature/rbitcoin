@@ -1905,6 +1905,8 @@ pub fn fee_estimates_sync(st: &AppState) -> Response {
         .unwrap_or_default();
     match fee_estimates_from(&pairs) {
         Some(v) => Json(v).into_response(),
+        // LDK aborts startup on a failed fee update and must not be handed an invented rate.
+        None if st.network != Network::Bitcoin => Json(json!({})).into_response(),
         None => (StatusCode::SERVICE_UNAVAILABLE, "fee estimates unavailable").into_response(),
     }
 }

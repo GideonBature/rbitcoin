@@ -2197,11 +2197,14 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         "mempool/recent missing package tx: {body}"
     );
     // Flow is cold and the chain holds too little fee history: the live
-    // pool alone does not set a rate, so no target answers.
+    // pool alone does not set a rate. Regtest answers 200 {} so a client
+    // can apply its own fallback, and does not invent a target.
     let (st, body) = http_get(esplora_addr, "/fee-estimates").await;
-    assert_eq!(st, 503, "GET /fee-estimates: {body}");
-    assert!(
-        body.contains("fee estimates unavailable"),
+    assert_eq!(st, 200, "GET /fee-estimates: {body}");
+    let cold_fees: Value = serde_json::from_str(&body).expect("fee-estimates json");
+    assert_eq!(
+        cold_fees,
+        json!({}),
         "an empty estimator must not invent a target: {body}"
     );
     let cold_est = electrum_rpc(&mut el, 40, "blockchain.estimatefee", json!([2])).await;
