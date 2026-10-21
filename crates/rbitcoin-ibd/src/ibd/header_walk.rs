@@ -3222,6 +3222,29 @@ pub fn retire_adopt_if_confirmed(st: &mut IbdWorkState, hub: &ChainHub) {
 /// Read `header.adopt`. A file that does not parse does not restore
 /// checkpoints. Headers already queued and linked from the confirmed tip are
 /// still noted on the milestone path.
+/// Ancestors walked to find a stored failure's height.
+const FAILURE_HEIGHT_WALK: usize = 64;
+
+/// A stored failure that a walk saved from `base_height` may build on: one
+/// above that base, or one whose height is not found within a few headers
+/// of the best chain. The chain at or below the base is the confirmed one.
+fn failure_above(hub: &ChainHub, base_height: u32) -> bool {
+    hub.invalid_blocks()
+        .into_iter()
+        .any(|hash| failure_height(hub, hash).is_none_or(|h| h > base_height))
+}
+
+fn failure_height(hub: &ChainHub, hash: BlockHash) -> Option<u32> {
+    let path =
+        super::reorg::header_hashes_to_best_ancestor_n(hub, hash, FAILURE_HEIGHT_WALK).ok()?;
+    let join = super::reorg::parent_hash_of(hub, *path.first()?).ok()??;
+    if !hub.is_connected(&join) {
+        return None;
+    }
+    let join_h = hub.query.height_of_hash(&join.to_byte_array()).ok()??.0;
+    Some(join_h.saturating_add(path.len() as u32))
+}
+
 pub fn restore_adopt(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
     retire_adopt_if_confirmed(st, hub);
     let started = std::time::Instant::now();
@@ -3254,7 +3277,7 @@ pub fn restore_adopt(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
     }
     // A saved candidate above the confirmed tip may build on a block marked
     // invalid after it was saved. The walk starts again from the tip.
-    if parsed.tip.height > hub.tip_height().unwrap_or(0) && !hub.invalid_blocks().is_empty() {
+    if parsed.tip.height > hub.tip_height().unwrap_or(0) && failure_above(hub, parsed.base_height) {
         rbitcoin_log::info!(
             "ibd: headers resume refused height={}: invalid blocks are stored",
             parsed.tip.height

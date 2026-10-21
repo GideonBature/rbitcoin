@@ -1338,6 +1338,40 @@ fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     assert!(!restore_adopt(&mut st, &hub));
 }
 
+/// A failure stored at or below the saved walk's base is on no chain that
+/// walk can take, so the walk is restored. One whose height is not found may
+/// be on it.
+#[test]
+fn a_failure_below_the_saved_base_keeps_the_resume() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-resume-below");
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let b1 = mine_block(gen, 1);
+    hub.accept_block(b1.clone()).unwrap();
+    let b2 = mine_block(b1.block_hash(), 2);
+    hub.accept_block(b2.clone()).unwrap();
+    let stale = mine(gen, 64);
+    hub.ensure_header(&stale).unwrap();
+    assert!(hub.note_failed_connect(stale.block_hash()));
+    let (s2, _rx2) = slot(2);
+    let mut st = IbdWorkState::new(vec![s2], hub.tip_hash(), hub.tip_height());
+    assert!(send_getheaders(&mut st, &hub).unwrap());
+    let q3 = mine(b2.block_hash(), 65);
+    let q4 = mine(q3.block_hash(), 66);
+    apply(&mut st, &hub, 2, vec![q3, q4]);
+    save_adopt(&st, &hub);
+    st.header_walk = HeaderWalk::default();
+    assert!(
+        restore_adopt(&mut st, &hub),
+        "a failure below the walk's base does not stop the resume"
+    );
+    assert_eq!(st.header_walk.tip_hash(), Some(q4.block_hash()));
+    // A failure whose height is not found may be on it.
+    assert!(hub.note_failed_connect(BlockHash::from_byte_array([0x5a; 32])));
+    st.header_walk = HeaderWalk::default();
+    assert!(!restore_adopt(&mut st, &hub));
+}
+
 #[test]
 fn a_failed_adopt_still_notes_the_queued_path() {
     let (_dir, mut hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-renote");
