@@ -10,7 +10,7 @@
 //! An accepted batch is written and recorded as a checkpoint.
 //! Above the work floor, one short reply that leaves the candidate
 //! unextended retires that peer and the reservation moves. A full
-//! 2,000-header window does not, so a lighter fork can still catch up. A
+//! 2,000-header window that advances a lighter fork stays eligible. A
 //! block inv is one challenge ask when that peer is not already the walk's
 //! next ask: a reply that beats the candidate takes the reservation, and any
 //! other reply leaves it where it was. One competing chain is kept until it
@@ -90,9 +90,8 @@ pub struct HeaderWalk {
     /// its own latch; this one exists so header-walk tests can see it.
     #[cfg(debug_assertions)]
     pub announced_done: bool,
-    /// Peers retired from the walk after a short reply that did not extend
-    /// the candidate. A block inv or a redial clears the bit. Not written
-    /// to `header.adopt`.
+    /// Peers retired from the walk after a reply made no useful progress.
+    /// A block inv or a redial clears the bit. Not written to `header.adopt`.
     pub walk_quiet: HashSet<usize>,
     /// Peer that serves the one headers ask. Not written to `header.adopt`.
     pub reserved: Option<usize>,
@@ -484,24 +483,33 @@ pub fn candidate_tip(st: &IbdWorkState) -> Option<BlockHash> {
 
 /// Retire `peer` from the walk when this reply did not extend the candidate.
 ///
-/// A full [`rbitcoin_net::codec::MAX_HEADERS_RESULTS`] window stays, so a lighter
-/// fork can grow across more than one locator. Below the work floor the
-/// empty-reply rewind still owns the peer. An extension, a block inv, or
-/// peer death clears a previous retirement.
+/// A full [`rbitcoin_net::codec::MAX_HEADERS_RESULTS`] window stays only when
+/// it advances a lighter fork, so that fork can grow across locators without
+/// repeated batches holding IBD open. Below the work floor the empty-reply
+/// rewind still owns the peer. An extension, a block inv, or peer death
+/// clears a previous retirement.
 pub fn settle_walk_peer(
     st: &mut IbdWorkState,
     hub: &ChainHub,
     peer: usize,
     tip_before: Option<BlockHash>,
     queued_before: usize,
+    challenger_work_before: Option<Work>,
     batch_len: usize,
 ) {
-    // A stored continuation of the download path is not a failed walk.
-    let extended = st.header_walk.tip_hash() != tip_before || st.ordered.len() > queued_before;
+    let fork_advanced = batch_len >= rbitcoin_net::codec::MAX_HEADERS_RESULTS
+        && st
+            .header_walk
+            .challenger
+            .as_ref()
+            .is_some_and(|ch| challenger_work_before.is_none_or(|before| ch.tip.work > before));
+    let extended = st.header_walk.tip_hash() != tip_before
+        || st.ordered.len() > queued_before
+        || fork_advanced;
     if extended {
         st.header_walk.walk_quiet.remove(&peer);
     }
-    if batch_len >= rbitcoin_net::codec::MAX_HEADERS_RESULTS || !st.header_walk.origin {
+    if !st.header_walk.origin {
         return;
     }
     if below_floor(hub, &st.header_walk.tip_work()) || extended {

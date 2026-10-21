@@ -511,6 +511,7 @@ pub struct BatchMark {
     pub tip_before: Option<BlockHash>,
     pub work_before: [u8; 32],
     pub queued_before: usize,
+    pub challenger_work_before: Option<bitcoin::Work>,
     pub outer_len: usize,
 }
 
@@ -523,6 +524,7 @@ pub fn finish_mark(st: &mut IbdWorkState, hub: &ChainHub, peer: usize, mark: &Ba
             peer,
             mark.tip_before,
             mark.queued_before,
+            mark.challenger_work_before,
             mark.outer_len,
         );
     }
@@ -635,6 +637,7 @@ pub fn plan_header_batch(
         tip_before: super::header_walk::candidate_tip(st),
         work_before: super::header_walk::candidate_work(st),
         queued_before: st.ordered.len(),
+        challenger_work_before: st.header_walk.challenger.as_ref().map(|ch| ch.tip.work),
         outer_len: headers.len(),
     };
     if mark.outer_len == 0 {
@@ -644,6 +647,7 @@ pub fn plan_header_batch(
             peer,
             mark.tip_before,
             mark.queued_before,
+            mark.challenger_work_before,
             mark.outer_len,
         );
     }

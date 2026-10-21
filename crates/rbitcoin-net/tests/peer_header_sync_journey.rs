@@ -744,7 +744,7 @@ fn growing_the_queue_keeps_the_peer_on_the_walk() {
     let dummy = BlockHash::from_byte_array([0x61; 32]);
     fast.ordered.push_back(dummy);
     fast.ordered_set.insert(dummy);
-    settle_walk_peer(&mut fast, &hub, 0, tip, before, 1);
+    settle_walk_peer(&mut fast, &hub, 0, tip, before, None, 1);
     assert!(send_getheaders(&mut fast, &hub).unwrap());
     assert!(
         took_getheaders(&mut fast_rx),
@@ -760,7 +760,7 @@ fn before_origin_a_short_reply_does_not_retire_the_peer() {
     a.first_data_ms = 2;
     let (b, _rb) = slot(1, 100_000);
     let mut st = IbdWorkState::new(vec![a, b], hub.tip_hash(), hub.tip_height());
-    settle_walk_peer(&mut st, &hub, 0, None, 0, 1);
+    settle_walk_peer(&mut st, &hub, 0, None, 0, None, 1);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert!(
         took_getheaders(&mut ra),
@@ -790,7 +790,7 @@ fn equal_work_is_not_below_the_floor() {
     };
     let tip = candidate_tip(&st);
     let queued = st.ordered.len();
-    settle_walk_peer(&mut st, &hub, 0, tip, queued, 1);
+    settle_walk_peer(&mut st, &hub, 0, tip, queued, None, 1);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert!(
         took_getheaders(&mut slow_rx),
@@ -1216,7 +1216,7 @@ fn a_local_challenge_still_retires_a_short_reply() {
     challenge_answered(&mut st, &hub, 0, &mut fast_rx);
     let tip = candidate_tip(&st);
     let queued = st.ordered.len();
-    settle_walk_peer(&mut st, &hub, 0, tip, queued, 1);
+    settle_walk_peer(&mut st, &hub, 0, tip, queued, None, 1);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert!(
         took_getheaders(&mut slow_rx),
