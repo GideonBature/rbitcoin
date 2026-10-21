@@ -382,10 +382,12 @@ Full modality matrix: [`docs/io-modality.md`](../io-modality.md).
 ## Health probes and metrics
 
 `--health-listen [ADDR]` binds a small HTTP listener at the very start of
-`rbitcoin-node`, before the store opens. RPC, Electrum, and Esplora bind
-only after the store opens, catch-up finishes, and the scripthash index
-materializes; on mainnet those can take minutes (a schema backfill) to
-hours (IBD). The health listener answers through all of it.
+`rbitcoin-node`, before the store opens. RPC binds before a catch-up that may
+wait for peers, so `stop`, `addnode`, and status calls remain available while
+it waits; otherwise it binds after catch-up and the scripthash materialize.
+Electrum and Esplora bind only after catch-up finishes and that index
+materializes. On mainnet those can take minutes (a schema backfill) to hours
+(IBD). The health listener answers through all of it.
 
 | Route | Answer |
 |-------|--------|

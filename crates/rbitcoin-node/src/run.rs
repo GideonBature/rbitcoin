@@ -152,8 +152,9 @@ pub fn spawn_signal_handler(shutdown: Arc<Shutdown>) {
     });
 }
 
-/// Bind RPC after tip entry and onion publish, so wallet RPCs and
-/// `getnetworkinfo` see a node that can already mine and list those services.
+/// Bind RPC. A catch-up that waits for peers starts it early so the
+/// operator can inspect, stop, or add a peer; the tip-follow path starts it
+/// after wallet services are published.
 pub async fn start_rpc_listener(
     config: &NodeConfig,
     node: &P2PNode,
@@ -723,6 +724,21 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             .is_tip(),
         config.max_run_secs,
     );
+    // A peerless catch-up can wait indefinitely. Bring RPC up first so
+    // `stop`, `addnode`, and status calls still work while it waits.
+    if matches!(peerless, Peerless::Redial { .. }) && !shutdown.requested() {
+        rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
+        if let Some(h) = &rpc_handle {
+            let stop = Arc::clone(&h.stop);
+            let sd = Arc::clone(&shutdown);
+            tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                sd.request();
+            });
+        }
+    }
     let catch_up = run_ibd_or_skip(
         &node,
         &ibd_targets,
@@ -948,7 +964,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if let Some(h) = esplora_handles.first() {
         publish_listener_addr(config.datadir.path(), "esplora", h.local_addr);
     }
-    if !shutdown.requested() {
+    if rpc_handle.is_none() && !shutdown.requested() {
         rpc_handle = start_rpc_listener(&config, &node, &mempool, &shared_peers).await;
     }
     // The first dial is often during catch-up, before this port accepts.
