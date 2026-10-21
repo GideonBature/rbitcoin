@@ -8,10 +8,10 @@ Fixed
 - **A tip hole in front of later queued bodies is requested.** The densify cursor rewinds to the first height that is not claim-ready. A holder whose peer is gone does not count as covering that height. A full getdata window still rewinds that cursor. Heights already found claim-ready are not walked again until the tip moves back or a holder is freed.
 - **The coordination loop does not replay header rows.** It never copies a header snapshot back onto the work queue. The header-fk map is extended in place, and that publish happens after the coordination lock drops.
 - **Header-store work on the header thread runs outside the coordination lock.** A short header batch, a resume, an origin load, a reseed's block check, and a most-work rewind do their store IO before the lock is taken again for the RAM commit.
-- **A confirm reject whose parent header is missing is a cascade, not a consensus ban.**
+- **A confirm reject whose parent header is missing is an engine fault, not a consensus ban.**
 - **IBD progress counters are seeded before the first tick.** The ordered-queue size on that tick is the live deque. A below-floor header batch does not move the peer's best-known tip and uses cached tip work when the prefix is already warm.
-- **A full below-floor header batch still asks for the next headers.** The ignore still skips best-known and body fetch. The chain is stored once the pending path crosses the floor.
+- **A full below-floor header batch does not ask for the next headers.** The ignore still skips best-known and body fetch. The chain is stored once the pending path crosses the floor.
 - **The height index refuses a height the store has already left.** A catch-up that read a header before a disconnect does not publish that height.
 - **A header rewind records the path's header fks.** A body for a rewound header resolves without another store walk.
 - **Header apply is one command on the header thread.** Classification chooses the kept prefix before anything is persisted. The coordination loop only enqueues that command.
-- **A multi-block confirm indexes every new height from the rows it already has.** The header command channel is bounded. When it is full the coordination loop stops pulling header events instead of parking a second queue.
+- **A multi-block confirm indexes every new height from the rows it already has.** The header command channel holds 64 commands. The peer-event drain stops taking control events while it is full. A header event taken on the coordination loop's wait is dropped if the channel is still full.
