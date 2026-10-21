@@ -373,16 +373,17 @@ impl UringSession {
         }
     }
 
-    /// Drain leftover in-flight SQEs, then bump harvest epoch.
+    /// Bump the harvest epoch. Leftover in-flight SQEs are fatal.
     ///
     /// Held TLS rings run probe → idx → BDZ g-pages → rel preads on one
     /// session. A previous machine that swallowed `drain_all` leaves CQEs in
-    /// `pending`; the next wave must not harvest them as its own kind/slot.
-    /// Poisoned or undrainable leftover is `Err` — callers must not push.
+    /// `pending`, but its buffers are already gone. There is no safe drain
+    /// here, so fail closed instead of writing completions into freed memory.
+    /// Machines drain (or use a guard declared after their buffers) before
+    /// returning. Poisoned or leftover is fatal — callers must not push.
     pub fn begin_batch(&mut self) -> Result<(), StoreError> {
-        self.check_live()?;
         if !self.pending.is_empty() {
-            self.drain_all()?;
+            return self.fail_closed_boundary();
         }
         self.check_live()?;
         self.epoch = self.epoch.wrapping_add(1);
@@ -943,14 +944,19 @@ impl UringSession {
 }
 
 impl UringSession {
-    /// Drop must not ignore a hard cap and then free caller buffers.
+    /// A frame boundary has no buffer owner. Never drain pending SQEs here.
+    /// Aborts in release; the `with_drain_hard_cap` test seam returns `Err`.
+    fn fail_closed_boundary(&mut self) -> Result<(), StoreError> {
+        self.poisoned = true;
+        finish_drain_hard_cap(self.pending.len())
+    }
+
+    /// Drain while the guard's SQE buffers are still live. Declare the guard
+    /// after those buffers. On unwind, abort instead: a caller-frame guard
+    /// cannot know whether a callee already freed them.
+    ///
     /// `fail_closed` aborts unless this thread is inside [`with_drain_hard_cap`].
     /// Leftover ids stay in `pending`.
-    ///
-    /// During an unwind the buffers may already be gone when the guard is in a
-    /// caller frame (for example `read_index_window`). Abort instead of
-    /// draining in that case. A guard that shares the buffer frame must be
-    /// declared after those buffers so it drops first.
     #[doc(hidden)]
     pub fn drop_drain(&mut self) {
         if std::thread::panicking() && self.in_flight() != 0 {
@@ -980,16 +986,19 @@ pub fn note_drop_drain_error(err: &StoreError) {
 
 impl Drop for UringSession {
     fn drop(&mut self) {
-        self.drop_drain();
+        if !self.pending.is_empty() {
+            // No buffer owner is known at session drop. Draining here could
+            // complete into memory a previous frame already freed.
+            let _ = finish_drain_hard_cap(self.pending.len());
+        }
     }
 }
 
-/// Drain the session when dropped.
+/// Drain the session when dropped, while the guard's SQE buffers are live.
 ///
 /// Declare **after** SQE buffers owned by the same frame so this drops first
 /// and drains while they are still live. A guard in a caller frame cannot
-/// outlive buffers owned by a callee: if SQEs are still in flight on unwind,
-/// it aborts instead of draining into freed memory.
+/// outlive buffers owned by a callee: use [`AbortOnDrop`] there instead.
 pub struct DrainOnDrop<'a> {
     pub session: &'a mut UringSession,
 }
@@ -1014,6 +1023,43 @@ impl std::ops::Deref for DrainOnDrop<'_> {
 }
 
 impl std::ops::DerefMut for DrainOnDrop<'_> {
+    fn deref_mut(&mut self) -> &mut UringSession {
+        self.session
+    }
+}
+
+/// Abort if any SQE is still pending when dropped. Never drains.
+///
+/// Use in a caller frame or as a backstop where the SQE buffers belong to a
+/// callee or a previous call and may already be gone. The buffer-owning frame
+/// must drain explicitly (or use [`DrainOnDrop`] declared after its buffers).
+pub struct AbortOnDrop<'a> {
+    pub session: &'a mut UringSession,
+}
+
+impl UringSession {
+    pub fn abort_guard(&mut self) -> AbortOnDrop<'_> {
+        AbortOnDrop { session: self }
+    }
+}
+
+impl Drop for AbortOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.session.pending.is_empty() {
+            self.session.poisoned = true;
+            let _ = finish_drain_hard_cap(self.session.pending.len());
+        }
+    }
+}
+
+impl std::ops::Deref for AbortOnDrop<'_> {
+    type Target = UringSession;
+    fn deref(&self) -> &UringSession {
+        self.session
+    }
+}
+
+impl std::ops::DerefMut for AbortOnDrop<'_> {
     fn deref_mut(&mut self) -> &mut UringSession {
         self.session
     }
@@ -1061,11 +1107,11 @@ pub fn uring_recover_count() -> u64 {
 /// - **Nested** calls **panic** (hard error). Do not call bulk_io / another
 ///   `with_thread_local` while holding the session — fold IO into the outer
 ///   machine instead (e.g. plan `STAGE_IDX` for body_range).
-/// - Drains stray in-flight CQEs before handing the session to `f`.
-/// - A panic after `f` queued SQEs aborts. A guard inside `f` (declared after
-///   its SQE buffers) aborts first while unwinding; this frame is the backstop
-///   for callers without one (bulk_io's buffers outlive `f`, but an inner frame
-///   may have freed its own). Neither a drain nor session reuse is safe.
+/// - Leftover in-flight CQEs from a previous call are fatal: that frame's
+///   buffers are gone, so this aborts instead of draining them.
+/// - `f` must drain its own buffers (or use a guard declared after them)
+///   before returning. Leftover SQEs after `f` are fatal, as is a panic after
+///   SQEs were queued: neither a drain nor session reuse is safe.
 ///
 /// Returns `Err` if io_uring is unavailable or setup fails. Callers that prefer
 /// a silent fallback can map `Err` themselves (bulk_io does).
@@ -1107,7 +1153,10 @@ pub fn with_thread_local<R>(
                 if need_open {
                     if let Some(mut old) = slot.take() {
                         if old.in_flight() != 0 {
-                            old.drain_all()?;
+                            let _ = old.fail_closed_boundary();
+                            return Err(StoreError::Corrupt(
+                                "invariant: io_uring leftover at session growth",
+                            ));
                         }
                         drop(old);
                     }
@@ -1121,19 +1170,24 @@ pub fn with_thread_local<R>(
                 }
                 let session = slot.as_mut().expect("session just ensured");
                 if session.in_flight() != 0 {
-                    session.drain_all()?;
+                    let _ = session.fail_closed_boundary();
+                    let _ = slot.take();
+                    return Err(StoreError::Corrupt(
+                        "invariant: io_uring leftover at session entry",
+                    ));
                 }
                 let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session)));
                 match out {
                     Ok(out) => {
-                        let poisoned = session.is_poisoned();
                         if session.in_flight() != 0 {
-                            let d = session.drain_all();
-                            if d.is_err() || session.is_poisoned() {
-                                let _ = slot.take();
-                            }
-                            d?;
-                        } else if poisoned {
+                            // `f`'s buffers are already gone. Never drain them.
+                            let _ = session.fail_closed_boundary();
+                            let _ = slot.take();
+                            return Err(StoreError::Corrupt(
+                                "invariant: io_uring leftover after session use",
+                            ));
+                        }
+                        if session.is_poisoned() {
                             let _ = slot.take();
                         }
                         Ok(out)

@@ -177,6 +177,23 @@ pub fn run_on_session(
     out
 }
 
+#[cfg(debug_assertions)]
+thread_local! {
+    static TEST_ERROR_AFTER_PUSH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam: make the index-build machine fail after its first push.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn with_index_error_after_push<R>(f: impl FnOnce() -> R) -> R {
+    TEST_ERROR_AFTER_PUSH.with(|c| {
+        let prev = c.replace(true);
+        let out = f();
+        c.set(prev);
+        out
+    })
+}
+
 fn run_on_session_inner(
     session: &mut UringSession,
     jobs: &mut [ReadJob<'_>],
@@ -198,6 +215,10 @@ fn run_on_session_inner(
             // every leftover SQE before returning an error.
             unsafe { session.push_pread(job.fd, job.off, &mut job.buf, ud) }?;
             inflight += 1;
+            #[cfg(debug_assertions)]
+            if TEST_ERROR_AFTER_PUSH.with(|c| c.get()) {
+                return Err(StoreError::Corrupt("test: index build error after push"));
+            }
         }
         if inflight == 0 {
             break;
@@ -264,7 +285,9 @@ pub fn read_index_window(
     heights: &[IndexHeight],
 ) -> Result<IndexWindow, StoreError> {
     match uring_session::with_thread_local(ENTRIES, |s| {
-        let mut s = s.drain_guard();
+        // `read_window` owns the SQE buffers and `run_on_session` drains them
+        // before returning. This guard only aborts if that contract breaks.
+        let mut s = s.abort_guard();
         read_window(table, heights, &mut Reader::Session(&mut s))
     }) {
         Ok(r) => r,
