@@ -46,7 +46,11 @@ def _string_end(src: str, i: int) -> int | None:
         return None
     k = i
     raw = False
-    if src.startswith(("br", "bR", "Br", "BR", "cr", "cR"), i):
+    # `rb`/`rc` are raw, same as `br`/`cr`. Checked before the cooked `b"`/`c"` arm.
+    if src.startswith(
+        ("br", "bR", "Br", "BR", "rb", "rB", "Rb", "RB", "cr", "cR", "Cr", "CR", "rc", "rC", "Rc", "RC"),
+        i,
+    ):
         k = i + 2
         raw = True
     elif i + 1 < n and src[i] in "bBcC" and src[i + 1] == '"':

@@ -54,6 +54,10 @@ assert_ok "a where-clause test item does not hide the next function" \
   python3 "$PY" --root "$FIX/cfg-where-next"
 assert_ok "cfg(test) generic impl where-clause is not counted" \
   python3 "$PY" --root "$FIX/cfg-impl"
+assert_fail "rb raw string does not hide a later unwrap" \
+  python3 "$PY" --root "$FIX/raw-rb"
+assert_fail "rc and rb# raw strings do not hide a later unwrap" \
+  python3 "$PY" --root "$FIX/raw-rc"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "unwrap-ratchet.test.sh: $PASS passed, $FAIL failed"
