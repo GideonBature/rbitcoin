@@ -402,6 +402,25 @@ fn startup_catch_up_waits_for_peers_only_when_a_give_up_would_exit() {
     );
 }
 
+#[test]
+fn follow_targets_refresh_after_catch_up_learns_peers() {
+    let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));
+    let mut addrman = AddrMan::new();
+    assert!(
+        refresh_follow_targets(&[], &shared, &mut addrman, 2, &[]).is_empty(),
+        "empty book has no follow targets"
+    );
+    shared
+        .lock()
+        .unwrap()
+        .add_addr(rbitcoin_net::NetAddr::Ip("127.0.0.1:1".parse().unwrap()));
+    assert_eq!(
+        refresh_follow_targets(&[], &shared, &mut addrman, 2, &[]).len(),
+        1,
+        "tip follow must see a peer learned during catch-up"
+    );
+}
+
 #[tokio::test]
 async fn empty_book_waits_for_a_discovered_target() {
     let shared = Arc::new(std::sync::Mutex::new(AddrMan::new()));

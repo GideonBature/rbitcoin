@@ -710,7 +710,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let occupied = node.peers.live_outbound_full_relay_nets();
     let mut pinned = config.listen.connect.clone();
     pinned.extend(dns_resolved);
-    let targets = follow_dial_targets(&pinned, &addrman, max_out, &occupied);
     let follow_type = follow_dial_type(&pinned);
     let ibd_targets = follow_dial_targets(&pinned, &addrman, candidate_n, &occupied);
     let awaiting_dialable = addrman.is_empty() && (reachability_removed_rows || proxy_seeds_queued);
@@ -754,6 +753,13 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config.network,
     )
     .await;
+
+    // Catch-up may have waited for a peer discovered after the startup book
+    // was read. Refresh the follow dial list before tip mode; IBD disconnects
+    // its own peers on the way out.
+    let occupied_now = node.peers.live_outbound_full_relay_nets();
+    let targets =
+        refresh_follow_targets(&pinned, &shared_peers, &mut addrman, max_out, &occupied_now);
 
     let catch_up = catch_up_with_connect(
         catch_up,
@@ -1791,6 +1797,26 @@ pub async fn wait_for_dialable_targets(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// Recompute the tip-follow dial list after catch-up may have learned peers.
+/// IBD disconnects its own sessions before returning, so the pre-catch-up list
+/// can be stale (or empty) even when the shared book now has rows.
+#[doc(hidden)]
+pub fn refresh_follow_targets(
+    pinned: &[rbitcoin_net::NetAddr],
+    shared_peers: &std::sync::Arc<std::sync::Mutex<AddrMan>>,
+    addrman: &mut AddrMan,
+    max_out: usize,
+    occupied: &[rbitcoin_net::NetAddr],
+) -> Vec<rbitcoin_net::NetAddr> {
+    {
+        let g = shared_peers.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.is_empty() {
+            *addrman = g.clone();
+        }
+    }
+    follow_dial_targets(pinned, addrman, max_out, occupied)
 }
 
 pub fn catch_up_after_ok(accepted: u32, tip: u32, shutdown: bool) -> CatchUp {
