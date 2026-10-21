@@ -581,3 +581,44 @@ fn default_kind_follows_os_when_env_unset() {
         SessionKind::Iocp
     );
 }
+
+/// A panic while SQEs are in flight frees the closure's buffers. The kernel
+/// may still complete into them, so the process must abort instead of
+/// unwinding and leaving the TLS session to be reused.
+#[test]
+#[cfg(target_os = "linux")]
+fn with_thread_local_aborts_when_panicking_with_inflight() {
+    const CHILD: &str = "RBITCOIN_URING_INFLIGHT_PANIC_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        if !rbitcoin_store::bulk_io::io_uring_enabled() {
+            std::process::exit(77);
+        }
+        let _ = with_thread_local(DEFAULT_ENTRIES, |s| {
+            s.pending.insert(1).expect("pending");
+            panic!("in-flight panic");
+        });
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "uring_session::with_thread_local_aborts_when_panicking_with_inflight",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("RBITCOIN_IO", "pool")
+        .output()
+        .expect("child test");
+    if out.status.code() == Some(77) {
+        return;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        out.status.signal(),
+        Some(6),
+        "in-flight panic must SIGABRT, not unwind into freed buffers: {:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

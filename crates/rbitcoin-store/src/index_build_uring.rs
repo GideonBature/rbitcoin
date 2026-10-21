@@ -155,8 +155,22 @@ impl Reader<'_> {
 }
 
 /// Keep the ring full with `jobs` and harvest until all complete.
+///
+/// On any error this drains leftover SQEs before returning: `jobs` (and their
+/// buffers) are dropped by the caller as soon as this returns.
 #[doc(hidden)]
 pub fn run_on_session(
+    session: &mut UringSession,
+    jobs: &mut [ReadJob<'_>],
+) -> Result<(), StoreError> {
+    let out = run_on_session_inner(session, jobs);
+    if out.is_err() && session.in_flight() != 0 {
+        session.drain_all()?;
+    }
+    out
+}
+
+fn run_on_session_inner(
     session: &mut UringSession,
     jobs: &mut [ReadJob<'_>],
 ) -> Result<(), StoreError> {
@@ -173,8 +187,8 @@ pub fn run_on_session(
             }
             let ud = uring_session::pack_ud(uring_session::KIND_INDEX_BUILD, epoch, i as u32);
             let job = &mut jobs[i];
-            // SAFETY: `job.buf` lives until this batch drains (the caller's
-            // drain guard outlives `jobs`).
+            // SAFETY: `job.buf` lives through `run_on_session`, which drains
+            // every leftover SQE before returning an error.
             unsafe { session.push_pread(job.fd, job.off, &mut job.buf, ud) }?;
             inflight += 1;
         }

@@ -1036,6 +1036,8 @@ pub fn uring_recover_count() -> u64 {
 ///   `with_thread_local` while holding the session — fold IO into the outer
 ///   machine instead (e.g. plan `STAGE_IDX` for body_range).
 /// - Drains stray in-flight CQEs before handing the session to `f`.
+/// - A panic after `f` queued SQEs aborts: unwinding already freed the buffers
+///   those SQEs point at, so neither a drain nor session reuse is safe.
 ///
 /// Returns `Err` if io_uring is unavailable or setup fails. Callers that prefer
 /// a silent fallback can map `Err` themselves (bulk_io does).
@@ -1093,18 +1095,34 @@ pub fn with_thread_local<R>(
                 if session.in_flight() != 0 {
                     session.drain_all()?;
                 }
-                let out = f(session);
-                let poisoned = session.is_poisoned();
-                if session.in_flight() != 0 {
-                    let d = session.drain_all();
-                    if d.is_err() || session.is_poisoned() {
-                        let _ = slot.take();
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session)));
+                match out {
+                    Ok(out) => {
+                        let poisoned = session.is_poisoned();
+                        if session.in_flight() != 0 {
+                            let d = session.drain_all();
+                            if d.is_err() || session.is_poisoned() {
+                                let _ = slot.take();
+                            }
+                            d?;
+                        } else if poisoned {
+                            let _ = slot.take();
+                        }
+                        Ok(out)
                     }
-                    d?;
-                } else if poisoned {
-                    let _ = slot.take();
+                    Err(payload) => {
+                        // Unwinding `f` already dropped the buffers its SQEs
+                        // point at. The kernel may still complete into them,
+                        // so do not drain and do not reuse this session.
+                        if session.in_flight() != 0 {
+                            abort_uring_unusable("panic with in-flight SQEs");
+                        }
+                        if session.is_poisoned() {
+                            let _ = slot.take();
+                        }
+                        std::panic::resume_unwind(payload)
+                    }
                 }
-                Ok(out)
             });
             out
         })
