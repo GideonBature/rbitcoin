@@ -97,6 +97,7 @@ fn base() -> &'static Base {
                 listen_q,
                 params.clone(),
                 Milestone::NONE,
+                rbitcoin_net::REDIAL_INTERVAL_TEST,
             ))
             .unwrap_or_else(|e| harness_failure(&format!("p2p listen: {e}")));
         Base {

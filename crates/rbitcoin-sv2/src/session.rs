@@ -53,8 +53,9 @@ pub const MAX_RETAINED: usize = 64;
 #[doc(hidden)]
 pub const MAX_SUPERSEDED_CONSTRAINTS: u32 = 8;
 
-/// When a changed budget rebuilds. `None` means [`crate::CONSTRAINTS_COOLDOWN`]
-/// has elapsed and the budget publishes on this message.
+/// When a changed budget rebuilds. `None` means `cooldown` has elapsed and
+/// the budget publishes on this message. The node passes
+/// [`crate::CONSTRAINTS_COOLDOWN`].
 pub fn constraints_rebuild_at(
     built_at: Instant,
     now: Instant,
@@ -225,7 +226,7 @@ pub struct Session {
     pub templates: Templates,
     /// When `publish` last sent a template.
     pub built_at: Option<Instant>,
-    /// Constraints-triggered rebuild deferred until [`crate::CONSTRAINTS_COOLDOWN`].
+    /// Constraints-triggered rebuild deferred until `constraints_cooldown`.
     pub rebuild_at: Option<Instant>,
     /// Budgets that replaced a queued rebuild's since the last build.
     superseded: u32,
