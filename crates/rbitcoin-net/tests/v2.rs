@@ -370,6 +370,19 @@ async fn garbage_read_by_v2_peer(
     }
 }
 
+fn assert_garbage_lengths_vary(direction: &str, mut samples: Vec<usize>) {
+    assert!(
+        samples.iter().all(|&n| n <= 4095),
+        "{direction} garbage lengths {samples:?}"
+    );
+    samples.sort_unstable();
+    samples.dedup();
+    assert!(
+        samples.len() > 1,
+        "{direction} sent one garbage length: {samples:?}"
+    );
+}
+
 /// Core `GenerateRandomGarbage`: each side sends 0..=4095 random garbage
 /// bytes after its ellswift key, so a v2 handshake has no fixed length. A v2
 /// peer reads that garbage from us whether we dial out or it dials in.
@@ -378,7 +391,8 @@ async fn v2_peer_reads_random_length_garbage_from_us() {
     use tokio::net::{TcpListener, TcpStream};
 
     let magic = Magic::from(Network::Regtest);
-    let mut garbage = Vec::new();
+    let mut outbound = Vec::new();
+    let mut inbound = Vec::new();
     for _ in 0..4 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -387,7 +401,7 @@ async fn v2_peer_reads_random_length_garbage_from_us() {
             open_v2(stream, magic, false).await.map(|_| ())
         });
         let (mut peer, _) = listener.accept().await.unwrap();
-        garbage.push(garbage_read_by_v2_peer(&mut peer, Role::Responder, magic).await);
+        outbound.push(garbage_read_by_v2_peer(&mut peer, Role::Responder, magic).await);
         dial_out.await.unwrap().unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -397,16 +411,11 @@ async fn v2_peer_reads_random_length_garbage_from_us() {
             open_v2(stream, magic, true).await.map(|_| ())
         });
         let mut peer = TcpStream::connect(addr).await.unwrap();
-        garbage.push(garbage_read_by_v2_peer(&mut peer, Role::Initiator, magic).await);
+        inbound.push(garbage_read_by_v2_peer(&mut peer, Role::Initiator, magic).await);
         dial_in.await.unwrap().unwrap();
     }
-    assert!(garbage.iter().all(|&n| n <= 4095), "{garbage:?}");
-    garbage.sort_unstable();
-    garbage.dedup();
-    assert!(
-        garbage.len() > 1,
-        "a v2 peer read {garbage:?} garbage bytes on every handshake"
-    );
+    assert_garbage_lengths_vary("outbound", outbound);
+    assert_garbage_lengths_vary("inbound", inbound);
 }
 
 /// Core `test_size`: reject on the decrypted length prefix — do not wait
