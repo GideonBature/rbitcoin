@@ -28,17 +28,9 @@ EXCLUDED_TAIL = re.compile(
 )
 CFG_TEST_ATTR = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 SKIP_CRATES = {"rbitcoin-test", "rbitcoin-bench"}
-ITEM_WORDS = (
-    "mod ",
-    "fn ",
-    "impl ",
-    "struct ",
-    "enum ",
-    "trait ",
-    "const ",
-    "static ",
-    "type ",
-)
+# `impl<T>` and `impl<'a>` have no space after the keyword. A trailing
+# space would miss them and drop the cfg(test) skip.
+ITEM_RE = re.compile(r"\b(?:mod|fn|impl|struct|enum|trait|const|static|type)\b")
 
 
 def _blank(chars: list[str], start: int, end: int) -> None:
@@ -206,7 +198,7 @@ def file_count(path: str) -> int:
                 and not stripped.endswith(";")
             )
             if not attr_only:
-                if any(word in code for word in ITEM_WORDS):
+                if ITEM_RE.search(code):
                     saw_item = True
                 if stripped.endswith(";"):
                     pending = False
