@@ -158,9 +158,10 @@ pub fn unmap(ptr: *mut u8, len: usize) {
 pub fn map_readonly(file: &File, len: usize) -> std::io::Result<*mut u8> {
     use std::os::windows::io::AsRawHandle;
     let handle = file.as_raw_handle() as *mut std::ffi::c_void;
-    // SAFETY: `handle` is the open file. The mapping is read-only and unnamed.
-    let mapping =
-        unsafe { CreateFileMappingW(handle, ptr::null_mut(), PAGE_READONLY, 0, 0, ptr::null()) };
+    let mapping = unsafe {
+        // SAFETY: `handle` is the open file. The mapping is read-only and unnamed.
+        CreateFileMappingW(handle, ptr::null_mut(), PAGE_READONLY, 0, 0, ptr::null())
+    };
     if mapping.is_null() {
         return Err(std::io::Error::last_os_error());
     }
