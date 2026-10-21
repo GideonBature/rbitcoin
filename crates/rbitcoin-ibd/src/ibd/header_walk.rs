@@ -113,6 +113,9 @@ pub struct HeaderWalk {
     /// Probe ask already sent. Its reply is read into that peer's chain
     /// record, not by the walk.
     pub probe_open: Option<usize>,
+    /// The path top the open probe asked headers after; none when it asked
+    /// from the confirmed tip.
+    pub probe_top: Option<(u32, BlockHash)>,
     /// The one in-flight headers ask. Not written to `header.adopt`.
     pub walk: Lane,
     /// Expired asks. Not written to `header.adopt`.
@@ -554,12 +557,17 @@ pub fn note_block_inv(st: &mut IbdWorkState, peer: usize) {
     }
 }
 
-/// Ask one block peer that has not announced a chain for headers, so block
-/// getdata can follow what it holds. Core starts header sync with each
-/// peer. One probe at a time, never the reserved header peer, and not a
-/// peer with a walk ask open. The probe asks from the confirmed tip, so an
-/// empty reply means nothing above it.
-pub fn probe_unprobed_peer(st: &mut IbdWorkState) {
+/// Heights above the confirmed tip a peer's record should decide before it
+/// is probed again.
+const PROBE_AHEAD: u32 = 4_096;
+
+/// Ask one block peer for headers, so block getdata follows what it holds:
+/// one that has not announced a chain (Core starts header sync with each
+/// peer), or one whose record no longer decides the next blocks. One probe
+/// at a time, never the reserved header peer, and not a peer with a walk ask
+/// open.
+pub fn probe_unprobed_peer(st: &mut IbdWorkState, hub: &ChainHub) {
+    use super::peer_io::PeerSlot;
     let walk = &st.header_walk;
     // A record only chooses among peers. With one live peer it would only
     // take the header lane, and its reply would not reach the walk.
@@ -569,10 +577,16 @@ pub fn probe_unprobed_peer(st: &mut IbdWorkState) {
     {
         return;
     }
+    let tip = hub.tip_height().unwrap_or(0);
+    let ahead = tip.saturating_add(PROBE_AHEAD).min(st.max_ordered_height);
+    let now = Instant::now();
+    let due = |s: &PeerSlot| {
+        !s.chain.probed() || (ahead > tip && s.chain.needs_refresh(&st.height_to_hash, ahead, now))
+    };
     let Some(slot) = st
         .slots
         .iter()
-        .find(|s| s.alive && !walk_busy(walk, s.id) && !s.chain.probed())
+        .find(|s| s.alive && !walk_busy(walk, s.id) && due(s))
     else {
         return;
     };
@@ -632,6 +646,7 @@ pub fn forget_walk_peer(st: &mut IbdWorkState, peer: usize) {
     }
     if st.header_walk.probe_open == Some(peer) {
         st.header_walk.probe_open = None;
+        st.header_walk.probe_top = None;
     }
 }
 
@@ -670,43 +685,36 @@ pub fn note_reservation(
     }
 }
 
-/// Whether block `hash` may be asked of `peer`. A peer is not asked for a
-/// block it answered `notfound`, or for a path block its announced chain
-/// does not hold. The reserved header peer is asked only when no other live
-/// peer may have it, or, once its own announced chain shows the block, when no
-/// other peer's shows it. A single peer still does both.
+/// Whether block `hash` may be asked of `peer`. As in Core, a peer is asked
+/// only for a block its chain showed (`PeerChain::shows`), and not for one it
+/// answered `notfound`. The reserved header peer is asked only when no other
+/// peer shows the block. A single peer still does both.
 pub fn may_serve(st: &IbdWorkState, peer: usize, hash: &BlockHash) -> bool {
     use super::peer_io::PeerSlot;
     let height = st.hash_height.get(hash).copied();
     let now = super::peer_io::ibd_mono_ms();
+    let path = &st.height_to_hash;
     let askable = |s: &PeerSlot| s.alive && !s.chain.lacks(hash, now);
-    let holds = |s: &PeerSlot| {
-        askable(s) && !height.is_some_and(|ht| s.chain.left_path_by(&st.height_to_hash, ht))
-    };
+    let shows = |s: &PeerSlot| askable(s) && height.is_some_and(|ht| s.chain.shows(path, ht));
+    let open =
+        |s: &PeerSlot| askable(s) && !height.is_some_and(|ht| s.chain.left_path_by(path, ht));
     let Some(slot) = st.slots.iter().find(|s| s.id == peer) else {
         return false;
     };
-    // A chain record can be stale. With no peer that holds the block by what
-    // it announced, any peer that did not answer `notfound` may be asked,
-    // the header peer too.
-    if !st.slots.iter().any(&holds) {
+    // With no peer that shows the block, a record can be stale: a peer whose
+    // chain has not left the path is asked, else any peer that did not answer
+    // `notfound`, the header peer too. Otherwise the header peer stays on
+    // headers while another peer can fetch the block.
+    let tier: &dyn Fn(&PeerSlot) -> bool = if st.slots.iter().any(&shows) {
+        &shows
+    } else if st.slots.iter().any(&open) {
+        &open
+    } else {
         return askable(slot);
-    }
-    if !holds(slot) {
-        return false;
-    }
-    if st.header_walk.reserved != Some(peer) {
-        return true;
-    }
-    // A header peer whose announced chain shows the block is kept from it only
-    // by another peer that shows it too. Otherwise any peer that may hold it
-    // does: the header peer stays on headers while others fetch blocks.
-    let shows =
-        |s: &PeerSlot| askable(s) && height.is_some_and(|ht| s.chain.shows(&st.height_to_hash, ht));
-    let shown = shows(slot);
-    !st.slots
-        .iter()
-        .any(|s| s.id != peer && if shown { shows(s) } else { holds(s) })
+    };
+    tier(slot)
+        && (st.header_walk.reserved != Some(peer)
+            || !st.slots.iter().any(|s| s.id != peer && tier(s)))
 }
 
 /// Settle each peer's recorded split against this node's confirmed chain once
@@ -2449,6 +2457,7 @@ pub fn expire_header_ask(st: &mut IbdWorkState) -> Option<usize> {
     };
     if st.header_walk.probe_open == Some(peer) {
         st.header_walk.probe_open = None;
+        st.header_walk.probe_top = None;
         if n >= HEADER_MISS_DISCONNECT {
             st.header_walk.header_misses.remove(&peer);
             punish_header_peer(st, peer);
@@ -2568,12 +2577,40 @@ pub fn arm_header_ask(
         st.header_walk.challenge_external = false;
     }
     if let Some(peer) = take_probe(st) {
-        // Only the confirmed chain: the first of its hashes the peer has is
-        // at or below the tip, so the reply is what it has above it.
-        if ask_header_peer(st, hub, peer, &[])? {
+        // After the path top alone: a reply that builds on it shows the
+        // whole path. A peer that did not show it is asked with the
+        // confirmed chain only, whose first hash it has is at or below the
+        // tip, so the reply is what it has above it.
+        let tip_h = hub.tip_height().unwrap_or(0);
+        let from_tip = st
+            .slots
+            .iter()
+            .any(|s| s.id == peer && s.chain.probe_from_tip());
+        let top = path_top(st, hub).filter(|&(_, h)| h > tip_h && !from_tip);
+        let sent = match top {
+            Some((hash, height)) => {
+                let sent = super::dial::request_headers_from(
+                    &st.slots,
+                    peer,
+                    &mut st.header_req_seq,
+                    vec![hash],
+                )?;
+                if sent {
+                    note_lane(st, peer);
+                }
+                st.header_walk.probe_top = sent.then_some((height, hash));
+                sent
+            }
+            None => {
+                st.header_walk.probe_top = None;
+                ask_header_peer(st, hub, peer, &[])?
+            }
+        };
+        if sent {
             st.header_walk.probe_open = Some(peer);
+            let now = Instant::now();
             if let Some(slot) = st.slots.iter_mut().find(|s| s.id == peer) {
-                slot.chain.note_probed();
+                slot.chain.note_probe_sent(now, top.is_none());
             }
             return Ok(true);
         }
@@ -3411,6 +3448,7 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         challenge_open: None,
         probe: None,
         probe_open: None,
+        probe_top: None,
         walk: Lane::default(),
         header_misses: HashMap::new(),
         base_diff,

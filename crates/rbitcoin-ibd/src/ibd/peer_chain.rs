@@ -8,6 +8,7 @@
 use bitcoin::block::Header;
 use bitcoin::BlockHash;
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 /// `notfound` hashes kept per peer. Past the cap a peer may be asked again.
 const LACKS_CAP: usize = 1024;
@@ -17,6 +18,10 @@ const LACKS_TTL_MS: u64 = 30_000;
 
 /// Announced hashes kept per peer: one full `headers` reply.
 const ANNOUNCED_CAP: usize = rbitcoin_net::codec::MAX_HEADERS_RESULTS;
+
+/// How often a peer whose record no longer decides the next blocks is
+/// probed again.
+const PROBE_REFRESH: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Default)]
 pub struct PeerChain {
@@ -36,8 +41,17 @@ pub struct PeerChain {
     /// That height has left the path and this node's confirmed block there
     /// is a different one.
     split_confirmed: bool,
-    /// The peer announced headers, or was asked for them once.
+    /// The highest path block this peer showed through a probe that asked
+    /// for headers after it. It holds every path block at or below it while
+    /// the path still holds that block there.
+    reaches: Option<(u32, BlockHash)>,
+    /// The last probe asked after the path top and the reply did not show
+    /// it, so the next probe asks from the confirmed tip.
+    probe_from_tip: bool,
+    /// The peer announced headers, or was asked for them.
     probed: bool,
+    /// When the last probe was sent.
+    probed_at: Option<Instant>,
 }
 
 impl PeerChain {
@@ -66,8 +80,41 @@ impl PeerChain {
         self.probed
     }
 
-    pub fn note_probed(&mut self) {
+    /// Whether the next probe asks from the confirmed tip.
+    pub fn probe_from_tip(&self) -> bool {
+        self.probe_from_tip
+    }
+
+    /// A probe was sent `at`, from the tip or after the path top.
+    pub fn note_probe_sent(&mut self, at: Instant, from_tip: bool) {
         self.probed = true;
+        self.probed_at = Some(at);
+        if from_tip {
+            self.probe_from_tip = false;
+        }
+    }
+
+    /// The peer's chain holds the path block `hash` at `height`.
+    pub fn note_reaches(&mut self, height: u32, hash: BlockHash) {
+        self.reaches = Some((height, hash));
+    }
+
+    /// The reply to a probe after the path top did not show it: ask from
+    /// the confirmed tip next.
+    pub fn note_lacks_top(&mut self) {
+        self.probe_from_tip = true;
+        self.probed = false;
+    }
+
+    /// The record no longer says whether the peer holds the path block at
+    /// `height`, and no probe was sent within one refresh.
+    pub fn needs_refresh(&self, path: &HashMap<u32, BlockHash>, height: u32, now: Instant) -> bool {
+        self.probed
+            && self
+                .probed_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= PROBE_REFRESH)
+            && !self.shows(path, height)
+            && !self.left_path_by(path, height)
     }
 
     /// An empty reply to a walk ask: the peer is at one of several locator
@@ -225,6 +272,14 @@ impl PeerChain {
     pub fn shows(&self, path: &HashMap<u32, BlockHash>, height: u32) -> bool {
         if self.left_path_by(path, height) {
             return false;
+        }
+        // A path block the peer holds, from a probe or from where its chain
+        // left this one before this node took its chain.
+        let holds = |at: Option<(u32, BlockHash)>| {
+            at.is_some_and(|(h, hash)| height <= h && path.get(&h) == Some(&hash))
+        };
+        if holds(self.reaches) || holds(self.split) {
+            return true;
         }
         let Some(len) = (self.announced.len() as u32).checked_sub(1) else {
             return false;

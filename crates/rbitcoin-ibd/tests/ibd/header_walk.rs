@@ -1658,7 +1658,7 @@ fn two_peers_reserve_the_header_walk() {
     other.first_data_ms = 5_000;
     short.first_data_ms = 6_000;
     unknown.first_data_ms = 7_000;
-    unknown.chain.note_probed();
+    unknown.chain.note_probe_sent(Instant::now(), true);
     let mut st = IbdWorkState::new(vec![head, other, short, unknown], Some(gen), Some(0));
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert_eq!(drain_getheaders(&mut head_rx), 1);
@@ -1666,7 +1666,7 @@ fn two_peers_reserve_the_header_walk() {
     apply(&mut st, &hub, 5, path.to_vec());
     assert_eq!(st.header_walk.reserved, Some(5));
     let _ = take_header_ask(&mut st, 5);
-    probe_unprobed_peer(&mut st);
+    probe_unprobed_peer(&mut st, &hub);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert_eq!(
         drain_getheaders(&mut other_rx),
@@ -1678,7 +1678,7 @@ fn two_peers_reserve_the_header_walk() {
     apply(&mut st, &hub, 6, vec![fork, mine(fork.block_hash(), 46)]);
     // A short reply is everything that peer has: its chain ends at height 1.
     apply(&mut st, &hub, 7, vec![path[0]]);
-    probe_unprobed_peer(&mut st);
+    probe_unprobed_peer(&mut st, &hub);
     assert!(st.header_walk.probe.is_none(), "a peer is probed once");
     for h in &path {
         st.body.mark_missing(h.block_hash());
@@ -1807,25 +1807,31 @@ fn two_peers_reserve_the_header_walk() {
     );
     assert!(may_serve(&st, 8, &taken2.block_hash()));
 
-    // A sixth, on its own hub, because the probe must say what a peer has
-    // above the tip: it asks from the confirmed tip, so an empty reply is a
-    // chain that ends there and that peer is not asked for path blocks. A
-    // caught-up peer sends the path and is. The probe is not a walk answer,
-    // and a reply with a chain the walk has not seen gets the walk's own ask.
-    // An empty reply to a walk ask is a caught-up peer as well as one behind,
-    // so that peer is probed again.
+    // A sixth, on its own hub, because a probe must say what a peer has. It
+    // asks after the path top alone, and a reply on that top shows the whole
+    // path. A peer that does not show it is asked from the confirmed tip,
+    // where an empty reply is a chain that ends there. The probe is not a
+    // walk answer, and a reply with a header the walk has not seen gets the
+    // walk's own ask. An empty reply to a walk ask is a caught-up peer as well
+    // as one behind, so that peer is probed again.
     let (_dir6, hub6) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-probe");
     hub6.ensure_genesis().unwrap();
     let gen6 = hub6.tip_hash().unwrap();
     let (mut head, mut head_rx) = slot(13);
     let (mut caught, mut caught_rx) = slot(14);
     let (mut behind, mut behind_rx) = slot(15);
+    let (mut fallback, mut fallback_rx) = slot(26);
     let (mut side, mut side_rx) = slot(16);
     head.first_data_ms = 50;
     caught.first_data_ms = 5_000;
     behind.first_data_ms = 6_000;
+    fallback.first_data_ms = 6_500;
     side.first_data_ms = 7_000;
-    let mut st = IbdWorkState::new(vec![head, caught, behind, side], Some(gen6), Some(0));
+    let mut st = IbdWorkState::new(
+        vec![head, caught, behind, fallback, side],
+        Some(gen6),
+        Some(0),
+    );
     assert!(send_getheaders(&mut st, &hub6).unwrap());
     assert_eq!(drain_getheaders(&mut head_rx), 1);
     let path = [mine(gen6, 51), mine(mine(gen6, 51).block_hash(), 52)];
@@ -1833,48 +1839,82 @@ fn two_peers_reserve_the_header_walk() {
     assert_eq!(st.header_walk.reserved, Some(13));
     let _ = take_header_ask(&mut st, 13);
 
-    probe_unprobed_peer(&mut st);
+    probe_unprobed_peer(&mut st, &hub6);
     assert!(send_getheaders(&mut st, &hub6).unwrap());
     let locator = getheaders_locator(&mut caught_rx).expect("the caught-up peer is probed");
     assert_eq!(
-        locator.first(),
-        Some(&gen6),
-        "the probe asks from the confirmed tip"
+        locator,
+        vec![path[1].block_hash()],
+        "the probe asks after the path top alone"
     );
-    assert!(!locator.contains(&path[1].block_hash()));
     // An announcement that crosses the probe is not its reply.
-    let next = mine(path[1].block_hash(), 53);
-    apply(&mut st, &hub6, 14, vec![next]);
+    let stray = mine(BlockHash::from_byte_array([0x77; 32]), 53);
+    apply(&mut st, &hub6, 14, vec![stray]);
     assert_eq!(
         st.header_walk.walk.peer,
         Some(14),
         "the probe ask stays open, so it can still expire"
     );
-    apply(&mut st, &hub6, 14, vec![path[0], path[1], next]);
+    // That stray batch went to the walk, which retired the peer from it.
+    st.header_walk.walk_quiet.remove(&14);
+    // At the top the peer has nothing after it, so it is asked again from
+    // the tip.
+    apply(&mut st, &hub6, 14, Vec::new());
     assert_eq!(st.header_walk.probe_open, None);
     assert!(
         !st.header_walk.walk_quiet.contains(&14),
         "a probe reply is not a walk answer"
     );
     assert_eq!(st.header_walk.reserved, Some(13));
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    let locator = getheaders_locator(&mut caught_rx).expect("the peer is asked again");
+    assert_eq!(locator.first(), Some(&gen6), "then from the confirmed tip");
+    assert!(
+        !st.slots[1].chain.probe_from_tip(),
+        "and the probe after that asks after the top again"
+    );
+    apply(&mut st, &hub6, 14, path.to_vec());
+    assert!(may_serve(&st, 14, &path[1].block_hash()));
 
-    probe_unprobed_peer(&mut st);
+    // A peer without the top answers from genesis: this node sends genesis
+    // itself, Core the header after it. One that stops at or below the tip
+    // is asked again from the tip, where an empty reply is a chain that ends
+    // there.
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert_eq!(getheaders_locator(&mut behind_rx).map(|l| l.len()), Some(1));
+    apply(&mut st, &hub6, 15, vec![hub6.header_of(&gen6).unwrap()]);
+    assert_eq!(st.header_walk.probe_open, None);
+    assert!(st.slots[2].chain.probe_from_tip());
+    probe_unprobed_peer(&mut st, &hub6);
     assert!(send_getheaders(&mut st, &hub6).unwrap());
     assert!(getheaders_locator(&mut behind_rx).is_some());
     apply(&mut st, &hub6, 15, Vec::new());
     assert!(
-        !may_serve(&st, 15, &path[0].block_hash()),
-        "a peer with nothing above the tip is not asked for a path block"
+        st.slots[2].chain.left_path_by(&st.height_to_hash, 1),
+        "a peer with nothing above the tip does not hold a path block"
     );
-    assert!(may_serve(&st, 14, &path[1].block_hash()));
+    probe_unprobed_peer(&mut st, &hub6);
+    assert!(send_getheaders(&mut st, &hub6).unwrap());
+    assert!(getheaders_locator(&mut fallback_rx).is_some());
+    // A reply from genesis that already goes past the tip says what a probe
+    // from the tip would.
+    apply(&mut st, &hub6, 26, vec![mine(gen6, 55)]);
+    assert_eq!(st.header_walk.probe_open, None);
+    assert!(!st.slots[3].chain.probe_from_tip());
+    assert!(st.slots[3].chain.left_path_by(&st.height_to_hash, 1));
+    st.header_walk.challenge = None;
 
-    // A probe reply that leaves the path is a chain the walk has not seen,
-    // so that peer gets the walk's own ask.
-    probe_unprobed_peer(&mut st);
+    // A reply on the path top shows the path below it. Its new header is one
+    // the walk has not seen, so that peer gets the walk's own ask.
+    probe_unprobed_peer(&mut st, &hub6);
     assert!(send_getheaders(&mut st, &hub6).unwrap());
     assert!(getheaders_locator(&mut side_rx).is_some());
-    apply(&mut st, &hub6, 16, vec![mine(gen6, 54)]);
+    apply(&mut st, &hub6, 16, vec![mine(path[1].block_hash(), 54)]);
+    assert!(st.slots[4].chain.shows(&st.height_to_hash, 1));
     assert_eq!(st.header_walk.challenge, Some(16));
+    st.header_walk.challenge = None;
 
     // A block inv's ask carries the path top, so an empty reply is a peer at
     // that top as well as one behind it.
@@ -1896,7 +1936,7 @@ fn two_peers_reserve_the_header_walk() {
     st.header_walk.walk.peer = None;
     st.header_walk.walk.at = None;
     st.header_walk.walk.prev_peer = Some(14);
-    probe_unprobed_peer(&mut st);
+    probe_unprobed_peer(&mut st, &hub6);
     assert_ne!(st.header_walk.probe, Some(14));
     st.header_walk.probe = Some(14);
     assert!(send_getheaders(&mut st, &hub6).unwrap());
@@ -1907,7 +1947,7 @@ fn two_peers_reserve_the_header_walk() {
     // after another peer's expiry took the lane's last slot for it.
     st.header_walk.walk.prev_peer = None;
     st.header_walk.header_misses.insert(14, 1);
-    probe_unprobed_peer(&mut st);
+    probe_unprobed_peer(&mut st, &hub6);
     assert_ne!(st.header_walk.probe, Some(14));
     st.header_walk.header_misses.clear();
 
@@ -1918,7 +1958,7 @@ fn two_peers_reserve_the_header_walk() {
     }
     st.header_walk.walk.peer = None;
     st.header_walk.walk.at = None;
-    probe_unprobed_peer(&mut st);
+    probe_unprobed_peer(&mut st, &hub6);
     assert_eq!(st.header_walk.probe, Some(14));
     assert!(send_getheaders(&mut st, &hub6).unwrap());
     assert_eq!(st.header_walk.probe_open, Some(14));
@@ -2000,11 +2040,89 @@ fn two_peers_reserve_the_header_walk() {
         !may_serve(&st, 17, &w1.block_hash()),
         "a peer on the rewound chain is not asked for the new one"
     );
-    assert!(may_serve(&st, 18, &w1.block_hash()));
-    assert!(may_serve(&st, 19, &w2.block_hash()));
+    assert!(
+        !st.slots[1].chain.left_path_by(&st.height_to_hash, 1),
+        "a peer with no record gets no split at the rewind"
+    );
+    assert!(!may_serve(&st, 18, &w1.block_hash()));
+    assert!(
+        may_serve(&st, 19, &w1.block_hash()),
+        "a peer whose split is the new chain's block shows it"
+    );
     assert!(
         may_serve(&st, 20, &w3.block_hash()),
         "a peer that announced the new chain is asked for it"
+    );
+
+    // An eighth, because a block is asked only of a peer whose chain showed
+    // it: a peer whose full reply ended below the block, or one with no
+    // record, is not asked for it while another peer shows it. With no peer
+    // that shows a block, a peer that has not left the path is asked first.
+    let (_dir8, hub8) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-shown");
+    hub8.ensure_genesis().unwrap();
+    let gen8 = hub8.tip_hash().unwrap();
+    let (head, _head_rx) = slot(22);
+    let (full, _full_rx) = slot(23);
+    let (blank, _blank_rx) = slot(24);
+    let (left, _left_rx) = slot(25);
+    let mut st = IbdWorkState::new(vec![head, full, blank, left], Some(gen8), Some(0));
+    let mut prev = gen8;
+    let mut chain8 = Vec::new();
+    for n in 0..2_004u32 {
+        let h = mine(prev, 90_000 + n);
+        prev = h.block_hash();
+        chain8.push(h);
+    }
+    for (i, h) in chain8.iter().enumerate() {
+        st.record_height(h.block_hash(), i as u32 + 1);
+        st.height_to_hash.insert(i as u32 + 1, h.block_hash());
+    }
+    st.header_walk.reserved = Some(22);
+    let none = |_| None;
+    let path8 = st.height_to_hash.clone();
+    st.slots[0]
+        .chain
+        .note_headers(&path8, none, 0, 1, &chain8[..2_003]);
+    st.slots[1]
+        .chain
+        .note_headers(&path8, none, 0, 1, &chain8[..2_000]);
+    let fork = mine(chain8[0].block_hash(), 99_999);
+    st.slots[3].chain.note_headers(&path8, none, 0, 2, &[fork]);
+    let at = |h: u32| chain8[h as usize - 1].block_hash();
+    assert!(may_serve(&st, 23, &at(100)));
+    assert!(
+        !may_serve(&st, 22, &at(100)),
+        "the header peer stays on headers while another peer shows the block"
+    );
+    assert!(
+        !may_serve(&st, 23, &at(2_003)),
+        "a full reply that ended below a block does not show it"
+    );
+    assert!(
+        !may_serve(&st, 24, &at(2_003)),
+        "a peer with no record is not asked for a block another peer shows"
+    );
+    assert!(
+        may_serve(&st, 22, &at(2_003)),
+        "the header peer shows it alone"
+    );
+    assert!(may_serve(&st, 24, &at(2_004)));
+    assert!(
+        !may_serve(&st, 25, &at(2_004)),
+        "with nobody showing a block, a peer that left the path is not asked"
+    );
+    // A peer whose record stops short of the next blocks is probed again; one
+    // probed just now is not.
+    st.max_ordered_height = 2_004;
+    probe_unprobed_peer(&mut st, &hub8);
+    assert_eq!(st.header_walk.probe, Some(23));
+    st.header_walk.probe = None;
+    st.slots[1].chain.note_probe_sent(Instant::now(), true);
+    probe_unprobed_peer(&mut st, &hub8);
+    assert_eq!(
+        st.header_walk.probe,
+        Some(24),
+        "the next is the peer with no record"
     );
 }
 

@@ -703,7 +703,7 @@ pub async fn ibd_cancellable(
             if hub.header_inv_challenge_pending() && header_walk::note_external_block_inv(st) {
                 hub.clear_header_inv_challenge();
             }
-            header_walk::probe_unprobed_peer(st);
+            header_walk::probe_unprobed_peer(st, hub.as_ref());
             let challenge_due = header_walk::inv_challenge_due(st);
             if cadence.headers_due(now_cadence, path_empty, challenge_due) {
                 let live = st.ordered_set.len();

@@ -163,6 +163,38 @@ fn a_reply_on_this_chain_above_a_split_clears_it() {
     assert!(moved.left_path_by(&path, 2));
 }
 
+/// A peer whose record does not decide a height is probed again, but not
+/// within 10 s of its last probe.
+#[test]
+fn a_record_that_stops_short_is_refreshed() {
+    use std::time::{Duration, Instant};
+    let headers = chain(20, 0x5c);
+    let path: HashMap<u32, BlockHash> = (1..).zip(headers.iter().map(|h| h.block_hash())).collect();
+    let Some(sent) = Instant::now().checked_sub(Duration::from_secs(30)) else {
+        return;
+    };
+    let mut ended = PeerChain::default();
+    ended.note_probe_sent(sent, true);
+    ended.note_headers(&path, |_| None, 0, 1, &headers[..10]);
+    assert!(
+        !ended.needs_refresh(&path, 5, Instant::now()),
+        "a height the record shows is decided"
+    );
+    assert!(
+        !ended.needs_refresh(&path, 15, Instant::now()),
+        "so is one above where a short reply ended"
+    );
+    let mut reached = PeerChain::default();
+    reached.note_probe_sent(sent, false);
+    reached.note_reaches(10, headers[9].block_hash());
+    assert!(!reached.needs_refresh(&path, 5, sent + Duration::from_secs(10)));
+    assert!(reached.needs_refresh(&path, 15, sent + Duration::from_secs(10)));
+    assert!(
+        !reached.needs_refresh(&path, 15, sent + Duration::from_millis(9_999)),
+        "not within 10 s of the last probe"
+    );
+}
+
 /// A `notfound` keeps a peer off that block for one stall window, then the
 /// peer may be asked again.
 #[test]

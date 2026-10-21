@@ -15,14 +15,15 @@ Fixed
   is not asked again for a block it answered `notfound` for 30 seconds or
   until it announces more, or for a block above where its announced headers
   left the download path or ended.
-- **IBD asks each block peer for headers once.** A peer that had announced
-  nothing was asked for blocks of any chain, so a Core peer serving a
-  lighter chain stayed silent on blocks it did not have and was dropped for
-  a 10 minute cooldown. Each block peer now gets one headers ask from the
-  confirmed tip, so its chain is known before blocks are asked of it. A
-  peer with nothing above the tip is not asked for blocks. An empty reply
-  to a header-sync ask does not say whether the peer is caught up or
-  behind, so that peer is asked again from the tip.
+- **IBD asks a block peer only for blocks its chain showed.** A peer that
+  had announced nothing, or whose announced headers ended below a block,
+  was asked for blocks of any chain, so a Core peer serving a lighter chain
+  stayed silent on blocks it did not have and was dropped for a 10 minute
+  cooldown. Each block peer is asked for headers after the download path's
+  top, and from the confirmed tip when it does not have that top, and again
+  when its record no longer covers the next blocks. It is asked only for
+  blocks that record shows. With no peer that shows a block, a peer whose
+  chain has not left the path is asked first.
 - **A block that failed connect stays invalid after restart.** The mark was
   in memory only, so a restart adopted the stored header chain through that
   block again and rewound a valid tip to chase it. Connect failures are

@@ -933,9 +933,11 @@ fn note_peer_headers(
 }
 
 /// The reply to this peer's open probe, read into its chain record and kept
-/// from the walk. The probe asked from the confirmed chain, so its reply is
-/// empty or builds on a confirmed block; a batch that does not is an
-/// announcement that crossed the probe. True when the reply was consumed.
+/// from the walk. A probe after the path top is answered empty, on that top,
+/// or from genesis when the peer does not have it. A probe from the
+/// confirmed chain is answered empty or on a confirmed block. A batch of
+/// another shape is an announcement that crossed the probe. True when the
+/// reply was consumed.
 fn answer_probe(
     st: &mut IbdWorkState,
     hub: &ChainHub,
@@ -946,25 +948,34 @@ fn answer_probe(
         return false;
     }
     let tip = hub.tip_height().unwrap_or(0);
+    let top = st.header_walk.probe_top;
     if let Some(first) = headers.first() {
         let prev = first.prev_blockhash;
-        let confirmed = hub
+        let confirmed_h = hub
             .query
             .height_of_hash(&prev.to_byte_array())
             .ok()
             .flatten()
-            .is_some_and(|h| h.0 <= tip && super::peer_chain::confirmed_at(hub, h.0) == Some(prev));
-        if !confirmed {
+            .map(|h| h.0)
+            .filter(|&h| h <= tip && super::peer_chain::confirmed_at(hub, h) == Some(prev));
+        let shaped = match top {
+            Some((_, hash)) => {
+                prev == hash || prev.to_byte_array() == [0u8; 32] || confirmed_h == Some(0)
+            }
+            None => confirmed_h.is_some(),
+        };
+        if !shaped {
             return false;
         }
     }
     st.header_walk.probe_open = None;
+    st.header_walk.probe_top = None;
     let _ = super::header_walk::take_header_ask(st, peer);
-    if headers.is_empty() {
-        if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
-            s.chain.note_ends_at(tip);
-        }
-    } else {
+    let past_tip = headers.first().is_some_and(|first| {
+        parent_height(&st.hash_height, hub, first.prev_blockhash)
+            .is_some_and(|h| h.saturating_add(headers.len() as u32) > tip.saturating_add(1))
+    });
+    if !headers.is_empty() {
         note_announcement(st, peer);
         note_peer_headers(st, hub, peer, headers);
         // A header this node has not seen: the peer's chain leaves this one
@@ -974,6 +985,20 @@ fn answer_probe(
             || matches!(hub.query.height_of_hash(&last.to_byte_array()), Ok(Some(_)));
         if !seen {
             super::header_walk::note_block_inv(st, peer);
+        }
+    }
+    if let Some(s) = st.slots.iter_mut().find(|s| s.id == peer) {
+        match top {
+            Some((height, hash)) if headers.first().map(|h| h.prev_blockhash) == Some(hash) => {
+                s.chain.note_reaches(height, hash);
+            }
+            // A reply from genesis that goes past the tip says what a probe
+            // from the tip would. Empty is also a peer that sends nothing
+            // below the minimum work.
+            Some(_) if past_tip => {}
+            Some(_) => s.chain.note_lacks_top(),
+            None if headers.is_empty() => s.chain.note_ends_at(tip),
+            None => {}
         }
     }
     true
