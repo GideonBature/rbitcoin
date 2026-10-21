@@ -630,6 +630,17 @@ async fn http_503_chain_view_moved_omits_tip_header() {
 }
 
 #[test]
+fn output_by_position_paths_accept_asof() {
+    assert!(path_accepts_asof("/block-height/1/tx/0"));
+    assert!(path_accepts_asof("/block-height/1/tx/0/out/0"));
+    assert!(path_accepts_asof("/tx/ab/out/0"));
+    assert!(path_accepts_asof("/block-heights/txs/outs"));
+    assert!(!path_accepts_asof("/block-height/1"));
+    assert!(!path_accepts_asof("/tx/ab"));
+    assert!(!path_accepts_asof("/block/ab/tx/0"));
+}
+
+#[test]
 fn config_defaults_use_public_proxy_limits() {
     let cfg = EsploraConfig::new("0.0.0.0:3000".parse().unwrap());
     assert_eq!(cfg.limits, ServeLimits::for_public_proxy());
@@ -647,11 +658,6 @@ fn asof_query_is_gated_to_documented_routes() {
     assert!(!path_accepts_asof("/address/bcrt1q/txs/mempool"));
     assert!(!path_accepts_asof("/tx/ab"));
     assert!(!path_accepts_asof("/block-height/1"));
-    assert!(path_accepts_asof("/block-height/1/tx/0/out/0"));
-    assert!(path_accepts_asof("/tx/ab/out/0"));
-    assert!(path_accepts_asof("/block-heights/txs/outs"));
-    assert!(path_accepts_asof("/block-height/1/tx/0"));
-    assert!(!path_accepts_asof("/block/ab/tx/0"));
     assert!(!path_accepts_asof("/mempool"));
     assert!(!path_accepts_asof("/scripthash/ab/txs/mempool"));
     assert!(path_never_pins("/mempool"));

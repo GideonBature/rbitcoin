@@ -422,18 +422,23 @@ async fn junk_paths_asof_and_post(addr: SocketAddr, genesis: &[u8; 32]) {
 }
 
 /// A same-height replace restamps a scripthash read. `/mempool` never pins a view.
-async fn same_height_replace_restamps(pad: &mut HttpPad) {
+async fn tip_coinbase_output(pad: &HttpPad) -> (String, Value, String) {
     let h = pad.tip();
     let out_path = format!("/block-height/{h}/tx/0/out/0");
     let (st, body) = http_get(pad.addr, &out_path).await;
-    assert_eq!(st, 200, "tip coinbase output before replace: {body}");
-    let before: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(st, 200, "tip coinbase output: {body}");
+    let out: Value = serde_json::from_str(&body).unwrap();
+    let missing = format!("/block-height/{h}/tx/1/out/0");
+    let (st, gap) = http_get(pad.addr, &missing).await;
+    assert_eq!(st, 404, "coinbase-only block has no index 1: {gap}");
+    (out_path, out, missing)
+}
+
+async fn same_height_replace_restamps(pad: &mut HttpPad) {
+    let (out_path, before, missing) = tip_coinbase_output(pad).await;
     let old_hash = block_hash_hex(pad.hashes.last().unwrap());
     assert_eq!(before["status"]["block_hash"], old_hash, "{before}");
     assert_eq!(before["scriptpubkey"], "51", "{before}");
-    let missing = format!("/block-height/{h}/tx/1/out/0");
-    let (st, body) = http_get(pad.addr, &missing).await;
-    assert_eq!(st, 404, "coinbase-only block has no index 1: {body}");
 
     let sh_hex = block_hash_hex(&script_hash(&[0x51]));
     let path = format!("/scripthash/{sh_hex}/utxo");
@@ -611,12 +616,6 @@ async fn mempool_cursor_past_the_page_is_the_confirmed_page() {
 /// Position and outpoint output objects. Genesis and a mempool-only tx are
 /// absent. A mempool spend of a confirmed coin leaves `spent: false`.
 async fn confirmed_output_by_position(pad: &HttpPad) {
-    use bitcoin::absolute::LockTime;
-    use bitcoin::consensus::encode::serialize_hex;
-    use bitcoin::hashes::Hash;
-    use bitcoin::transaction::Version as TxVersion;
-    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-
     let addr = pad.addr;
     let (st, body) = http_get(addr, "/block-height/2/tx/0/out/0").await;
     assert_eq!(st, 200, "unspent coinbase output: {body}");
@@ -631,10 +630,13 @@ async fn confirmed_output_by_position(pad: &HttpPad) {
     let (st, by_txid) = http_get(addr, &format!("/tx/{cb2}/out/0")).await;
     assert_eq!(st, 200, "{by_txid}");
     assert_eq!(by_txid, body, "outpoint route matches the position route");
+    output_misses_are_absent(addr, &block_hash_hex(&pad.cbs[0]), &cb2).await;
+    mempool_spend_stays_unspent(pad).await;
+}
 
+async fn output_misses_are_absent(addr: SocketAddr, genesis: &str, cb2: &str) {
     let (st, body) = http_get(addr, "/block-height/0/tx/0/out/0").await;
     assert_eq!(st, 404, "genesis coinbase by position: {body}");
-    let genesis = block_hash_hex(&pad.cbs[0]);
     let (st, body) = http_get(addr, &format!("/tx/{genesis}/out/0")).await;
     assert_eq!(st, 404, "genesis coinbase by txid: {body}");
 
@@ -649,7 +651,16 @@ async fn confirmed_output_by_position(pad: &HttpPad) {
     assert_eq!(st, 400, "non-integer index: {body}");
     let (st, body) = http_get(addr, &format!("/tx/{cb2}/out/nope")).await;
     assert_eq!(st, 400, "non-integer vout: {body}");
+}
 
+async fn mempool_spend_stays_unspent(pad: &HttpPad) {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize_hex;
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    let addr = pad.addr;
     let spend = Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,

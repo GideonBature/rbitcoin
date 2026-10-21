@@ -1669,9 +1669,19 @@ async fn assert_output_asof_hides_later_spend(
     asof_create: &str,
     create_hex: &str,
 ) {
-    let live = format!("/block-height/102/tx/1/out/0");
+    assert_output_gets_hide_later_spend(addr, asof_create, create_hex).await;
+    assert_output_batch_hides_later_spend(addr, asof_create).await;
+    assert_tx_by_position_uses_pin(addr, asof_create, create_hex).await;
+}
+
+async fn assert_output_gets_hide_later_spend(
+    addr: SocketAddr,
+    asof_create: &str,
+    create_hex: &str,
+) {
+    let live = "/block-height/102/tx/1/out/0";
     let (st, body) = {
-        let (st, _, body) = http_get_raw(addr, &live).await;
+        let (st, _, body) = http_get_raw(addr, live).await;
         (st, body)
     };
     assert_eq!(st, 200, "live position output: {body}");
@@ -1726,7 +1736,9 @@ async fn assert_output_asof_hides_later_spend(
         http_header_value(&raw, "x-bitcoin-chain-tip").is_none(),
         "unknown asof must not stamp a tip"
     );
+}
 
+async fn assert_output_batch_hides_later_spend(addr: SocketAddr, asof_create: &str) {
     let batch =
         serde_json::to_vec(&json!([[102, 1, 0], [102, 1, 0], [103, 1, 0], [102, 9, 0]])).unwrap();
     let (st, _, body) = http_post_raw(addr, "/block-heights/txs/outs", &batch).await;
@@ -1766,7 +1778,9 @@ async fn assert_output_asof_hides_later_spend(
     .await;
     assert_eq!(st, 404, "dead asof rejects the whole post: {body}");
     assert!(http_header_value(&raw, "x-bitcoin-chain-tip").is_none());
+}
 
+async fn assert_tx_by_position_uses_pin(addr: SocketAddr, asof_create: &str, create_hex: &str) {
     let (st, _, by_id) = http_get_raw(addr, &format!("/tx/{create_hex}")).await;
     assert_eq!(st, 200, "live tx: {by_id}");
     let (st, _, by_pos) = http_get_raw(addr, "/block-height/102/tx/1").await;

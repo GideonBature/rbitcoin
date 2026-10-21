@@ -470,6 +470,7 @@ fn genesis_coinbase(query: &Query, fk: Fk) -> Result<bool, StoreError> {
     query.is_coinbase_create(fk, 0)
 }
 
+#[allow(clippy::result_large_err)] // axum Response, same as pin_or_reject
 fn pinned_tip(query: &Query, asof: Option<[u8; 32]>) -> Result<ChainView, Response> {
     match pin_or_reject(query, ChainViewKind::Tip, asof)? {
         Some(view) => Ok(view),
