@@ -1,3 +1,3 @@
 Added
 
-- **Consensus tests pin retarget compact form, exception-block script execution, the anchored script skip, and several block and script edges against Bitcoin Core.**
+- **Consensus tests pin the retarget compact form and exception-block script execution against Bitcoin Core.** They also pin the anchored script skip, which is not Core `assumevalid`, and several other block and script edges.

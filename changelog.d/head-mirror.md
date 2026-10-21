@@ -2,8 +2,9 @@ Changed
 
 - **IBD looks up txids through a map of the open `tx.head`.** The open
   segment's slot file is read through a read-only `MAP_SHARED` view, so a
-  probe no longer reads a 4 KiB page per key. Each slot also carries a 7-bit
-  fingerprint of its txid in the spare bits of the 4-byte entry, so most
+  probe no longer reads a 4 KiB page per key. Each slot also carries a
+  fingerprint of its txid in the spare bits of the 4-byte entry (7 bits at
+  the 25-bit default, and none when the width is 32), so most
   foreign slots on a probe chain are skipped before the identity read of
   `txid.body`. Signet IBD on the Mac mini ran about 20% faster. The open
   segment's uring page-probe stream is gone; sealed segments are untouched.
