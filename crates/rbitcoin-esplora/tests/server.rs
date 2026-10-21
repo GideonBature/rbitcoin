@@ -699,8 +699,22 @@ async fn remaining_routes_fixture() {
     let mem: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(mem["count"], 0);
 
-    // No mempool, no estimate: 503, not an invented 1 sat/vB.
+    // No mempool, no estimate. Regtest returns an empty map so a client can
+    // apply its own fallback. It must not invent a sat/vB.
     let (st, body) = http_get(addr, "/fee-estimates").await;
+    assert_eq!(st, 200, "{body}");
+    let estimates: Value = serde_json::from_str(&body).expect("fee-estimates json");
+    assert_eq!(
+        estimates,
+        json!({}),
+        "an empty estimator must not invent a target: {body}"
+    );
+
+    let main_cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Bitcoin);
+    let main_handle = run_esplora(main_cfg, Arc::clone(&q), None)
+        .await
+        .expect("mainnet listen");
+    let (st, body) = http_get(main_handle.local_addr, "/fee-estimates").await;
     assert_eq!(st, 503, "{body}");
     assert!(body.contains("fee estimates unavailable"), "{body}");
 

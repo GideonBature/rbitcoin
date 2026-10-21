@@ -94,7 +94,7 @@ address index, so point BDK at Esplora or Electrum with `--sh-index`.
 | `/tx/:txid/raw`, `/hex`, `/status` | done |
 | `/tx/:txid/outspend/:n` | done (`spent`, optional `txid` / `vin` / `status`) |
 | `/tx/:txid/merkleblock-proof` | done (BIP37 hex; verifies against header merkle root) |
-| `/fee-estimates` | done (conf-target keys, sat/vB) |
+| `/fee-estimates` | done (conf-target keys, sat/vB; **200** `{}` when none, except mainnet **503**) |
 | `POST /tx` | done |
 
 BDK on-chain wallet still needs `/address/*` and `/scripthash/*` → **`--sh-index`**.
