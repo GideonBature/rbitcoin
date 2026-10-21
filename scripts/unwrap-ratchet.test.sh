@@ -48,6 +48,10 @@ assert_fail "cfg(test) inside a nested comment does not skip later code" \
   python3 "$PY" --root "$FIX/cfg-hidden"
 assert_fail "a name that only ends in try_into is counted" \
   python3 "$PY" --root "$FIX/try-name"
+assert_ok "cfg(test) where-clause body is not counted" \
+  python3 "$PY" --root "$FIX/cfg-where"
+assert_ok "a where-clause test item does not hide the next function" \
+  python3 "$PY" --root "$FIX/cfg-where-next"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "unwrap-ratchet.test.sh: $PASS passed, $FAIL failed"
