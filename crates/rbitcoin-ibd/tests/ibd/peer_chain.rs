@@ -128,6 +128,41 @@ fn a_third_chain_split_survives_two_rewinds() {
     );
 }
 
+/// A peer that showed a stale sibling and then builds on this node's block
+/// at or above that height has joined this chain: the split is gone.
+#[test]
+fn a_reply_on_this_chain_above_a_split_clears_it() {
+    let ours = chain(3, 0x5c);
+    let sibling = chain(1, 0x77);
+    let path: HashMap<u32, BlockHash> = (1..).zip(ours.iter().map(|h| h.block_hash())).collect();
+    let mut peer = PeerChain::default();
+    peer.note_headers(&path, |_| None, 0, 1, &sibling);
+    assert!(peer.left_path_by(&path, 2));
+    peer.note_headers(&path, |_| None, 0, 2, &ours[1..]);
+    assert!(!peer.left_path_by(&path, 2));
+    assert!(!peer.left_path_by(&path, 3));
+    assert!(
+        peer.shows(&path, 3),
+        "the peer is asked for this chain again"
+    );
+
+    // A reply on this node's block that leaves it at the next height: the
+    // parent clears the old split and the new one is where it left.
+    let mut moved = PeerChain::default();
+    moved.note_headers(&path, |_| None, 0, 1, &sibling);
+    let other = chain(2, 0x91);
+    let off = Header {
+        prev_blockhash: ours[0].block_hash(),
+        ..other[1]
+    };
+    moved.note_headers(&path, |_| None, 0, 2, &[off]);
+    assert!(
+        !moved.left_path_by(&path, 1),
+        "it has this node's block below"
+    );
+    assert!(moved.left_path_by(&path, 2));
+}
+
 /// A `notfound` keeps a peer off that block for one stall window, then the
 /// peer may be asked again.
 #[test]

@@ -104,9 +104,24 @@ impl PeerChain {
         self.probed = true;
         let hashes: Vec<BlockHash> = headers.iter().map(|h| h.block_hash()).collect();
         let mut split_moved = false;
+        let ours = |ht: u32| {
+            path.get(&ht)
+                .copied()
+                .or_else(|| (ht <= tip).then(|| confirmed(ht)).flatten())
+        };
+        // A reply on this node's block proves this chain below it, so a split
+        // at or below that block is gone. Every chain shares genesis.
+        if let Some(first) = headers.first() {
+            if height > 1
+                && ours(height - 1) == Some(first.prev_blockhash)
+                && self.split.is_some_and(|(at, _)| at < height)
+            {
+                self.split = None;
+            }
+        }
         for (ht, hash) in (height..).zip(&hashes) {
             let on_path = path.get(&ht).copied();
-            let Some(our) = on_path.or_else(|| (ht <= tip).then(|| confirmed(ht)).flatten()) else {
+            let Some(our) = ours(ht) else {
                 continue;
             };
             if our == *hash {
@@ -139,11 +154,20 @@ impl PeerChain {
         };
         let start = height.saturating_add(skip as u32);
         let end = self.from.saturating_add(self.announced.len() as u32);
-        if self.announced.is_empty() || start < self.from || start > end {
-            self.announced.clear();
-            self.from = start;
-        } else {
-            self.announced.truncate((start - self.from) as usize);
+        // The kept run continues only from the parent of `start`.
+        let parent = match skip {
+            0 => headers[0].prev_blockhash,
+            k => hashes[k - 1],
+        };
+        let keep = (start > self.from && start <= end)
+            .then(|| (start - self.from) as usize)
+            .filter(|&k| self.announced[k - 1] == parent);
+        match keep {
+            Some(k) => self.announced.truncate(k),
+            None => {
+                self.announced.clear();
+                self.from = start;
+            }
         }
         self.announced.extend(fresh.iter().copied());
         let over = self.announced.len().saturating_sub(ANNOUNCED_CAP);
