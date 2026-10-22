@@ -2537,7 +2537,6 @@ impl ScriptHashTable {
             slot_words: Vec::new(),
             body_buf: Vec::with_capacity(BULK_BODY_FLUSH),
             body_write_off: bump,
-            finished: false,
             keys_written: 0,
             shards_flushed: 0,
             body_flush_ns: 0,
@@ -2679,7 +2678,6 @@ pub struct ScriptHashBulkSession<'a> {
     /// direct `write_at` (freelist reuse, page, gap carve).
     pub body_buf: Vec<u8>,
     pub body_write_off: u64,
-    pub finished: bool,
     pub keys_written: u64,
     pub shards_flushed: u32,
     /// Wall time spent in body `write_at` flushes.
@@ -2734,21 +2732,6 @@ pub struct BulkOpenKey {
 pub const BULK_BODY_FLUSH: usize = 16 * 1024 * 1024;
 
 impl<'a> ScriptHashBulkSession<'a> {
-    /// Creates written so far (sum of chain lengths, not unique keys).
-    pub fn creates_written(&self) -> u64 {
-        self.live_count
-    }
-
-    /// Creates including the open key's accepted FKs (status while a megakey streams).
-    pub fn stream_creates_written(&self) -> u64 {
-        self.live_count.saturating_add(
-            self.open_key
-                .as_ref()
-                .map(|o| u64::from(o.n_total))
-                .unwrap_or(0),
-        )
-    }
-
     /// Unique keys packed so far.
     pub fn keys_written(&self) -> u64 {
         self.keys_written
@@ -2836,7 +2819,6 @@ impl<'a> ScriptHashBulkSession<'a> {
             pack_ns: self.pack_ns,
             fp_singles: 0,
         };
-        self.finished = true;
         Ok(pack)
     }
 
