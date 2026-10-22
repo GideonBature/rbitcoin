@@ -1547,23 +1547,14 @@ impl ChainHub {
         false
     }
 
-    /// Header for a connected, held, archived, or header-only hash.
+    /// Header for a cached, held, archived, or header-only hash.
+    ///
+    /// A cache hit is the stored body header. It does not rebuild the block.
+    /// A miss builds the wire header from the header row, and only that row.
     pub fn header_of(&self, hash: &BlockHash) -> Option<bitcoin::block::Header> {
         HEADER_OF_N.with(|c| c.set(c.get().saturating_add(1)));
-        // The body cache is indexed by height. After a reorg it can still
-        // hold a different block at the published height; that body is not
-        // this header. Archive and held bodies are the fallback.
-        if let Some(h) = self
-            .query
-            .height_of_hash(&hash.to_byte_array())
-            .ok()
-            .flatten()
-        {
-            if let Ok(Some(b)) = self.block_at_height(h.0) {
-                if b.block_hash() == *hash {
-                    return Some(b.header);
-                }
-            }
+        if let Some(header) = self.cache.get_header(hash) {
+            return Some(header);
         }
         if let Some(b) = self.load_side_body(hash) {
             return Some(b.header);
@@ -3256,10 +3247,6 @@ impl ChainHub {
             .await
     }
 
-    pub fn accept_received_on_lane(&self, block: Block) -> Result<AcceptOutcome, NetError> {
-        self.accept_received_block_inner(block)
-    }
-
     /// Wait until the current tip-accept job finishes (including BIP152 HB select).
     ///
     /// Default is bounded to that job: a queued follow-on accept may still be
@@ -3316,10 +3303,6 @@ impl ChainHub {
     }
 
     /// Park a disconnected body without running [`Self::try_apply_held`].
-    pub fn hold_unconnected_body(&self, block: Block) {
-        self.hold_body(Arc::new(block));
-    }
-
     #[doc(hidden)]
     pub fn hold_body(&self, block: Arc<Block>) {
         let hash = block.block_hash();

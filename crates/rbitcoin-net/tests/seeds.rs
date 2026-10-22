@@ -44,7 +44,9 @@ fn inject_drops_unroutable_and_add_learned_keeps_it() {
         public,
     ]);
     assert_eq!(book.len(), 1);
-    assert!(book.entry(&public).is_some());
+    assert!(book
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(public))
+        .is_some());
     let sixto4_public: SocketAddr = "[2002:0102:0304::]:8333".parse().unwrap();
     let nat64_public: SocketAddr = "[64:ff9b::102:304]:8333".parse().unwrap();
     let compatible_public: SocketAddr = "[::102:304]:8333".parse().unwrap();
@@ -62,24 +64,37 @@ fn inject_drops_unroutable_and_add_learned_keeps_it() {
         bench_outside,
     ]);
     assert!(
-        book.entry(&sixto4_public).is_some(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(sixto4_public))
+            .is_some(),
         "6to4 of a public IPv4 stays when the suffix is zero"
     );
     assert!(
-        book.entry(&nat64_public).is_some(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(nat64_public))
+            .is_some(),
         "NAT64 of a public IPv4 stays"
     );
-    assert!(book.entry(&compatible_public).is_some());
-    assert!(book.entry(&siit_public).is_some());
-    assert!(book.entry(&nat64_local_public).is_some());
-    assert!(book.entry(&mapped_public).is_some());
+    assert!(book
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(compatible_public))
+        .is_some());
+    assert!(book
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(siit_public))
+        .is_some());
+    assert!(book
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(nat64_local_public))
+        .is_some());
+    assert!(book
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(mapped_public))
+        .is_some());
     assert!(
-        book.entry(&bench_outside).is_some(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(bench_outside))
+            .is_some(),
         "2001:2:1::/48 is outside the benchmarking prefix"
     );
     let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
     assert!(book.add_learned(lan, 64));
-    assert!(book.entry(&lan).is_some());
+    assert!(book
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(lan))
+        .is_some());
     let cjdns: SocketAddr =
         SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)), 8333);
     book.set_cjdns_reachable(true);
@@ -148,9 +163,9 @@ fn take_dial_prefers_untried_and_good_over_failed() {
     am.add(incompat);
     am.add(good);
     am.add(untried);
-    am.note_connected(good);
-    am.note_connect_failed(failed, false);
-    am.note_connect_failed(incompat, true);
+    am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(good));
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(failed), false);
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(incompat), true);
 
     let got = am.take_dial_candidates(4, &HashSet::new(), &[]);
     assert_eq!(got.len(), 3);
@@ -175,10 +190,10 @@ fn take_dial_skips_incompatible_while_good_remain() {
     am.add(failed);
     am.add(incompat_a);
     am.add(incompat_b);
-    am.note_connected(good);
-    am.note_connect_failed(failed, false);
-    am.note_connect_failed(incompat_a, true);
-    am.note_connect_failed(incompat_b, true);
+    am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(good));
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(failed), false);
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(incompat_a), true);
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(incompat_b), true);
 
     let got = am.take_dial_candidates(48, &HashSet::new(), &[]);
     assert!(
@@ -198,8 +213,8 @@ fn take_dial_incompatible_when_nothing_else() {
     let b = addr(2);
     am.add(a);
     am.add(b);
-    am.note_connect_failed(a, true);
-    am.note_connect_failed(b, true);
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(a), true);
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(b), true);
     let got = am.take_dial_candidates(48, &HashSet::new(), &[]);
     assert_eq!(got.len(), 2);
     assert!(got.contains(&a));
@@ -260,8 +275,8 @@ fn take_dial_occupied_group_tier0_beats_unused_group_last_resort() {
     let lemon = slash16(9, 9, 1);
     am.add(good_same);
     am.add(lemon);
-    am.note_connected(good_same);
-    am.note_connect_failed(lemon, false);
+    am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(good_same));
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(lemon), false);
     let occupied = [slash16(1, 2, 9)];
     let got = am.take_dial_candidates(1, &HashSet::new(), &occupied);
     assert_eq!(
@@ -276,13 +291,13 @@ fn take_dial_skips_recent_attempt_while_others_remain() {
     let mut am = AddrMan::new();
     am.add(addr(1));
     am.add(addr(2));
-    am.note_attempt(addr(1));
+    am.note_attempt_addr(rbitcoin_net::NetAddr::from_socket(addr(1)));
     let got = am.take_dial_candidates(2, &HashSet::new(), &[]);
     assert_eq!(got, vec![addr(2)]);
 
     let mut only = AddrMan::new();
     only.add(addr(1));
-    only.note_attempt(addr(1));
+    only.note_attempt_addr(rbitcoin_net::NetAddr::from_socket(addr(1)));
     assert_eq!(
         only.take_dial_candidates(1, &HashSet::new(), &[]),
         vec![addr(1)],
@@ -327,13 +342,16 @@ fn add_learned_evicts_failed_when_at_cap() {
     let mut am = AddrMan::new();
     for i in 1..=3 {
         am.add(addr(i));
-        am.note_connect_failed(addr(i), i == 1);
+        am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(addr(i)), i == 1);
     }
     assert!(am.add_learned(addr(9), 3));
     assert_eq!(am.len(), 3);
-    assert!(am.entry(&addr(9)).is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(9)))
+        .is_some());
     assert!(
-        am.entry(&addr(1)).is_none(),
+        am.entry_of(&rbitcoin_net::NetAddr::from_socket(addr(1)))
+            .is_none(),
         "incompatible is evicted before failed-last-connect"
     );
 }
@@ -343,11 +361,13 @@ fn add_learned_keeps_good_when_full() {
     let mut am = AddrMan::new();
     for i in 1..=3 {
         am.add(addr(i));
-        am.note_connected(addr(i));
+        am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(addr(i)));
     }
     assert!(!am.add_learned(addr(9), 3));
     assert_eq!(am.len(), 3);
-    assert!(am.entry(&addr(9)).is_none());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(9)))
+        .is_none());
     assert!(!am.add_learned(addr(1), 3));
 }
 
@@ -359,13 +379,20 @@ fn add_learned_evicts_oldest_new_when_at_cap() {
     }
     assert!(am.add_learned(addr(9), 3));
     assert_eq!(am.len(), 3);
-    assert!(am.entry(&addr(9)).is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(9)))
+        .is_some());
     assert!(
-        am.entry(&addr(1)).is_none(),
+        am.entry_of(&rbitcoin_net::NetAddr::from_socket(addr(1)))
+            .is_none(),
         "oldest new is evicted after incompat/failed"
     );
-    assert!(am.entry(&addr(2)).is_some());
-    assert!(am.entry(&addr(3)).is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(2)))
+        .is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(3)))
+        .is_some());
 }
 
 #[test]
@@ -389,16 +416,22 @@ fn add_keeps_tried_and_may_exceed_cap() {
     for i in 0..MAX_ADDR_MAN {
         let a = addr_n(i as u32);
         am.add(a);
-        am.note_connected(a);
+        am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(a));
     }
     let extra = addr_n(MAX_ADDR_MAN as u32);
     am.add(extra);
     assert_eq!(am.len(), MAX_ADDR_MAN + 1);
-    assert!(am.entry(&extra).is_some());
-    assert!(am.entry(&addr_n(0)).is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(extra))
+        .is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(0)))
+        .is_some());
     assert!(!am.add_learned(addr_n(MAX_ADDR_MAN as u32 + 1), MAX_ADDR_MAN));
     assert_eq!(am.len(), MAX_ADDR_MAN + 1);
-    assert!(am.entry(&extra).is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(extra))
+        .is_some());
 }
 
 #[test]
@@ -410,9 +443,15 @@ fn add_evicts_oldest_new_at_cap() {
     let extra = addr_n(MAX_ADDR_MAN as u32);
     am.add(extra);
     assert_eq!(am.len(), MAX_ADDR_MAN);
-    assert!(am.entry(&extra).is_some());
-    assert!(am.entry(&addr_n(0)).is_none());
-    assert!(am.entry(&addr_n(1)).is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(extra))
+        .is_some());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(0)))
+        .is_none());
+    assert!(am
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(1)))
+        .is_some());
 }
 
 #[test]
@@ -421,7 +460,7 @@ fn merge_from_trims_to_cap_keeping_tried() {
     for i in 0..MAX_ADDR_MAN {
         let x = addr_n(i as u32);
         a.add(x);
-        a.note_connected(x);
+        a.note_connected_addr(rbitcoin_net::NetAddr::from_socket(x));
     }
     let mut b = AddrMan::new();
     for i in 0..8 {
@@ -430,11 +469,15 @@ fn merge_from_trims_to_cap_keeping_tried() {
     a.merge_from(&b);
     assert_eq!(a.len(), MAX_ADDR_MAN);
     assert!(
-        a.entry(&addr_n(0)).is_some(),
+        a.entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(0)))
+            .is_some(),
         "tried addrs must survive merge trim"
     );
     assert!(
-        a.entry(&addr_n(MAX_ADDR_MAN as u32)).is_none(),
+        a.entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(
+            MAX_ADDR_MAN as u32
+        )))
+        .is_none(),
         "extra new from the other book must not grow past cap"
     );
 }
@@ -465,17 +508,25 @@ fn load_trims_tried_then_new_to_cap() {
     assert_eq!(loaded.len(), MAX_ADDR_MAN);
     for i in 0..n_tried {
         assert!(
-            loaded.entry(&addr_n(i)).is_some(),
+            loaded
+                .entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(i)))
+                .is_some(),
             "tried {i} must survive trim"
         );
         assert!(loaded.flags(&addr_n(i)).has_connected());
     }
     let n_new_kept = MAX_ADDR_MAN - n_tried as usize;
-    assert!(loaded.entry(&addr_n(n_tried)).is_some());
     assert!(loaded
-        .entry(&addr_n(n_tried + n_new_kept as u32 - 1))
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(n_tried)))
         .is_some());
-    assert!(loaded.entry(&addr_n(n_total - 1)).is_none());
+    assert!(loaded
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(
+            n_tried + n_new_kept as u32 - 1
+        )))
+        .is_some());
+    assert!(loaded
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr_n(n_total - 1)))
+        .is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -488,10 +539,14 @@ fn peers_file_roundtrip_preserves_flags() {
     let a = addr(10);
     let b = addr(20);
     am.add(a);
-    am.note_connected(a);
-    am.note_speed(a, 40, PeerFlags::FAST_BPS_MIN + 100);
+    am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(a));
+    am.note_speed_addr(
+        rbitcoin_net::NetAddr::from_socket(a),
+        40,
+        PeerFlags::FAST_BPS_MIN + 100,
+    );
     am.add(b);
-    am.note_connect_failed(b, true);
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(b), true);
     am.save(&path).unwrap();
 
     let loaded = AddrMan::load(&path).unwrap();
@@ -622,10 +677,14 @@ fn peer_flags_set_remove_and_mid_range_speed() {
 fn note_ibd_slow_clears_fast_and_is_tier_one() {
     let mut am = AddrMan::new();
     let a = addr(11);
-    am.note_speed(a, 40, PeerFlags::FAST_BPS_MIN + 100);
+    am.note_speed_addr(
+        rbitcoin_net::NetAddr::from_socket(a),
+        40,
+        PeerFlags::FAST_BPS_MIN + 100,
+    );
     assert!(am.flags(&a).is_fast());
     assert_eq!(am.flags(&a).dial_tier(), 0);
-    am.note_ibd_slow(a);
+    am.note_ibd_slow_addr(rbitcoin_net::NetAddr::from_socket(a));
     assert!(am.flags(&a).is_slow(), "IBD outlier must be SLOW");
     assert!(!am.flags(&a).is_fast(), "IBD outlier must not keep FAST");
     assert_eq!(am.flags(&a).dial_tier(), 1);
@@ -635,10 +694,19 @@ fn note_ibd_slow_clears_fast_and_is_tier_one() {
 fn apply_ibd_dead_speed_outlier_mid_range_does_not_restore_fast() {
     let mut am = AddrMan::new();
     let a = addr(12);
-    am.note_speed(a, 40, PeerFlags::FAST_BPS_MIN + 100);
+    am.note_speed_addr(
+        rbitcoin_net::NetAddr::from_socket(a),
+        40,
+        PeerFlags::FAST_BPS_MIN + 100,
+    );
     assert!(am.flags(&a).is_fast());
     // Relative-slow kick sample is often 150–500 KB/s (above SLOW_BPS_MAX).
-    am.apply_ibd_dead_speed(a, 150, Some(300_000), true);
+    am.apply_ibd_dead_speed_addr(
+        rbitcoin_net::NetAddr::from_socket(a),
+        150,
+        Some(300_000),
+        true,
+    );
     assert!(
         am.flags(&a).is_slow() && !am.flags(&a).is_fast(),
         "cooldown Dead mid-range must not restore FAST: {:?}",
@@ -651,8 +719,17 @@ fn apply_ibd_dead_speed_outlier_mid_range_does_not_restore_fast() {
 fn apply_ibd_dead_speed_without_outlier_keeps_mid_range_fast() {
     let mut am = AddrMan::new();
     let a = addr(13);
-    am.note_speed(a, 40, PeerFlags::FAST_BPS_MIN + 100);
-    am.apply_ibd_dead_speed(a, 150, Some(300_000), false);
+    am.note_speed_addr(
+        rbitcoin_net::NetAddr::from_socket(a),
+        40,
+        PeerFlags::FAST_BPS_MIN + 100,
+    );
+    am.apply_ibd_dead_speed_addr(
+        rbitcoin_net::NetAddr::from_socket(a),
+        150,
+        Some(300_000),
+        false,
+    );
     assert!(
         am.flags(&a).is_fast() && !am.flags(&a).is_slow(),
         "graceful Dead mid-range still leaves prior FAST"
@@ -678,15 +755,17 @@ fn addrman_merge_offset_and_ipv4_sort() {
     });
     a.merge_from(&b);
     assert!(a.flags(&addr(9)).is_slow());
-    assert!(a.entry(&addr(9)).is_some());
+    assert!(a
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(9)))
+        .is_some());
     assert!(!a.is_empty());
 
     // Ranked outbound + offset wrap.
-    let ranked = a.take_outbound(2);
+    let ranked = a.take_dial_candidates(2, &HashSet::new(), &[]);
     assert_eq!(ranked.len(), 2);
-    let offset = a.take_outbound_offset(3, 1);
+    let offset = a.take_outbound_offset_occupied(3, 1, &[]);
     assert_eq!(offset.len(), 3.min(a.len()));
-    assert!(a.take_outbound_offset(0, 0).is_empty());
+    assert!(a.take_outbound_offset_occupied(0, 0, &[]).is_empty());
     assert!(a.take_dial_candidates(0, &HashSet::new(), &[]).is_empty());
 }
 
@@ -772,9 +851,9 @@ fn peers_file_load_errors_and_empty() {
     let nested = dir.join("nested").join("peers");
     let mut am = AddrMan::new();
     am.add(addr(3));
-    am.note_connect_failed(addr(3), true);
+    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(addr(3)), true);
     assert!(am.flags(&addr(3)).is_incompatible());
-    am.note_connected(addr(3));
+    am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(addr(3)));
     assert!(am.flags(&addr(3)).has_connected());
     assert!(!am.flags(&addr(3)).is_incompatible());
     am.save(&nested).unwrap();
@@ -797,7 +876,9 @@ fn peers_file_v1_ipv4_still_loads() {
     let path = dir.join("peers");
     std::fs::write(&path, format!("rbitcoin-peers-v1\n{} 0x01\n", addr(4))).unwrap();
     let loaded = AddrMan::load(&path).unwrap();
-    assert!(loaded.entry(&addr(4)).is_some());
+    assert!(loaded
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(4)))
+        .is_some());
     assert!(loaded.flags(&addr(4)).has_connected());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -828,17 +909,23 @@ rbitcoin-peers-v2
     let loaded = AddrMan::load(&path).unwrap();
     let public: SocketAddr = "1.2.3.4:8333".parse().unwrap();
     assert!(
-        loaded.entry(&public).is_some(),
+        loaded
+            .entry_of(&rbitcoin_net::NetAddr::from_socket(public))
+            .is_some(),
         "a public address still loads"
     );
     assert!(loaded.flags(&public).has_connected());
     let lan: SocketAddr = "10.0.0.1:8333".parse().unwrap();
     assert!(
-        loaded.entry(&lan).is_none(),
+        loaded
+            .entry_of(&rbitcoin_net::NetAddr::from_socket(lan))
+            .is_none(),
         "a remembered RFC1918 address is not dialed again"
     );
     let cgnat: SocketAddr = "100.64.0.1:8333".parse().unwrap();
-    assert!(loaded.entry(&cgnat).is_none());
+    assert!(loaded
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(cgnat))
+        .is_none());
     assert!(
         loaded
             .entries()

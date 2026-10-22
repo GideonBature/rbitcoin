@@ -242,7 +242,7 @@ impl ParentTracker {
             return;
         };
         for hash in hashes {
-            self.remove_peer_ann(&hash, peer);
+            self.remove_peer_ann_kind(&hash, peer, None);
         }
     }
 
@@ -461,11 +461,6 @@ impl ParentTracker {
         for peer in peers {
             self.remove_peer_ann_kind(hash, peer, Some(wtxid));
         }
-    }
-
-    #[doc(hidden)]
-    pub fn remove_peer_ann(&mut self, hash: &[u8; 32], peer: u64) {
-        self.remove_peer_ann_kind(hash, peer, None);
     }
 
     #[doc(hidden)]

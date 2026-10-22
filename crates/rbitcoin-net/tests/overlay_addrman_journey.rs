@@ -196,7 +196,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<rbitcoin_net::seeds::AddrMan>, overl
         "a failed onion loses to a fresh one: {got:?}"
     );
     let placeholder = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8333));
-    failed.note_connect_failed(placeholder, false);
+    failed.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(placeholder), false);
     assert!(
         failed
             .entries()
@@ -231,7 +231,7 @@ fn only_net_dials_and_peers_file(am: &Mutex<rbitcoin_net::seeds::AddrMan>, overl
     tired_ip.set_onion_reachable(true);
     let tired_clear = SocketAddr::from((Ipv4Addr::new(9, 9, 9, 9), 8333));
     tired_ip.add(tired_clear);
-    tired_ip.note_connect_failed(tired_clear, false);
+    tired_ip.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(tired_clear), false);
     tired_ip.add_addr(tired_onion);
     tired_ip.note_connect_failed_addr(tired_onion, false);
     let got = tired_ip.take_dial_candidates_net(4, &HashSet::new(), &[]);

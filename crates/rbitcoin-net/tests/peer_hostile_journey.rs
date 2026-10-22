@@ -130,9 +130,9 @@ async fn addrv2_gossip_drops_unroutable_clearnet() {
     let book = book.lock().unwrap_or_else(|e| e.into_inner());
     let public_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 8333);
     let lan_sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8333);
-    assert!(book.entry(&public_sock).is_some());
+    assert!(book.entry_of(&rbitcoin_net::NetAddr::from_socket(public_sock)).is_some());
     assert!(
-        book.entry(&lan_sock).is_none(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(lan_sock)).is_none(),
         "learn_addrv2 does not store RFC1918"
     );
 }

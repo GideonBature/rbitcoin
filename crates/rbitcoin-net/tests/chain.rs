@@ -238,7 +238,7 @@ fn latest_run_chain_surfaces() {
     let parent = mine(child.block_hash(), t0.saturating_add(1), 2);
     let taller = mine(parent.block_hash(), t0.saturating_add(2), 3);
     let taller_hash = taller.block_hash();
-    hub.hold_unconnected_body(taller);
+    hub.hold_body(Arc::new(taller));
     match hub.accept_received_block(parent).unwrap() {
         AcceptOutcome::Accepted { height } => assert_eq!(
             height, 3,
@@ -390,14 +390,14 @@ fn invalid_child_missing_parent_and_linked_reconsider() {
     let gen = hub.tip_hash().unwrap();
     let t0 = hub.tip_header().unwrap().time;
     let on_tip = mine(gen, t0.saturating_add(1), 1);
-    hub.hold_unconnected_body(on_tip.clone());
+    hub.hold_body(Arc::new(on_tip.clone()));
     assert!(
         hub.held_missing_parents().is_empty(),
         "the parent is connected, so the held block is not missing one"
     );
     let orphan = mine(on_tip.block_hash(), t0.saturating_add(2), 2);
     hub.drop_held(on_tip.block_hash());
-    hub.hold_unconnected_body(orphan.clone());
+    hub.hold_body(Arc::new(orphan.clone()));
     assert_eq!(hub.held_missing_parents(), vec![on_tip.block_hash()]);
 
     hub.accept_block(on_tip.clone()).unwrap();
@@ -408,7 +408,7 @@ fn invalid_child_missing_parent_and_linked_reconsider() {
         2,
         &[orphan.block_hash()],
     );
-    hub.hold_unconnected_body(child.clone());
+    hub.hold_body(Arc::new(child.clone()));
     assert!(
         hub.is_block_invalid(&child.block_hash()),
         "a held child of an invalid block is invalid"
@@ -428,7 +428,7 @@ fn invalid_child_missing_parent_and_linked_reconsider() {
     let d = mine(c_hash, t0.saturating_add(6), 3);
     let d_hash = d.block_hash();
     hub.ensure_header(&d.header).unwrap();
-    hub.hold_unconnected_body(d);
+    hub.hold_body(Arc::new(d));
     hub.invalidate_block(d_hash).unwrap();
     hub.invalidate_block(b.block_hash()).unwrap();
     hub.reconsider_block(b.block_hash()).unwrap();
@@ -444,7 +444,7 @@ fn held_genesis_is_a_valid_header_chain() {
     let (dir, hub) = tmp_hub();
     let genesis = genesis_block(&hub.params);
     let hash = genesis.block_hash();
-    hub.hold_unconnected_body(genesis);
+    hub.hold_body(Arc::new(genesis));
     let status = hub
         .chaintips()
         .into_iter()
@@ -873,13 +873,13 @@ fn hold_body_caps_fifo() {
     let mut exact = block_with_wire_len(HeldBodies::MAX_BLOCK_SERIALIZED);
     exact.header.nonce = 1;
     let exact_h = exact.block_hash();
-    hub.hold_unconnected_body(exact);
+    hub.hold_body(Arc::new(exact));
     assert!(hub.held_body(&exact_h).is_some());
     let mut over = block_with_wire_len(HeldBodies::MAX_BLOCK_SERIALIZED);
     over.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0u8; 4_000_001]);
     over.header.nonce = 2;
     let over_h = over.block_hash();
-    hub.hold_unconnected_body(over);
+    hub.hold_body(Arc::new(over));
     assert!(hub.held_body(&over_h).is_none());
     hub.drop_held(exact_h);
     let gen = hub.tip_hash().unwrap();
@@ -891,7 +891,7 @@ fn hold_body_caps_fifo() {
         let h = b.block_hash();
         avoid.push(h);
         hashes.push(h);
-        hub.hold_unconnected_body(b);
+        hub.hold_body(Arc::new(b));
     }
     assert_eq!(hub.held_body_count(), HeldBodies::CAP);
     assert!(
@@ -910,12 +910,12 @@ fn hold_body_spares_asked_getdata_from_fifo() {
     let asked = mine_distinct(gen, 1_400_000_000, 1, &[]);
     let asked_h = asked.block_hash();
     hub.note_asked_block(asked_h);
-    hub.hold_unconnected_body(asked);
+    hub.hold_body(Arc::new(asked));
     let mut avoid = vec![asked_h];
     for i in 0..HeldBodies::CAP as u32 {
         let b = mine_distinct(gen, 1_400_000_100 + i, 1, &avoid);
         avoid.push(b.block_hash());
-        hub.hold_unconnected_body(b);
+        hub.hold_body(Arc::new(b));
     }
     assert!(
         hub.held_body(&asked_h).is_some(),
@@ -932,11 +932,11 @@ fn held_missing_parents_skips_connected_and_held() {
     let gen = hub.tip_hash().unwrap();
     let orphan_prev = BlockHash::from_byte_array([0x09; 32]);
     let b = mine(orphan_prev, 1_300_000_500, 1);
-    hub.hold_unconnected_body(b);
+    hub.hold_body(Arc::new(b));
     let parent = mine(gen, 1_300_000_600, 1);
     let child = mine(parent.block_hash(), 1_300_000_700, 2);
-    hub.hold_unconnected_body(parent.clone());
-    hub.hold_unconnected_body(child);
+    hub.hold_body(Arc::new(parent.clone()));
+    hub.hold_body(Arc::new(child));
     let missing = hub.held_missing_parents();
     assert!(missing.contains(&orphan_prev));
     assert!(!missing.contains(&gen));
@@ -1294,7 +1294,7 @@ fn chain_edges_pin_work_headers_and_reopen() {
         1,
         &[child.block_hash()],
     );
-    hub.hold_unconnected_body(parked.clone());
+    hub.hold_body(Arc::new(parked.clone()));
     assert!(hub
         .query
         .get_header_by_hash(&parked.block_hash().to_byte_array())
@@ -1378,7 +1378,7 @@ fn chain_edges_pin_work_headers_and_reopen() {
     let s2 = mine(s1.block_hash(), s1.header.time.saturating_add(1), 2);
     hub.accept_branch(&[s1, s2]).unwrap();
     assert_eq!(hub.tip_height(), Some(2));
-    hub.hold_unconnected_body(parked.clone());
+    hub.hold_body(Arc::new(parked.clone()));
     let fork_status = hub
         .chaintips()
         .into_iter()
@@ -2296,7 +2296,7 @@ fn ancestry_walks_never_reread_a_held_chain_lock() {
     let child = mine(b1.block_hash(), 1_300_030_100, 2);
     hub.ensure_header(&child.header).unwrap();
     let side = mine(gen, 1_300_030_200, 1);
-    hub.hold_unconnected_body(side.clone());
+    hub.hold_body(Arc::new(side.clone()));
     assert!(hub.held_body(&side.block_hash()).is_some());
     let tip = child.block_hash();
 
@@ -3223,8 +3223,8 @@ fn failed_offered_block_is_rejected_when_its_held_prefix_stays() {
     );
     let w3 = mine(w2.block_hash(), w2.header.time + 600, 3);
     let w4 = mine(w3.block_hash(), w3.header.time + 600, 9);
-    hub.hold_unconnected_body(w2);
-    hub.hold_unconnected_body(w3.clone());
+    hub.hold_body(Arc::new(w2));
+    hub.hold_body(Arc::new(w3.clone()));
     let err = hub
         .accept_received_block(w4.clone())
         .expect_err("w4 has a wrong BIP34 height");
@@ -4158,7 +4158,7 @@ fn reconsider_skips_a_branch_that_fails() {
         .unwrap()
         .unwrap();
     hub.invalidate_block(tip).unwrap();
-    hub.hold_unconnected_body(tip_body);
+    hub.hold_body(Arc::new(tip_body));
     hub.chain_work_prefix.write().unwrap().clear();
     let header_body = dir.path().join("header.body");
     std::fs::OpenOptions::new()

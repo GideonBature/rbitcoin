@@ -761,13 +761,13 @@ impl LivePeer {
     }
 
     pub fn advertises_network(&self) -> bool {
-        self.services & service_flags_u64(ServiceFlags::NETWORK) != 0
+        self.services & ServiceFlags::NETWORK.to_u64() != 0
     }
 
     /// NETWORK or NETWORK_LIMITED — this peer can serve blocks.
     pub fn can_serve_blocks(&self) -> bool {
-        let net = service_flags_u64(ServiceFlags::NETWORK);
-        let lim = service_flags_u64(ServiceFlags::NETWORK_LIMITED);
+        let net = ServiceFlags::NETWORK.to_u64();
+        let lim = ServiceFlags::NETWORK_LIMITED.to_u64();
         self.services & (net | lim) != 0
     }
 
@@ -1919,13 +1919,11 @@ impl PeerHub {
         let services = crate::peer::local_service_flags(self.is_pruned(), Some(self));
         self.addr_response_net(bind, false)
             .into_iter()
-            .filter_map(|(t, a)| match a {
-                crate::NetAddr::Ip(s) => {
-                    Some((t, bitcoin::p2p::address::Address::new(&s, services)))
-                }
-                crate::NetAddr::Onion { .. }
-                | crate::NetAddr::I2p { .. }
-                | crate::NetAddr::Cjdns { .. } => None,
+            .filter_map(|(t, a)| {
+                let crate::NetAddr::Ip(s) = a else {
+                    return None;
+                };
+                Some((t, bitcoin::p2p::address::Address::new(&s, services)))
             })
             .collect()
     }
@@ -2435,7 +2433,7 @@ impl PeerHub {
         let _ = self
             .next_id
             .fetch_max(id.saturating_add(1), Ordering::Relaxed);
-        let services = service_flags_u64(ver.services);
+        let services = ver.services.to_u64();
         let connected_at = self.now_secs();
         let peer = Arc::new(LivePeer {
             id,
@@ -3140,12 +3138,6 @@ pub fn pick_stale_follow_evict(ids: &[u64], salt: u64, groups: &[u64]) -> Option
         }
     }
     Some(ids[(salt as usize) % ids.len()])
-}
-
-#[doc(hidden)]
-pub fn service_flags_u64(f: ServiceFlags) -> u64 {
-    // rust-bitcoin 0.32: ServiceFlags is a bitflags newtype.
-    f.to_u64()
 }
 
 /// Parse Core `ip:port` / `[v6]:port`.

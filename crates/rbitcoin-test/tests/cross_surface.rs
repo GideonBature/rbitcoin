@@ -2735,7 +2735,8 @@ async fn node_listen_and_exit() {
     assert!(mempool.exists(), "run_p2p opens the mempool");
     let book = rbitcoin_net::AddrMan::load(&peers).expect("junk book replaced");
     assert!(
-        book.entry(&dead).is_none(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(dead))
+            .is_none(),
         "loopback is not restored from the peers file"
     );
     let text = std::fs::read_to_string(&peers).expect("peers saved");

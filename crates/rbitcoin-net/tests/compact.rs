@@ -19,9 +19,8 @@ fn empty_avail() -> HashMap<ShortId, Vec<&'static Transaction>> {
 fn must_partial<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     avail: &HashMap<ShortId, Vec<T>>,
-    version: u32,
 ) -> CmpctPartial {
-    match reconstruct(hsi, avail, version) {
+    match reconstruct(hsi, avail) {
         Reconstruct::Partial(p) => p,
         other => panic!("expected partial, got {other:?}"),
     }
@@ -97,13 +96,13 @@ fn reconstruct_rejects_tx_count_above_weight_ratio() {
     let mut hsi = HeaderAndShortIds::from_block(&block, 1, 2, &[]).unwrap();
     hsi.short_ids = vec![ShortId::from([0u8; 6]); rbitcoin_consensus::MAX_BLOCK_TX_COUNT];
     assert!(
-        matches!(reconstruct(&hsi, &empty_avail(), 2), Reconstruct::Fail),
+        matches!(reconstruct(&hsi, &empty_avail()), Reconstruct::Fail),
         "count at the cap plus the prefilled coinbase is over"
     );
     let n_pref = hsi.prefilled_txs.len();
     hsi.short_ids = vec![ShortId::from([0u8; 6]); rbitcoin_consensus::MAX_BLOCK_TX_COUNT - n_pref];
     assert!(
-        !matches!(reconstruct(&hsi, &empty_avail(), 2), Reconstruct::Fail),
+        !matches!(reconstruct(&hsi, &empty_avail()), Reconstruct::Fail),
         "exactly the cap is still a partial, not a count failure"
     );
 }
@@ -116,7 +115,7 @@ fn reconstruct_full_from_mempool_map() {
     let hsi = HeaderAndShortIds::from_block(&block, 0xdead_beef, 2, &[]).unwrap();
     // Available: both non-coinbase from "mempool"
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1, &b2]);
-    let recon = try_reconstruct(&hsi, &avail, 2).expect("full fill");
+    let recon = try_reconstruct(&hsi, &avail).expect("full fill");
     assert_eq!(recon.txdata.len(), 3);
     assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
     assert_eq!(recon.txdata[2].compute_txid(), b2.compute_txid());
@@ -141,11 +140,11 @@ fn reconstruct_fill_keeps_matching_shortid_not_rehash() {
 
     let rehashed = shortid_map_from_txs(&block.header, hsi.nonce, 2, owned.values().flatten());
     assert!(
-        try_reconstruct(&hsi, &rehashed, 2).is_err(),
+        try_reconstruct(&hsi, &rehashed).is_err(),
         "rehashing clones must miss a caller short-id"
     );
 
-    let recon = try_reconstruct(&hsi, &owned, 2).expect("matching short-id must place body");
+    let recon = try_reconstruct(&hsi, &owned).expect("matching short-id must place body");
     assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
 }
 
@@ -158,7 +157,7 @@ fn missing_indexes_when_mempool_empty() {
     };
     let hsi = HeaderAndShortIds::from_block(&block, 1, 2, &[]).unwrap();
     let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-    let missing = try_reconstruct(&hsi, &empty, 2).unwrap_err();
+    let missing = try_reconstruct(&hsi, &empty).unwrap_err();
     // coinbase prefilled; one short id missing at abs index 1
     assert_eq!(missing, vec![1]);
 }
@@ -172,7 +171,7 @@ fn repeated_short_id_is_requested_not_duplicated() {
     };
     let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
-    let missing = try_reconstruct(&hsi, &avail, 2).expect_err("repeat must not fully fill");
+    let missing = try_reconstruct(&hsi, &avail).expect_err("repeat must not fully fill");
     assert!(
         !missing.is_empty(),
         "second slot of the same short-id must be missing"
@@ -193,7 +192,7 @@ fn unique_shortid_wrong_body_is_not_a_block() {
     let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
     let wrong = spend(9);
     avail.insert(sid, vec![&wrong]);
-    let missing = try_reconstruct(&hsi, &avail, 2).expect_err("wrong unique fill");
+    let missing = try_reconstruct(&hsi, &avail).expect_err("wrong unique fill");
     assert!(
         missing.is_empty(),
         "merkle-mutated fill must getdata (empty missing), got {missing:?}"
@@ -241,7 +240,7 @@ fn prefilled_64_byte_body_without_coinbase_is_not_a_block() {
     let inner = rbitcoin_net::chain::sixty_four_byte_body(BlockHash::all_zeros(), 1);
     let hsi = HeaderAndShortIds::from_block(&inner, 6, 2, &[]).unwrap();
     let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-    let missing = try_reconstruct(&hsi, &empty, 2).expect_err("possible inner merkle node");
+    let missing = try_reconstruct(&hsi, &empty).expect_err("possible inner merkle node");
     assert!(
         missing.is_empty(),
         "a mutated fill must getdata the full block, got {missing:?}"
@@ -254,7 +253,7 @@ fn apply_blocktxn_wrong_body_is_not_a_block() {
     let block = sealed_block(vec![coinbase(), b1]);
     let hsi = HeaderAndShortIds::from_block(&block, 5, 2, &[]).unwrap();
     let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-    let partial = must_partial(&hsi, &empty, 2);
+    let partial = must_partial(&hsi, &empty);
     let txn = BlockTransactions {
         block_hash: block.block_hash(),
         transactions: vec![spend(11)],
@@ -272,7 +271,7 @@ fn apply_blocktxn_completes() {
     let block = sealed_block(vec![coinbase(), b1.clone()]);
     let hsi = HeaderAndShortIds::from_block(&block, 2, 2, &[]).unwrap();
     let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-    let partial = must_partial(&hsi, &empty, 2);
+    let partial = must_partial(&hsi, &empty);
     let txn = BlockTransactions {
         block_hash: block.block_hash(),
         transactions: vec![b1.clone()],
@@ -296,7 +295,7 @@ fn partial_mempool_plus_blocktxn() {
     let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
     // Only b1 in "mempool"
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
-    let partial = must_partial(&hsi, &avail, 2);
+    let partial = must_partial(&hsi, &avail);
     assert_eq!(partial.missing(), [2]); // abs index of b2
     let txn = BlockTransactions {
         block_hash: block.block_hash(),
@@ -314,7 +313,7 @@ fn apply_keeps_first_pass_when_mempool_map_gone() {
     let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
     let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
-    let partial = must_partial(&hsi, &avail, 2);
+    let partial = must_partial(&hsi, &avail);
     assert_eq!(partial.missing(), [2]);
     let txn = BlockTransactions {
         block_hash: block.block_hash(),
@@ -336,7 +335,7 @@ fn apply_collision_slot_from_blocktxn_only() {
     let b_alt = spend(10);
     let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
     avail.insert(sid, vec![&b1, &b_alt]);
-    let partial = must_partial(&hsi, &avail, 2);
+    let partial = must_partial(&hsi, &avail);
     assert_eq!(partial.missing(), [1]);
     let txn = BlockTransactions {
         block_hash: block.block_hash(),
@@ -358,7 +357,7 @@ fn reconstruct_oob_prefill_is_fail() {
         }],
     };
     assert!(matches!(
-        reconstruct(&oob, &empty_avail(), 2),
+        reconstruct(&oob, &empty_avail()),
         Reconstruct::Fail
     ));
 }
@@ -422,7 +421,7 @@ fn version1_txid_shortids_fill() {
     let block = sealed_block(vec![coinbase(), b1.clone()]);
     let hsi = HeaderAndShortIds::from_block(&block, 4, 1, &[]).unwrap();
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 1, [&b1]);
-    let recon = try_reconstruct(&hsi, &avail, 1).expect("v1 fill");
+    let recon = try_reconstruct(&hsi, &avail).expect("v1 fill");
     assert_eq!(recon.txdata[1].compute_txid(), b1.compute_txid());
 }
 
@@ -435,7 +434,7 @@ fn wrong_count_blocktxn_errors() {
     };
     let hsi = HeaderAndShortIds::from_block(&block, 5, 2, &[]).unwrap();
     let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-    let partial = must_partial(&hsi, &empty, 2);
+    let partial = must_partial(&hsi, &empty);
     let txn = BlockTransactions {
         block_hash: block.block_hash(),
         transactions: vec![], // wrong count
@@ -453,12 +452,12 @@ fn empty_compact_and_ambiguous_shortid() {
         prefilled_txs: vec![],
     };
     assert!(
-        try_reconstruct(&hsi, &HashMap::<ShortId, Vec<&Transaction>>::new(), 2)
+        try_reconstruct(&hsi, &HashMap::<ShortId, Vec<&Transaction>>::new())
             .unwrap_err()
             .is_empty()
     );
     assert!(matches!(
-        reconstruct(&hsi, &HashMap::<ShortId, Vec<&Transaction>>::new(), 2),
+        reconstruct(&hsi, &HashMap::<ShortId, Vec<&Transaction>>::new()),
         Reconstruct::Fail
     ));
     let empty_partial = CmpctPartial {
@@ -488,7 +487,7 @@ fn empty_compact_and_ambiguous_shortid() {
     let b_alt = spend(10);
     let mut avail: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
     avail.insert(sid, vec![&b1, &b_alt]);
-    let missing = try_reconstruct(&hsi, &avail, 2).unwrap_err();
+    let missing = try_reconstruct(&hsi, &avail).unwrap_err();
     assert_eq!(missing, vec![1]);
 
     // prefilled absolute indexes differential walk.
@@ -567,13 +566,10 @@ fn v2_header_hashes_reads_a_headers_payload() {
 #[test]
 fn try_reconstruct_empty_mempool_two_tx_is_index_1() {
     let hsi = mined_h1_two_tx_hsi();
-    assert_eq!(
-        try_reconstruct(&hsi, &empty_avail(), 2).unwrap_err(),
-        vec![1]
-    );
+    assert_eq!(try_reconstruct(&hsi, &empty_avail()).unwrap_err(), vec![1]);
     let raw = bitcoin::consensus::encode::serialize(&hsi);
     assert_eq!(
-        try_reconstruct(&decode_cmpct_hsi(&raw).unwrap(), &empty_avail(), 2).unwrap_err(),
+        try_reconstruct(&decode_cmpct_hsi(&raw).unwrap(), &empty_avail()).unwrap_err(),
         vec![1]
     );
 }
@@ -585,10 +581,7 @@ fn cmpct_h1_two_tx_fixture_matches_mined() {
     let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert_eq!(raw, expected);
     let hsi = decode_cmpct_hsi(&raw).unwrap();
-    assert_eq!(
-        try_reconstruct(&hsi, &empty_avail(), 2).unwrap_err(),
-        vec![1]
-    );
+    assert_eq!(try_reconstruct(&hsi, &empty_avail()).unwrap_err(), vec![1]);
 }
 
 /// Compact siphash nonce for `cmpct_wtxid_shortid_collision_*.bin`.
@@ -644,7 +637,7 @@ fn assert_collider_fill_getdata<T: std::borrow::Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     avail: &HashMap<ShortId, Vec<T>>,
 ) {
-    let missing = try_reconstruct(hsi, avail, 2).expect_err("collider unique fill");
+    let missing = try_reconstruct(hsi, avail).expect_err("collider unique fill");
     assert!(
         missing.is_empty(),
         "48-bit unique fill must getdata, got {missing:?}"
@@ -764,7 +757,6 @@ fn cmpct_reconstruct_stats_first_shot_all_mempool_fetched_zero() {
     let recon = try_reconstruct(
         &hsi,
         &shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1, &b2]),
-        2,
     )
     .expect("full fill");
     let fill = CmpctFillSets {
@@ -803,7 +795,7 @@ fn cmpct_reconstruct_stats_blocktxn_fetched_bytes() {
     let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
     let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
-    let partial = must_partial(&hsi, &avail, 2);
+    let partial = must_partial(&hsi, &avail);
     let txn = BlockTransactions {
         block_hash: block.block_hash(),
         transactions: vec![b2.clone()],
@@ -833,7 +825,7 @@ fn cmpct_reconstruct_stats_redundant_prefill_in_mempool() {
     let block = sealed_block(vec![coinbase(), b1.clone()]);
     let hsi = HeaderAndShortIds::from_block(&block, 7, 2, &[0, 1]).unwrap();
     let empty: HashMap<ShortId, Vec<&Transaction>> = HashMap::new();
-    let recon = try_reconstruct(&hsi, &empty, 2).expect("prefilled");
+    let recon = try_reconstruct(&hsi, &empty).expect("prefilled");
     let fill = CmpctFillSets {
         mempool: [b1.compute_wtxid()].into_iter().collect(),
         extra: Default::default(),
@@ -856,7 +848,6 @@ fn cmpct_reconstruct_stats_extra_disjoint_from_mempool() {
     let recon = try_reconstruct(
         &hsi,
         &shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]),
-        2,
     )
     .expect("extra fill");
     let fill = CmpctFillSets {
@@ -879,7 +870,6 @@ fn cmpct_reconstruct_stats_orphan_bytes_sum() {
     let recon = try_reconstruct(
         &hsi,
         &shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]),
-        2,
     )
     .expect("orphan fill");
     let fill = CmpctFillSets {
