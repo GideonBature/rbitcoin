@@ -773,10 +773,10 @@ fn queue_hwm_tracks_max_depth() {
     assert_eq!(q.snap().1, 2);
     q.note_script_recv(32, 1, 0);
     assert_eq!(q.snap().1, 1);
-    let (_lh, sh, wh) = q.sample_hwm_and_reset();
+    let (sh, wh) = q.sample_hwm_and_reset();
     assert_eq!(sh, 2, "hwm keeps max even after recv");
     assert_eq!(wh, 0);
-    let (_, sh2, _) = q.sample_hwm_and_reset();
+    let (sh2, _) = q.sample_hwm_and_reset();
     assert_eq!(sh2, 0, "hwm resets each sample window");
 }
 
@@ -2511,7 +2511,7 @@ fn parent_check_reads_the_tip() {
 #[test]
 fn unconnected_stale_body_returns_to_the_queue() {
     use rbitcoin_consensus::mine_empty_regtest;
-    use rbitcoin_ibd::ibd::confirm::reoffer_unconnected_bodies;
+    use rbitcoin_ibd::ibd::confirm::reoffer_blocks_to_body_queue;
 
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("stale-body");
     hub.ensure_genesis().unwrap();
@@ -2523,7 +2523,7 @@ fn unconnected_stale_body_returns_to_the_queue() {
     let fresh = mine_empty_regtest(tip, time + 600, 1);
     assert!(hub.has_block(&genesis.block_hash()));
     assert!(!hub.has_block(&fresh.block_hash()));
-    reoffer_unconnected_bodies(
+    reoffer_blocks_to_body_queue(
         &hub,
         [
             (1, genesis.block_hash(), &genesis, None),

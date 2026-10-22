@@ -576,7 +576,7 @@ pub fn run_header_batch(
             };
             let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
             if rewound {
-                let _ = try_complete_awaiting_reorg(&mut st, hub);
+                let _ = try_apply_exploration(&mut st, hub);
             }
             let _ = super::header_walk::send_getheaders(&mut st, hub);
             finish_mark(&mut st, hub, peer, &mark);
@@ -606,7 +606,7 @@ pub fn run_header_batch(
                 super::reorg::rewind_off_coord_lock(shared, hub, Some(bus)).unwrap_or(false);
             if rewound {
                 let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
-                let _ = try_complete_awaiting_reorg(&mut st, hub);
+                let _ = try_apply_exploration(&mut st, hub);
             }
             if ask {
                 let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
@@ -844,7 +844,7 @@ pub fn apply_block_framed(
         if let Ok(block) = bitcoin::consensus::deserialize::<bitcoin::Block>(&payload) {
             st.reorg.hold_body(block);
             st.body.mark_pending(hash);
-            if try_complete_awaiting_reorg(st, hub) {
+            if try_apply_exploration(st, hub) {
                 return;
             }
         }
@@ -864,7 +864,7 @@ pub fn apply_block_framed(
         u64::try_from(peer).ok(),
     ) {
         Ok(_offer) => {
-            let _ = try_complete_awaiting_reorg(st, hub);
+            let _ = try_apply_exploration(st, hub);
         }
         Err(e) => {
             if store_reject_drops_peer(&e) {
@@ -1658,15 +1658,6 @@ pub fn try_apply_exploration(st: &mut IbdWorkState, hub: &rbitcoin_net::chain::C
             false
         }
     }
-}
-
-/// After a side-branch body is held (or BQ has mids), try to finish an awaiting reorg
-/// by header-work rewind (never `accept_branch` of gathered bodies).
-pub fn try_complete_awaiting_reorg(
-    st: &mut IbdWorkState,
-    hub: &rbitcoin_net::chain::ChainHub,
-) -> bool {
-    try_apply_exploration(st, hub)
 }
 
 pub fn parent_height(

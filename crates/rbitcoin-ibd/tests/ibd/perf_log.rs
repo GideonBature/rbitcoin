@@ -176,7 +176,7 @@ fn sample_pulls_atomics() {
         0,
         0,
         0,
-        (0, 0, 0),
+        (0, 0),
         1,
         WorkStructureSizes::default(),
         ProcessOwnedSizes::default(),
