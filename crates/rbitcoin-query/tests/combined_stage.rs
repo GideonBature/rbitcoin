@@ -11,15 +11,7 @@ fn temp_query() -> (rbitcoin_query::testutil::TempDir, Query) {
 fn put_tx(q: &Query, seed: u8) -> Fk {
     let mut txid = [0u8; 32];
     txid[0] = seed;
-    let tx = TxRecord {
-        txid,
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: 2,
-    };
+    let tx = TxRecord::class_a(txid, 1, 0, 1, 2);
     let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01, seed], vec![])];
     let outs = vec![
         OutputRecord::unspent(10, vec![0x76, 0xa9, seed]),
@@ -440,15 +432,7 @@ fn obfuscation_on_disk_via_store_put() {
     let script = vec![0x76, 0xa9, 0x14, 0x11, 0x22, 0x33];
     let mut txid = [0u8; 32];
     txid[0] = 0xee;
-    let tx = TxRecord {
-        txid,
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: 1,
-    };
+    let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
     let inputs = vec![InputRecord::coinbase(
         u32::MAX,
         script.clone(),

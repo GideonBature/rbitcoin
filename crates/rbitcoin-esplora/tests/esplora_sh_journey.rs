@@ -150,15 +150,13 @@ fn pay_height(h: u32, spk: bitcoin::ScriptBuf) -> TxApply {
     txid[0..4].copy_from_slice(&h.to_le_bytes());
     txid[31] = 0xaa;
     TxApply {
-        tx: TxRecord {
+        tx: TxRecord::class_a(
             txid,
-            version: 2,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+            2,
+            0,
+            1,
+            1,
+        ),
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,

@@ -13,15 +13,7 @@ fn pin(id: u64) -> CreatePin {
     let mut txid = [0u8; 32];
     txid[..8].copy_from_slice(&id.to_le_bytes());
     rbitcoin_query::CreatePinInner::records(
-        TxRecord {
-            txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        TxRecord::class_a(txid, 1, 0, 1, 1),
         vec![OutputRecord::unspent(1, vec![0x51])],
     )
 }

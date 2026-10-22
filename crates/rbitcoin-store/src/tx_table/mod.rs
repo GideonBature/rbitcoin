@@ -53,22 +53,35 @@ pub fn tx_head_rebuild_workers_for_free_ram(cpus: usize, free_bytes: u64) -> usi
 ///
 /// On-disk `txout.body` (schema **17**): thin LAYOUT17 meta then outputs (no spender).
 /// Identity lives in [`crate::txid_body::TxidBody`]. `txid` is filled in-memory
-/// from the sidefile (or caller) after decode. `input_start_fk` / `output_start_fk`
-/// stay [`Fk::NULL`] in RAM (legacy split-run address unused).
+/// from the sidefile (or caller) after decode. `input_count` and `output_count`
+/// are caller-supplied; schema-17 body meta stores version and locktime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxRecord {
     pub txid: [u8; 32],
     pub version: i32,
     pub locktime: u32,
-    /// Always [`Fk::NULL`] for packed Class A (legacy split-run address unused).
-    pub input_start_fk: Fk,
     pub input_count: u32,
-    /// Always [`Fk::NULL`] for packed Class A (legacy split-run address unused).
-    pub output_start_fk: Fk,
     pub output_count: u32,
 }
 
 impl TxRecord {
+    /// Class A row. Counts are caller-supplied; body meta stores version and locktime.
+    pub fn class_a(
+        txid: [u8; 32],
+        version: i32,
+        locktime: u32,
+        input_count: u32,
+        output_count: u32,
+    ) -> Self {
+        Self {
+            txid,
+            version,
+            locktime,
+            input_count,
+            output_count,
+        }
+    }
+
     /// Upper bound for buffer estimates (schema-15 16 B; v17 typical is 3).
     pub const BODY_META_LEN: usize = 4 + 4 + 4 + 4;
     /// Full in-memory encode size (txid + body meta); used for estimates only.
@@ -204,15 +217,7 @@ pub fn decode_body_meta_v17(buf: &[u8]) -> Result<(TxRecord, usize), StoreError>
         nin as u32
     };
     Ok((
-        TxRecord {
-            txid: [0u8; 32],
-            version,
-            locktime,
-            input_start_fk: Fk::NULL,
-            input_count,
-            output_start_fk: Fk::NULL,
-            output_count: 0,
-        },
+        TxRecord::class_a([0u8; 32], version, locktime, input_count, 0),
         off,
     ))
 }
@@ -399,7 +404,7 @@ pub fn txstat_placeholders(
     items.iter().map(|_| txstat_placeholder()).collect()
 }
 
-/// Class A output (addressed via `tx.output_start_fk` run + local vout).
+/// Class A output (local vout into the txout run).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputRecord {
     /// Satoshis. Decode rejects a mantissa above `i64::MAX` (`output value too large`).
@@ -1670,15 +1675,7 @@ impl TxTable {
             return Err(StoreError::NotFound);
         }
         let mut tx = if let Some(n_in) = self.input.n_in(fk)? {
-            TxRecord {
-                txid: [0u8; 32],
-                version: 0,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: n_in,
-                output_start_fk: Fk::NULL,
-                output_count: 0,
-            }
+            TxRecord::class_a([0u8; 32], 0, 0, n_in, 0)
         } else {
             self.get(fk)?
         };

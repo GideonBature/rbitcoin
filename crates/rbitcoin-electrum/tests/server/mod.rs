@@ -294,15 +294,7 @@ fn restatus_notes_scans_intermediate_tick_heights() {
     let mut txid0 = [0u8; 32];
     txid0[0] = 0xa0;
     let ta0 = TxApply {
-        tx: TxRecord {
-            txid: txid0,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(txid0, 1, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -331,15 +323,7 @@ fn restatus_notes_scans_intermediate_tick_heights() {
         Height(1),
         &h1,
         &[TxApply {
-            tx: TxRecord {
-                txid: txid1,
-                version: 1,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(txid1, 1, 0, 1, 1),
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: rbitcoin_store::InputParent::Coinbase,
@@ -734,15 +718,7 @@ fn get_history_height_window_and_status_full() {
         txid[0..4].copy_from_slice(&h.to_le_bytes());
         txid[31] = 0xcb;
         let ta = TxApply {
-            tx: TxRecord {
-                txid,
-                version: 1,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(txid, 1, 0, 1, 1),
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: rbitcoin_store::InputParent::Coinbase,
@@ -860,15 +836,7 @@ async fn chain_view_reorg_notifies_dropped_scripthash() {
     let mut txid = [0u8; 32];
     txid[31] = 0xcb;
     let ta = TxApply {
-        tx: TxRecord {
-            txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(txid, 1, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -947,15 +915,7 @@ async fn chain_view_reorg_notifies_dropped_scripthash() {
     txid_b[0] = 0x99;
     txid_b[31] = 0xcd;
     let ta_b = TxApply {
-        tx: TxRecord {
-            txid: txid_b,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(txid_b, 1, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -1174,15 +1134,7 @@ async fn tweaks_subscribe_dones_when_the_first_wave_finishes_count() {
         txid[0..4].copy_from_slice(&h.to_le_bytes());
         txid[31] = 0xcb;
         let ta = TxApply {
-            tx: TxRecord {
-                txid,
-                version: 1,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(txid, 1, 0, 1, 1),
             inputs: vec![InputRecord::coinbase(u32::MAX, vec![h as u8], vec![])],
             outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
         };
@@ -1383,15 +1335,7 @@ async fn tweaks_subscribe_pre_taproot_collapses_empty_heights() {
         txid[0..4].copy_from_slice(&h.to_le_bytes());
         txid[31] = 0xcb;
         let ta = TxApply {
-            tx: TxRecord {
-                txid,
-                version: 1,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(txid, 1, 0, 1, 1),
             inputs: vec![InputRecord::coinbase(u32::MAX, vec![h as u8], vec![])],
             outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
         };

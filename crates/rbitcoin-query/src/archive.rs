@@ -223,10 +223,7 @@ impl PackedCreate for CreatePinInner {
                 encode_txout_meta_and_outs(tx, outs, buf, secret);
             }
             Self::Wire { tx, .. } => {
-                let mut meta = tx.clone();
-                meta.input_start_fk = Fk::NULL;
-                meta.output_start_fk = Fk::NULL;
-                meta.encode_body_meta_into(buf);
+                tx.encode_body_meta_into(buf);
                 if let Some(wtx) = self.wire_tx() {
                     for o in &wtx.output {
                         encode_unspent_output_into_secret(
@@ -758,15 +755,13 @@ pub fn plan_in_from_txin(inp: &bitcoin::TxIn) -> PlanIn {
 
 #[doc(hidden)]
 pub fn tx_record_from_wire(tx: &bitcoin::Transaction, txid: [u8; 32]) -> TxRecord {
-    TxRecord {
+    TxRecord::class_a(
         txid,
-        version: tx.version.0,
-        locktime: tx.lock_time.to_consensus_u32(),
-        input_start_fk: Fk::NULL,
-        input_count: tx.input.len() as u32,
-        output_start_fk: Fk::NULL,
-        output_count: tx.output.len() as u32,
-    }
+        tx.version.0,
+        tx.lock_time.to_consensus_u32(),
+        tx.input.len() as u32,
+        tx.output.len() as u32,
+    )
 }
 
 #[doc(hidden)]

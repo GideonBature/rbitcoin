@@ -100,15 +100,7 @@ fn test_pin(id: u64) -> rbitcoin_query::CreatePin {
     let mut txid = [0u8; 32];
     txid[..8].copy_from_slice(&id.to_le_bytes());
     rbitcoin_query::CreatePinInner::records(
-        TxRecord {
-            txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 0,
-            output_start_fk: Fk::NULL,
-            output_count: 0,
-        },
+        TxRecord::class_a(txid, 1, 0, 0, 0),
         vec![OutputRecord::unspent(1, vec![0x51])],
     )
 }
@@ -2004,28 +1996,12 @@ fn ibd_confirm_pin_fault() {
     let mut spend_txid = [0u8; 32];
     spend_txid[0] = 0x11;
     let coinbase = TxApply {
-        tx: TxRecord {
-            txid: [0x22; 32],
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a([0x22; 32], 1, 0, 1, 1),
         inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
     };
     let ta1 = TxApply {
-        tx: TxRecord {
-            txid: spend_txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(spend_txid, 1, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: cb_txid,
             parent: rbitcoin_store::InputParent::Prevout {

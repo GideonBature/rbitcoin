@@ -97,15 +97,7 @@ fn first_subscribe_wave_indexed_shares_batch_and_pre_taproot_is_empty() {
         txid[0..4].copy_from_slice(&h.to_le_bytes());
         txid[31] = 0xcb;
         let ta = TxApply {
-            tx: TxRecord {
-                txid,
-                version: 1,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(txid, 1, 0, 1, 1),
             inputs: vec![InputRecord::coinbase(u32::MAX, vec![h as u8], vec![])],
             outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
         };
@@ -201,15 +193,7 @@ fn remaining_lines_pre_taproot_are_one_empty_wave() {
         txid[0..4].copy_from_slice(&h.to_le_bytes());
         txid[31] = 0xcb;
         let ta = TxApply {
-            tx: TxRecord {
-                txid,
-                version: 1,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(txid, 1, 0, 1, 1),
             inputs: vec![InputRecord::coinbase(u32::MAX, vec![h as u8], vec![])],
             outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
         };
@@ -292,15 +276,7 @@ fn height_map_cut_through_omits_spent_p2tr() {
             Height(0),
             &h0,
             &[TxApply {
-                tx: TxRecord {
-                    txid: genesis_txid,
-                    version: 1,
-                    locktime: 0,
-                    input_start_fk: Fk::NULL,
-                    input_count: 1,
-                    output_start_fk: Fk::NULL,
-                    output_count: 1,
-                },
+                tx: TxRecord::class_a(genesis_txid, 1, 0, 1, 1),
                 inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x00], vec![])],
                 outputs: vec![OutputRecord::unspent(50_0000_0000, p2wpkh.clone())],
             }],
@@ -328,15 +304,7 @@ fn height_map_cut_through_omits_spent_p2tr() {
             Height(1),
             &h1,
             &[TxApply {
-                tx: TxRecord {
-                    txid: spend_txid,
-                    version: 2,
-                    locktime: 0,
-                    input_start_fk: Fk::NULL,
-                    input_count: 1,
-                    output_start_fk: Fk::NULL,
-                    output_count: 1,
-                },
+                tx: TxRecord::class_a(spend_txid, 2, 0, 1, 1),
                 inputs: vec![InputRecord {
                     prev_txid: genesis_txid,
                     parent: rbitcoin_store::InputParent::Prevout {
@@ -378,15 +346,7 @@ fn height_map_cut_through_omits_spent_p2tr() {
         Height(2),
         &h2,
         &[TxApply {
-            tx: TxRecord {
-                txid: spend2,
-                version: 2,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(spend2, 2, 0, 1, 1),
             inputs: vec![InputRecord {
                 prev_txid: spend_txid,
                 parent: rbitcoin_store::InputParent::Prevout {

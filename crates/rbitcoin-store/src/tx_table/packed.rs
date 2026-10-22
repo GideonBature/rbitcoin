@@ -615,10 +615,7 @@ pub fn encode_txout_meta_and_outs(
     secret: Option<&crate::store_secret::StoreSecret>,
 ) {
     debug_assert_eq!(outputs.len() as u32, tx.output_count);
-    let mut meta = tx.clone();
-    meta.input_start_fk = Fk::NULL;
-    meta.output_start_fk = Fk::NULL;
-    meta.encode_body_meta_into(out);
+    tx.encode_body_meta_into(out);
     encode_output_run_secret(outputs, out, secret);
 }
 

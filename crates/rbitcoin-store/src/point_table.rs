@@ -17,7 +17,6 @@ pub struct PointRecord {
     pub out_index: u32,
     pub spending_tx_fk: Fk,
     pub spending_vin: u32,
-    pub next: Fk,
 }
 
 /// Mark create outpoint spent by `spending_tx_fk` at `spending_vin` (promote to multi-list if needed).

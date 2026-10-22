@@ -708,15 +708,7 @@ fn stamp_uses_inflight_until_tip_covers_parent_height() {
     let parent_txid = [0x22u8; 32];
     let parent_fk = rbitcoin_primitives::Fk(99);
     let pin = rbitcoin_query::CreatePinInner::records(
-        TxRecord {
-            txid: parent_txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: rbitcoin_primitives::Fk::NULL,
-            input_count: 1,
-            output_start_fk: rbitcoin_primitives::Fk::NULL,
-            output_count: 1,
-        },
+        TxRecord::class_a(parent_txid, 1, 0, 1, 1),
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
     let mut log = InFlight::new();
@@ -794,15 +786,7 @@ fn stamp_uses_inflight_when_confirmed_tip_leads_fence() {
     let parent_txid = [0x33u8; 32];
     let parent_fk = rbitcoin_primitives::Fk(99);
     let pin = rbitcoin_query::CreatePinInner::records(
-        TxRecord {
-            txid: parent_txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: rbitcoin_primitives::Fk::NULL,
-            input_count: 1,
-            output_start_fk: rbitcoin_primitives::Fk::NULL,
-            output_count: 1,
-        },
+        TxRecord::class_a(parent_txid, 1, 0, 1, 1),
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
     let mut log = InFlight::new();

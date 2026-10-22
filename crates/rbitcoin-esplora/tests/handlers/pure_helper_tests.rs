@@ -26,15 +26,7 @@ fn seed_genesis(q: &Query) -> [u8; 32] {
         weight: 0,
     };
     let ta = TxApply {
-        tx: TxRecord {
-            txid: [0xcb; 32],
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a([0xcb; 32], 1, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -91,15 +83,7 @@ fn outspend_json_spent_includes_vin() {
     let _hash = seed_genesis(&q);
     let create_fk = q.tx_fk_by_txid(&[0xcb; 32]).unwrap().unwrap();
     let spend = (
-        TxRecord {
-            txid: [0x11; 32],
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        TxRecord::class_a([0x11; 32], 1, 0, 1, 1),
         vec![InputRecord {
             prev_txid: [0xcb; 32],
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -127,5 +111,10 @@ fn outspend_json_spent_includes_vin() {
     assert_eq!(v["spent"], true, "{v}");
     assert!(v.get("txid").is_some(), "{v}");
     assert_eq!(v["vin"], 0, "outspend vin from spent slot: {v}");
+    assert!(v.get("status").is_some(), "{v}");
+    assert!(v.get("next").is_none(), "{v}");
+    let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["spent", "status", "txid", "vin"], "{v}");
     let _ = std::fs::remove_dir_all(dir);
 }
