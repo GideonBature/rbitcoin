@@ -1327,8 +1327,6 @@ pub fn apply_soft_wire_reject(
         }
         st.body.mark_missing(hash);
         st.reopen_for_densify(&[hash]);
-        st.body.demote_known(hash);
-        st.reopen_for_densify(&[hash]);
         match parent {
             BadPrevParent::Tip => warn!(
                 "ibd: confirm reject BadPrev @{height} {hash}: {err} (parent is tip, re-getdata)"
