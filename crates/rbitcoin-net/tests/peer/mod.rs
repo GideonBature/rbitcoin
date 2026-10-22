@@ -5183,32 +5183,80 @@ async fn failed_body_queue_releases_the_ask() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// No high-bandwidth peer means the compact build does not run. A stack hub
-/// would persist the header on this thread, so the count stays visible.
+fn hb_tip_child(hub: &rbitcoin_net::chain::ChainHub) -> bitcoin::Block {
+    rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        hub.tip_header().unwrap().time.saturating_add(600),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    )
+}
+
+/// No offered high-bandwidth peer means the compact build does not run.
+/// `from` has a live hub, so this reaches the offer filter. A stack hub
+/// would persist the header on this thread.
 #[test]
 fn hb_relay_skips_the_build_when_no_peer_is_offered_it() {
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-relay-no-peer");
     hub.ensure_genesis().unwrap();
     hub.set_prefill_compact(true);
-    let prev = hub.tip_hash().unwrap();
-    let block = rbitcoin_consensus::mine_regtest_paying(
-        prev,
-        hub.tip_header().unwrap().time.saturating_add(600),
-        hub.tip_height().unwrap().saturating_add(1),
-        ScriptBuf::from_bytes(vec![0x51]),
-        vec![],
-    );
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18520, 41, false);
+    let quiet = live_peer(&peers, 18521, 42, false);
+    quiet.note_best_known(hub.tip_hash().unwrap());
+    let block = hb_tip_child(&hub);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rbitcoin_net::chain::reset_ensure_header_fk_count();
-    rt.block_on(relay_new_pow_valid_block(&hub, &block, None));
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
     assert_eq!(
         rbitcoin_net::chain::ensure_header_fk_count(),
         0,
-        "no high-bandwidth peer means the header is not persisted for compact relay"
+        "a peer that was not offered the block does not persist its header"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One offered high-bandwidth peer builds the prefill and short ids off the
+/// worker. `assert_not_reactor` panics if that build stays on `tokio-rt-worker`.
+#[test]
+fn hb_relay_offered_build_runs_off_the_reactor() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-relay-off-reactor");
+    hub.ensure_genesis().unwrap();
+    hub.set_prefill_compact(true);
+    let genesis = hub.tip_hash().unwrap();
+    let block = hb_tip_child(&hub);
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18522, 43, false);
+    let target = live_peer(&peers, 18523, 44, false);
+    target.set_hb_from(true);
+    target.note_best_known(genesis);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        tokio::spawn(async move {
+            relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())).await;
+            assert!(
+                matches!(
+                    out_rx.try_recv().map(PeerOut::expect_msg),
+                    Ok(NetworkMessage::CmpctBlock(_))
+                ),
+                "the offered peer receives the compact block"
+            );
+        })
+        .await
+        .expect("reactor task")
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -154,8 +154,9 @@ A failed high-bandwidth join is logged and skips that announcement.
 A failed compact tip-announce join still ends that session.
 An unsolicited compact block that does not
 reconstruct yet persists that header path on the header-job pool.
-`cmpct_tip_announce_shortids_run_off_the_reactor` and
-`hb_relay_skips_the_build_when_no_peer_is_offered_it` are the pins.
+`cmpct_tip_announce_shortids_run_off_the_reactor`,
+`hb_relay_skips_the_build_when_no_peer_is_offered_it`, and
+`hb_relay_offered_build_runs_off_the_reactor` are the pins.
 
 **Fixed.** The IBD coordinator holds `shared` across the turn, the
 redial apply, and the event drains. A peer split whose height has left
