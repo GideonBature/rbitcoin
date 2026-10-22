@@ -377,18 +377,19 @@ pub fn heavier_fork_candidates(
 /// Scan a competing work-path tip+1 for a heavier disconnected fork and
 /// rewind the confirmed tip to the LCA so the normal pipeline confirms it.
 ///
-/// [`select_heavier_path`] reads the header store. The coordinator drops
-/// `shared` before that read. The commit runs only while the tip is still
-/// the block that prepare disconnected to.
+/// The caller does not hold `shared`. Candidates are collected under that
+/// lock, then the rewind runs with the lock down. One exclusion covers the
+/// select, the disconnect, and the commit. The commit is skipped when the
+/// tip is no longer the block the prepare disconnected to.
 pub fn consider_disconnected_heavier(
-    st: &mut super::state::IbdWorkState,
+    shared: &Mutex<super::state::IbdWorkState>,
     hub: &ChainHub,
 ) -> Result<bool, NetError> {
-    let (cands, invalid) = heavier_fork_candidates(st, hub)?;
-    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
-        return Ok(false);
+    let (cands, invalid) = {
+        let st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        heavier_fork_candidates(&st, hub)?
     };
-    apply_header_rewind(st, hub, &path)
+    Ok(apply_off_lock_rewind(shared, hub, &cands, &invalid)?.is_some())
 }
 
 /// The walk's candidate while nothing is planted above the confirmed tip. A
@@ -697,7 +698,9 @@ pub fn apply_header_rewind(
     Ok(true)
 }
 
-/// Header thread and coordinator share this so only one of them disconnects.
+/// Off-lock rewinds take this, then `shared`. Reject and explore still
+/// disconnect through `maybe_rewind_to_best_work` → `apply_header_rewind`
+/// while the caller holds `shared`, so that path does not take this gate.
 fn rewind_exclusion() -> &'static Mutex<()> {
     static GATE: Mutex<()> = Mutex::new(());
     &GATE

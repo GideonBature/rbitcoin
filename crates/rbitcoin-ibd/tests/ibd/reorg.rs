@@ -235,25 +235,35 @@ fn a_walk_candidate_forked_below_the_tip_is_rewound_to() {
     }
     let w4 = mine(w3.block_hash(), 1_500_063_401, 4);
 
-    let mut st =
+    let st =
         rbitcoin_ibd::ibd::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
-    st.header_walk.tip.hash = Some(w4.block_hash());
-    st.header_walk.tip.height = 4;
-    assert!(!consider_disconnected_heavier(&mut st, &hub).unwrap());
+    let shared = Mutex::new(st);
+    {
+        let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        st.header_walk.tip.hash = Some(w4.block_hash());
+        st.header_walk.tip.height = 4;
+    }
+    assert!(!consider_disconnected_heavier(&shared, &hub).unwrap());
     assert_eq!(
         hub.tip_height(),
         Some(2),
         "an unstored walk tip is not a rewind"
     );
 
-    st.header_walk.tip.hash = Some(w3.block_hash());
-    st.header_walk.tip.height = 3;
-    assert!(consider_disconnected_heavier(&mut st, &hub).unwrap());
+    {
+        let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        st.header_walk.tip.hash = Some(w3.block_hash());
+        st.header_walk.tip.height = 3;
+    }
+    assert!(consider_disconnected_heavier(&shared, &hub).unwrap());
     assert_eq!(hub.tip_height(), Some(0), "rewound to the fork");
-    assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
-    assert_eq!(st.height_to_hash.get(&3), Some(&w3.block_hash()));
+    {
+        let st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
+        assert_eq!(st.height_to_hash.get(&3), Some(&w3.block_hash()));
+    }
     reset_parent_hash_of_count();
-    assert!(!consider_disconnected_heavier(&mut st, &hub).unwrap());
+    assert!(!consider_disconnected_heavier(&shared, &hub).unwrap());
     assert_eq!(
         parent_hash_of_count(),
         0,
@@ -468,8 +478,11 @@ fn linear_ahead_headers_are_not_a_disconnected_fork() {
         st.record_height(*hash, *h);
     }
     st.max_ordered_height = 8;
+    let shared = Mutex::new(st);
+    let rewound = consider_disconnected_heavier(&shared, &hub).unwrap();
+    let st = shared.into_inner().unwrap_or_else(|err| err.into_inner());
     assert!(
-        !consider_disconnected_heavier(&mut st, &hub).unwrap(),
+        !rewound,
         "linear work-path must not register connecting search; need={:?}",
         st.reorg.need_getdata()
     );
@@ -539,8 +552,11 @@ fn connecting_search_skips_linear_tip_plus_one() {
         connecting_search_candidates(&st, &hub).unwrap().is_empty(),
         "linear tip+1 must not be a connecting-search candidate (avoids a 10k max_ordered walk)"
     );
+    let shared = Mutex::new(st);
+    let rewound = consider_disconnected_heavier(&shared, &hub).unwrap();
+    let st = shared.into_inner().unwrap_or_else(|err| err.into_inner());
     assert!(
-        !consider_disconnected_heavier(&mut st, &hub).unwrap(),
+        !rewound,
         "linear tip+1 + far headers must not register; last={last} need={:?}",
         st.reorg.need_getdata()
     );
@@ -631,8 +647,9 @@ fn connecting_search_skips_when_tip_plus_one_is_own_child() {
         connecting_search_candidates(&st, &hub).unwrap().is_empty(),
         "own-child tip+1 is linear; heavier far header is not a consider candidate"
     );
+    let shared = Mutex::new(st);
     assert!(
-        !consider_disconnected_heavier(&mut st, &hub).unwrap(),
+        !consider_disconnected_heavier(&shared, &hub).unwrap(),
         "accepted miss: heavier fork only at max_ordered while tip+1 is our child"
     );
     let _ = std::fs::remove_dir_all(dir);
