@@ -155,6 +155,12 @@ pub fn store_include_hwm(store_dir: &Path, max_create_fk: u64) -> Result<(), Sto
     Ok(())
 }
 
+/// P2TR scriptPubKey: `OP_1` then a 32-byte x-only key.
+#[doc(hidden)]
+pub fn is_p2tr(spk: &[u8]) -> bool {
+    spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20
+}
+
 /// Electrum scripthash = SHA256(scriptPubKey) (binary; API often reverses for hex).
 pub fn script_hash(script: &[u8]) -> [u8; 32] {
     sha256::Hash::hash(script).to_byte_array()

@@ -1069,11 +1069,13 @@ fn apply_peer_event_body_and_control_surface() {
         1,
     );
     assert!(
-        book.entry(&addr(2)).is_none(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(addr(2)))
+            .is_none(),
         "gossip drops RFC1918; addpeeraddress still uses add_learned"
     );
     assert!(
-        book.entry(&routable).is_some(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(routable))
+            .is_some(),
         "gossip keeps a public address"
     );
     let onion: rbitcoin_net::NetAddr =
@@ -1510,7 +1512,7 @@ fn ibd_bad_prev_fork() {
     use rbitcoin_ibd::ibd::assign::{assign_work_ordered, AssignDepth};
     use rbitcoin_ibd::ibd::confirm::{ConfirmEvent, ConfirmFeed};
     use rbitcoin_ibd::ibd::events::{
-        apply_confirm_events, apply_peer_event, try_complete_awaiting_reorg,
+        apply_confirm_events, apply_peer_event, try_apply_exploration,
     };
     use rbitcoin_ibd::ibd::exit::header_lag_behind_peers;
     use rbitcoin_ibd::ibd::path::seed_work_path_from_store;
@@ -1942,7 +1944,7 @@ fn ibd_bad_prev_fork() {
     st.reorg
         .register_explore([win.block_hash(), ext.block_hash()], Some(ext.block_hash()));
     assert!(st.reorg.need_getdata().contains(&ext.block_hash()));
-    assert!(try_complete_awaiting_reorg(&mut st, &hub));
+    assert!(try_apply_exploration(&mut st, &hub));
     assert_eq!(hub.tip_hash(), Some(tip));
     assert!(planted(&st, t, &win, &ext));
     settle(&win, &ext);

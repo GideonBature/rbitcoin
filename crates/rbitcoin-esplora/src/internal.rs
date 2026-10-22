@@ -148,7 +148,11 @@ pub fn mempool_tx_json(st: &AppState, id: &[u8; 32]) -> Option<Value> {
 }
 
 #[cfg(unix)]
-pub async fn post_internal_txs(State(st): State<AppState>, body: Bytes) -> Response {
+async fn post_tx_batch(
+    st: AppState,
+    body: Bytes,
+    lookup: fn(&AppState, &[u8; 32]) -> Option<Value>,
+) -> Response {
     if body.len() > st.max_body {
         return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
     }
@@ -159,7 +163,7 @@ pub async fn post_internal_txs(State(st): State<AppState>, body: Bytes) -> Respo
         };
         let mut out = Vec::new();
         for id in ids {
-            if let Some(v) = confirmed_or_mempool_tx(&st, &id) {
+            if let Some(v) = lookup(&st, &id) {
                 out.push(v);
             }
         }
@@ -169,24 +173,13 @@ pub async fn post_internal_txs(State(st): State<AppState>, body: Bytes) -> Respo
 }
 
 #[cfg(unix)]
+pub async fn post_internal_txs(State(st): State<AppState>, body: Bytes) -> Response {
+    post_tx_batch(st, body, confirmed_or_mempool_tx).await
+}
+
+#[cfg(unix)]
 pub async fn post_internal_mempool_txs(State(st): State<AppState>, body: Bytes) -> Response {
-    if body.len() > st.max_body {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "body too large").into_response();
-    }
-    spawn_join(move || {
-        let ids = match parse_txid_array(&body) {
-            Ok(v) => v,
-            Err(r) => return r,
-        };
-        let mut out = Vec::new();
-        for id in ids {
-            if let Some(v) = mempool_tx_json(&st, &id) {
-                out.push(v);
-            }
-        }
-        Json(out).into_response()
-    })
-    .await
+    post_tx_batch(st, body, mempool_tx_json).await
 }
 
 #[cfg(unix)]

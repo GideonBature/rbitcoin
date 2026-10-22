@@ -926,7 +926,7 @@ pub async fn address_info(
                     client.as_deref(),
                 ) {
                     Ok((v, view)) => maybe_attach_view(Json(v).into_response(), view),
-                    Err(e) => store_err(e),
+                    Err(r) => r,
                 }
             })
             .await
@@ -954,7 +954,7 @@ pub async fn scripthash_info(
             client.as_deref(),
         ) {
             Ok((v, view)) => maybe_attach_view(Json(v).into_response(), view),
-            Err(e) => store_err(e),
+            Err(r) => r,
         }
     })
     .await
@@ -1029,6 +1029,7 @@ pub fn resolve_address_sh(addr_s: &str, network: Network) -> Result<[u8; 32], ()
 }
 
 #[doc(hidden)]
+#[allow(clippy::result_large_err)] // axum Response, same as the other handlers
 pub fn sh_stats_json(
     st: &AppState,
     sh: &[u8; 32],
@@ -1036,27 +1037,17 @@ pub fn sh_stats_json(
     scripthash_hex: Option<&str>,
     asof: Option<[u8; 32]>,
     client: Option<&str>,
-) -> Result<(Value, Option<rbitcoin_query::ChainView>), rbitcoin_query::QueryError> {
-    let (chain, view) = if asof.is_some() {
-        let view = st
-            .query
-            .pin_view(ChainViewKind::ScriptHash, asof.as_ref())?;
-        if view.is_none() {
-            return Err(StoreError::NotFound);
-        }
-        let v = view.as_ref().unwrap();
-        (st.query.scripthash_chain_stats_in(sh, v)?, view)
-    } else {
-        match st.query.run_at_view(ChainViewKind::ScriptHash, |v| {
-            st.with_sh_join(client, sh, |slot| {
-                st.query.scripthash_chain_stats_slot_in(sh, slot, v)
-            })
-        }) {
-            Ok((view, chain)) => (chain, Some(view)),
-            Err(StoreError::NotFound) => (ScriptHashChainStats::default(), None),
-            Err(e) => return Err(e),
-        }
-    };
+) -> Result<(Value, Option<rbitcoin_query::ChainView>), Response> {
+    let (chain, view) = sh_at_view(
+        st,
+        sh,
+        asof,
+        |q, view| q.scripthash_chain_stats_in(sh, view),
+        |q, slot, view| q.scripthash_chain_stats_slot_in(sh, slot, view),
+        ScriptHashChainStats::default(),
+        client,
+        None,
+    )?;
     let chain_stats = json!({
         "tx_count": chain.tx_count,
         "funded_txo_count": chain.funded_txo_count,
@@ -1084,7 +1075,8 @@ pub fn sh_stats_json(
                     "spent_txo_sum": s.spent_txo_sum,
                 })
             })
-        })?
+        })
+        .map_err(store_err)?
     } else {
         zeros
     };
@@ -2179,15 +2171,6 @@ pub fn parse_maxfeerate_btc_kvb(q: MaxFeeQuery) -> Result<u64, Response> {
     Ok(sat.max(1))
 }
 
-#[doc(hidden)]
-pub fn fee_exceeds_sat_vb(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
-    if max_sat_vb == 0 {
-        return false;
-    }
-    let vsize = rbitcoin_consensus::policy::vbytes_ceil(weight);
-    fee_sat > max_sat_vb.saturating_mul(vsize)
-}
-
 pub async fn post_txs_test(
     State(st): State<AppState>,
     AxumQuery(q): AxumQuery<MaxFeeQuery>,
@@ -2256,7 +2239,8 @@ pub async fn post_txs_test(
             let wtxid = format!("{}", tx.compute_wtxid());
             match mp.test_accept(&tx) {
                 Ok(r) => {
-                    if fee_exceeds_sat_vb(r.fee_sat, r.weight, max_sat_vb) {
+                    if rbitcoin_consensus::policy::fee_exceeds_max(r.fee_sat, r.weight, max_sat_vb)
+                    {
                         out.push(json!({
                             "txid": txid,
                             "wtxid": wtxid,

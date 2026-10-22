@@ -124,12 +124,7 @@ pub const RBFR_RATIO_DEN: u64 = 4;
 pub const ROLLING_FEE_HALFLIFE_MS: u64 = 12 * 60 * 60 * 1000;
 
 #[doc(hidden)]
-pub fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+pub use rbitcoin_consensus::clock::unix_ms;
 
 /// Eviction bump decays by half toward `min_relay` once per halflife.
 pub fn decayed_relay_floor(rolling: u64, min_relay: u64, elapsed_ms: u64) -> u64 {
@@ -1184,7 +1179,7 @@ impl ActiveMempool {
                 self.note_extra(&old_tx);
                 for o in &old_tx.output {
                     replaced_scripthashes
-                        .push(Self::electrum_scripthash(o.script_pubkey.as_bytes()));
+                        .push(rbitcoin_store::script_hash(o.script_pubkey.as_bytes()));
                 }
                 replaced_txs.push(old_tx);
             }
@@ -1423,13 +1418,6 @@ impl ActiveMempool {
         }
 
         Ok((conflict_set, fee_sat, weight))
-    }
-
-    /// Electrum scripthash = SHA256(scriptPubKey) (same as store `script_hash`).
-    #[doc(hidden)]
-    pub fn electrum_scripthash(script: &[u8]) -> [u8; 32] {
-        use bitcoin::hashes::{sha256, Hash};
-        *sha256::Hash::hash(script).as_byte_array()
     }
 
     /// Re-try orphans that listed `parent` as missing.
@@ -2410,7 +2398,7 @@ impl ActiveMempool {
                 let script_hash = prep
                     .prevouts
                     .get(i)
-                    .map(|o| Self::electrum_scripthash(o.script_pubkey.as_bytes()));
+                    .map(|o| rbitcoin_store::script_hash(o.script_pubkey.as_bytes()));
                 let create_fk = prep
                     .chain_coins
                     .get(i)

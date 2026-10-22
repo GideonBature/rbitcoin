@@ -857,7 +857,7 @@ pub fn sample(
     conf_ready: usize,
     conf_script_q: usize,
     conf_write_q: usize,
-    conf_q_hwm: (usize, usize, usize),
+    conf_q_hwm: (usize, usize),
     sh_runs: usize,
     work: WorkStructureSizes,
     owned: ProcessOwnedSizes,
@@ -1077,8 +1077,8 @@ pub fn sample(
         conf_write_q,
         conf_script_q_cap: super::confirm::script_queue_cap(),
         conf_write_q_cap: super::confirm::write_queue_cap(),
-        conf_script_q_hwm: conf_q_hwm.1,
-        conf_write_q_hwm: conf_q_hwm.2,
+        conf_script_q_hwm: conf_q_hwm.0,
+        conf_write_q_hwm: conf_q_hwm.1,
         thr_lookup_claim_ms: ns_ms(w.thr_lookup_claim_ns),
         thr_lookup_stamp_ms: ns_ms(w.thr_lookup_stamp_ns),
         thr_lookup_other_ms: ns_ms(w.thr_lookup_other_ns),
@@ -1191,14 +1191,6 @@ pub fn sample(
 }
 
 #[doc(hidden)]
-pub fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-#[doc(hidden)]
 pub fn ser_process_owned<S: serde::Serializer>(
     o: &ProcessOwnedSizes,
     ser: S,
@@ -1290,7 +1282,10 @@ pub struct TipPerfLog {
 pub fn tip_perf_json(s: &TipPerfLog) -> String {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("ts".to_string(), serde_json::Value::from(unix_ms()));
+        obj.insert(
+            "ts".to_string(),
+            serde_json::Value::from(rbitcoin_consensus::clock::unix_ms()),
+        );
     }
     v.to_string()
 }
@@ -1300,7 +1295,10 @@ pub fn tip_perf_json(s: &TipPerfLog) -> String {
 pub fn perf_sample_json(s: &IbdPerfSample) -> String {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("ts".to_string(), serde_json::Value::from(unix_ms()));
+        obj.insert(
+            "ts".to_string(),
+            serde_json::Value::from(rbitcoin_consensus::clock::unix_ms()),
+        );
     }
     v.to_string()
 }

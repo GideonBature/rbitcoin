@@ -19,7 +19,13 @@ fn temp_table() -> (std::path::PathBuf, TxTable, SpenderTable) {
 }
 
 fn put_n_outs(t: &TxTable, n_out: u32, txid_byte: u8) -> (Fk, u64, u64) {
-    let tx = TxRecord::class_a([txid_byte; 32], 1, 0, 1, n_out);
+    let tx = TxRecord {
+        txid: [txid_byte; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: n_out,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: rbitcoin_store::InputParent::Coinbase,
@@ -126,7 +132,13 @@ fn pure_write_idempotent_skip() {
 #[test]
 fn class_a_same_batch_slot_annotate_is_skip() {
     let (dir, t, spenders) = temp_table();
-    let tx = TxRecord::class_a([0x21; 32], 1, 0, 1, 2);
+    let tx = TxRecord {
+        txid: [0x21; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 2,
+    };
     let pin = std::sync::Arc::new((
         tx,
         vec![

@@ -276,9 +276,9 @@ All workspace members that contain production code:
 modules (`*_tests.rs`, `tests.rs`, crate `/tests/`, `testutil.rs`,
 `tests_verify.rs`), crate `rbitcoin-test`, and `rbitcoin-bench` (optional
 host client tool; not a coverage gate). The excluded tests still run.
-Dependencies are not attributed to us. `regtest_rpc.rs` / `regtest_pad.rs`
-stay in the denominator. A journey which executes a production line already
-counts that line.
+Dependencies are not attributed to us. `regtest_pad.rs` stays in the
+denominator. A journey which executes a production line already counts
+that line.
 
 ### Philosophy
 

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 #[doc(hidden)]
 pub fn decode_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
-    rbitcoin_primitives::hex_decode(s).map_err(|e| e.to_string())
+    crate::server::decode_hex_bytes(s)
 }
 
 /// Heights scanned when the client omits a start or passes 0.

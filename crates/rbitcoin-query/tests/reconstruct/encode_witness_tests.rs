@@ -3,7 +3,13 @@ use rbitcoin_store::{InputRecord, OutputRecord, StoreError, TxRecord};
 
 #[test]
 fn encode_class_a_tx_emits_segwit_marker_when_input_has_witness() {
-    let rec = TxRecord::class_a([0xee; 32], 1, 0, 1, 1);
+    let rec = TxRecord {
+        txid: [0xee; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let ins = vec![InputRecord::coinbase(
         u32::MAX,
         vec![0x01],

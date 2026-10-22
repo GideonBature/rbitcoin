@@ -226,7 +226,13 @@ fn three_stage_write_filter_and_scripts_surface() {
     txid[0] = 1;
     metered.batch_parents.insert_owned(
         rbitcoin_primitives::Fk(1),
-        rbitcoin_store::TxRecord::class_a(txid, 1, 0, 0, 1),
+        rbitcoin_store::TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 1,
+        },
         vec![(0, rbitcoin_store::OutputRecord::unspent(1, vec![0x51]))],
         vec![0],
         Some(false),
@@ -831,7 +837,13 @@ fn fill_edges_from_packed(plan: &mut rbitcoin_query::ArchiveWritePlan) {
 }
 
 fn rec_tx(b: u8, n_out: u32) -> rbitcoin_store::TxRecord {
-    rbitcoin_store::TxRecord::class_a([b; 32], 1, 0, 1, n_out)
+    rbitcoin_store::TxRecord {
+        txid: [b; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: n_out,
+    }
 }
 
 /// One store: pin/ensure error strings + denserels/abs + freeze + same-batch.
@@ -1477,7 +1489,6 @@ fn structural_same_batch_overlay_skips_meta_pread() {
         &q,
         &block,
         &ctx,
-        Some(&fks),
         &spends,
         0,
         &mut pending,
@@ -1633,7 +1644,6 @@ fn structural_scratch_second_block_does_not_replay_first_slots() {
             &q,
             &block,
             &ctx,
-            None,
             &spends,
             0,
             &mut pending,
@@ -2021,7 +2031,13 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
     let parent_id = 77u64;
     let parent_fk = Fk(parent_id);
     // Spend needs vout 0 from parent_id.
-    let spend_tx = TxRecord::class_a([0xCCu8; 32], 1, 0, 1, 1);
+    let spend_tx = TxRecord {
+        txid: [0xCCu8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let spend_ins = vec![InputRecord {
         prev_txid: [0xDDu8; 32],
         parent: rbitcoin_store::InputParent::Prevout {
@@ -2042,7 +2058,6 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
         )],
         planned_fks: vec![Fk(2)],
         per_header_ranges: vec![],
-        per_header_sw: vec![],
         edges: Default::default(),
         batch_creates: vec![],
         external_parents: Default::default(),
@@ -2055,7 +2070,13 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
     };
     // In-flight "parent" with **empty** outs → live.len() != need → cold path;
     // no Class A body either → end pin contract fails.
-    let parent_tx = TxRecord::class_a([0xDDu8; 32], 1, 0, 1, 0);
+    let parent_tx = TxRecord {
+        txid: [0xDDu8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 0,
+    };
     let pin = rbitcoin_query::CreatePinInner::records(parent_tx, Vec::new());
     let mut inflight = rbitcoin_query::InFlight::new();
     inflight.note_pins([(Fk(parent_id), &pin)], None);
@@ -2094,7 +2115,6 @@ fn parent_pin_stamp_take_from_plan_moves_maps() {
         packed: vec![],
         planned_fks: vec![],
         per_header_ranges: vec![],
-        per_header_sw: vec![],
         edges: Default::default(),
         batch_creates: vec![],
         external_parents: idents,
@@ -2124,7 +2144,13 @@ fn pin_takes_stamp_parent_vouts() {
     use rbitcoin_query::ArchiveWritePlan;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
     let (path, q) = tmp_query();
-    let parent_tx = TxRecord::class_a([0x11u8; 32], 1, 0, 1, 1);
+    let parent_tx = TxRecord {
+        txid: [0x11u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let parent = (
         parent_tx.clone(),
         vec![InputRecord::coinbase(u32::MAX, vec![0x11], vec![])],
@@ -2141,7 +2167,13 @@ fn pin_takes_stamp_parent_vouts() {
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![(
         rbitcoin_query::CreatePinInner::records(
-            TxRecord::class_a([0x22u8; 32], 1, 0, 1, 1),
+            TxRecord {
+                txid: [0x22u8; 32],
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![OutputRecord::unspent(1, vec![0x51])],
         ),
         vec![InputRecord {
@@ -2187,13 +2219,25 @@ fn pin_for_wire_create_pin_shares_script_bytes() {
 
     let (path, q) = tmp_query();
     let script = vec![0x51u8; 4096];
-    let parent_tx = TxRecord::class_a([0x41u8; 32], 1, 0, 1, 1);
+    let parent_tx = TxRecord {
+        txid: [0x41u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let pin: CreatePin = rbitcoin_query::CreatePinInner::records(
         parent_tx.clone(),
         vec![OutputRecord::unspent(50, script)],
     );
     let expect = pin.out_parts(0).expect("vout 0").1.as_ptr();
-    let child_tx = TxRecord::class_a([0x42u8; 32], 1, 0, 1, 1);
+    let child_tx = TxRecord {
+        txid: [0x42u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![
         (
@@ -2299,12 +2343,24 @@ fn pin_plan_edges_without_packed_ins() {
     let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
 
-    let parent_tx = TxRecord::class_a([0x11u8; 32], 1, 0, 1, 1);
+    let parent_tx = TxRecord {
+        txid: [0x11u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let pin: CreatePin = rbitcoin_query::CreatePinInner::records(
         parent_tx.clone(),
         vec![OutputRecord::unspent(50, vec![0x51])],
     );
-    let child_tx = TxRecord::class_a([0x42u8; 32], 1, 0, 1, 1);
+    let child_tx = TxRecord {
+        txid: [0x42u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let mut plan = ArchiveWritePlan::empty();
     plan.packed = vec![
         (Arc::clone(&pin), vec![]),
@@ -2351,7 +2407,13 @@ fn pin_plan_empty_edges_is_invariant() {
     let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
     let pin = rbitcoin_query::CreatePinInner::records(
-        TxRecord::class_a([0x11u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [0x11u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![OutputRecord::unspent(50, vec![0x51])],
     );
     let mut plan = ArchiveWritePlan::empty();
@@ -2381,7 +2443,13 @@ fn pin_sparse_need_high_vout_only() {
     let (path, q) = tmp_query();
     q.enter_direct_index_mode().unwrap();
 
-    let parent_tx = TxRecord::class_a([0x33u8; 32], 1, 0, 1, 4);
+    let parent_tx = TxRecord {
+        txid: [0x33u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 4,
+    };
     let parent_outs = vec![
         OutputRecord::unspent(1, vec![0x00]),
         OutputRecord::unspent(2, vec![0x01]),
@@ -2397,7 +2465,13 @@ fn pin_sparse_need_high_vout_only() {
     let range = q.store().tx_body_range(pfk).unwrap();
     let parent_id = pfk.get().unwrap();
 
-    let spend_tx = TxRecord::class_a([0x44u8; 32], 1, 0, 1, 1);
+    let spend_tx = TxRecord {
+        txid: [0x44u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let spend_ins = vec![InputRecord {
         prev_txid: parent_tx.txid,
         parent: rbitcoin_store::InputParent::Prevout {
@@ -2416,7 +2490,6 @@ fn pin_sparse_need_high_vout_only() {
         packed: vec![(Arc::clone(&spend_pin), spend_ins)],
         planned_fks: vec![Fk(2)],
         per_header_ranges: vec![],
-        per_header_sw: vec![],
         edges: Default::default(),
         batch_creates: vec![],
         external_parents: {
@@ -2468,7 +2541,13 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
         tid[0] = tag;
         tid[1] = 0xee;
         (
-            TxRecord::class_a(tid, 1, 0, 1, 1),
+            TxRecord {
+                txid: tid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord::coinbase(u32::MAX, vec![tag], vec![])],
             vec![OutputRecord::unspent(1000 + tag as u64, vec![0x51, tag])],
         )
@@ -2481,7 +2560,13 @@ fn pin_range_fill_does_not_count_as_cache_hit() {
         ranges.push(q.store().tx_body_range(*fk).unwrap());
     }
 
-    let spend_tx = TxRecord::class_a([0x5cu8; 32], 1, 0, 3, 1);
+    let spend_tx = TxRecord {
+        txid: [0x5cu8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 3,
+        output_count: 1,
+    };
     let spend_ins: Vec<InputRecord> = (0..3)
         .map(|i| InputRecord {
             prev_txid: items[i].0.txid,
@@ -2544,13 +2629,25 @@ fn pin_stamp_outs_is_cache_not_new() {
 
     let mut tid = [0u8; 32];
     tid[0] = 0x41;
-    let parent_tx = TxRecord::class_a(tid, 1, 0, 1, 1);
+    let parent_tx = TxRecord {
+        txid: tid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let parent_out = OutputRecord::unspent(50, vec![0x51, 0xaa]);
     let pin: CreatePin =
         rbitcoin_query::CreatePinInner::records(parent_tx.clone(), vec![parent_out.clone()]);
     let pfk = Fk(7);
 
-    let spend_tx = TxRecord::class_a([0x5cu8; 32], 1, 0, 1, 1);
+    let spend_tx = TxRecord {
+        txid: [0x5cu8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let spend_ins = vec![InputRecord {
         prev_txid: tid,
         parent: rbitcoin_store::InputParent::Prevout {
@@ -2612,7 +2709,13 @@ fn pin_recent_identity_without_outs_still_range_fills() {
     let mut tid = [0u8; 32];
     tid[0] = 0x42;
     let parent = (
-        TxRecord::class_a(tid, 1, 0, 1, 1),
+        TxRecord {
+            txid: tid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x42], vec![])],
         vec![OutputRecord::unspent(50, vec![0x51, 0x42])],
     );
@@ -2623,7 +2726,13 @@ fn pin_recent_identity_without_outs_still_range_fills() {
         .unwrap();
     let range = q.store().tx_body_range(fks[0]).unwrap();
 
-    let spend_tx = TxRecord::class_a([0x5du8; 32], 1, 0, 1, 1);
+    let spend_tx = TxRecord {
+        txid: [0x5du8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let spend_ins = vec![InputRecord {
         prev_txid: tid,
         parent: rbitcoin_store::InputParent::Prevout {

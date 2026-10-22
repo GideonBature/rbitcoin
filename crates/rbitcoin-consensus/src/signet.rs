@@ -102,7 +102,7 @@ pub fn signet_challenge_transactions(
     // Core: `vin.emplace_back(COutPoint(), CScript(OP_0), 0)` then `scriptSig << block_data`.
     // scriptSig must be OP_0 + push(block_data) or the to_spend txid (and sighash) is wrong.
     let mut ss = vec![0x00];
-    push_data(&mut ss, &block_data);
+    crate::script::interpreter::encode_push(&mut ss, &block_data);
     let to_spend = Transaction {
         version: bitcoin::transaction::Version::non_standard(0),
         lock_time: LockTime::ZERO,
@@ -138,25 +138,6 @@ pub fn signet_challenge_transactions(
     };
 
     Ok((to_spend, to_sign))
-}
-
-/// Core `CScript << std::span<const std::byte>`: direct push below 76 bytes, then
-/// PUSHDATA1, PUSHDATA2, or PUSHDATA4. A one-byte payload is not turned into `OP_N`.
-#[doc(hidden)]
-pub fn push_data(out: &mut Vec<u8>, data: &[u8]) {
-    if data.len() < 0x4c {
-        out.push(data.len() as u8);
-    } else if let Ok(n) = u8::try_from(data.len()) {
-        out.push(0x4c);
-        out.push(n);
-    } else if let Ok(n) = u16::try_from(data.len()) {
-        out.push(0x4d);
-        out.extend_from_slice(&n.to_le_bytes());
-    } else {
-        out.push(0x4e);
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    }
-    out.extend_from_slice(data);
 }
 
 #[doc(hidden)]
@@ -200,7 +181,7 @@ pub fn next_script_op<'a>(spk: &'a [u8], pc: &mut usize) -> Option<(u8, &'a [u8]
 ///
 /// The rewrite stops at a truncated push. An empty push (OP_0 or a zero-length
 /// PUSHDATA1/2/4) is re-emitted as its bare opcode, and a non-empty push through
-/// [`push_data`], so the modified coinbase txid matches Core.
+/// [`crate::script::interpreter::encode_push`], so the modified coinbase txid matches Core.
 #[doc(hidden)]
 pub fn fetch_and_clear_signet_section(spk: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut pc = 0usize;
@@ -215,11 +196,11 @@ pub fn fetch_and_clear_signet_section(spk: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> 
         if solution.is_none() {
             if let Some(sol) = extract_header_payload(data) {
                 solution = Some(sol);
-                push_data(&mut replacement, &SIGNET_HEADER);
+                crate::script::interpreter::encode_push(&mut replacement, &SIGNET_HEADER);
                 continue;
             }
         }
-        push_data(&mut replacement, data);
+        crate::script::interpreter::encode_push(&mut replacement, data);
     }
 
     solution.map(|sol| (sol, replacement))

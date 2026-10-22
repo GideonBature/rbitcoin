@@ -640,7 +640,8 @@ async fn run_p2p_refused_connect_flushes_book_and_dials_proxy() {
     );
     let book = AddrMan::load(&peers_path).expect("peers saved");
     assert!(
-        book.entry(&connect).is_none(),
+        book.entry_of(&rbitcoin_net::NetAddr::from_socket(connect))
+            .is_none(),
         "loopback is not restored from the peers file"
     );
     let _ = std::fs::remove_dir_all(&dir);

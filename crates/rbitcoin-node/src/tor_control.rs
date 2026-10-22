@@ -201,22 +201,6 @@ impl TorControl {
         self.add_onion_persistent(&key_path, virt, target).await
     }
 
-    pub async fn add_electrum_onion(
-        &mut self,
-        datadir: &Path,
-        bound: SocketAddr,
-    ) -> Result<HiddenService, NodeError> {
-        self.add_named_onion(datadir, "electrum", bound).await
-    }
-
-    pub async fn add_esplora_onion(
-        &mut self,
-        datadir: &Path,
-        bound: SocketAddr,
-    ) -> Result<HiddenService, NodeError> {
-        self.add_named_onion(datadir, "esplora", bound).await
-    }
-
     pub async fn add_p2p_onion(
         &mut self,
         datadir: &Path,

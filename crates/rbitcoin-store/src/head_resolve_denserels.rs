@@ -79,17 +79,6 @@ pub fn note_first_leftover_miss(
 }
 
 #[doc(hidden)]
-pub fn hex_bytes(b: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(b.len().saturating_mul(2));
-    for &x in b {
-        s.push(HEX[(x >> 4) as usize] as char);
-        s.push(HEX[(x & 0x0f) as usize] as char);
-    }
-    s
-}
-
-#[doc(hidden)]
 pub fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDiag) -> String {
     let age = d
         .sealed_age
@@ -98,8 +87,8 @@ pub fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDi
     let mut s = format!(
         "leftover probe diag txid={} mix={} page_base={} bits={} file_id={} first_fk={} age={} \
          hit_empty={} depth_end={} empty_local={} occ={} ncand={}",
-        hex_bytes(&d.txid),
-        hex_bytes(&d.mixed_prefix),
+        rbitcoin_primitives::hex_encode(d.txid),
+        rbitcoin_primitives::hex_encode(d.mixed_prefix),
         d.page_base,
         d.bits,
         d.file_id,
@@ -118,7 +107,7 @@ pub fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDi
             c.local,
             c.rel,
             c.abs_fk,
-            hex_bytes(&c.body_prefix),
+            rbitcoin_primitives::hex_encode(c.body_prefix),
             u8::from(c.body_match),
         ));
     }

@@ -2788,7 +2788,13 @@ fn class_a_coinbase(
     Vec<rbitcoin_store::OutputRecord>,
 ) {
     (
-        rbitcoin_store::TxRecord::class_a(txid, 1, 0, 1, 1),
+        rbitcoin_store::TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![rbitcoin_store::InputRecord::coinbase(
             u32::MAX,
             vec![0x01],

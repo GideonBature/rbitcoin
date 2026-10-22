@@ -27,7 +27,13 @@ fn seed_table(n: u8) -> (PathBuf, TxTable, Vec<[u8; 32]>) {
         tid[1] = 0xa5;
         tid[2] = 0x5a;
         txids.push(tid);
-        let tx = TxRecord::class_a(tid, 1, 0, 1, 1);
+        let tx = TxRecord {
+            txid: tid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         let script: Vec<u8> = (0..((i as usize % 17) + 1)).map(|b| b as u8).collect();
         items.push((
             tx,
@@ -53,7 +59,13 @@ fn seed_table_n(n: u32) -> (PathBuf, TxTable, Vec<[u8; 32]>) {
         tid[2] = 0xa5;
         tid[3] = 0x5a;
         txids.push(tid);
-        let tx = TxRecord::class_a(tid, 1, 0, 1, 1);
+        let tx = TxRecord {
+            txid: tid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         let script: Vec<u8> = (0..((i as usize % 17) + 1)).map(|b| b as u8).collect();
         items.push((
             tx,
@@ -122,7 +134,13 @@ fn uring_pending_write_behind_does_not_nest_tls() {
     let t = TxTable::create_tiny(&dir).unwrap();
     let mut tid = [0u8; 32];
     tid[0] = 0x51;
-    let tx = TxRecord::class_a(tid, 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: tid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let fks = t
         .put_full_batch_indexed(
             &[(
@@ -206,7 +224,13 @@ fn tip_fence_keeps_older_connected_across_sealed_segments() {
         tid[8] = 0xa5;
         txids.push(tid);
         items.push((
-            TxRecord::class_a(tid, 1, 0, 1, 1),
+            TxRecord {
+                txid: tid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord::coinbase(u32::MAX, vec![], vec![])],
             vec![OutputRecord::unspent(1, vec![0x51])],
         ));
@@ -216,7 +240,13 @@ fn tip_fence_keeps_older_connected_across_sealed_segments() {
     let dup_fk = t
         .put_full_batch_indexed(
             &[(
-                TxRecord::class_a(dup_tid, 1, 0, 1, 1),
+                TxRecord {
+                    txid: dup_tid,
+                    version: 1,
+                    locktime: 0,
+                    input_count: 1,
+                    output_count: 1,
+                },
                 vec![InputRecord::coinbase(u32::MAX, vec![0x22], vec![])],
                 vec![OutputRecord::unspent(1, vec![0x52])],
             )],
@@ -273,7 +303,13 @@ fn miss_and_deepest_create_wins() {
     let txid = [0xcd; 32];
     let mk = |hint: u8| {
         (
-            TxRecord::class_a(txid, 1, 0, 1, 1),
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord::coinbase(u32::MAX, vec![hint], vec![])],
             vec![OutputRecord::unspent(1, vec![0x51])],
         )

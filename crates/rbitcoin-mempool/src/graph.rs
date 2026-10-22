@@ -21,7 +21,7 @@ pub const MAX_CLUSTER_VSIZE: u64 = 101_000;
 pub const MAX_CLUSTER_WEIGHT: u64 = MAX_CLUSTER_VSIZE * 4;
 
 /// Consensus block sigop cost limit (BIP141 `MAX_BLOCK_SIGOPS_COST`).
-pub const MAX_BLOCK_SIGOPS_COST: u64 = 80_000;
+pub use rbitcoin_consensus::block::MAX_BLOCK_SIGOPS_COST;
 /// Sigop cost reserved for the coinbase (Core `node/miner.cpp` `nBlockSigOpsCost = 400`).
 pub const COINBASE_SIGOPS_RESERVE: u64 = 400;
 /// Core `DEFAULT_BYTES_PER_SIGOP` (`-bytespersigop`).

@@ -114,7 +114,7 @@ async fn start_miner(dir: &Path) -> P2PNode {
 fn load_chain(miner: &P2PNode, blocks: &[bitcoin::Block]) {
     for (height, block) in blocks.iter().enumerate() {
         miner
-            .ingest_block(height as u32, block.clone())
+            .ingest_block(block.clone())
             .unwrap_or_else(|e| panic!("ingest {height}: {e}"));
     }
 }
@@ -800,7 +800,7 @@ async fn contaminate_writebehind(dir: &Path, miner: &P2PNode, height: u32) {
     )
     .await
     .expect("contaminated syncer");
-    node.ingest_block(height, block)
+    node.ingest_block(block)
         .unwrap_or_else(|e| panic!("write-behind ingest: {e}"));
     let count = node.query.store().txs.count();
     assert!(count > before, "ingested block did not grow Class A");
@@ -1161,15 +1161,14 @@ async fn work_fork_journey() {
     let heavy_time = heavy_blocks.last().unwrap().header.time.saturating_add(1);
     push_block(&params, &mut heavy_blocks, heavy_time);
     heavy
-        .ingest_block(heavy_h + 1, heavy_blocks.last().unwrap().clone())
+        .ingest_block(heavy_blocks.last().unwrap().clone())
         .unwrap();
     let step = (params.btc.pow_target_spacing as u32).saturating_mul(2) + 1;
     for _ in 0..3 {
         let prev_time = light_blocks.last().unwrap().header.time;
-        let height = light_blocks.len() as u32;
         push_block(&params, &mut light_blocks, prev_time.saturating_add(step));
         light
-            .ingest_block(height, light_blocks.last().unwrap().clone())
+            .ingest_block(light_blocks.last().unwrap().clone())
             .unwrap();
     }
     let heavy_h = (heavy_blocks.len() - 1) as u32;
@@ -1280,8 +1279,8 @@ async fn invalid_heavier_fork_journey() {
     // leaves it for the honest chain.
     let from = honest_blocks.len() as u32;
     extend_split(&mut honest_blocks, 30, true, 1_000);
-    for (height, block) in honest_blocks.iter().enumerate().skip(from as usize) {
-        honest.ingest_block(height as u32, block.clone()).unwrap();
+    for block in honest_blocks.iter().skip(from as usize) {
+        honest.ingest_block(block.clone()).unwrap();
     }
     let rewinds = TestDatadir::new().unwrap();
     sync_to(

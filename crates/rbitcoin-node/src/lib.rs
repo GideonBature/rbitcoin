@@ -13,8 +13,6 @@ pub mod inhibit;
 #[doc(hidden)]
 pub mod lock;
 #[doc(hidden)]
-pub mod regtest_rpc;
-#[doc(hidden)]
 pub mod run;
 #[doc(hidden)]
 pub mod tor_control;

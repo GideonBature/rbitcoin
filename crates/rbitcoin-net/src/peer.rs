@@ -139,7 +139,7 @@ pub async fn accept_received_from_peer(
     };
     if let Some(hub) = hub.shared_arc() {
         return crate::tip_accept::run_on_tip_accept_async(move || {
-            let r = hub.accept_received_on_lane(block);
+            let r = hub.accept_received_block_inner(block);
             note_accepted_hb(&r, &hb);
             r
         })
@@ -148,7 +148,7 @@ pub async fn accept_received_from_peer(
     // A stack hub (unit tests) has no `Arc`. Join before return so the
     // borrow outlives the job.
     crate::tip_accept::run_on_tip_accept(|| {
-        let r = hub.accept_received_on_lane(block);
+        let r = hub.accept_received_block_inner(block);
         note_accepted_hb(&r, &hb);
         r
     })
@@ -2347,7 +2347,7 @@ pub fn try_reconstruct_cmpct(
     version: u32,
 ) -> Option<CmpctReconstruct> {
     let (owned, fill) = mempool_shortid_avail(hub, hsi, version);
-    match crate::compact::reconstruct(hsi, &owned, version) {
+    match crate::compact::reconstruct(hsi, &owned) {
         crate::compact::Reconstruct::Block(block) => {
             Some(CmpctReconstruct::Block(block, fill.map(Box::new)))
         }
@@ -4114,7 +4114,7 @@ pub async fn on_cmpctblock(
     let keep = keep_pending_connecting_paths(hub, &follow.pending_headers);
     release_asks_off_path(hub, &mut follow.requested_blocks, &keep);
     on_cmpctblock_queue_ancestors(hub, out_tx, follow, session, hash)?;
-    if compact_header_low_work(hub, &hsi.header) && !follow.requested_blocks.contains(&hash) {
+    if hub.header_below_anti_dos(&hsi.header) && !follow.requested_blocks.contains(&hash) {
         let id = session.map(|s| s.id).unwrap_or(0);
         rbitcoin_log::info!("p2p: ignore low-work compact block from peer {id}");
         take_requested_block(hub, &mut follow.requested_blocks, &hash);
@@ -5405,12 +5405,6 @@ pub fn compact_claimed_height(hub: &ChainHub, header: &bitcoin::block::Header) -
     }
     hub.header_height(&header.prev_blockhash)
         .map(|p| p.saturating_add(1))
-}
-
-/// Compact whose claimed chain work is below the 144-block anti-DoS buffer.
-#[doc(hidden)]
-pub fn compact_header_low_work(hub: &ChainHub, header: &bitcoin::block::Header) -> bool {
-    hub.header_below_anti_dos(header)
 }
 
 /// Resend BIP133 feefilter when the published floor moved since the last send.

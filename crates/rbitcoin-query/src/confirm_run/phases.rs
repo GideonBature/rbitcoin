@@ -375,7 +375,6 @@ pub fn structural_run(
             query,
             wire_blocks[i].as_ref(),
             &ctx,
-            Some(&p.tx_fks),
             &p.spends,
             p.fees,
             &mut reuse.pending,

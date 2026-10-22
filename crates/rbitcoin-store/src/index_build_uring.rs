@@ -92,11 +92,6 @@ impl IndexWindow {
 }
 
 #[doc(hidden)]
-pub fn is_p2tr(spk: &[u8]) -> bool {
-    spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20
-}
-
-#[doc(hidden)]
 pub struct ReadJob<'p> {
     pub fd: IoHandle,
     pub path: &'p Path,
@@ -531,7 +526,7 @@ pub fn decode_block(
             rec.txid.copy_from_slice(&ids[ti * 32..ti * 32 + 32]);
         }
         rec.input_count = edges[ti].len() as u32;
-        let need_seqsigwit = h.tweaks && outs.iter().any(|o| is_p2tr(&o.script));
+        let need_seqsigwit = h.tweaks && outs.iter().any(|o| crate::scripthash::is_p2tr(&o.script));
         txs.push(LoadedTweakTx {
             fk: Fk(h.first.0 + ti as u64),
             rec,

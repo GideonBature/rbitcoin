@@ -4,6 +4,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::script::{Script, ScriptBuf};
 use bitcoin::{Amount, Block, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
 use rbitcoin_consensus::error::ConsensusError;
+use rbitcoin_consensus::script::interpreter::encode_push;
 use rbitcoin_consensus::signet::*;
 
 #[test]
@@ -135,19 +136,19 @@ fn missing_signet_section_lets_challenge_script_decide() {
 #[test]
 fn push_data_all_length_encodings() {
     let mut short = Vec::new();
-    push_data(&mut short, &[0xab]);
+    encode_push(&mut short, &[0xab]);
     assert_eq!(short, vec![0x01, 0xab]);
 
     let mid = vec![0u8; 0x4c];
     let mut out = Vec::new();
-    push_data(&mut out, &mid);
+    encode_push(&mut out, &mid);
     assert_eq!(out[0], 0x4c);
     assert_eq!(out[1], 0x4c);
     assert_eq!(&out[2..], mid.as_slice());
 
     let long = vec![0x11u8; 300];
     let mut out2 = Vec::new();
-    push_data(&mut out2, &long);
+    encode_push(&mut out2, &long);
     assert_eq!(out2[0], 0x4d);
     assert_eq!(u16::from_le_bytes([out2[1], out2[2]]), 300);
     assert_eq!(&out2[3..], long.as_slice());
@@ -448,7 +449,7 @@ fn push_data_mid_and_unknown_op_passthrough() {
     // push_data uses PUSHDATA2 for 0xff < len <= 0xffff.
     let mid = vec![0u8; 300];
     let mut out = Vec::new();
-    push_data(&mut out, &mid);
+    encode_push(&mut out, &mid);
     assert_eq!(out[0], 0x4d);
     assert_eq!(u16::from_le_bytes([out[1], out[2]]), 300);
     // Truncated PUSHDATA4 stops the scan (no solution).

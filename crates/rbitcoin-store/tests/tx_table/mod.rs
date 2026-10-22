@@ -127,7 +127,13 @@ fn open_refuses_txout_without_peer_stems() {
     let dir = tempfile_dir("missing-stems");
     {
         let t = create_tiny(&dir);
-        let rec = TxRecord::class_a([1u8; 32], 1, 0, 0, 0);
+        let rec = TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        };
         t.put_full_batch_indexed(&meta_only_items(&[rec]), true)
             .unwrap();
     }
@@ -146,7 +152,13 @@ fn open_refuses_txout_without_peer_stems() {
 fn put_full_batch_from_pins_roundtrip() {
     let dir = tempfile_dir("from-pins");
     let t = create_tiny(&dir);
-    let tx = TxRecord::class_a([3u8; 32], 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: [3u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let pin = std::sync::Arc::new((tx, outs));
@@ -168,7 +180,13 @@ fn put_full_batch_from_pins_roundtrip() {
 fn put_full_batch_writes_txstat_and_reopen() {
     let dir = tempfile_dir("txstat-append");
     let t = create_tiny(&dir);
-    let tx = TxRecord::class_a([9u8; 32], 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: [9u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let fks = t.put_full_batch_indexed(&[(tx, ins, outs)], true).unwrap();
@@ -193,7 +211,13 @@ fn put_full_batch_writes_txstat_and_reopen() {
 }
 
 fn two_input_item() -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
-    let tx = TxRecord::class_a([0x11u8; 32], 1, 0, 2, 1);
+    let tx = TxRecord {
+        txid: [0x11u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 2,
+        output_count: 1,
+    };
     let ins = vec![
         InputRecord::coinbase(u32::MAX, vec![0x01], vec![]),
         InputRecord {
@@ -260,7 +284,13 @@ fn prevouts_use_txstat_n_in_without_full_txout() {
 fn new_create_txout_meta_omits_n_in() {
     let dir = tempfile_dir("txout-omit-nin");
     let t = create_tiny(&dir);
-    let tx = TxRecord::class_a([4u8; 32], 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: [4u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let pin = std::sync::Arc::new((tx.clone(), outs.clone()));
@@ -393,7 +423,13 @@ fn input_n_in_scans_both_prevouts() {
 fn put_full_batch_roundtrips_one_output() {
     let dir = tempfile_dir("one-wave");
     let t = create_tiny(&dir);
-    let tx = TxRecord::class_a([4u8; 32], 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: [4u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(7, vec![0x51])];
     let pin = std::sync::Arc::new((tx, outs));
@@ -413,8 +449,20 @@ fn put_full_batch_roundtrips_one_output() {
 fn put_full_batch_from_pins_same_batch_spent_slot() {
     let dir = tempfile_dir("same-batch-spent");
     let t = create_tiny(&dir);
-    let parent_tx = TxRecord::class_a([1u8; 32], 1, 0, 1, 2);
-    let child_tx = TxRecord::class_a([2u8; 32], 1, 0, 1, 1);
+    let parent_tx = TxRecord {
+        txid: [1u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 2,
+    };
+    let child_tx = TxRecord {
+        txid: [2u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let parent_pin = std::sync::Arc::new((
         parent_tx,
         vec![
@@ -464,7 +512,13 @@ fn pending_head_resolve_before_drain() {
     let t = create_tiny(&dir);
     let mut txid = [0u8; 32];
     txid[0] = 0x51;
-    let rec = TxRecord::class_a(txid, 1, 0, 0, 0);
+    let rec = TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 0,
+    };
     let fks = t
         .put_full_batch_indexed(&meta_only_items(&[rec]), /*index=*/ false)
         .unwrap();
@@ -512,7 +566,13 @@ fn pending_head_same_page_drains_one_write() {
     }
     let recs: Vec<TxRecord> = items
         .iter()
-        .map(|(txid, _)| TxRecord::class_a(*txid, 1, 0, 0, 0))
+        .map(|(txid, _)| TxRecord {
+            txid: *txid,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        })
         .collect();
     let fks = t
         .put_full_batch_indexed(&meta_only_items(&recs), false)
@@ -543,7 +603,13 @@ fn pending_head_reopen_backfills_lagging_head() {
         let t = create_tiny(&dir);
         let mut txid = [0u8; 32];
         txid[0] = 0x77;
-        let rec = TxRecord::class_a(txid, 1, 0, 0, 0);
+        let rec = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        };
         t.put_full_batch_indexed(&meta_only_items(&[rec]), false)
             .unwrap();
         // No head insert, no pending (process kill).
@@ -569,7 +635,13 @@ fn open_repairs_body_leading_txid_count() {
         for i in 0..5u8 {
             let mut txid = [0u8; 32];
             txid[0] = i.wrapping_add(1);
-            let tx = TxRecord::class_a(txid, 2, 0, 0, 1);
+            let tx = TxRecord {
+                txid,
+                version: 2,
+                locktime: 0,
+                input_count: 0,
+                output_count: 1,
+            };
             let outs = vec![OutputRecord::unspent(1000 + u64::from(i), vec![0x51])];
             items.push((tx, Vec::new(), outs));
         }
@@ -594,7 +666,13 @@ fn open_repairs_body_leading_txid_count() {
     // Further appends work after repair.
     let mut txid = [0u8; 32];
     txid[0] = 99;
-    let tx = TxRecord::class_a(txid, 2, 0, 0, 1);
+    let tx = TxRecord {
+        txid,
+        version: 2,
+        locktime: 0,
+        input_count: 0,
+        output_count: 1,
+    };
     let outs = vec![OutputRecord::unspent(42, vec![0x51])];
     t2.put_full_batch_indexed(&[(tx, Vec::new(), outs)], true)
         .unwrap();
@@ -788,12 +866,24 @@ fn reopen_backfills_legacy_seqsigwit_as_spans() {
     let dir = tempfile_dir("input-backfill-span");
     let t = create_tiny(&dir);
     let coinbase = (
-        TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
     let spend = (
-        TxRecord::class_a([2u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [2u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord {
             prev_txid: [1u8; 32],
             parent: InputParent::Prevout {
@@ -873,12 +963,24 @@ fn reopen_resumes_partial_legacy_input_backfill() {
     let dir = tempfile_dir("input-backfill-resume");
     let t = create_tiny(&dir);
     let coinbase = (
-        TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
     let spend = (
-        TxRecord::class_a([2u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [2u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord {
             prev_txid: [1u8; 32],
             parent: InputParent::Prevout {
@@ -953,12 +1055,24 @@ fn input_backfill_resume_starts_at_backfilled_count() {
     let dir = tempfile_dir("input-backfill-progress");
     let t = create_tiny(&dir);
     let coinbase = (
-        TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
     let spend = (
-        TxRecord::class_a([2u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [2u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord {
             prev_txid: [1u8; 32],
             parent: InputParent::Prevout {
@@ -1102,7 +1216,13 @@ fn input_encode_create_fk_not_prev_txid() {
 
 #[test]
 fn scan_packed_meta_and_prevouts_no_output_alloc() {
-    let tx = TxRecord::class_a([7u8; 32], 2, 0, 2, 1);
+    let tx = TxRecord {
+        txid: [7u8; 32],
+        version: 2,
+        locktime: 0,
+        input_count: 2,
+        output_count: 1,
+    };
     let inputs = vec![
         InputRecord {
             prev_txid: [0u8; 32],
@@ -1149,7 +1269,13 @@ fn scan_packed_meta_and_prevouts_no_output_alloc() {
 
 #[test]
 fn packed_output_spender_rels_multi_vout_one_walk() {
-    let tx = TxRecord::class_a([8u8; 32], 1, 0, 1, 4);
+    let tx = TxRecord {
+        txid: [8u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 4,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -1182,13 +1308,25 @@ fn denserels_layout_exact_matches_encode_decode_shapes() {
     let cases: Vec<(TxRecord, Vec<InputRecord>, Vec<OutputRecord>)> = vec![
         // Coinbase + OP_TRUE out
         (
-            TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
+            TxRecord {
+                txid: [1u8; 32],
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord::coinbase(u32::MAX, vec![0x01, 0x02], vec![])],
             vec![OutputRecord::unspent(50, vec![0x51])],
         ),
         // Non-final sequence, long script, multi-witness, multi-vout
         (
-            TxRecord::class_a([2u8; 32], 2, 100, 2, 3),
+            TxRecord {
+                txid: [2u8; 32],
+                version: 2,
+                locktime: 100,
+                input_count: 2,
+                output_count: 3,
+            },
             vec![
                 InputRecord {
                     prev_txid: [9u8; 32],
@@ -1270,7 +1408,13 @@ fn body_txid_range_matches_serial() {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
         txid[8] = 0xce;
-        let rec = TxRecord::class_a(txid, 1, 0, 1, 1);
+        let rec = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: InputParent::Coinbase,
@@ -1318,7 +1462,13 @@ fn body_txid_thin_prefix_matches_fat_packed_body() {
     let t = create_tiny(&dir);
     let mut txid = [0xabu8; 32];
     txid[0] = 0x7e;
-    let tx = TxRecord::class_a(txid, 2, 0, 1, 1);
+    let tx = TxRecord {
+        txid,
+        version: 2,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -1356,7 +1506,13 @@ fn bulk_body_range_matches_sequential() {
     for i in 0u8..12 {
         let mut txid = [0u8; 32];
         txid[0] = i.wrapping_add(10);
-        let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
+        let tx = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: InputParent::Coinbase,
@@ -1416,7 +1572,13 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     let t = create_tiny(&dir);
     let txid = [0x5a; 32];
     let mk = |hint: u8, value: u64| {
-        let rec = TxRecord::class_a(txid, 1, 0, 1, 1);
+        let rec = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: InputParent::Coinbase,
@@ -1434,7 +1596,13 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     // Also a single-cand key (denserels-only path).
     let mut solo = [0u8; 32];
     solo[0] = 0x77;
-    let solo_rec = TxRecord::class_a(solo, 1, 0, 1, 1);
+    let solo_rec = TxRecord {
+        txid: solo,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let solo_in = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -1499,7 +1667,13 @@ fn streaming_resolve_early_exit_fewer_body_lookups() {
     let t = create_tiny(&dir);
     let txid = [0xcd; 32];
     let mk = |hint: u8| {
-        let rec = TxRecord::class_a(txid, 1, 0, 1, 1);
+        let rec = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: InputParent::Coinbase,
@@ -1537,7 +1711,13 @@ fn get_fk_by_txid_batch_depth_wins_with_workers() {
         let t = create_tiny(&dir);
         let txid = [0xab; 32];
         let mk = |hint: u8| {
-            let rec = TxRecord::class_a(txid, 1, 0, 1, 1);
+            let rec = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: InputParent::Coinbase,
@@ -1555,7 +1735,13 @@ fn get_fk_by_txid_batch_depth_wins_with_workers() {
         for i in 0u8..10 {
             let mut other = [0u8; 32];
             other[0] = i.wrapping_add(1);
-            let rec = TxRecord::class_a(other, 1, 0, 1, 1);
+            let rec = TxRecord {
+                txid: other,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: InputParent::Coinbase,
@@ -1612,7 +1798,13 @@ fn get_fk_by_txid_batch_matches_single() {
     for i in 0u8..5 {
         let mut txid = [0u8; 32];
         txid[0] = i.wrapping_add(1);
-        let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
+        let tx = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: InputParent::Coinbase,
@@ -1672,7 +1864,13 @@ fn get_outs_denserels_by_range_sparse_need() {
         x
     };
     let big_script = vec![0xAAu8; 200];
-    let tx = TxRecord::class_a(want_txid, 1, 0, 1, 3);
+    let tx = TxRecord {
+        txid: want_txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 3,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -1721,7 +1919,13 @@ fn get_outs_by_range_batch_skips_extend_when_need_in_first_page() {
     let mut txid = [0u8; 32];
     txid[0] = 0x5a;
     let n_out = 80u32;
-    let tx = TxRecord::class_a(txid, 1, 0, 1, n_out);
+    let tx = TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: n_out,
+    };
     let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let mut outputs = Vec::with_capacity(n_out as usize);
     outputs.push(OutputRecord::unspent(1, vec![0x51]));
@@ -1787,7 +1991,13 @@ fn head_insert_many_tiny_roundtrip() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     let items = meta_only_items(&recs);
@@ -1840,7 +2050,13 @@ fn head_leading_truncated_class_a_rebuilds_on_open() {
         let mk = |i: u64| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            let rec = TxRecord::class_a(txid, 1, 0, 1, 1);
+            let rec = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: InputParent::Coinbase,
@@ -1903,7 +2119,13 @@ fn get_output_spender_metas_at_one_walk() {
     std::fs::create_dir_all(&dir).unwrap();
     let t = create_tiny(&dir);
     let spenders = rbitcoin_store::spender_table::SpenderTable::create(&dir).unwrap();
-    let tx = TxRecord::class_a([0xcd; 32], 1, 0, 1, 3);
+    let tx = TxRecord {
+        txid: [0xcd; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 3,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -1983,7 +2205,13 @@ fn put_spends_on_create_at_batch_patches_all_vouts() {
     std::fs::create_dir_all(&dir).unwrap();
     let t = create_tiny(&dir);
     let spenders = rbitcoin_store::spender_table::SpenderTable::create(&dir).unwrap();
-    let tx = TxRecord::class_a([0xab; 32], 1, 0, 1, 3);
+    let tx = TxRecord {
+        txid: [0xab; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 3,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -2024,7 +2252,13 @@ fn pwrite_spend_batch_records_sole_multi_and_cold() {
         .unwrap();
     assert!(empty.is_empty());
 
-    let tx = TxRecord::class_a([0xee; 32], 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: [0xee; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -2322,7 +2556,13 @@ fn skip_at_overflow_amount_is_corrupt() {
 
 #[test]
 fn tx_fixed_roundtrip() {
-    let rec = TxRecord::class_a([9u8; 32], 2, 100, 1, 0);
+    let rec = TxRecord {
+        txid: [9u8; 32],
+        version: 2,
+        locktime: 100,
+        input_count: 1,
+        output_count: 0,
+    };
     let enc = rec.encode();
     assert!(enc.len() > 32, "txid + thin meta");
     let mut got = TxRecord::decode(&enc).unwrap();
@@ -2333,7 +2573,13 @@ fn tx_fixed_roundtrip() {
 
 #[test]
 fn packed_tx_roundtrip() {
-    let tx = TxRecord::class_a([7u8; 32], 2, 0, 1, 2);
+    let tx = TxRecord {
+        txid: [7u8; 32],
+        version: 2,
+        locktime: 0,
+        input_count: 1,
+        output_count: 2,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -2365,7 +2611,13 @@ fn packed_tx_roundtrip() {
 #[test]
 fn seqsigwit_and_txout_secret_xor_roundtrip() {
     let secret = rbitcoin_store::store_secret::StoreSecret::from_bytes([0x5au8; 32]);
-    let tx = TxRecord::class_a([3u8; 32], 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: [3u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Prevout {
@@ -2402,7 +2654,13 @@ fn seqsigwit_and_txout_secret_xor_roundtrip() {
 #[test]
 fn visit_packed_script_hashes_matches_full_decode() {
     let secret = rbitcoin_store::store_secret::StoreSecret::from_bytes([0x3cu8; 32]);
-    let tx = TxRecord::class_a([9u8; 32], 1, 0, 1, 3);
+    let tx = TxRecord {
+        txid: [9u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 3,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -2454,7 +2712,13 @@ fn short_or_truncated_packed_body_rejected() {
         Err(StoreError::Corrupt(_))
     ));
     // Meta claims inputs/outputs but payload ends after body meta.
-    let rec = TxRecord::class_a([1u8; 32], 1, 0, 1, 1);
+    let rec = TxRecord {
+        txid: [1u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let mut raw = Vec::new();
     rec.encode_body_meta_into(&mut raw);
     assert!(TxRecord::decode_body_meta(&raw).is_ok());
@@ -2481,7 +2745,13 @@ fn address_head_get_by_txid() {
     std::fs::create_dir_all(&dir).unwrap();
     // Force tiny address width for the test process.
     let t = create_tiny(&dir);
-    let tx = TxRecord::class_a([0x42u8; 32], 1, 0, 1, 1);
+    let tx = TxRecord {
+        txid: [0x42u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let inputs = vec![InputRecord {
         prev_txid: [0u8; 32],
         parent: InputParent::Coinbase,
@@ -2510,7 +2780,13 @@ fn packed_encode_decode_flags_and_error_arms() {
         TxRecord::decode(&[0u8; 10]),
         Err(StoreError::Corrupt(_))
     ));
-    let meta = TxRecord::class_a([9u8; 32], -1, 42, 2, 3);
+    let meta = TxRecord {
+        txid: [9u8; 32],
+        version: -1,
+        locktime: 42,
+        input_count: 2,
+        output_count: 3,
+    };
     let enc = meta.encode();
     assert!(enc.len() > 32);
     let dec = TxRecord::decode(&enc).unwrap();
@@ -2645,7 +2921,13 @@ fn packed_encode_decode_flags_and_error_arms() {
     ));
 
     // Packed encode/decode
-    let tx = TxRecord::class_a([0xab; 32], 2, 0, 2, 2);
+    let tx = TxRecord {
+        txid: [0xab; 32],
+        version: 2,
+        locktime: 0,
+        input_count: 2,
+        output_count: 2,
+    };
     let inputs = vec![coin.clone(), non_final.clone()];
     let outputs = vec![o_true.clone(), o_script.clone()];
     let mut raw = Vec::new();
@@ -2799,7 +3081,13 @@ fn packed_encode_decode_flags_and_error_arms() {
     }
     // packed outs short / trailing on outs_with_spender (loc n_out is the count)
     {
-        let tx = TxRecord::class_a([0xcd; 32], 1, 0, 1, 2);
+        let tx = TxRecord {
+            txid: [0xcd; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 2,
+        };
         let inputs = [InputRecord::coinbase(u32::MAX, vec![], vec![])];
         let outputs = [OutputRecord::unspent(1, vec![0x51])];
         let mut raw = Vec::new();
@@ -2819,7 +3107,13 @@ fn packed_encode_decode_flags_and_error_arms() {
         // non-zero trailing on outs_only path
         let mut good = Vec::new();
         encode_packed_tx_with_secret(
-            &TxRecord::class_a([1; 32], 1, 0, 1, 1),
+            &TxRecord {
+                txid: [1; 32],
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             &inputs,
             &outputs,
             &mut good,
@@ -2892,7 +3186,13 @@ fn put_full_aligns_record_starts_and_txid_prefix() {
         let mut txid = [0u8; 32];
         txid[0] = i;
         txid[1] = 0xA5;
-        let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
+        let tx = TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        };
         // Vary sizes so pad between records is non-trivial.
         let script: Vec<u8> = (0..((i as usize % 17) + 1)).map(|b| b as u8).collect();
         items.push((
@@ -2926,7 +3226,13 @@ fn put_full_aligns_record_starts_and_txid_prefix() {
         let mut txid = [0u8; 32];
         txid[0] = i;
         more.push((
-            TxRecord::class_a(txid, 2, 0, 1, 1),
+            TxRecord {
+                txid,
+                version: 2,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord::coinbase(u32::MAX, vec![], vec![])],
             vec![OutputRecord::unspent(1, vec![0x51])],
         ));
@@ -2946,7 +3252,13 @@ fn span_prevouts_match_per_create() {
     let t = create_tiny(&dir);
     let mut items = Vec::with_capacity(1025);
     items.push((
-        TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![OutputRecord::unspent(50, vec![0x51])],
     ));
@@ -2954,7 +3266,13 @@ fn span_prevouts_match_per_create() {
         let mut txid = [2u8; 32];
         txid[0..4].copy_from_slice(&i.to_le_bytes());
         items.push((
-            TxRecord::class_a(txid, 1, 0, 1, 1),
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: InputParent::Prevout {
@@ -2969,7 +3287,13 @@ fn span_prevouts_match_per_create() {
         ));
     }
     items.push((
-        TxRecord::class_a([9u8; 32], 1, 0, 2, 1),
+        TxRecord {
+            txid: [9u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 2,
+            output_count: 1,
+        },
         vec![
             InputRecord {
                 prev_txid: [0u8; 32],
@@ -3028,7 +3352,13 @@ fn get_full_span_matches_per_fk_get_full() {
         let mut txid = [0u8; 32];
         txid[0] = i.saturating_add(1);
         items.push((
-            TxRecord::class_a(txid, 1, 0, 1, 1),
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord::coinbase(
                 u32::MAX,
                 vec![i],
@@ -3060,7 +3390,13 @@ fn pread_two_spans_parallel_matches_serial() {
         let mut txid = [0u8; 32];
         txid[0] = i.saturating_add(9);
         items.push((
-            TxRecord::class_a(txid, 1, 0, 1, 1),
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             vec![InputRecord::coinbase(u32::MAX, vec![0x02, i], vec![])],
             vec![OutputRecord::unspent(i as u64 + 1, vec![0x00, i])],
         ));
@@ -3099,7 +3435,13 @@ fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
     let mut shared = [0u8; 32];
     shared[0..8].copy_from_slice(&1u64.to_le_bytes());
     // Two Class A creates with the same txid (BIP30-shaped).
-    let r1 = TxRecord::class_a(shared, 1, 0, 0, 0);
+    let r1 = TxRecord {
+        txid: shared,
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 0,
+    };
     let r2 = r1.clone();
     let fks = t
         .put_full_batch_indexed(&meta_only_items(&[r1, r2]), true)
@@ -3111,7 +3453,13 @@ fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
     for i in 3..=819u64 {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
-        rest.push(TxRecord::class_a(txid, 1, 0, 0, 0));
+        rest.push(TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        });
     }
     t.put_full_batch_indexed(&meta_only_items(&rest), true)
         .unwrap();
@@ -3119,7 +3467,13 @@ fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
     let mut more = [0u8; 32];
     more[0..8].copy_from_slice(&820u64.to_le_bytes());
     t.put_full_batch_indexed(
-        &meta_only_items(&[TxRecord::class_a(more, 1, 0, 0, 0)]),
+        &meta_only_items(&[TxRecord {
+            txid: more,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        }]),
         true,
     )
     .unwrap();
@@ -3149,7 +3503,13 @@ fn open_tags_a_meta_v1_head() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     let fks = {
@@ -3192,7 +3552,13 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
             .map(|i| {
                 let mut txid = [0u8; 32];
                 txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-                TxRecord::class_a(txid, 1, 0, 0, 0)
+                TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_count: 0,
+                    output_count: 0,
+                }
             })
             .collect();
         t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3208,7 +3574,13 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     t.put_full_batch_indexed(&meta_only_items(&more), true)
@@ -3247,7 +3619,13 @@ fn orphan_class_a_bodies_do_not_drop_head_entries_at_seal() {
     let rec = |i: u64| {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
-        TxRecord::class_a(txid, 1, 0, 0, 0)
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        }
     };
     let orphan = |fk: u64| (51..=60).contains(&fk);
     let check = |t: &TxTable, when: &str| {
@@ -3315,7 +3693,13 @@ fn seal_without_retained_keys_matches_fuse_contains() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3344,7 +3728,13 @@ fn fat_creates_do_not_roll_head() {
         let mk = |i: u64| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
+            let tx = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: InputParent::Coinbase,
@@ -3387,7 +3777,13 @@ fn segmented_head_roll_and_lookup_via_tx_table() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     // insert in chunks
@@ -3442,7 +3838,13 @@ fn empty_occupancy_head_open_rebuilds_mphf_not_oa_backfill() {
                     .map(|i| {
                         let mut txid = [0u8; 32];
                         txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-                        TxRecord::class_a(txid, 1, 0, 0, 0)
+                        TxRecord {
+                            txid,
+                            version: 1,
+                            locktime: 0,
+                            input_count: 0,
+                            output_count: 0,
+                        }
                     })
                     .collect();
                 t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3478,7 +3880,13 @@ fn rebuild_head_direct_mphf_empty_tail() {
                     .map(|i| {
                         let mut txid = [0u8; 32];
                         txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-                        TxRecord::class_a(txid, 1, 0, 0, 0)
+                        TxRecord {
+                            txid,
+                            version: 1,
+                            locktime: 0,
+                            input_count: 0,
+                            output_count: 0,
+                        }
                     })
                     .collect();
                 t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3549,7 +3957,13 @@ fn rebuild_head_reports_live_progress() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3581,7 +3995,13 @@ fn rebuild_head_failure_keeps_sealed_ranges_counted() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3606,13 +4026,25 @@ fn rebuild_head_direct_mphf_bip30_newest_first() {
                 let t = create_tiny_rebuild(&dir, 6, 2);
                 let mut shared = [0u8; 32];
                 shared[0..8].copy_from_slice(&1u64.to_le_bytes());
-                let r1 = TxRecord::class_a(shared, 1, 0, 0, 0);
+                let r1 = TxRecord {
+                    txid: shared,
+                    version: 1,
+                    locktime: 0,
+                    input_count: 0,
+                    output_count: 0,
+                };
                 let r2 = r1.clone();
                 let mut rest: Vec<TxRecord> = (3..=65u64)
                     .map(|i| {
                         let mut txid = [0u8; 32];
                         txid[0..8].copy_from_slice(&i.to_le_bytes());
-                        TxRecord::class_a(txid, 1, 0, 0, 0)
+                        TxRecord {
+                            txid,
+                            version: 1,
+                            locktime: 0,
+                            input_count: 0,
+                            output_count: 0,
+                        }
                     })
                     .collect();
                 let mut recs = vec![r1, r2];
@@ -3642,7 +4074,13 @@ fn plan_head_rebuild_ranges_chunks_seal_bits_not_oa_load() {
         .map(|i| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-            TxRecord::class_a(txid, 1, 0, 0, 0)
+            TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            }
         })
         .collect();
     t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3676,7 +4114,13 @@ fn plan_head_rebuild_ranges_ignores_body_soft_span() {
         let mk = |i: u64| {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
-            let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
+            let tx = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            };
             let inputs = vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: InputParent::Coinbase,
@@ -3805,7 +4249,13 @@ fn open_seals_unsealed_nontail_after_copied_roll() {
             .map(|i| {
                 let mut txid = [0u8; 32];
                 txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
-                TxRecord::class_a(txid, 1, 0, 0, 0)
+                TxRecord {
+                    txid,
+                    version: 1,
+                    locktime: 0,
+                    input_count: 0,
+                    output_count: 0,
+                }
             })
             .collect();
         t.put_full_batch_indexed(&meta_only_items(&recs), true)
@@ -3841,7 +4291,13 @@ fn open_seals_unsealed_nontail_after_copied_roll() {
 }
 
 fn rec_meta(version: i32, locktime: u32, n_in: u32, n_out: u32) -> TxRecord {
-    TxRecord::class_a([0u8; 32], version, locktime, n_in, n_out)
+    TxRecord {
+        txid: [0u8; 32],
+        version,
+        locktime,
+        input_count: n_in,
+        output_count: n_out,
+    }
 }
 
 #[test]
@@ -4304,7 +4760,13 @@ fn fat_seqsigwit_uses_delta_loc_not_idx() {
         for i in 0..6u8 {
             let mut txid = [0u8; 32];
             txid[0] = i.wrapping_add(1);
-            let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
+            let tx = TxRecord {
+                txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            };
             let inputs = vec![InputRecord::coinbase(u32::MAX, fat_script.clone(), vec![])];
             let outs = vec![OutputRecord::unspent(1, vec![0x51])];
             t.put_full_batch_indexed(&[(tx, inputs, outs)], false)
@@ -4335,7 +4797,13 @@ fn script_hash_collect_span_is_16mib() {
 fn put_n_out(t: &TxTable, tag: u8, n_out: u32) -> Fk {
     let mut txid = [0u8; 32];
     txid[0] = tag;
-    let tx = TxRecord::class_a(txid, 1, 0, 1, n_out);
+    let tx = TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: n_out,
+    };
     let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x51], vec![])];
     let outs: Vec<OutputRecord> = (0..n_out)
         .map(|i| OutputRecord::unspent(1 + u64::from(i), vec![0x51]))

@@ -1,7 +1,6 @@
 use crate::config::{parse_btc_to_sat, ListenOpts, NodeConfig};
 use crate::error::NodeError;
 use crate::health::{run_health, NodeStatus, Phase};
-use crate::regtest_rpc::HubRegtest;
 use bitcoin::consensus::Encodable;
 use rbitcoin_electrum::{run_electrum, ElectrumConfig, ElectrumHandle, TipNotify};
 use rbitcoin_esplora::{run_esplora, BlockTemplateFn, EsploraConfig, EsploraHandle, EsploraListen};
@@ -16,7 +15,7 @@ use rbitcoin_net::{
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query, SpendSync};
 use rbitcoin_rpc::{
-    gbt_template, run_rpc, RpcActive, RpcConfig, RpcContext, RpcHandle, RpcRegtest,
+    gbt_template, run_rpc, HubRegtest, RpcActive, RpcConfig, RpcContext, RpcHandle, RpcRegtest,
 };
 use rbitcoin_store::StoreError;
 use rbitcoin_sv2::{run_sv2_tp, Sv2TpConfig, Sv2TpHandle};
@@ -926,7 +925,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     .await;
     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), electrum_handles.first()) {
         let hs = ctl
-            .add_electrum_onion(config.datadir.path(), h.local_addr)
+            .add_named_onion(config.datadir.path(), "electrum", h.local_addr)
             .await?;
         info!(
             "electrum onion {}.onion:{}",
@@ -957,7 +956,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     if config.esplora_onion {
         if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), esplora_handles.first()) {
             let hs = ctl
-                .add_esplora_onion(config.datadir.path(), h.local_addr)
+                .add_named_onion(config.datadir.path(), "esplora", h.local_addr)
                 .await?;
             info!(
                 "esplora onion http://{}.onion:{} (/ws same port)",
@@ -1155,7 +1154,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     .await;
                     if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                         let hs = ctl
-                            .add_electrum_onion(config.datadir.path(), h.local_addr)
+                            .add_named_onion(config.datadir.path(), "electrum", h.local_addr)
                             .await?;
                         info!(
                             "electrum onion {}.onion:{}",
@@ -1209,7 +1208,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     if config.esplora_onion {
                         if let (Some(ctl), Some(h)) = (tor_ctl.as_mut(), handles.first()) {
                             let hs = ctl
-                                .add_esplora_onion(config.datadir.path(), h.local_addr)
+                                .add_named_onion(config.datadir.path(), "esplora", h.local_addr)
                                 .await?;
                             info!(
                                 "esplora onion http://{}.onion:{} (/ws same port)",
@@ -2309,12 +2308,7 @@ pub async fn start_esplora_if_ready(
         return Vec::new();
     }
     let q = hub.query.clone();
-    let btc_net = match network {
-        rbitcoin_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
-        rbitcoin_primitives::Network::Testnet => bitcoin::Network::Testnet,
-        rbitcoin_primitives::Network::Signet => bitcoin::Network::Signet,
-        rbitcoin_primitives::Network::Regtest => bitcoin::Network::Regtest,
-    };
+    let btc_net = rbitcoin_rpc::methods::mine::rpc_btc_network(network);
     let mut ecfg = EsploraConfig::with_listen(listen, btc_net);
     if let Some(blocksonly) = block_template {
         let q = Arc::clone(&hub.query);

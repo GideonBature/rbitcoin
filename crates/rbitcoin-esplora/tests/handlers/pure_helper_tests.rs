@@ -26,7 +26,13 @@ fn seed_genesis(q: &Query) -> [u8; 32] {
         weight: 0,
     };
     let ta = TxApply {
-        tx: TxRecord::class_a([0xcb; 32], 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: [0xcb; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -83,7 +89,13 @@ fn outspend_json_spent_includes_vin() {
     let _hash = seed_genesis(&q);
     let create_fk = q.tx_fk_by_txid(&[0xcb; 32]).unwrap().unwrap();
     let spend = (
-        TxRecord::class_a([0x11; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [0x11; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord {
             prev_txid: [0xcb; 32],
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },

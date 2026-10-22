@@ -36,14 +36,14 @@ async fn start_node(dir: &std::path::Path) -> P2PNode {
 
 fn seed_chain(node: &P2PNode, blocks: u32) {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-    node.ingest_block(0, genesis.clone()).unwrap();
+    node.ingest_block(genesis.clone()).unwrap();
     let mut tip = genesis.block_hash();
     let mut time = genesis.header.time;
     for h in 1..=blocks {
         let b = mine(tip, time + 600, h);
         tip = b.block_hash();
         time = b.header.time;
-        node.ingest_block(h, b).unwrap();
+        node.ingest_block(b).unwrap();
     }
 }
 

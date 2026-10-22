@@ -69,6 +69,15 @@ pub fn unix_secs(now: SystemTime) -> u64 {
         .as_secs()
 }
 
+/// Wall clock in milliseconds. A clock before the epoch is 0.
+#[doc(hidden)]
+pub fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 thread_local! {
     static NOW_OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }

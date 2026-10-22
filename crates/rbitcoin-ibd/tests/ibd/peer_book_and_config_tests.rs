@@ -20,21 +20,45 @@ fn peer_book_session_injects_seeds_and_flushes_on_drop() {
                 rbitcoin_net::NetAddr::Ip(sa(2)),
             ],
         );
-        assert!(sess.book().entry(&sa(1)).is_some());
-        assert!(sess.book().entry(&sa(2)).is_some());
+        assert!(sess
+            .book()
+            .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(1)))
+            .is_some());
+        assert!(sess
+            .book()
+            .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(2)))
+            .is_some());
         // Mutate book via book_mut.
         sess.book_mut().add(sa(3));
-        assert!(sess.book().entry(&sa(3)).is_some());
+        assert!(sess
+            .book()
+            .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(3)))
+            .is_some());
         // Shared not yet flushed until drop/flush.
-        assert!(shared.lock().unwrap().entry(&sa(3)).is_none());
+        assert!(shared
+            .lock()
+            .unwrap()
+            .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(3)))
+            .is_none());
         sess.flush();
-        assert!(shared.lock().unwrap().entry(&sa(3)).is_some());
+        assert!(shared
+            .lock()
+            .unwrap()
+            .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(3)))
+            .is_some());
     }
     // Drop flushes again (idempotent).
-    assert!(shared.lock().unwrap().entry(&sa(1)).is_some());
+    assert!(shared
+        .lock()
+        .unwrap()
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(1)))
+        .is_some());
 
     // No shared book — seeds only, flush is a no-op.
     let sess2 = PeerBookSession::new(None, &[rbitcoin_net::NetAddr::Ip(sa(9))]);
-    assert!(sess2.book().entry(&sa(9)).is_some());
+    assert!(sess2
+        .book()
+        .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(9)))
+        .is_some());
     sess2.flush();
 }

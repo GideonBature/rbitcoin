@@ -391,13 +391,7 @@ fn script_pay(n: u32, script: u8) -> TxApply {
     txid[0..4].copy_from_slice(&n.to_le_bytes());
     txid[31] = script;
     TxApply {
-        tx: TxRecord::class_a(
-            txid,
-            1,
-            0,
-            1,
-            1,
-        ),
+        tx: TxRecord { txid, version: 1, locktime: 0, input_count: 1, output_count: 1 },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,

@@ -614,7 +614,6 @@ pub fn structural_validate_spends(
     query: &Query,
     block: &Block,
     ctx: &rbitcoin_consensus::ValidationContext<'_>,
-    archived_tx_fks: Option<&[rbitcoin_primitives::Fk]>,
     spends: &[(
         [u8; 32],
         u32,
@@ -689,7 +688,6 @@ pub fn structural_validate_spends(
         mtp_cache,
     )?;
     let bip68_ns = t_bip68.elapsed().as_nanos() as u64;
-    let _ = archived_tx_fks;
     rbitcoin_consensus::block::check_coinbase_subsidy(block, ctx, fees)?;
     Ok(StructuralPhaseNs {
         spent_ns,

@@ -1199,6 +1199,26 @@ pub fn checkmultisig_pairs(
     Ok(f_success)
 }
 
+/// Direct push: length opcode, then PUSHDATA1/2/4. Empty data is the single byte `0x00`.
+/// A one-byte payload is not rewritten as `OP_N`.
+#[doc(hidden)]
+pub fn encode_push(out: &mut Vec<u8>, data: &[u8]) {
+    let n = data.len();
+    if n < 0x4c {
+        out.push(n as u8);
+    } else if n <= 0xff {
+        out.push(0x4c);
+        out.push(n as u8);
+    } else if n <= 0xffff {
+        out.push(0x4d);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+    } else {
+        out.push(0x4e);
+        out.extend_from_slice(&(n as u32).to_le_bytes());
+    }
+    out.extend_from_slice(data);
+}
+
 /// Remove every occurrence of a data-push of `data` from `script`.
 ///
 /// Used for legacy (Base) CHECKSIG / CHECKMULTISIG so a signature cannot sign itself
@@ -1207,20 +1227,8 @@ pub fn checkmultisig_pairs(
 /// Consensus: empty `data` is Core's `CScript() << vchSig` = the push `0x00`,
 /// so an empty signature deletes every OP_0 opcode.
 pub fn find_and_delete(script: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut needle = Vec::with_capacity(data.len() + 3);
-    if data.len() < 0x4c {
-        needle.push(data.len() as u8);
-    } else if data.len() <= 0xff {
-        needle.push(0x4c);
-        needle.push(data.len() as u8);
-    } else if data.len() <= 0xffff {
-        needle.push(0x4d);
-        needle.extend_from_slice(&(data.len() as u16).to_le_bytes());
-    } else {
-        needle.push(0x4e);
-        needle.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    }
-    needle.extend_from_slice(data);
+    let mut needle = Vec::with_capacity(data.len() + 5);
+    encode_push(&mut needle, data);
 
     let mut out = Vec::with_capacity(script.len());
     let mut i = 0usize;
@@ -1537,16 +1545,7 @@ pub fn decode_i64(
     v: &[u8],
     require_minimal: bool,
 ) -> Result<i64, rbitcoin_primitives::ScriptNumError> {
-    use rbitcoin_primitives::ScriptNumError;
-    let parsed = if require_minimal {
-        bitcoin::script::read_scriptint(v)
-    } else {
-        bitcoin::script::read_scriptint_non_minimal(v)
-    };
-    parsed.map_err(|e| match e {
-        bitcoin::script::Error::NonMinimalPush => ScriptNumError::NonMinimal,
-        _ => ScriptNumError::Overflow,
-    })
+    rbitcoin_primitives::scriptnum_decode(v, require_minimal)
 }
 
 /// BIP342 MINIMALIF: IF/NOTIF argument is empty vector or single-byte 0x01 only.

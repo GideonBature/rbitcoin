@@ -621,7 +621,7 @@ impl NodeConfig {
         if self
             .mempool
             .block_reserved_sigops
-            .is_some_and(|n| n > 80_000)
+            .is_some_and(|n| n > rbitcoin_consensus::block::MAX_BLOCK_SIGOPS_COST)
         {
             return Err(NodeError::Config(
                 "block-reserved-sigops must be <= 80000".into(),

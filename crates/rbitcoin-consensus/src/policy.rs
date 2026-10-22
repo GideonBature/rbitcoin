@@ -49,6 +49,15 @@ pub fn vbytes_ceil(weight: u64) -> u64 {
     Weight::from_wu(weight).to_vbytes_ceil()
 }
 
+/// Zero `max_sat_vb` is unlimited. Otherwise the fee is over
+/// `max_sat_vb * vbytes_ceil(weight)`.
+pub fn fee_exceeds_max(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
+    if max_sat_vb == 0 {
+        return false;
+    }
+    fee_sat > max_sat_vb.saturating_mul(vbytes_ceil(weight))
+}
+
 /// True if `fee_sat` meets the minimum relay feerate for `weight` (WU).
 ///
 /// Uses integer compare: `fee * 1000 >= vsize * MIN_RELAY_FEE_RATE_SAT_PER_KVB`.
@@ -116,7 +125,8 @@ pub fn check_libre_annex(tx: &Transaction) -> PolicyResult {
 
 /// Core `CScript::IsUnspendable`: leading `OP_RETURN`, or over `MAX_SCRIPT_SIZE`.
 pub fn is_unspendable(script: &[u8]) -> bool {
-    script.first() == Some(&0x6a) || script.len() > 10_000
+    script.first() == Some(&0x6a)
+        || script.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY
 }
 
 /// Libre has no dust *limit*; a 0-value spendable output is still dust.
@@ -141,7 +151,7 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     }
     if tx.output.iter().any(|o| {
         let spk = o.script_pubkey.as_bytes();
-        spk.len() > 10_000 && spk.first() != Some(&0x6a)
+        spk.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY && spk.first() != Some(&0x6a)
     }) {
         return PolicyResult::NonStandard("scriptpubkey");
     }

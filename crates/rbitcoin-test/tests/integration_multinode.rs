@@ -167,14 +167,14 @@ async fn wait_v2_eof(sess: &mut rbitcoin_net::V2PlainSession, label: &str) {
 
 async fn seed_chain(node: &P2PNode, blocks: u32) {
     let genesis = regtest_genesis();
-    node.ingest_block(0, genesis.clone()).unwrap();
+    node.ingest_block(genesis.clone()).unwrap();
     let mut tip = genesis.block_hash();
     let mut time = genesis.header.time;
     for h in 1..=blocks {
         let b = mine_regtest_block(tip, time + 600, h, vec![]);
         tip = b.block_hash();
         time = b.header.time;
-        node.ingest_block(h, b).unwrap();
+        node.ingest_block(b).unwrap();
     }
 }
 
@@ -880,7 +880,7 @@ fn mine_on(node: &P2PNode, height: u32) -> BlockHash {
     let tip_time = node.hub.tip_header().expect("tip header").time;
     let b = mine_regtest_block(tip, tip_time + 600, height, vec![]);
     let h = b.block_hash();
-    node.ingest_block(height, b).unwrap();
+    node.ingest_block(b).unwrap();
     h
 }
 
@@ -990,7 +990,7 @@ async fn p2p_compact_hb_getblocktxn_and_orphan() {
         assert_eq!(with_extra.txdata.len(), 2, "coinbase + extra");
         let h_extra = with_extra.block_hash();
         let hsi_extra = HeaderAndShortIds::from_block(&with_extra, 0xdead_beef, 2, &[]).unwrap();
-        seed.ingest_block(pad_h + 2, with_extra).unwrap();
+        seed.ingest_block(with_extra).unwrap();
         wait_ms_until(
             5_000,
             || {
@@ -1991,7 +1991,7 @@ async fn tip_follow_after_ibd() {
                 .timestamp;
             let b = mine_regtest_block(tip, time + 600, h, vec![]);
             let hash = b.block_hash();
-            seed.ingest_block(h, b).unwrap();
+            seed.ingest_block(b).unwrap();
             hash
         };
         let h6 = mine_next(6);
@@ -2055,7 +2055,7 @@ async fn tip_follow_getheaders_catches_missed_blocks() {
             tip = b.block_hash();
             tip_time = b.header.time;
             last = tip;
-            seed.ingest_block(h, b).unwrap();
+            seed.ingest_block(b).unwrap();
         }
         assert_eq!(peer.query.tip_height(), Some(Height(5)));
         assert_eq!(seed.query.tip_height(), Some(Height(9)));

@@ -596,17 +596,6 @@ pub fn reoffer_blocks_to_body_queue<'a>(
     offer_back(hub, prepare_offer_back(hub, items));
 }
 
-/// A stale load epoch offers the wave back. Already-connected hashes are
-/// dropped by [`prepare_offer_back`]; a second filter here cannot change
-/// the queue.
-#[doc(hidden)]
-pub fn reoffer_unconnected_bodies<'a>(
-    hub: &ChainHub,
-    items: impl IntoIterator<Item = OfferBack<'a>>,
-) {
-    reoffer_blocks_to_body_queue(hub, items);
-}
-
 /// The script wave that goes back on the body queue. A one-block verdict
 /// drops its block. A retry, an engine fault, or a session fault keeps it.
 #[doc(hidden)]
@@ -1326,8 +1315,6 @@ pub fn confirm_ready_count(
 pub struct ConfirmQueueDepths {
     /// lookup → load (`loadq`; capacity [`load_queue_cap`]).
     pub lookup_to_load: AtomicUsize,
-    /// Max loadq depth since last HWM sample.
-    pub load_hwm: AtomicUsize,
     /// Sum of `batch.len()` sitting in loadq.
     pub load_blocks: AtomicUsize,
     /// Approx decoded wire bytes sitting in loadq.
@@ -1434,10 +1421,9 @@ impl ConfirmQueueDepths {
         self.lookup_to_load.load(Ordering::Relaxed)
     }
 
-    /// Max queue depths since last call; resets HWMs to 0.
-    pub fn sample_hwm_and_reset(&self) -> (usize, usize, usize) {
+    /// Max scriptq and writeq depths since last call; resets those HWMs to 0.
+    pub fn sample_hwm_and_reset(&self) -> (usize, usize) {
         (
-            self.load_hwm.swap(0, Ordering::Relaxed),
             self.script_hwm.swap(0, Ordering::Relaxed),
             self.write_hwm.swap(0, Ordering::Relaxed),
         )
@@ -1492,7 +1478,11 @@ impl ConfirmQueueDepths {
 
     #[doc(hidden)]
     pub fn note_load_send(&self, blocks: usize, wire_bytes: usize) {
-        Self::note_batch_depth_send(&self.lookup_to_load, &self.load_hwm);
+        let _ = self
+            .lookup_to_load
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_add(1))
+            });
         self.load_blocks
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_add(blocks))
@@ -2460,7 +2450,7 @@ pub fn spawn_confirm_engine(
                         "ibd: confirm load drop stale plan epoch={claim_epoch} live={}",
                         feed_load.epoch()
                     );
-                    reoffer_unconnected_bodies(
+                    reoffer_blocks_to_body_queue(
                         &hub_load,
                         lb.items.iter().map(|(h, raw, w)| {
                             let hash = BlockHash::from_byte_array(*raw);
@@ -2489,9 +2479,6 @@ pub fn spawn_confirm_engine(
                     }
                     run
                 };
-                let batch = (batch, 0u32);
-
-                let (batch, _batch_inputs) = batch;
                 // After the recv: a rejected wave's bodies are offered back
                 // and retaken at once, so a reset seen only before the recv
                 // lets the retake stamp from the plan it just failed with.

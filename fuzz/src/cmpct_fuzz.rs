@@ -186,7 +186,7 @@ pub fn reconstructed_cmpct_block(case: &CmpctFuzzCase) -> Option<bitcoin::Block>
         return None;
     }
     let avail = shortid_map_from_txs(&case.hsi.header, case.hsi.nonce, 2, &case.fill_txs);
-    try_reconstruct(&case.hsi, &avail, 2).ok()
+    try_reconstruct(&case.hsi, &avail).ok()
 }
 
 fn drain_one(hub: &ChainHub, block: bitcoin::Block) -> Result<(), NetError> {
@@ -341,7 +341,7 @@ pub fn cmpct_missing_for_case(case: &CmpctFuzzCase) -> Option<Vec<u64>> {
         return None;
     }
     let avail = shortid_map_from_txs(&case.hsi.header, case.hsi.nonce, 2, &case.fill_txs);
-    match try_reconstruct(&case.hsi, &avail, 2) {
+    match try_reconstruct(&case.hsi, &avail) {
         Ok(_) => Some(Vec::new()),
         Err(idx) => Some(idx),
     }
@@ -861,8 +861,7 @@ mod tests {
         assert!(cmpct_hsi_regtest_connectable(&case.hsi));
         assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[1u64][..]));
         assert_eq!(
-            try_reconstruct(&case.hsi, &HashMap::<ShortId, Vec<&Transaction>>::new(), 2)
-                .unwrap_err(),
+            try_reconstruct(&case.hsi, &HashMap::<ShortId, Vec<&Transaction>>::new()).unwrap_err(),
             vec![1]
         );
     }

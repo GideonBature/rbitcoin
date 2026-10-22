@@ -225,7 +225,7 @@ fn dial_blocked_and_cooldown_expiry() {
 fn handshake_then_die_is_failed_and_cooled() {
     let mut book = AddrMan::new();
     let lemon = addr(4);
-    book.note_connected(lemon);
+    book.note_connected_addr(rbitcoin_net::NetAddr::from_socket(lemon));
     let mut cooldown = HashMap::new();
     let now = Instant::now();
     note_dead_without_block_bytes(
@@ -245,7 +245,7 @@ fn handshake_then_die_is_failed_and_cooled() {
     assert!(blocked.contains(&rbitcoin_net::NetAddr::Ip(lemon)));
 
     let good = addr(5);
-    book.note_connected(good);
+    book.note_connected_addr(rbitcoin_net::NetAddr::from_socket(good));
     note_dead_without_block_bytes(
         &mut book,
         &mut cooldown,
@@ -264,7 +264,7 @@ fn handshake_then_die_is_failed_and_cooled() {
 fn misbehavior_dead_cools_after_a_block_body() {
     let mut book = AddrMan::new();
     let lemon = addr(6);
-    book.note_connected(lemon);
+    book.note_connected_addr(rbitcoin_net::NetAddr::from_socket(lemon));
     let mut cooldown = HashMap::new();
     let now = Instant::now();
     note_misbehavior_dead(
@@ -1171,7 +1171,7 @@ fn relative_slow_pure_edges_and_mature_sample_filters() {
     let mut last_kick_ms = 0u64;
     let mut book = AddrMan::new();
     book.add(addr(41));
-    book.note_connect_failed(addr(41), false);
+    book.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(addr(41)), false);
     let now = Instant::now();
     assert!(
         !replacement_available(&book, &slots, &cooldown, now),
@@ -1209,7 +1209,7 @@ fn relative_slow_kick_needs_a_replacement() {
     let now = Instant::now();
     let mut book = AddrMan::new();
     book.add(addr(41));
-    book.note_connect_failed(addr(41), false);
+    book.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(addr(41)), false);
     book.add(addr(42));
     let mut cooldown = HashMap::new();
     cooldown.insert(addr(42), now);
@@ -1243,7 +1243,7 @@ fn relative_slow_kick_needs_a_replacement() {
     let slow_addr = addr(60);
     let mut kicked_book = AddrMan::new();
     kicked_book.add(addr(80));
-    kicked_book.note_connect_failed(addr(80), false);
+    kicked_book.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(addr(80)), false);
     cooldown.clear();
     let t_warm = 1_000 + RELATIVE_SLOW_GLOBAL_WARMUP_MS;
     let mut inflight = HashMap::new();

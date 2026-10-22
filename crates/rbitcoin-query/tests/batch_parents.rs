@@ -9,7 +9,13 @@ use rbitcoin_store::U64IdentityHasher;
 fn tx(id: u8) -> TxRecord {
     let mut txid = [0u8; 32];
     txid[0] = id;
-    TxRecord::class_a(txid, 1, 0, 1, 1)
+    TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    }
 }
 
 fn out(v: i64) -> OutputRecord {

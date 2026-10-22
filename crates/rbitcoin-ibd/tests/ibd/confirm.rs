@@ -100,7 +100,13 @@ fn test_pin(id: u64) -> rbitcoin_query::CreatePin {
     let mut txid = [0u8; 32];
     txid[..8].copy_from_slice(&id.to_le_bytes());
     rbitcoin_query::CreatePinInner::records(
-        TxRecord::class_a(txid, 1, 0, 0, 0),
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        },
         vec![OutputRecord::unspent(1, vec![0x51])],
     )
 }
@@ -773,10 +779,10 @@ fn queue_hwm_tracks_max_depth() {
     assert_eq!(q.snap().1, 2);
     q.note_script_recv(32, 1, 0);
     assert_eq!(q.snap().1, 1);
-    let (_lh, sh, wh) = q.sample_hwm_and_reset();
+    let (sh, wh) = q.sample_hwm_and_reset();
     assert_eq!(sh, 2, "hwm keeps max even after recv");
     assert_eq!(wh, 0);
-    let (_, sh2, _) = q.sample_hwm_and_reset();
+    let (sh2, _) = q.sample_hwm_and_reset();
     assert_eq!(sh2, 0, "hwm resets each sample window");
 }
 
@@ -1996,12 +2002,24 @@ fn ibd_confirm_pin_fault() {
     let mut spend_txid = [0u8; 32];
     spend_txid[0] = 0x11;
     let coinbase = TxApply {
-        tx: TxRecord::class_a([0x22; 32], 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: [0x22; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
     };
     let ta1 = TxApply {
-        tx: TxRecord::class_a(spend_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: spend_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: cb_txid,
             parent: rbitcoin_store::InputParent::Prevout {
@@ -2511,7 +2529,7 @@ fn parent_check_reads_the_tip() {
 #[test]
 fn unconnected_stale_body_returns_to_the_queue() {
     use rbitcoin_consensus::mine_empty_regtest;
-    use rbitcoin_ibd::ibd::confirm::reoffer_unconnected_bodies;
+    use rbitcoin_ibd::ibd::confirm::reoffer_blocks_to_body_queue;
 
     let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("stale-body");
     hub.ensure_genesis().unwrap();
@@ -2523,7 +2541,7 @@ fn unconnected_stale_body_returns_to_the_queue() {
     let fresh = mine_empty_regtest(tip, time + 600, 1);
     assert!(hub.has_block(&genesis.block_hash()));
     assert!(!hub.has_block(&fresh.block_hash()));
-    reoffer_unconnected_bodies(
+    reoffer_blocks_to_body_queue(
         &hub,
         [
             (1, genesis.block_hash(), &genesis, None),

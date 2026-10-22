@@ -138,9 +138,8 @@ pub enum Reconstruct {
 pub fn try_reconstruct<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     available: &HashMap<ShortId, Vec<T>>,
-    version: u32,
 ) -> Result<Block, Vec<u64>> {
-    match reconstruct(hsi, available, version) {
+    match reconstruct(hsi, available) {
         Reconstruct::Block(b) => Ok(b),
         Reconstruct::Partial(p) => Err(p.missing),
         Reconstruct::Fail => Err(Vec::new()),
@@ -150,7 +149,6 @@ pub fn try_reconstruct<T: Borrow<Transaction>>(
 pub fn reconstruct<T: Borrow<Transaction>>(
     hsi: &HeaderAndShortIds,
     available: &HashMap<ShortId, Vec<T>>,
-    version: u32,
 ) -> Reconstruct {
     let n_short = hsi.short_ids.len();
     let n_pref = hsi.prefilled_txs.len();
@@ -200,7 +198,6 @@ pub fn reconstruct<T: Borrow<Transaction>>(
         }
     }
 
-    let _ = version;
     if !missing.is_empty() {
         return Reconstruct::Partial(CmpctPartial { slots, missing });
     }

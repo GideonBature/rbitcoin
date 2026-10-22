@@ -11,7 +11,7 @@ fn threshold_dead_cools_after_a_body_and_other_deaths_do_not() {
     let addr = slot.addr;
     let mut st = IbdWorkState::new(vec![slot], None, Some(0));
     let mut book = AddrMan::new();
-    book.note_connected(addr);
+    book.note_connected_addr(rbitcoin_net::NetAddr::from_socket(addr));
     apply_peer_dead(
         &mut st,
         &mut book,
@@ -29,7 +29,7 @@ fn threshold_dead_cools_after_a_body_and_other_deaths_do_not() {
     let other_addr = other.addr;
     let mut st = IbdWorkState::new(vec![other], None, Some(0));
     let mut book = AddrMan::new();
-    book.note_connected(other_addr);
+    book.note_connected_addr(rbitcoin_net::NetAddr::from_socket(other_addr));
     apply_peer_dead(&mut st, &mut book, 2, "bye".to_string());
     assert!(
         !st.addr_cooldown.contains_key(&other_addr),

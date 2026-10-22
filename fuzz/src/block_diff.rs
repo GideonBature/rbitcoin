@@ -15,6 +15,7 @@ use rbitcoin_consensus::{
 use rbitcoin_net::{drain_pending_now, AcceptOutcome, ChainHub, NetError, PendingBlocks};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -425,7 +426,7 @@ pub fn setup_side_block(
 ) -> Result<(), &'static str> {
     match hub.accept_block(block.clone()) {
         Ok(AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave) => {
-            hub.hold_unconnected_body(block.clone());
+            hub.hold_body(Arc::new(block.clone()));
         }
         Ok(AcceptOutcome::Accepted { .. }) => return Err("side became tip"),
         Err(_) => return Err("side reject"),
@@ -2643,9 +2644,9 @@ mod tests {
         );
         stamp_diff_coinbase(&mut s3, next_diff_cb_uniq());
         remine_diff_header(&mut s3);
-        hub.hold_unconnected_body(s1);
-        hub.hold_unconnected_body(s2);
-        hub.hold_unconnected_body(s3);
+        hub.hold_body(Arc::new(s1));
+        hub.hold_body(Arc::new(s2));
+        hub.hold_body(Arc::new(s3));
         store_reorg_step(&hub, StoreReorgOp::Extend).expect("held heavier fork after extend");
         assert!(hub.tip_height().is_some());
         let _ = fs::remove_dir_all(dir);

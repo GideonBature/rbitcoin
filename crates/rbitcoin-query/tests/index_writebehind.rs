@@ -677,13 +677,13 @@ fn tx_apply(
     outputs: Vec<rbitcoin_store::OutputRecord>,
 ) -> rbitcoin_query::TxApply {
     rbitcoin_query::TxApply {
-        tx: rbitcoin_store::TxRecord::class_a(
+        tx: rbitcoin_store::TxRecord {
             txid,
-            2,
-            0,
-            inputs.len() as u32,
-            outputs.len() as u32,
-        ),
+            version: 2,
+            locktime: 0,
+            input_count: inputs.len() as u32,
+            output_count: outputs.len() as u32,
+        },
         inputs,
         outputs,
     }

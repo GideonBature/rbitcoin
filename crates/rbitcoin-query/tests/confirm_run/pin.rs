@@ -6,7 +6,13 @@ use rbitcoin_store::{OutputRecord, TxRecord};
 
 fn pin_with(txid: [u8; 32], inputs: u32) -> CreatePin {
     rbitcoin_query::CreatePinInner::records(
-        TxRecord::class_a(txid, 1, 0, inputs, 1),
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: inputs,
+            output_count: 1,
+        },
         vec![OutputRecord::unspent(50, vec![0x51])],
     )
 }

@@ -493,13 +493,7 @@ pub fn sat_vb_from_json(v: &Value) -> Result<u64, Value> {
 }
 
 #[doc(hidden)]
-pub fn fee_exceeds_max(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
-    if max_sat_vb == 0 {
-        return false;
-    }
-    let vsize = rbitcoin_consensus::policy::vbytes_ceil(weight);
-    fee_sat > max_sat_vb.saturating_mul(vsize)
-}
+pub use rbitcoin_consensus::policy::fee_exceeds_max;
 
 #[doc(hidden)]
 pub fn prevout_value_sat(ctx: &RpcContext, op: &OutPoint) -> Option<u64> {

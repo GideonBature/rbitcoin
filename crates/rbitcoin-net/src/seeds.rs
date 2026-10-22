@@ -644,10 +644,6 @@ impl AddrMan {
             .unwrap_or_else(PeerFlags::empty)
     }
 
-    pub fn entry(&self, addr: &SocketAddr) -> Option<PeerEntry> {
-        self.entry_of(&NetAddr::from_socket(*addr))
-    }
-
     #[doc(hidden)]
     pub fn entry_of(&self, addr: &NetAddr) -> Option<PeerEntry> {
         self.by_addr
@@ -664,10 +660,6 @@ impl AddrMan {
     }
 
     /// Successful BIP324 handshake.
-    pub fn note_connected(&mut self, addr: SocketAddr) {
-        self.note_connected_addr(NetAddr::from_socket(addr));
-    }
-
     pub fn note_connected_addr(&mut self, addr: NetAddr) {
         self.add_addr(addr);
         if let Some(f) = self.by_addr.get_mut(&addr) {
@@ -677,11 +669,7 @@ impl AddrMan {
         }
     }
 
-    /// Record a dial attempt. Not persisted.
-    pub fn note_attempt(&mut self, addr: SocketAddr) {
-        self.note_attempt_at(addr, Instant::now());
-    }
-
+    /// Record a dial attempt at `when`. Not persisted.
     pub fn note_attempt_at(&mut self, addr: SocketAddr, when: Instant) {
         self.last_attempt.insert(NetAddr::from_socket(addr), when);
     }
@@ -708,10 +696,6 @@ impl AddrMan {
     }
 
     /// Dial failed. `incompatible` = no v2 / protocol reject; else network/timeout.
-    pub fn note_connect_failed(&mut self, addr: SocketAddr, incompatible: bool) {
-        self.note_connect_failed_addr(NetAddr::from_socket(addr), incompatible);
-    }
-
     pub fn note_connect_failed_addr(&mut self, addr: NetAddr, incompatible: bool) {
         if net_addr_unspecified(addr) {
             return;
@@ -728,10 +712,6 @@ impl AddrMan {
     }
 
     /// Throughput / latency sample from an active session.
-    pub fn note_speed(&mut self, addr: SocketAddr, latency_ms: u64, bytes_per_sec: u64) {
-        self.note_speed_addr(NetAddr::from_socket(addr), latency_ms, bytes_per_sec);
-    }
-
     pub fn note_speed_addr(&mut self, addr: NetAddr, latency_ms: u64, bytes_per_sec: u64) {
         if net_addr_unspecified(addr) {
             return;
@@ -745,10 +725,6 @@ impl AddrMan {
 
     /// IBD stall / relative-slow: force `SLOW`, clear `FAST` (mid-range samples
     /// would otherwise leave a prior FAST bit and keep `dial_tier` 0).
-    pub fn note_ibd_slow(&mut self, addr: SocketAddr) {
-        self.note_ibd_slow_addr(NetAddr::from_socket(addr));
-    }
-
     pub fn note_ibd_slow_addr(&mut self, addr: NetAddr) {
         if net_addr_unspecified(addr) {
             return;
@@ -762,16 +738,6 @@ impl AddrMan {
     }
 
     /// `Dead` speed sample, then IBD-outlier override when `ibd_outlier`.
-    pub fn apply_ibd_dead_speed(
-        &mut self,
-        addr: SocketAddr,
-        latency_ms: u64,
-        bps: Option<u64>,
-        ibd_outlier: bool,
-    ) {
-        self.apply_ibd_dead_speed_addr(NetAddr::from_socket(addr), latency_ms, bps, ibd_outlier);
-    }
-
     pub fn apply_ibd_dead_speed_addr(
         &mut self,
         addr: NetAddr,
@@ -865,12 +831,8 @@ impl AddrMan {
         out
     }
 
-    /// Round-robin-ish: take up to `max` peers starting at `offset` (legacy helper).
+    /// Round-robin-ish: take up to `max` peers starting at `offset`.
     /// Still prefers better dial tiers by walking a ranked list.
-    pub fn take_outbound_offset(&self, max: usize, offset: usize) -> Vec<SocketAddr> {
-        self.take_outbound_offset_occupied(max, offset, &[])
-    }
-
     pub fn take_outbound_offset_occupied(
         &self,
         max: usize,
@@ -891,11 +853,6 @@ impl AddrMan {
             out.push(ranked[(offset + i) % n]);
         }
         out
-    }
-
-    /// Best up-to-`max` outbound candidates (ranked).
-    pub fn take_outbound(&self, max: usize) -> Vec<SocketAddr> {
-        self.take_dial_candidates(max, &HashSet::new(), &[])
     }
 
     /// Snapshot of all entries (for tests / diagnostics).

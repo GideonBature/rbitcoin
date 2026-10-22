@@ -34,11 +34,6 @@ pub struct TweakWave {
 }
 
 #[doc(hidden)]
-pub fn is_p2tr(spk: &[u8]) -> bool {
-    spk.len() == 34 && spk[0] == 0x51 && spk[1] == 0x20
-}
-
-#[doc(hidden)]
 pub struct PreadJob {
     pub off: u64,
     pub buf: Vec<u8>,
@@ -165,7 +160,13 @@ pub fn run_stage(
 
 #[doc(hidden)]
 pub fn empty_rec(txid: [u8; 32]) -> TxRecord {
-    TxRecord::class_a(txid, 1, 0, 0, 0)
+    TxRecord {
+        txid,
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 0,
+    }
 }
 
 /// Load outs for `fks`; seqsigwit + extra parents only for P2TR creates.
@@ -217,7 +218,7 @@ pub fn load_tweak_wave(table: &TxTable, fks: &[Fk]) -> Result<TweakWave, StoreEr
         )?;
         rec.txid = txs[i].rec.txid;
         table.overlay_stamped_n_in(txs[i].fk, &mut rec)?;
-        txs[i].need_seqsigwit = outs.iter().any(|o| is_p2tr(&o.script));
+        txs[i].need_seqsigwit = outs.iter().any(|o| crate::scripthash::is_p2tr(&o.script));
         wave_outs.insert(txs[i].fk.0, outs.clone());
         txs[i].outs = outs;
         txs[i].rec = rec;
