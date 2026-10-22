@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Hermetic pin for scripts/docker-tags.sh (image tag policy). No docker.
 set -euo pipefail
+# repo() runs in $(...); a failed git there must stop the test, not leave
+# a repo with no tags for the policy checks.
+shopt -s inherit_errexit
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAGS="$ROOT/scripts/docker-tags.sh"
@@ -11,6 +14,9 @@ export GIT_AUTHOR_NAME=rbitcoin-docker-tags-test
 export GIT_AUTHOR_EMAIL=test@example.invalid
 export GIT_COMMITTER_NAME=rbitcoin-docker-tags-test
 export GIT_COMMITTER_EMAIL=test@example.invalid
+# The caller's git config (tag.gpgsign, commit.gpgsign) is not the test's.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rbitcoin-docker-tags.XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
