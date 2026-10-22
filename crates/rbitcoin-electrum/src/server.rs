@@ -1572,6 +1572,8 @@ pub fn method_needs_sh_index(method: &str) -> bool {
         || method.starts_with("blockchain.silentpayments.")
 }
 
+/// Chain-tip stamp and a trailing `asof:` share this set. A method that
+/// stamps without accepting asof has to split the list on purpose.
 #[doc(hidden)]
 pub fn method_stamps_chain_tip(method: &str) -> bool {
     matches!(
@@ -2231,18 +2233,6 @@ pub fn param_i64(params: &Value, idx: usize) -> Result<i64, String> {
 }
 
 #[doc(hidden)]
-pub fn method_accepts_asof(method: &str) -> bool {
-    matches!(
-        method,
-        "blockchain.scripthash.get_history"
-            | "blockchain.scripthash.get_balance"
-            | "blockchain.scripthash.listunspent"
-            | "blockchain.transaction.get"
-            | "blockchain.transaction.get_merkle"
-    )
-}
-
-#[doc(hidden)]
 pub fn parse_blockhash32(s: &str) -> Option<[u8; 32]> {
     rbitcoin_primitives::parse_display_hash32(s).ok()
 }
@@ -2390,7 +2380,7 @@ pub fn take_trailing_asof(
     params: &Value,
     asof_ok: bool,
 ) -> Result<(Value, Option<[u8; 32]>), String> {
-    if !method_accepts_asof(method) {
+    if !method_stamps_chain_tip(method) {
         return Ok((params.clone(), None));
     }
     let Some(arr) = params.as_array() else {
