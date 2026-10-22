@@ -861,8 +861,7 @@ mod tests {
         assert!(cmpct_hsi_regtest_connectable(&case.hsi));
         assert_eq!(cmpct_missing_for_case(&case).as_deref(), Some(&[1u64][..]));
         assert_eq!(
-            try_reconstruct(&case.hsi, &HashMap::<ShortId, Vec<&Transaction>>::new())
-                .unwrap_err(),
+            try_reconstruct(&case.hsi, &HashMap::<ShortId, Vec<&Transaction>>::new()).unwrap_err(),
             vec![1]
         );
     }
