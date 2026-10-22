@@ -277,8 +277,6 @@ pub struct ArchiveWritePlan {
     pub packed: Vec<(CreatePin, Vec<InputRecord>)>,
     pub planned_fks: Vec<Fk>,
     pub per_header_ranges: Vec<(Fk, Fk, u32)>,
-    /// Empty. Block size and weight are summed from `txstat`, not stored here.
-    pub per_header_sw: Vec<(u32, u32)>,
     /// Pin-time spend edges (create_fk stamped). Survives freeze. Wire commit
     /// reads `input.loc` from these edges and script bytes from the wire tx.
     pub edges: crate::SpendEdges,
@@ -314,7 +312,6 @@ impl ArchiveWritePlan {
             packed: Vec::new(),
             planned_fks: Vec::new(),
             per_header_ranges: Vec::new(),
-            per_header_sw: Vec::new(),
             edges: crate::SpendEdges::default(),
             batch_creates: Vec::new(),
             external_parents: crate::U64Map::default(),
@@ -437,15 +434,11 @@ impl ArchiveWritePlan {
         }
         let mut keep_fks: crate::U64Set = crate::U64Set::default();
         let mut new_ranges: Vec<(Fk, Fk, u32)> = Vec::with_capacity(self.per_header_ranges.len());
-        let mut new_sw: Vec<(u32, u32)> = Vec::with_capacity(self.per_header_ranges.len());
-        for (i, &(hfk, first, n)) in self.per_header_ranges.iter().enumerate() {
+        for &(hfk, first, n) in &self.per_header_ranges {
             if has_body(hfk)? {
                 continue;
             }
             new_ranges.push((hfk, first, n));
-            if i < self.per_header_sw.len() {
-                new_sw.push(self.per_header_sw[i]);
-            }
             let start = self
                 .planned_fks
                 .iter()
@@ -504,7 +497,6 @@ impl ArchiveWritePlan {
         self.tx_fees = new_fees;
         self.tx_sizes = new_sizes;
         self.per_header_ranges = new_ranges;
-        self.per_header_sw = new_sw;
         self.edges.retain(|id, _| keep_fks.contains(id));
         self.batch_creates
             .retain(|(_, fk)| fk.get().is_some_and(|id| keep_fks.contains(&id)));
@@ -542,7 +534,6 @@ impl ArchiveWritePlan {
         }
         self.planned_fks.append(&mut other.planned_fks);
         self.per_header_ranges.append(&mut other.per_header_ranges);
-        self.per_header_sw.append(&mut other.per_header_sw);
         self.edges.extend(other.edges);
         self.batch_creates.append(&mut other.batch_creates);
         self.batch_pin.append(&mut other.batch_pin);
@@ -1370,7 +1361,6 @@ impl Query {
             packed,
             planned_fks,
             per_header_ranges,
-            per_header_sw: Vec::new(),
             edges,
             batch_creates,
             external_parents,
