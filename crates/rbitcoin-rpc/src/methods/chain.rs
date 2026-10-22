@@ -1008,10 +1008,7 @@ pub fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
                         "bestblock": getbestblockhash(ctx)?,
                         "confirmations": 0,
                         "value": out.value.to_btc(),
-                        "scriptPubKey": {
-                            "hex": rbitcoin_primitives::hex_encode(out.script_pubkey.as_bytes() ),
-                            "asm": out.script_pubkey.to_asm_string(),
-                        },
+                        "scriptPubKey": script_pubkey_json(&out.script_pubkey, rpc_btc_network(ctx.network)),
                         "coinbase": false,
                     }));
                 }
@@ -1074,10 +1071,7 @@ pub fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         "bestblock": getbestblockhash(ctx)?,
         "confirmations": confs,
         "value": Amount::from_sat(out.value).to_btc(),
-        "scriptPubKey": {
-            "hex": rbitcoin_primitives::hex_encode(&out.script),
-            "asm": ScriptBuf::from_bytes(out.script.clone()).to_asm_string(),
-        },
+        "scriptPubKey": script_pubkey_json(&ScriptBuf::from_bytes(out.script), rpc_btc_network(ctx.network)),
         "coinbase": coinbase,
     }))
 }
