@@ -68,29 +68,8 @@ pub struct BinaryFuse8 {
 
 #[inline]
 #[doc(hidden)]
-pub fn splitmix64(seed: &mut u64) -> u64 {
-    *seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *seed;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
-
-#[inline]
-#[doc(hidden)]
-pub fn mix64(mut k: u64) -> u64 {
-    k ^= k >> 33;
-    k = k.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    k ^= k >> 33;
-    k = k.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    k ^= k >> 33;
-    k
-}
-
-#[inline]
-#[doc(hidden)]
 pub fn mix(key: u64, seed: u64) -> u64 {
-    mix64(key.wrapping_add(seed))
+    crate::bdz::mix64(key.wrapping_add(seed))
 }
 
 #[inline]
@@ -269,7 +248,7 @@ impl BinaryFuse8 {
 
         let mut fingerprints = vec![0u8; fp_array_len].into_boxed_slice();
         let mut rng = 1u64;
-        let mut seed = splitmix64(&mut rng);
+        let mut seed = crate::bdz::splitmix64(&mut rng);
         let capacity = fingerprints.len();
         let mut alone = vec![0u32; capacity];
         let mut t2count = vec![0u8; capacity];
@@ -346,7 +325,7 @@ impl BinaryFuse8 {
                     t2count[i] = 0;
                     t2hash[i] = 0;
                 }
-                seed = splitmix64(&mut rng);
+                seed = crate::bdz::splitmix64(&mut rng);
                 continue;
             }
 
@@ -372,7 +351,7 @@ impl BinaryFuse8 {
                 t2count[i] = 0;
                 t2hash[i] = 0;
             }
-            seed = splitmix64(&mut rng);
+            seed = crate::bdz::splitmix64(&mut rng);
         }
         if !done {
             return Err("Failed to construct binary fuse filter.");
