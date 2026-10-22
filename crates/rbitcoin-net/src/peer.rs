@@ -2774,9 +2774,9 @@ pub async fn handle_decoded_peer_msg(
             on_getblocks(hub, out_tx, follow, session, &gb).await?
         }
         NetworkMessage::Headers(headers) => {
-            if session.is_some_and(|s| s.send_over_budget()) {
-                return Ok(());
-            }
+            // The frame is already off the socket. Store it and clear the
+            // locator latch. Getdata and the next getheaders wait in
+            // `apply_headers` until the writer drains.
             on_headers(hub, out_tx, follow, session, &headers).await?
         }
         NetworkMessage::Block(block) => on_block(hub, out_tx, follow, session, &block).await?,
@@ -4090,6 +4090,11 @@ fn apply_headers(
     }
     for hash in &apply.drop_asks {
         follow.requested_blocks.remove(hash);
+    }
+    // The batch is already persisted. A spent send budget does not claim
+    // bodies or queue another locator. The 120s poll can ask again.
+    if session.is_some_and(|s| s.send_over_budget()) {
+        return Ok(());
     }
     if !apply.want_bodies.is_empty() {
         queue_block_getdata(

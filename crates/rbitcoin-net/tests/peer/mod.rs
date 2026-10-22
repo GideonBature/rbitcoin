@@ -5101,6 +5101,54 @@ async fn cmpct_relay_join_failure_is_protocol() {
     assert!(err.to_string().contains("cmpct relay join failed"), "{err}");
 }
 
+/// A headers batch already taken off the socket is stored when the send
+/// budget is spent. The locator latch clears and nothing else is queued.
+#[tokio::test]
+async fn over_budget_headers_are_stored_without_a_follow_up() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hdr-over-budget");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peer = live_peer(&peers, 18510, 31, false);
+    peer.note_awaiting_headers();
+    peer.note_send_queued(rbitcoin_net::peers::PEER_SEND_BUDGET + 1);
+    assert!(peer.send_over_budget());
+    let header = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        hub.tip_header().unwrap().time.saturating_add(600),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    )
+    .header;
+    let hash = header.block_hash();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let before = hub.headers_reply_count();
+    handle_decoded_peer_msg(
+        RawNetworkMessage::new(
+            Magic::from(Network::Regtest),
+            NetworkMessage::Headers(vec![header]),
+        ),
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+    )
+    .await
+    .expect("headers");
+    assert!(
+        hub.headers_reply_count() > before,
+        "the batch is handled, not dropped"
+    );
+    assert!(!peer.is_awaiting_headers(), "the locator latch clears");
+    assert!(
+        out_rx.try_recv().is_err(),
+        "no getdata or getheaders while the send budget is spent"
+    );
+    assert!(hub.header_of(&hash).is_some(), "the header is stored");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No high-bandwidth peer means the compact build does not run. A stack hub
 /// would persist the header on this thread, so the count stays visible.
 #[test]
