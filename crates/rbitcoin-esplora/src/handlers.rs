@@ -1029,6 +1029,7 @@ pub fn resolve_address_sh(addr_s: &str, network: Network) -> Result<[u8; 32], ()
 }
 
 #[doc(hidden)]
+#[allow(clippy::result_large_err)] // axum Response, same as the other handlers
 pub fn sh_stats_json(
     st: &AppState,
     sh: &[u8; 32],
