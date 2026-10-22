@@ -378,7 +378,8 @@ pub fn heavier_fork_candidates(
 /// rewind the confirmed tip to the LCA so the normal pipeline confirms it.
 ///
 /// [`select_heavier_path`] reads the header store. The coordinator drops
-/// `shared` before that read and commits through [`apply_off_lock_rewind`].
+/// `shared` before that read. The commit runs only while the tip is still
+/// the block that prepare disconnected to.
 pub fn consider_disconnected_heavier(
     st: &mut super::state::IbdWorkState,
     hub: &ChainHub,
