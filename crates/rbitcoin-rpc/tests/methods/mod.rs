@@ -800,6 +800,24 @@ fn blocksonly_generate_removes_the_tx_it_mines() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// More blocks than the cap is refused before any block is mined. The pool
+/// transactions chosen for that call stay live.
+#[test]
+fn generate_over_cap_leaves_the_pool() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = spend.compute_txid();
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let err = dispatch(&ctx, "generate", vec![json!(10_001)]).unwrap_err();
+    assert!(
+        ctx.mempool.as_ref().unwrap().contains(&txid),
+        "failed generate wiped the pool: {err}"
+    );
+    let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
+    assert_eq!(raw, json!([txid.to_string()]), "{raw}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn parse_wrapped_multi_sh_wsh_and_wsh() {
     let pk = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";

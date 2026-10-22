@@ -3155,41 +3155,50 @@ impl MempoolHub {
         Ok(accepted)
     }
 
-    /// Transactions one `generate` will put in a block, removed under this lock.
+    /// Pool transactions one `generate` may put in the first block.
     ///
-    /// [`Self::remove_for_block`] drops nothing while relay is off. Catch-up
-    /// must not call this (that block stays coinbase-only). Every id returned
-    /// has already left the live set, so a relay change during the mine cannot
-    /// leave a mined tx in the pool.
-    pub fn take_generate_txs(&self, min_sat_kvb: u64) -> Vec<Transaction> {
+    /// The live set is unchanged. [`Self::commit_generated_txids`] runs only
+    /// after that mine returns. Catch-up must not call this (that block stays
+    /// coinbase-only). [`Self::remove_for_block`] drops nothing while relay is off.
+    pub fn select_generate_txs(&self, min_sat_kvb: u64) -> Vec<Transaction> {
         let deltas = self.fee_deltas.lock().unwrap().clone();
-        let (txs, ids) = {
+        let g = self.lock_write();
+        let budget = g.template_budget(min_sat_kvb);
+        let selected = g.select_block_template(budget, |id| deltas.get(&id).copied().unwrap_or(0));
+        selected
+            .into_iter()
+            .map(|(tx, _sel)| Transaction::clone(tx.as_ref()))
+            .collect()
+    }
+
+    /// Remove `txids` that a successful `generate` placed in a block.
+    ///
+    /// Entries connect already removed are left alone, so their confirm-memory
+    /// sample is not recorded twice. A mine that returned an error must not
+    /// call this: the pool stays as it was.
+    pub fn commit_generated_txids(&self, txids: &[Txid]) -> Result<(), AcceptError> {
+        if txids.is_empty() {
+            return Ok(());
+        }
+        let removed = {
             let mut g = self.lock_write();
-            let budget = g.template_budget(min_sat_kvb);
-            let selected =
-                g.select_block_template(budget, |id| deltas.get(&id).copied().unwrap_or(0));
             let bps = g.graph.bytes_per_sigop();
-            let mut txs = Vec::with_capacity(selected.len());
-            let mut ids = Vec::with_capacity(selected.len());
-            for (tx, sel) in selected {
-                if let Some(e) = g.graph.get(&sel.txid) {
+            for tid in txids {
+                if let Some(e) = g.graph.get(tid) {
                     let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
                         e.fee_sat,
                         e.adjusted_weight(bps),
                     );
                     self.push_confirm_memory(rate);
                 }
-                ids.push(sel.txid);
-                txs.push(Transaction::clone(tx.as_ref()));
             }
-            let _ = g.remove_live_txids(&ids);
-            (txs, ids)
+            g.remove_live_txids(txids)?
         };
-        if !ids.is_empty() {
-            self.unindex_evicted(&ids);
+        if removed > 0 {
+            self.unindex_evicted(txids);
         }
-        self.drop_mined_fee_deltas(&ids);
-        txs
+        self.drop_mined_fee_deltas(txids);
+        Ok(())
     }
 
     /// Remove confirmed txids (tip connect / archive confirm) and re-try orphans
