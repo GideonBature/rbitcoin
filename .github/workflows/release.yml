@@ -373,10 +373,11 @@ jobs:
     # One tag at a time across the repo. Each run picks X.Y / latest from
     # the tags it fetches at its own start, so a tag pushed while another
     # publishes cannot move them backwards. The workflow group above is per
-    # tag and does not serialize this.
+    # tag and does not serialize this. queue: max keeps every waiting tag;
+    # the default keeps one and cancels the older pending run.
     concurrency:
       group: docker-publish
-      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
