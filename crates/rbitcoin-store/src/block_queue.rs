@@ -494,17 +494,4 @@ impl BlockQueue {
             .filter(|e| matches!(e.body, QueuedBody::Promoted { .. }))
             .count()
     }
-
-    pub fn mark_resolve_complete_wave(&mut self, heights: &[u32]) -> Result<usize, StoreError> {
-        let mut n = 0usize;
-        for &h in heights {
-            if let Ok(e) = self.entry_mut_for_height(h) {
-                if !e.resolve_complete {
-                    e.resolve_complete = true;
-                    n += 1;
-                }
-            }
-        }
-        Ok(n)
-    }
 }
