@@ -4039,7 +4039,6 @@ fn classify_headers(
                 );
                 want.retain(|h| !have_bodies.contains(h) && !requested.contains(h));
                 want.truncate(MAX_SERVE_BLOCKS.saturating_sub(requested.len()));
-                want.retain(|h| hub.claim_block_ask(h));
                 apply.want_bodies = want;
             }
         }
@@ -4096,15 +4095,27 @@ fn apply_headers(
     if session.is_some_and(|s| s.send_over_budget()) {
         return Ok(());
     }
-    if !apply.want_bodies.is_empty() {
-        queue_block_getdata(
-            hub,
-            out_tx,
-            session,
-            &mut follow.requested_blocks,
-            &apply.want_bodies,
-            getdata_use_compact(hub, follow.cmpct_version),
-        )?;
+    // Claim on this session, next to the queue. The header job only
+    // filters. An aborted join never publishes an ask that was not sent.
+    let mut claimed = Vec::new();
+    for hash in &apply.want_bodies {
+        if hub.claim_block_ask(hash) {
+            claimed.push(*hash);
+        }
+    }
+    if let Err(e) = queue_block_getdata(
+        hub,
+        out_tx,
+        session,
+        &mut follow.requested_blocks,
+        &claimed,
+        getdata_use_compact(hub, follow.cmpct_version),
+    ) {
+        for hash in &claimed {
+            follow.requested_blocks.remove(hash);
+            hub.forget_asked_block(hash);
+        }
+        return Err(e);
     }
     if let Some(locator) = apply.getheaders {
         queue_headers_locator(out_tx, session, locator)?;

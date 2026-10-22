@@ -5146,6 +5146,40 @@ async fn over_budget_headers_are_stored_without_a_follow_up() {
         "no getdata or getheaders while the send budget is spent"
     );
     assert!(hub.header_of(&hash).is_some(), "the header is stored");
+    assert!(
+        !hub.already_have_or_asked_block(&hash),
+        "an unsent body is not left in flight"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A closed writer fails the getdata. The claim from that attempt is released
+/// so another peer can ask.
+#[tokio::test]
+async fn failed_body_queue_releases_the_ask() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hdr-ask-release");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peer = live_peer(&peers, 18511, 32, false);
+    let header = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        hub.tip_header().unwrap().time.saturating_add(600),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    )
+    .header;
+    let hash = header.block_hash();
+    let (out_tx, out_rx) = mpsc::unbounded_channel();
+    drop(out_rx);
+    let mut follow = PeerFollowState::new();
+    let err = on_headers(&hub, &out_tx, &mut follow, Some(peer.as_ref()), &[header])
+        .await
+        .expect_err("closed writer");
+    assert!(err.to_string().contains("peer write half closed"), "{err}");
+    assert!(!hub.already_have_or_asked_block(&hash));
+    assert!(!follow.requested_blocks.contains(&hash));
+    assert!(hub.header_of(&hash).is_some(), "the header is stored");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
