@@ -4,6 +4,8 @@ use rbitcoin_ibd::ibd::reorg::*;
 use rbitcoin_net::chain::ChainHub;
 use rbitcoin_net::error::NetError;
 use rbitcoin_primitives::Height;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("ibd-reorg")
@@ -257,6 +259,107 @@ fn a_walk_candidate_forked_below_the_tip_is_rewound_to() {
         0,
         "a planted path is not a store walk"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+struct ClearRewindHook;
+impl Drop for ClearRewindHook {
+    fn drop(&mut self) {
+        arm_after_header_rewind_prepare_for_test(None);
+        *HOOK_HUB.lock().unwrap_or_else(|err| err.into_inner()) = None;
+        *HOOK_SHARED.lock().unwrap_or_else(|err| err.into_inner()) = None;
+        HOOK_G1.lock().unwrap_or_else(|err| err.into_inner()).take();
+    }
+}
+
+static HOOK_HUB: Mutex<Option<Arc<ChainHub>>> = Mutex::new(None);
+static HOOK_SHARED: Mutex<Option<Arc<Mutex<rbitcoin_ibd::ibd::state::IbdWorkState>>>> =
+    Mutex::new(None);
+static HOOK_G1: Mutex<Option<BlockHash>> = Mutex::new(None);
+static HOOK_RAN: AtomicBool = AtomicBool::new(false);
+
+/// Stands in for the header thread committing a deeper fork after this
+/// prepare already disconnected, and before its commit.
+fn commit_deeper_fork_after_prepare() {
+    let hub = HOOK_HUB
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .expect("hub armed")
+        .clone();
+    let shared = HOOK_SHARED
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .expect("shared armed")
+        .clone();
+    let g1 = HOOK_G1
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .expect("side hash armed");
+    let prep = prepare_header_rewind(&hub, &[g1])
+        .unwrap()
+        .expect("deeper fork disconnects to genesis");
+    let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+    commit_header_rewind(&mut st, &hub, &[g1], &prep);
+    HOOK_RAN.store(true, Ordering::Release);
+}
+
+/// The coordinator prepared a rewind to L1. The header thread then rewound
+/// to genesis and committed that fork. The prepared L1 commit must not run.
+#[test]
+fn stale_heavier_rewind_does_not_commit_after_the_tip_moves() {
+    let _clear = ClearRewindHook;
+    HOOK_RAN.store(false, Ordering::Release);
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let gen = hub.tip_hash().unwrap();
+    let l1 = mine(gen, 1_500_064_100, 1);
+    hub.accept_block(l1.clone()).unwrap();
+    let l2 = mine(l1.block_hash(), 1_500_064_200, 2);
+    hub.accept_block(l2.clone()).unwrap();
+    let w2 = distinct_sib(mine(l1.block_hash(), 1_500_064_201, 2), l2.block_hash());
+    let w3 = mine(w2.block_hash(), 1_500_064_301, 3);
+    let w4 = mine(w3.block_hash(), 1_500_064_401, 4);
+    let w5 = mine(w4.block_hash(), 1_500_064_501, 5);
+    for w in [&w2, &w3, &w4, &w5] {
+        hub.ensure_header(&w.header).unwrap();
+    }
+    let g1 = distinct_sib(mine(gen, 1_500_064_111, 1), l1.block_hash());
+    hub.ensure_header(&g1.header).unwrap();
+
+    let mut st =
+        rbitcoin_ibd::ibd::state::IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
+    st.header_walk.tip.hash = Some(w5.block_hash());
+    st.header_walk.tip.height = 5;
+    let shared = Arc::new(Mutex::new(st));
+    let hub = Arc::new(hub);
+    *HOOK_HUB.lock().unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(&hub));
+    *HOOK_SHARED.lock().unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(&shared));
+    *HOOK_G1.lock().unwrap_or_else(|err| err.into_inner()) = Some(g1.block_hash());
+    arm_after_header_rewind_prepare_for_test(Some(commit_deeper_fork_after_prepare));
+    rbitcoin_ibd::ibd::settle_disconnected_heavier_for_test(&shared, &hub);
+
+    assert!(
+        HOOK_RAN.load(Ordering::Acquire),
+        "the header-thread commit ran while the coordinator rewind was prepared"
+    );
+    assert_eq!(
+        hub.tip_height(),
+        Some(0),
+        "the later rewind to genesis stays the tip"
+    );
+    assert_eq!(
+        hub.query.lookup_taken_hi(),
+        Some(0),
+        "the prepared L1 commit must not move lookup_taken_hi back up"
+    );
+    let st = shared.lock().unwrap_or_else(|err| err.into_inner());
+    assert!(
+        !st.ordered.contains(&w2.block_hash()),
+        "losing hashes from the prepared path stay off ordered"
+    );
+    assert_eq!(st.height_to_hash.get(&1), Some(&g1.block_hash()));
     let _ = std::fs::remove_dir_all(dir);
 }
 

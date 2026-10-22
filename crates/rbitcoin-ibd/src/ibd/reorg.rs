@@ -10,6 +10,8 @@ use rbitcoin_net::error::NetError;
 use rbitcoin_net::most_work::{sum_work, work_better, InvalidHashSet};
 use rbitcoin_primitives::{Fk, Height};
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::thread::ThreadId;
 
 /// Whether a confirm reject string is the soft BadPrev class.
 pub fn is_bad_prev_err(err: &str) -> bool {
@@ -376,7 +378,7 @@ pub fn heavier_fork_candidates(
 /// rewind the confirmed tip to the LCA so the normal pipeline confirms it.
 ///
 /// [`select_heavier_path`] reads the header store. The coordinator drops
-/// `shared` before that read and commits with [`commit_header_rewind`].
+/// `shared` before that read and commits through [`apply_off_lock_rewind`].
 pub fn consider_disconnected_heavier(
     st: &mut super::state::IbdWorkState,
     hub: &ChainHub,
@@ -694,13 +696,109 @@ pub fn apply_header_rewind(
     Ok(true)
 }
 
+/// Header thread and coordinator share this so only one of them disconnects.
+fn rewind_exclusion() -> &'static Mutex<()> {
+    static GATE: Mutex<()> = Mutex::new(());
+    &GATE
+}
+
+fn tip_pair(hub: &ChainHub) -> (Option<u32>, Option<BlockHash>) {
+    (hub.tip_height(), hub.tip_hash())
+}
+
+/// `prepare_header_rewind` already disconnected when `prep.rewound`. The
+/// commit is for that tip, not whatever tip is current after a later rewind.
+fn rewind_tip_still(
+    hub: &ChainHub,
+    prep: &RewindPrep,
+    tip_before: (Option<u32>, Option<BlockHash>),
+) -> bool {
+    let now = tip_pair(hub);
+    if prep.rewound {
+        now == (Some(prep.lca_h), Some(prep.lca))
+    } else {
+        now == tip_before
+    }
+}
+
+static AFTER_PREPARE: Mutex<Option<(ThreadId, fn())>> = Mutex::new(None);
+
+/// Runs on this thread after a rewind is prepared and before it is committed.
+/// The header-thread stand-in in the stale-commit pin uses this. An empty
+/// hook is production.
+#[doc(hidden)]
+pub fn arm_after_header_rewind_prepare_for_test(hook: Option<fn()>) {
+    let mut slot = AFTER_PREPARE.lock().unwrap_or_else(|err| err.into_inner());
+    *slot = hook.map(|hook| (std::thread::current().id(), hook));
+}
+
+fn fire_after_prepare() {
+    let hook = {
+        let mut slot = AFTER_PREPARE.lock().unwrap_or_else(|err| err.into_inner());
+        match slot.as_ref() {
+            Some((id, hook)) if *id == std::thread::current().id() => {
+                let hook = *hook;
+                *slot = None;
+                Some(hook)
+            }
+            _ => None,
+        }
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Select, disconnect, and commit one heavier path. Caller does not hold
+/// `shared`. One exclusion covers the select, the disconnect, and the
+/// commit. A moved tip or a hash marked invalid skips the commit, so
+/// `clear_path_above` and `set_lookup_taken_hi` stay off that stale height.
+pub(crate) fn apply_off_lock_rewind(
+    shared: &Mutex<super::state::IbdWorkState>,
+    hub: &ChainHub,
+    cands: &[BlockHash],
+    invalid: &HashSet<[u8; 32]>,
+) -> Result<Option<Vec<(BlockHash, Fk)>>, NetError> {
+    let _gate = rewind_exclusion()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let Some(path) = select_heavier_path(hub, cands, invalid)? else {
+        return Ok(None);
+    };
+    let tip_before = tip_pair(hub);
+    let Some(prep) = prepare_header_rewind(hub, &path)? else {
+        return Ok(None);
+    };
+    // Re-selecting here would see the LCA we just rewound to and return
+    // none. The fresh select is the one above, after the other rewind has
+    // either committed or is waiting on this gate.
+    fire_after_prepare();
+    let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+    if path
+        .iter()
+        .any(|hash| st.reorg.invalid.contains(hash.to_byte_array()))
+    {
+        return Ok(None);
+    }
+    if !rewind_tip_still(hub, &prep, tip_before) {
+        return Ok(None);
+    }
+    commit_header_rewind(&mut st, hub, &path, &prep);
+    let pairs = path
+        .iter()
+        .zip(prep.fks.iter())
+        .filter_map(|(hash, fk)| fk.map(|fk| (*hash, fk)))
+        .collect();
+    Ok(Some(pairs))
+}
+
 /// Most-work rewind with the store reads outside `shared`.
 ///
 /// `bus` receives the path's header fks after the lock drops. Those fks are
 /// also in `header_fks`, so a body that arrives before the publish still
 /// resolves.
 pub fn rewind_off_coord_lock(
-    shared: &std::sync::Mutex<super::state::IbdWorkState>,
+    shared: &Mutex<super::state::IbdWorkState>,
     hub: &ChainHub,
     bus: Option<&super::peer_io::HeaderFkBus>,
 ) -> Result<bool, NetError> {
@@ -710,25 +808,8 @@ pub fn rewind_off_coord_lock(
         let invalid: HashSet<[u8; 32]> = st.reorg.invalid.iter().collect();
         (cands, invalid)
     };
-    let Some(path) = select_heavier_path(hub, &cands, &invalid)? else {
+    let Some(pairs) = apply_off_lock_rewind(shared, hub, &cands, &invalid)? else {
         return Ok(false);
-    };
-    let Some(prep) = prepare_header_rewind(hub, &path)? else {
-        return Ok(false);
-    };
-    let pairs = {
-        let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
-        if path
-            .iter()
-            .any(|h| st.reorg.invalid.contains(h.to_byte_array()))
-        {
-            return Ok(false);
-        }
-        commit_header_rewind(&mut st, hub, &path, &prep);
-        path.iter()
-            .zip(prep.fks.iter())
-            .filter_map(|(hash, fk)| fk.map(|fk| (*hash, fk)))
-            .collect::<Vec<_>>()
     };
     if let Some(bus) = bus {
         super::peer_io::publish_header_fks(bus, &pairs);

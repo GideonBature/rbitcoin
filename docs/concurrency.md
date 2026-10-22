@@ -160,12 +160,16 @@ redial apply, and the event drains. A peer split whose height has left
 the download path is compared with the confirmed header only while that
 lock is down. An unplanted header-walk candidate is checked for a
 heavier fork the same way: the header walk runs with the lock down, and
-only the commit takes `shared` again. `tip_height`, `has_block`, and
+only the commit takes `shared` again. That commit shares one rewind
+exclusion with the header thread. It runs only when the tip is still the
+block the prepare disconnected to, so a header-thread rewind that already
+moved the tip is left in place. `tip_height`, `has_block`, and
 `block_queue_*` under the lock are RAM. The header thread still reads
 the store (`load_origin`, resume) with the lock dropped around that IO.
 `coord_shared_lock_skips_header_and_store_io`,
-`off_path_split_settles_outside_the_coord_lock`, and
-`unplanted_walk_reads_headers_outside_the_coord_lock` are the pins.
+`off_path_split_settles_outside_the_coord_lock`,
+`unplanted_walk_reads_headers_outside_the_coord_lock`, and
+`stale_heavier_rewind_does_not_commit_after_the_tip_moves` are the pins.
 
 **Deferred.** Headers decode and classify are still two blocking joins.
 `decode_framed_offload` drops its permit inside the decode job.

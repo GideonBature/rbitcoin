@@ -174,8 +174,9 @@ pub fn settle_off_path_for_test(shared: &std::sync::Mutex<state::IbdWorkState>, 
 }
 
 /// A heavier-fork check reads headers. `shared` is down across that read.
-/// No candidate keeps the lock. A hash marked invalid while the lock was
-/// down is not committed.
+/// No candidate keeps the lock. The commit waits until the header thread
+/// is out of its own rewind, and it is skipped when that thread already
+/// moved the tip.
 fn settle_disconnected_heavier<'a>(
     st_guard: HeldShared<'a>,
     shared: &'a std::sync::Mutex<state::IbdWorkState>,
@@ -189,25 +190,8 @@ fn settle_disconnected_heavier<'a>(
         return st_guard;
     }
     drop(st_guard);
-    let prepared = reorg::select_heavier_path(hub, &cands, &invalid)
-        .ok()
-        .flatten()
-        .and_then(|path| {
-            reorg::prepare_header_rewind(hub, &path)
-                .ok()
-                .flatten()
-                .map(|prep| (path, prep))
-        });
-    let mut st_guard = HeldShared::lock(shared);
-    if let Some((path, prep)) = prepared {
-        let marked = path
-            .iter()
-            .any(|hash| st_guard.reorg.invalid.contains(hash.to_byte_array()));
-        if !marked {
-            reorg::commit_header_rewind(&mut st_guard, hub, &path, &prep);
-        }
-    }
-    st_guard
+    let _ = reorg::apply_off_lock_rewind(shared, hub, &cands, &invalid);
+    HeldShared::lock(shared)
 }
 
 /// Same drop, header walk, and commit as the coordinator assign turn.
