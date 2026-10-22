@@ -152,9 +152,10 @@ jobs:
       - name: Download musl artifact
         env:
           GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ needs.musl.outputs.short }}
         run: |
           set -euo pipefail
-          short='${{ needs.musl.outputs.short }}'
+          short="$SHORT"
           dir="dist/docker/${{ matrix.platform }}"
           gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
             -n "rbitcoin-musl-${{ matrix.arch }}-linux-${short}" -D "$dir"
@@ -305,9 +306,10 @@ jobs:
       - name: Download artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ needs.musl.outputs.short }}
         run: |
           set -euo pipefail
-          short='${{ needs.musl.outputs.short }}'
+          short="$SHORT"
           gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
             -n "rbitcoin-musl-x86_64-linux-${short}" -D musl
           gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
@@ -368,6 +370,13 @@ jobs:
     name: docker-publish
     needs: [musl, publish]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # One tag at a time across the repo. Each run picks X.Y / latest from
+    # the tags it fetches at its own start, so a tag pushed while another
+    # publishes cannot move them backwards. The workflow group above is per
+    # tag and does not serialize this.
+    concurrency:
+      group: docker-publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -391,9 +400,10 @@ jobs:
       - name: Download musl artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ needs.musl.outputs.short }}
         run: |
           set -euo pipefail
-          short='${{ needs.musl.outputs.short }}'
+          short="$SHORT"
           for pair in x86_64:amd64 aarch64:arm64; do
             dir="dist/docker/${pair#*:}"
             gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \

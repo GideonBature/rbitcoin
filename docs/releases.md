@@ -154,6 +154,12 @@ emulation) and `sha256sum -c`s them first.
 publishes. If `docker-publish` fails after a good Release, rerun that job:
 the same tag gives the same platform manifests.
 
+`docker-publish` runs one tag at a time across the repo (its own
+concurrency group), and each run reads the tag list at its start. Two tags
+cut together, such as `X.Y.0` and a patch on `vX.(Y-1).x`, cannot move
+`latest` or `X.Y` backwards. GitHub keeps one pending run per group, so a
+third tag queued behind two is cancelled: rerun its `docker-publish`.
+
 ---
 
 ## CI gates on a ship PR
