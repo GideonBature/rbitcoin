@@ -5101,11 +5101,11 @@ async fn cmpct_relay_join_failure_is_protocol() {
     assert!(err.to_string().contains("cmpct relay join failed"), "{err}");
 }
 
-/// Header persist and the prefill walk for a high-bandwidth relay run off
-/// the session worker. Prefill is on, so the walk is not skipped.
+/// No high-bandwidth peer means the compact build does not run. A stack hub
+/// would persist the header on this thread, so the count stays visible.
 #[test]
-fn hb_relay_prefill_runs_off_the_reactor() {
-    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-relay-off-reactor");
+fn hb_relay_skips_the_build_when_no_peer_is_offered_it() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-relay-no-peer");
     hub.ensure_genesis().unwrap();
     hub.set_prefill_compact(true);
     let prev = hub.tip_hash().unwrap();
@@ -5116,20 +5116,17 @@ fn hb_relay_prefill_runs_off_the_reactor() {
         ScriptBuf::from_bytes(vec![0x51]),
         vec![],
     );
-    let hub = hub.into_arc();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name("tokio-rt-worker")
+    let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    rt.block_on(async move {
-        tokio::spawn(async move {
-            relay_new_pow_valid_block(&hub, &block, None).await;
-        })
-        .await
-        .expect("prefill and header persist left the reactor");
-    });
+    rbitcoin_net::chain::reset_ensure_header_fk_count();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, None));
+    assert_eq!(
+        rbitcoin_net::chain::ensure_header_fk_count(),
+        0,
+        "no high-bandwidth peer means the header is not persisted for compact relay"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

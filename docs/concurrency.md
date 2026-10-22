@@ -149,11 +149,13 @@ session inside `on_tip_event`, then build short ids there.
 block-decode permit. A missing body still falls through to a headers
 announcement. High-bandwidth relay of a body already in hand persists that
 header, builds the prefill, and builds those short ids on that pool
-too. A closed decode permit or a failed blocking join is logged and
-skips the announcement. An unsolicited compact block that does not
+too, and only when a high-bandwidth peer would be offered the block.
+A failed high-bandwidth join is logged and skips that announcement.
+A failed compact tip-announce join still ends that session.
+An unsolicited compact block that does not
 reconstruct yet persists that header path on the header-job pool.
 `cmpct_tip_announce_shortids_run_off_the_reactor` and
-`hb_relay_prefill_runs_off_the_reactor` are the pins.
+`hb_relay_skips_the_build_when_no_peer_is_offered_it` are the pins.
 
 **Fixed.** The IBD coordinator holds `shared` across the turn, the
 redial apply, and the event drains. A peer split whose height has left

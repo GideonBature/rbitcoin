@@ -5190,10 +5190,34 @@ pub fn map_cmpct_relay_join<T>(joined: Result<T, tokio::task::JoinError>) -> Res
     joined.map_err(|_| NetError::Protocol("cmpct relay join failed"))
 }
 
+fn hb_peer_offered_block(
+    hub: &ChainHub,
+    peer: &crate::peers::LivePeer,
+    from_id: Option<u64>,
+    hash: BlockHash,
+    prev: BlockHash,
+) -> bool {
+    if from_id == Some(peer.id) {
+        return false;
+    }
+    if !peer.hb_from.load(Ordering::Relaxed) {
+        return false;
+    }
+    if peer.conn_type == crate::peers::PeerConnType::BlockRelay {
+        return false;
+    }
+    let (sent, known) = peer.header_marks();
+    !peer_has_header(hub, sent, known, hash) && peer_has_header(hub, sent, known, prev)
+}
+
 /// Send `cmpctblock` to peers who asked for high-bandwidth announcements
 /// (`hb_from`: they sent `sendcmpct` announce=1) as soon as a reconstructed
 /// or received body has a PoW-valid header that extends our tip, **before**
 /// `tip-accept` connect. Does not mark the block connected.
+///
+/// The compact message is built only when one of those peers would be
+/// offered the block. No such peer returns before the clone and the
+/// blocking job.
 ///
 /// Core `NewPoWValidBlock`: the peer already has the parent header and not
 /// this one. `hb_to` is the opposite direction (we asked them to announce
@@ -5220,36 +5244,28 @@ pub async fn relay_new_pow_valid_block(
     if block.header.prev_blockhash != tip {
         return;
     }
+    let Some(ph) = from.and_then(|s| s.peer_hub()) else {
+        return;
+    };
+    let from_id = from.map(|s| s.id);
+    let prev = block.header.prev_blockhash;
+    let targets: Vec<_> = ph
+        .live_peers()
+        .into_iter()
+        .filter(|s| hb_peer_offered_block(hub, s, from_id, hash, prev))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
     let msg = match cmpct_announce_off_session(hub, block.clone(), 2).await {
-        Ok(msg) => msg,
+        Ok(Some(msg)) => msg,
+        Ok(None) => return,
         Err(e) => {
             rbitcoin_log::warn!("p2p: high-bandwidth compact relay skipped: {e}");
             return;
         }
     };
-    let Some(ph) = from.and_then(|s| s.peer_hub()) else {
-        return;
-    };
-    let Some(msg) = msg else {
-        return;
-    };
-    let from_id = from.map(|s| s.id);
-    for s in ph.live_peers() {
-        if from_id == Some(s.id) {
-            continue;
-        }
-        if !s.hb_from.load(Ordering::Relaxed) {
-            continue;
-        }
-        if s.conn_type == crate::peers::PeerConnType::BlockRelay {
-            continue;
-        }
-        let (sent, known) = s.header_marks();
-        if peer_has_header(hub, sent, known, hash)
-            || !peer_has_header(hub, sent, known, block.header.prev_blockhash)
-        {
-            continue;
-        }
+    for s in targets {
         let Some(out) = s.writer() else {
             continue;
         };
