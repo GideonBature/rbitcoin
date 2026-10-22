@@ -608,15 +608,7 @@ pub fn bip34_height_script(height: u32) -> Vec<u8> {
         return vec![0x50 + height as u8];
     }
     // Height is at least 17, so the little-endian body is never empty.
-    let mut num = Vec::new();
-    let mut n = height;
-    while n > 0 {
-        num.push((n & 0xff) as u8);
-        n >>= 8;
-    }
-    if num.last().unwrap() & 0x80 != 0 {
-        num.push(0x00);
-    }
+    let num = rbitcoin_primitives::scriptnum_encode(i64::from(height));
     let mut out = Vec::with_capacity(1 + num.len());
     out.push(num.len() as u8);
     out.extend_from_slice(&num);

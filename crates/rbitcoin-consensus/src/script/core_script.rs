@@ -65,7 +65,7 @@ pub fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
             } else if (1..=16).contains(&n) {
                 out.push(0x50 + n as u8); // OP_1 .. OP_16
             } else {
-                let enc = encode_scriptnum(n);
+                let enc = rbitcoin_primitives::scriptnum_encode(n);
                 push_data(&mut out, &enc);
             }
             continue;
@@ -92,28 +92,6 @@ pub fn push_data(out: &mut Vec<u8>, data: &[u8]) {
         out.extend_from_slice(&(n as u32).to_le_bytes());
     }
     out.extend_from_slice(data);
-}
-
-#[doc(hidden)]
-pub fn encode_scriptnum(mut n: i64) -> Vec<u8> {
-    if n == 0 {
-        return vec![];
-    }
-    let neg = n < 0;
-    if neg {
-        n = -n;
-    }
-    let mut out = Vec::new();
-    while n > 0 {
-        out.push((n & 0xff) as u8);
-        n >>= 8;
-    }
-    if out.last().map(|b| b & 0x80 != 0).unwrap_or(false) {
-        out.push(if neg { 0x80 } else { 0x00 });
-    } else if neg {
-        *out.last_mut().unwrap() |= 0x80;
-    }
-    out
 }
 
 #[doc(hidden)]
