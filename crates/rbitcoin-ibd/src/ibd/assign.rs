@@ -1458,10 +1458,16 @@ pub fn cover_tip_holes(
         }
         let already = st.inflight.get(&h).map(|e| e.holders()).unwrap_or(0);
         let want = max_peers;
-        if already >= want {
+        // A retired-only holder set is not coverage: nobody is pulling. Race
+        // one fresh peer as densify does (`inflight_needs_racer`), or the
+        // hash — and the in-order tip behind it — freezes while densify sits
+        // at its hole-open zero cap. Retired still counts the cap once a
+        // racer lives.
+        let racerless = st.inflight.get(&h).is_some_and(inflight_needs_racer);
+        if already >= want && !racerless {
             continue;
         }
-        let mut need = want - already;
+        let mut need = if racerless { 1 } else { want - already };
         let mut placed_any = false;
         let ranked = rank_peers_for_tip_hole(&st.slots, alive, &avoid);
         for &pid in &ranked {
