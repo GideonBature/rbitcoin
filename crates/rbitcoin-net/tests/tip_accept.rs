@@ -227,6 +227,16 @@ impl Drop for ReleaseFillers {
     }
 }
 
+/// `Full` stops the filler. A blocking `send` waits for a slot while the
+/// holder is the tip-accept thread, so that slot never frees.
+fn enqueue_or_full(job: Job) -> bool {
+    match sender().try_send(job) {
+        Ok(()) => true,
+        Err(std::sync::mpsc::TrySendError::Full(_)) => false,
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+    }
+}
+
 struct ReleaseOnDrop(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
 
 impl Drop for ReleaseOnDrop {
@@ -259,23 +269,20 @@ async fn full_lane_parks_instead_of_spinning() {
     });
     holder_rx.recv().expect("holder running");
 
-    let (filled_tx, filled_rx) = mpsc::sync_channel(QUEUE_CAP);
     let filler = thread::spawn(move || {
+        let mut queued = Vec::with_capacity(QUEUE_CAP);
         for _ in 0..QUEUE_CAP {
             let (tx, rx) = mpsc::sync_channel::<()>(1);
-            sender()
-                .send(Box::new(move || {
-                    let _ = rx.recv();
-                }))
-                .expect("queue the filler");
-            filled_tx.send(tx).expect("hand the release");
+            if !enqueue_or_full(Box::new(move || {
+                let _ = rx.recv();
+            })) {
+                break;
+            }
+            queued.push(tx);
         }
+        queued
     });
-    filler.join().expect("filler queued");
-    let mut releases = Vec::with_capacity(QUEUE_CAP);
-    for _ in 0..QUEUE_CAP {
-        releases.push(filled_rx.recv().expect("filler release"));
-    }
+    let releases = filler.join().expect("filler queued");
 
     FULL_QUEUE_SPINS.store(0, Ordering::Relaxed);
     let ninth = tokio::spawn(async { run_on_tip_accept_async(|| 9u8).await });
@@ -356,29 +363,30 @@ async fn two_full_senders_both_enqueue() {
     });
     holder_rx.recv().expect("holder running");
 
-    let (started_tx, started_rx) = mpsc::sync_channel(QUEUE_CAP);
-    let (release_tx, release_rx) = mpsc::sync_channel(QUEUE_CAP);
     let filler = thread::spawn(move || {
+        let mut started = Vec::with_capacity(QUEUE_CAP);
+        let mut releases = Vec::with_capacity(QUEUE_CAP);
         for _ in 0..QUEUE_CAP {
             let (go_tx, go_rx) = mpsc::sync_channel::<()>(1);
             let (ran_tx, ran_rx) = mpsc::sync_channel::<()>(1);
-            sender()
-                .send(Box::new(move || {
-                    ran_tx.send(()).ok();
-                    let _ = go_rx.recv();
-                }))
-                .expect("queue the filler");
-            started_tx.send(ran_rx).expect("started watch");
-            release_tx.send(go_tx).expect("release watch");
+            if !enqueue_or_full(Box::new(move || {
+                ran_tx.send(()).ok();
+                let _ = go_rx.recv();
+            })) {
+                break;
+            }
+            started.push(ran_rx);
+            releases.push(go_tx);
         }
+        (started, releases)
     });
-    filler.join().expect("filler queued");
-    let mut started = Vec::with_capacity(QUEUE_CAP);
-    let mut releases = ReleaseFillers(Vec::with_capacity(QUEUE_CAP));
-    for _ in 0..QUEUE_CAP {
-        started.push(started_rx.recv().expect("started rx"));
-        releases.0.push(release_rx.recv().expect("release tx"));
-    }
+    let (started, release_txs) = filler.join().expect("filler queued");
+    let mut releases = ReleaseFillers(release_txs);
+    assert!(
+        started.len() >= 2,
+        "need two of this test's jobs queued to free two slots, queued {}",
+        started.len()
+    );
 
     let _park = ParkGate::arm();
     let first = tokio::spawn(async { run_on_tip_accept_async(|| 1u8).await });
