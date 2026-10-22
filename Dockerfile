@@ -6,9 +6,10 @@
 # it with ./scripts/docker-smoke.sh, and publishes the multi-arch manifest.
 # There is no RUN, so assembling a foreign arch needs no emulation.
 #
-# Local (host arch):
+# Local (host arch; the subdirectory is Docker's amd64 or arm64):
 #   ./scripts/repro-build.sh musl ./result
-#   ./scripts/stage-musl-artifacts.sh ./result ./dist/docker/amd64
+#   ./scripts/stage-musl-artifacts.sh ./result \
+#     "./dist/docker/$(docker version -f '{{.Server.Arch}}')"
 #   docker build -t rbitcoin:local -f Dockerfile ./dist/docker
 #
 # Node and cli both default to ./datadir, so the datadir is /data/datadir.

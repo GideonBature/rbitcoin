@@ -180,8 +180,9 @@ Default `--datadir` is cwd-relative `datadir` via `Path::new(".").join("datadir"
 
 ### Container image
 
-Each `v*.*.*` tag publishes `ghcr.io/reardencode/rbitcoin` and Docker Hub
-`reardencode/rbitcoin` for `linux/amd64` and `linux/arm64`. The image is
+Each `v*.*.*` tag publishes `ghcr.io/reardencode/rbitcoin` for
+`linux/amd64` and `linux/arm64`, and Docker Hub `reardencode/rbitcoin` once
+the maintainers enable it ([`releases.md`](../releases.md)). The image is
 the Release musl binaries on `FROM scratch`: no shell, no libc, no base
 image. Tags are `X.Y.Z`, `X.Y` (newest patch on that line), and `latest`
 (newest release). A patch on an older line does not move `latest`.
@@ -190,7 +191,8 @@ image. Tags are `X.Y.Z`, `X.Y` (newest patch on that line), and `latest`
 docker volume create rbitcoin
 docker run -d --name rbitcoin --stop-timeout 300 \
   -v rbitcoin:/data -p 8333:8333 \
-  ghcr.io/reardencode/rbitcoin:X.Y.Z --rpc-listen 127.0.0.1:8332
+  ghcr.io/reardencode/rbitcoin:X.Y.Z \
+  --listen 0.0.0.0:8333 --rpc-listen 127.0.0.1:8332
 docker logs -f rbitcoin
 docker exec rbitcoin rbitcoin-cli getblockchaininfo
 ```
@@ -204,11 +206,14 @@ docker exec rbitcoin rbitcoin-cli getblockchaininfo
 - **Stop.** The node flushes the store on SIGTERM. Docker's default stop
   timeout is 10 s. Use `--stop-timeout 300` (compose:
   `stop_grace_period: 5m`), the same budget as the NixOS unit.
-- **Listeners.** RPC, Electrum, Esplora, and health are opt-in, and the
-  loopback address inside a container is the container's own. To reach one
-  from the host, bind it to `0.0.0.0` inside and publish it on host
-  loopback only: `--rpc-listen 0.0.0.0:8332 -p 127.0.0.1:8332:8332`. The
-  health listener is unauthenticated; treat it the same way.
+- **Listeners.** The loopback address inside a container is the
+  container's own. P2P binds `127.0.0.1` when `--listen` is omitted, so
+  inbound peers need `--listen 0.0.0.0:<port>` and the same port published;
+  without it `-p 8333:8333` reaches nothing and the node is outbound-only.
+  RPC, Electrum, Esplora, and health are opt-in. To reach one from the host,
+  bind it to `0.0.0.0` inside and publish it on host loopback only:
+  `--rpc-listen 0.0.0.0:8332 -p 127.0.0.1:8332:8332`. The health listener
+  is unauthenticated; treat it the same way.
 - **Store IO.** Docker's default seccomp profile blocks `io_uring`. The
   store logs `completion session unavailable` and uses the `pread` fallback
   ([`io-modality.md`](../io-modality.md)). A seccomp profile that allows the

@@ -130,7 +130,7 @@ binaries must hash to that arch's `SHA256SUMS` before the Release
 docker create --name rbtc-verify ghcr.io/reardencode/rbitcoin:X.Y.Z
 docker cp rbtc-verify:/usr/local/bin/rbitcoin-node .
 docker cp rbtc-verify:/usr/local/bin/rbitcoin-cli .
-docker rm rbtc-verify
+docker rm -v rbtc-verify   # -v: also the anonymous /data volume
 sha256sum -c SHA256SUMS.linux-musl   # SHA256SUMS.linux-musl-aarch64 on arm64
 ```
 
