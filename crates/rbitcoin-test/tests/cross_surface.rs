@@ -123,6 +123,24 @@ async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     .await
 }
 
+/// TCP accept is not a routed response. Retry until `want` or the deadline.
+async fn http_get_status(addr: SocketAddr, path: &str, want: u16) -> (u16, String) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = http_get(addr, path).await;
+        if got.0 == want {
+            return got;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "GET {path} wanted {want}, last status {} body {}",
+                got.0, got.1
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn http_post(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
     http_exchange(
         addr,
@@ -369,7 +387,7 @@ async fn pin_metrics_equal_rpc(
 }
 
 async fn pin_address_prefix_404(esplora_addr: SocketAddr) {
-    let (st, body) = http_get(esplora_addr, "/address-prefix/bc1").await;
+    let (st, body) = http_get_status(esplora_addr, "/address-prefix/bc1", 404).await;
     assert_eq!(st, 404, "address-prefix stays 404: {body}");
 }
 
@@ -1567,7 +1585,7 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
         );
     }
 
-    let (st, height) = http_get(esplora_addr, "/blocks/tip/height").await;
+    let (st, height) = http_get_status(esplora_addr, "/blocks/tip/height", 200).await;
     assert_eq!(st, 200, "esplora tip height: {height}");
     assert_eq!(height, "106");
     let count = jsonrpc(rpc_addr, "getblockcount", json!([])).await;
@@ -3377,7 +3395,12 @@ async fn enter_tip_mode_indexes() {
         cfg.shindex = shindex;
         cfg.listen.electrum = Some(electrum_addr);
         cfg.rpc.listen = Some(rpc_addr);
-        cfg.max_run_secs = Some(60);
+        // Coverage instrumentation blows the uninstrumented 60s backstop.
+        cfg.max_run_secs = Some(if std::env::var_os("CARGO_LLVM_COV").is_some() {
+            180
+        } else {
+            60
+        });
         spawn_run_p2p(cfg)
     };
     let op_true = electrum_scripthash_hex(&[0x51]);

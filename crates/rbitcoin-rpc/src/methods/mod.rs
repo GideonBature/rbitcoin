@@ -190,7 +190,7 @@ impl RpcRegtest for HubRegtest {
         extra_txs: Vec<Transaction>,
     ) -> Result<Vec<BlockHash>, String> {
         self.0
-            .generate_to_script(nblocks, script_pubkey, extra_txs)
+            .generate_to_script_for_rpc(nblocks, script_pubkey, extra_txs)
             .map_err(|e| e.to_string())
     }
 

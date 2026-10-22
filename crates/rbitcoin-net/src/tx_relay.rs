@@ -3155,6 +3155,53 @@ impl MempoolHub {
         Ok(accepted)
     }
 
+    /// Pool transactions one `generate` may put in the first block.
+    ///
+    /// The live set is unchanged. RPC `generate` commits them once that block
+    /// is accepted, before a later block of the same call is mined. Catch-up
+    /// must not call this (that block stays coinbase-only).
+    /// [`Self::remove_for_block`] drops nothing while relay is off.
+    pub fn select_generate_txs(&self, min_sat_kvb: u64) -> Vec<Transaction> {
+        let deltas = self.fee_deltas.lock().unwrap().clone();
+        let g = self.lock_write();
+        let budget = g.template_budget(min_sat_kvb);
+        let selected = g.select_block_template(budget, |id| deltas.get(&id).copied().unwrap_or(0));
+        selected
+            .into_iter()
+            .map(|(tx, _sel)| Transaction::clone(tx.as_ref()))
+            .collect()
+    }
+
+    /// Remove `txids` once the block that contains them has been accepted.
+    ///
+    /// Entries connect already removed are left alone, so their confirm-memory
+    /// sample is not recorded twice. A failure before that block must not
+    /// call this. A later block in the same `generate` can still fail.
+    pub fn commit_generated_txids(&self, txids: &[Txid]) -> Result<(), AcceptError> {
+        if txids.is_empty() {
+            return Ok(());
+        }
+        let removed = {
+            let mut g = self.lock_write();
+            let bps = g.graph.bytes_per_sigop();
+            for tid in txids {
+                if let Some(e) = g.graph.get(tid) {
+                    let rate = rbitcoin_consensus::policy::fee_rate_sat_per_kvb(
+                        e.fee_sat,
+                        e.adjusted_weight(bps),
+                    );
+                    self.push_confirm_memory(rate);
+                }
+            }
+            g.remove_live_txids(txids)?
+        };
+        if removed > 0 {
+            self.unindex_evicted(txids);
+        }
+        self.drop_mined_fee_deltas(txids);
+        Ok(())
+    }
+
     /// Remove confirmed txids (tip connect / archive confirm) and re-try orphans
     /// whose parents just confirmed (Query UTXO view).
     ///

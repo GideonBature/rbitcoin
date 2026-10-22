@@ -930,7 +930,7 @@ pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, he
         return;
     };
     let parent_h = height.saturating_sub(1);
-    drop_dead_path(st, hub, parent_h);
+    drop_dead_path(st, Some(hub.query.as_ref()), parent_h);
     if !st.header_walk.origin || st.header_walk.tip_height() < height {
         return;
     }
@@ -965,13 +965,21 @@ pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, he
 
 /// Forget the download path above `keep`: queued hashes, bodies waiting in
 /// the body queue, the confirm plan, and the densify cursor. Every peer may
-/// be asked for headers again.
-fn drop_dead_path(st: &mut IbdWorkState, hub: &ChainHub, keep: u32) {
-    st.clear_path_above(keep);
+/// be asked for headers again. The queue drop runs before the path clear so
+/// a hash popped off the front of `ordered` is still forgotten from
+/// `hash_height`.
+pub(crate) fn drop_dead_path(
+    st: &mut IbdWorkState,
+    query: Option<&rbitcoin_query::Query>,
+    keep: u32,
+) {
     drop_queue_above(st, keep, &HashSet::new());
-    for queued in hub.query.block_queue_queued_heights() {
-        if queued > keep {
-            let _ = hub.query.block_queue_dequeue_height(queued);
+    st.clear_path_above(keep);
+    if let Some(query) = query {
+        for queued in query.block_queue_queued_heights() {
+            if queued > keep {
+                let _ = query.block_queue_dequeue_height(queued);
+            }
         }
     }
     st.confirm_quiesce = true;

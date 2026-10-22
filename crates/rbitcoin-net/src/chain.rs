@@ -547,6 +547,10 @@ pub struct ChainHub {
     pub connect_lock: std::sync::Mutex<()>,
     /// Serializes regtest generate so concurrent generateblock cannot race one tip.
     pub generate_lock: std::sync::Mutex<()>,
+    /// Tests stop one `generate` before this 0-based block index. `0` mines
+    /// the whole call. Production never sets it.
+    #[doc(hidden)]
+    pub generate_fail_before: AtomicU32,
     /// Optional cluster mempool (tip-mode tx relay + confirm remove).
     ///
     /// Attached once via [`Self::attach_mempool`] after the hub is in an `Arc`.
@@ -686,6 +690,7 @@ impl ChainHub {
             confirmed,
             connect_lock: std::sync::Mutex::new(()),
             generate_lock: std::sync::Mutex::new(()),
+            generate_fail_before: AtomicU32::new(0),
             mempool: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
             clock: rbitcoin_consensus::NodeClock::new(),
@@ -2224,11 +2229,31 @@ impl ChainHub {
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
     ) -> Result<Vec<BlockHash>, NetError> {
-        self.generate_to_script_limited(
+        self.generate_paying(
             nblocks,
             script_pubkey,
             extra_txs,
             Self::GENERATE_MAX_BLOCKS,
+            false,
+        )
+    }
+
+    /// RPC `generate` / `generateblock`. Same mine as [`Self::generate_to_script`],
+    /// and the pool txids in an accepted block are removed before the next
+    /// block of this call is mined. A relay-off connect does not remove them.
+    #[doc(hidden)]
+    pub fn generate_to_script_for_rpc(
+        &self,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+    ) -> Result<Vec<BlockHash>, NetError> {
+        self.generate_paying(
+            nblocks,
+            script_pubkey,
+            extra_txs,
+            Self::GENERATE_MAX_BLOCKS,
+            true,
         )
     }
 
@@ -2242,6 +2267,17 @@ impl ChainHub {
         script_pubkey: ScriptBuf,
         extra_txs: Vec<Transaction>,
         limit: u32,
+    ) -> Result<Vec<BlockHash>, NetError> {
+        self.generate_paying(nblocks, script_pubkey, extra_txs, limit, false)
+    }
+
+    fn generate_paying(
+        &self,
+        nblocks: u32,
+        script_pubkey: ScriptBuf,
+        extra_txs: Vec<Transaction>,
+        limit: u32,
+        commit_on_accept: bool,
     ) -> Result<Vec<BlockHash>, NetError> {
         if nblocks == 0 {
             return Ok(Vec::new());
@@ -2258,12 +2294,30 @@ impl ChainHub {
         let mut hashes = Vec::with_capacity(nblocks as usize);
         let mut extras = extra_txs;
         for i in 0..nblocks {
+            let stop = self.generate_fail_before.load(Ordering::Relaxed);
+            if stop > 0 && i == stop {
+                return Err(NetError::Consensus(
+                    "generate lost the tip during proof-of-work".into(),
+                ));
+            }
             let txs = if i == 0 {
                 std::mem::take(&mut extras)
             } else {
                 Vec::new()
             };
+            let ids = commit_on_accept.then(|| {
+                txs.iter()
+                    .map(|tx| tx.compute_txid())
+                    .collect::<Vec<Txid>>()
+            });
             hashes.push(self.mine_and_accept_paying(script_pubkey.clone(), txs)?);
+            if let Some(ids) = ids.filter(|ids| !ids.is_empty()) {
+                let Some(mp) = self.mempool() else {
+                    continue;
+                };
+                mp.commit_generated_txids(&ids)
+                    .map_err(|e| NetError::Consensus(e.to_string()))?;
+            }
         }
         if let Err(e) = self.query.apply_sh_pending() {
             rbitcoin_log::warn!("generate: SH write-behind drain: {e}");

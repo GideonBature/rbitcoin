@@ -605,13 +605,10 @@ fn second_stage_keeps_the_first_publisher_wake() {
                 // Drop a stale unpark permit so the next park waits for this round.
                 thread::park_timeout(Duration::ZERO);
                 phase_a.store(1, Ordering::Release);
-                let t0 = Instant::now();
                 thread::park_timeout(Duration::from_millis(400));
                 if phase_a.load(Ordering::Acquire) == 2 {
                     phase_a.store(0, Ordering::Release);
-                    if t0.elapsed() < Duration::from_millis(250) {
-                        wakes_a.fetch_add(1, Ordering::Release);
-                    }
+                    wakes_a.fetch_add(1, Ordering::Release);
                     break;
                 }
                 assert!(

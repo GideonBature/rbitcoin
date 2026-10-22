@@ -137,35 +137,36 @@ pub fn mempool_block_txs(ctx: &RpcContext) -> Vec<(Arc<Transaction>, Selected)> 
         .unwrap_or_default()
 }
 
-pub fn drain_mempool(ctx: &RpcContext, txs: &[Transaction]) {
-    let Some(mp) = ctx.mempool.as_ref() else {
-        return;
-    };
-    let ids: Vec<Txid> = txs.iter().map(Transaction::compute_txid).collect();
-    let _ = mp.remove_for_block(&ids);
-}
-
 pub fn generate_with_mempool(
     ctx: &RpcContext,
     nblocks: u32,
     script: ScriptBuf,
 ) -> Result<Value, Value> {
     let miner = require_regtest_miner(ctx, "generate")?;
+    if nblocks == 0 {
+        return Ok(hashes_json(&[]));
+    }
     let listing = ctx.pool_listing();
     // Catch-up leaves confirmed transactions in the pool, so mine the coinbase
-    // only. `-blocksonly` still strips on connect and regtest mines that node.
-    let extras: Vec<Transaction> = if matches!(listing, PoolListing::Downloading) {
+    // only. Any other listing is removed when the block that contains it is
+    // accepted, including while relay is off, and before a later block of this
+    // call is mined. A refusal before that block leaves the pool as it was.
+    let extras = if matches!(listing, PoolListing::Downloading) {
         Vec::new()
     } else {
-        mempool_block_txs(ctx)
-            .into_iter()
-            .map(|(tx, _)| Transaction::clone(&tx))
-            .collect()
+        let min = ctx
+            .chain
+            .as_ref()
+            .map(|c| c.block_min_tx_fee_sat_kvb())
+            .unwrap_or(1);
+        ctx.mempool
+            .as_ref()
+            .map(|mp| mp.select_generate_txs(min))
+            .unwrap_or_default()
     };
     let hashes = miner
-        .generate_to_script(nblocks, script, extras.clone())
+        .generate_to_script(nblocks, script, extras)
         .map_err(|e| rpc_error(ERR_MISC, e))?;
-    drain_mempool(ctx, &extras);
     if let Some(c) = ctx.chain.as_ref() {
         c.note_gbt_assembled();
     }

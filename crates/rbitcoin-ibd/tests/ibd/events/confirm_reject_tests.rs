@@ -41,6 +41,137 @@ fn apply_confirm_reject(
     );
 }
 
+/// A competing fork's BadPrev frees its height and every later block on
+/// that download, even when the stamp was a multi-block wave.
+/// `isolate_if_batched` turns that wave into a cascade, which leaves the
+/// bodies queued and the heights occupied. A parent that is this path's
+/// still-committing block stays a retry, and so does the block above it.
+#[test]
+fn batched_off_path_bad_prev_frees_the_height() {
+    let err = "unexpected previous header";
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("off-path-bad-prev");
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    let parent = h(0xab);
+    let child = h(0xcd);
+    let sibling = h(0xef);
+    assert_ne!(Some(parent), Some(tip));
+
+    let mut off = IbdWorkState::new(Vec::new(), Some(tip), Some(0));
+    off.record_height(child, 30);
+    off.record_height(sibling, 31);
+    off.ordered.push_back(child);
+    off.ordered.push_back(sibling);
+    off.ordered_set.insert(child);
+    off.ordered_set.insert(sibling);
+    off.note_path_prev(child, parent);
+    hub.query
+        .block_queue_enqueue(30, child.to_byte_array(), 0, b"child")
+        .unwrap();
+    hub.query
+        .block_queue_enqueue(31, sibling.to_byte_array(), 0, b"sibling")
+        .unwrap();
+    apply_confirm_reject_class(
+        &mut off,
+        30,
+        child,
+        ConfirmRejectClass::from_err_str(err),
+        err,
+        Some(hub.query.as_ref()),
+        Some(&hub),
+        2,
+        None,
+        None,
+        RejectParent {
+            hash: Some(parent),
+            unreadable: false,
+        },
+    );
+    assert!(
+        !off.height_to_hash.contains_key(&30),
+        "off-path BadPrev frees the height"
+    );
+    assert!(
+        !off.height_to_hash.contains_key(&31),
+        "off-path BadPrev frees the later block"
+    );
+    assert!(
+        !off.ordered_set.contains(&child),
+        "off-path BadPrev leaves the work path"
+    );
+    assert!(
+        !off.ordered_set.contains(&sibling),
+        "the later block leaves the work path"
+    );
+    assert!(
+        !off.hash_height.contains_key(&sibling),
+        "the later block leaves the height index"
+    );
+    let queued = hub.query.block_queue_queued_heights();
+    assert!(
+        !queued.contains(&30) && !queued.contains(&31),
+        "off-path BadPrev drops the body queue from that height up: {queued:?}"
+    );
+    assert!(
+        !off.body.is_missing(&child),
+        "off-path BadPrev is not fetched again"
+    );
+    assert!(
+        !off.body.is_missing(&sibling),
+        "the later block is not fetched again"
+    );
+
+    let mut committing = IbdWorkState::new(Vec::new(), Some(tip), Some(0));
+    committing.record_height(parent, 29);
+    committing.record_height(child, 30);
+    committing.record_height(sibling, 31);
+    committing.ordered.push_back(sibling);
+    committing.ordered_set.insert(sibling);
+    committing.note_path_prev(child, parent);
+    hub.query
+        .block_queue_enqueue(30, child.to_byte_array(), 0, b"child")
+        .unwrap();
+    hub.query
+        .block_queue_enqueue(31, sibling.to_byte_array(), 0, b"sibling")
+        .unwrap();
+    apply_confirm_reject_class(
+        &mut committing,
+        30,
+        child,
+        ConfirmRejectClass::from_err_str(err),
+        err,
+        Some(hub.query.as_ref()),
+        Some(&hub),
+        2,
+        None,
+        None,
+        RejectParent {
+            hash: Some(parent),
+            unreadable: false,
+        },
+    );
+    assert_eq!(
+        committing.height_to_hash.get(&30),
+        Some(&child),
+        "a parent still committing stays a retry"
+    );
+    assert_eq!(
+        committing.height_to_hash.get(&31),
+        Some(&sibling),
+        "a block above a committing parent stays"
+    );
+    assert!(
+        committing.ordered_set.contains(&sibling),
+        "a committing parent does not drop the later block"
+    );
+    let queued = hub.query.block_queue_queued_heights();
+    assert!(
+        queued.contains(&30) && queued.contains(&31),
+        "a committing parent keeps the body queue: {queued:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// SoftWire/Cascade/EngineFault/ConsensusInvalid/Cancelled class map.
 #[test]
 fn confirm_reject_class_matches_substring_table() {
