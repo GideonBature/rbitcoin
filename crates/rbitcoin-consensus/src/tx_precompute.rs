@@ -493,15 +493,11 @@ pub fn hash_wire_sighash(
 
 #[doc(hidden)]
 pub fn sigops_and_out_sum(tx: &Transaction) -> (u64, u64) {
-    let mut sigops = 0u64;
-    let mut out_sum = 0u64;
-    for txin in &tx.input {
-        sigops = sigops.saturating_add(script_sigop_count(txin.script_sig.as_bytes(), false));
-    }
-    for txout in &tx.output {
-        sigops = sigops.saturating_add(script_sigop_count(txout.script_pubkey.as_bytes(), false));
-        out_sum = out_sum.saturating_add(txout.value.to_sat());
-    }
+    let sigops = crate::block::legacy_sigop_count(tx);
+    let out_sum = tx
+        .output
+        .iter()
+        .fold(0u64, |n, txout| n.saturating_add(txout.value.to_sat()));
     (sigops, out_sum)
 }
 
