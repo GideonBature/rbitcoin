@@ -101,7 +101,6 @@ pub use state::IbdWorkState;
 use state::{enqueue_header_cmd, HeaderCmd};
 pub use status::LoopStats;
 
-use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
 use rbitcoin_log::{info, warn};
 use rbitcoin_net::chain::ChainHub;
