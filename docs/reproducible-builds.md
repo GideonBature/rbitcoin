@@ -127,12 +127,19 @@ binaries must hash to that arch's `SHA256SUMS` before the Release
 (`scripts/docker-smoke.sh`). To check a pulled image yourself:
 
 ```bash
-docker create --name rbtc-verify ghcr.io/reardencode/rbitcoin:X.Y.Z
+arch=$(docker version -f '{{.Server.Arch}}')   # or set amd64 / arm64
+case "$arch" in
+  amd64) sums=SHA256SUMS.linux-musl ;;
+  arm64) sums=SHA256SUMS.linux-musl-aarch64 ;;
+esac
+docker create --platform "linux/$arch" --name rbtc-verify ghcr.io/reardencode/rbitcoin:X.Y.Z
 docker cp rbtc-verify:/usr/local/bin/rbitcoin-node .
 docker cp rbtc-verify:/usr/local/bin/rbitcoin-cli .
 docker rm -v rbtc-verify   # -v: also the anonymous /data volume
-sha256sum -c SHA256SUMS.linux-musl   # SHA256SUMS.linux-musl-aarch64 on arm64
+sha256sum -c "$sums"
 ```
+
+`docker create` runs nothing, so either arch can be checked on any host.
 
 The image build sets `SOURCE_DATE_EPOCH` to the commit time with
 `rewrite-timestamp`, so a rerun gives the same platform manifests. Only the
