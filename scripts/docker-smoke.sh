@@ -33,8 +33,10 @@ WANT_VER="$(release_cargo_workspace_version)"
 NAME="rbitcoin-smoke-$$"
 VOL="rbitcoin-smoke-$$"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rbitcoin-docker-smoke.XXXXXX")"
+# -v: the image declares VOLUME /data, so docker create gives the copy
+# container an anonymous volume that plain rm would leave behind.
 cleanup() {
-  docker rm -f "$NAME" "$NAME-cp" >/dev/null 2>&1 || true
+  docker rm -f -v "$NAME" "$NAME-cp" >/dev/null 2>&1 || true
   docker volume rm -f "$VOL" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
@@ -55,7 +57,7 @@ docker create --name "$NAME-cp" "$IMAGE" >/dev/null
 for b in rbitcoin-node rbitcoin-cli; do
   docker cp -q "$NAME-cp:/usr/local/bin/$b" "$WORK/$b"
 done
-docker rm "$NAME-cp" >/dev/null
+docker rm -v "$NAME-cp" >/dev/null
 (cd "$WORK" && sha256sum -c --quiet "$SUMS") || fail "image binaries differ from $SUMS"
 
 step "version $WANT_VER"
