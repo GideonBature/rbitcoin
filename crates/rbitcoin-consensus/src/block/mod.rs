@@ -304,9 +304,11 @@ pub fn coinbase_has_witness_commitment(block: &Block) -> bool {
         .is_some()
 }
 
+/// BIP141 witness-commitment script prefix (`OP_RETURN` `6a24aa21a9ed`).
+const WITNESS_COMMITMENT_MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+
 /// Last BIP141 `OP_RETURN` witness commitment (exact 38-byte `6a24aa21a9ed` prefix).
 pub fn witness_commitment_vout_index(coinbase: &Transaction) -> Option<usize> {
-    const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
     coinbase
         .output
         .iter()
@@ -314,7 +316,7 @@ pub fn witness_commitment_vout_index(coinbase: &Transaction) -> Option<usize> {
         .rev()
         .find_map(|(i, out)| {
             let b = out.script_pubkey.as_bytes();
-            (b.len() >= 38 && b[..6] == MAGIC).then_some(i)
+            (b.len() >= 38 && b[..6] == WITNESS_COMMITMENT_MAGIC).then_some(i)
         })
 }
 
@@ -333,22 +335,29 @@ pub fn block_has_witness_from_pres(pres: &[TxPrecompute]) -> bool {
     pres.iter().any(|p| p.has_witness)
 }
 
-/// BIP141 coinbase `OP_RETURN` script for GBT `default_witness_commitment`.
-pub fn witness_commitment_script(
+/// Coinbase wtxid is 32 zero bytes, then the non-coinbase wtxids. Commitment is
+/// `sha256d(witness_merkle_root || reserved)`.
+fn witness_commitment_digest(
     non_cb_wtxids: impl IntoIterator<Item = [u8; 32]>,
     reserved: &[u8; 32],
-) -> Vec<u8> {
-    const MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+) -> [u8; 32] {
     let mut leaves = vec![[0u8; 32]];
     leaves.extend(non_cb_wtxids);
     let witness_root = merkle_root_bytes(&leaves);
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(&witness_root);
     buf[32..].copy_from_slice(reserved);
-    let hash = sha256d::Hash::hash(&buf);
+    sha256d::Hash::hash(&buf).to_byte_array()
+}
+
+/// BIP141 coinbase `OP_RETURN` script for GBT `default_witness_commitment`.
+pub fn witness_commitment_script(
+    non_cb_wtxids: impl IntoIterator<Item = [u8; 32]>,
+    reserved: &[u8; 32],
+) -> Vec<u8> {
     let mut spk = Vec::with_capacity(38);
-    spk.extend_from_slice(&MAGIC);
-    spk.extend_from_slice(&hash.to_byte_array());
+    spk.extend_from_slice(&WITNESS_COMMITMENT_MAGIC);
+    spk.extend_from_slice(&witness_commitment_digest(non_cb_wtxids, reserved));
     spk
 }
 
@@ -552,12 +561,6 @@ pub fn check_witness_commitment_with_wtxids(
     let mut committed = [0u8; 32];
     committed.copy_from_slice(&b[6..38]);
 
-    // Witness merkle: coinbase wtxid is 32 zero bytes. The caller builds
-    // `precomputed_non_cb` as one wtxid per non-coinbase tx.
-    let mut leaves = Vec::with_capacity(block.txdata.len());
-    leaves.push([0u8; 32]);
-    leaves.extend_from_slice(precomputed_non_cb);
-    let witness_root = merkle_root_bytes(&leaves);
     let wit = &coinbase.input[0].witness;
     if wit.len() != 1 {
         return Err(ConsensusError::BadBlock("bad-witness-nonce-size"));
@@ -568,11 +571,10 @@ pub fn check_witness_commitment_with_wtxids(
     if reserved.len() != 32 {
         return Err(ConsensusError::BadBlock("bad-witness-nonce-size"));
     }
-    let mut buf = [0u8; 64];
-    buf[0..32].copy_from_slice(&witness_root);
-    buf[32..64].copy_from_slice(reserved);
-    let hash = sha256d::Hash::hash(&buf);
-    if hash.to_byte_array() != committed {
+    let mut reserved_arr = [0u8; 32];
+    reserved_arr.copy_from_slice(reserved);
+    let hash = witness_commitment_digest(precomputed_non_cb.iter().copied(), &reserved_arr);
+    if hash != committed {
         return Err(ConsensusError::BadBlock("witness commitment mismatch"));
     }
     Ok(())
