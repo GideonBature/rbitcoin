@@ -313,7 +313,12 @@ pub fn getrawtransaction(ctx: &RpcContext, params: &RpcParams) -> Result<Value, 
         .query
         .get_tx_by_txid(&want)
         .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?
-        .ok_or_else(|| rpc_error(ERR_MISC, "No such mempool or blockchain transaction"))?;
+        .ok_or_else(|| {
+            rpc_error(
+                ERR_INVALID_ADDRESS_OR_KEY,
+                "No such mempool or blockchain transaction",
+            )
+        })?;
     let tx = ctx
         .query
         .reconstruct_tx(fk)

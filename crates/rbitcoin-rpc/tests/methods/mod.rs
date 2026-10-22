@@ -1129,6 +1129,7 @@ fn mempool_txid_lookups_do_not_list_live() {
         miss_raw["message"],
         "No such mempool or blockchain transaction"
     );
+    assert_eq!(miss_raw["code"], ERR_INVALID_ADDRESS_OR_KEY);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
