@@ -1545,16 +1545,7 @@ pub fn decode_i64(
     v: &[u8],
     require_minimal: bool,
 ) -> Result<i64, rbitcoin_primitives::ScriptNumError> {
-    use rbitcoin_primitives::ScriptNumError;
-    let parsed = if require_minimal {
-        bitcoin::script::read_scriptint(v)
-    } else {
-        bitcoin::script::read_scriptint_non_minimal(v)
-    };
-    parsed.map_err(|e| match e {
-        bitcoin::script::Error::NonMinimalPush => ScriptNumError::NonMinimal,
-        _ => ScriptNumError::Overflow,
-    })
+    rbitcoin_primitives::scriptnum_decode(v, require_minimal)
 }
 
 /// BIP342 MINIMALIF: IF/NOTIF argument is empty vector or single-byte 0x01 only.
