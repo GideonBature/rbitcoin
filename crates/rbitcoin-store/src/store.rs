@@ -1508,7 +1508,6 @@ impl Store {
                     out_index,
                     spending_tx_fk,
                     spending_vin,
-                    next: Fk::NULL,
                 });
                 Ok(true)
             },

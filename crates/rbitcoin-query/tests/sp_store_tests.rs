@@ -48,15 +48,7 @@ fn thin_compose_matches_engine_outs_without_parents() {
             Height(0),
             &h0,
             &[TxApply {
-                tx: TxRecord {
-                    txid: genesis_txid,
-                    version: 1,
-                    locktime: 0,
-                    input_start_fk: Fk::NULL,
-                    input_count: 1,
-                    output_start_fk: Fk::NULL,
-                    output_count: 1,
-                },
+                tx: TxRecord::class_a(genesis_txid, 1, 0, 1, 1),
                 inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x00], vec![])],
                 outputs: vec![OutputRecord::unspent(50_0000_0000, p2wpkh.clone())],
             }],
@@ -71,15 +63,7 @@ fn thin_compose_matches_engine_outs_without_parents() {
         Height(1),
         &h1,
         &[TxApply {
-            tx: TxRecord {
-                txid: spend_txid,
-                version: 2,
-                locktime: 0,
-                input_start_fk: Fk::NULL,
-                input_count: 1,
-                output_start_fk: Fk::NULL,
-                output_count: 1,
-            },
+            tx: TxRecord::class_a(spend_txid, 2, 0, 1, 1),
             inputs: vec![InputRecord {
                 prev_txid: genesis_txid,
                 parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -218,15 +202,7 @@ fn sp_spend(
     let mut txid = [0u8; 32];
     txid[0] = tag;
     TxApply {
-        tx: TxRecord {
-            txid,
-            version: 2,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: outs.len() as u32,
-        },
+        tx: TxRecord::class_a(txid, 2, 0, 1, outs.len() as u32),
         inputs: vec![InputRecord {
             prev_txid: prev.0,
             parent: rbitcoin_store::InputParent::Prevout {
@@ -401,15 +377,7 @@ fn sp_tweaks_confirm_life() {
             Height(0),
             &h0,
             &[TxApply {
-                tx: TxRecord {
-                    txid: cb_txid,
-                    version: 1,
-                    locktime: 0,
-                    input_start_fk: Fk::NULL,
-                    input_count: 1,
-                    output_start_fk: Fk::NULL,
-                    output_count: 4,
-                },
+                tx: TxRecord::class_a(cb_txid, 1, 0, 1, 4),
                 inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x00], vec![])],
                 outputs: vec![
                     OutputRecord::unspent(20_0000_0000, keys.p2wpkh.clone()),

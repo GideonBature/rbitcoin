@@ -59,15 +59,7 @@ fn coinbase(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRecord, T
     txid[0..4].copy_from_slice(&h.to_le_bytes());
     txid[31] = 0xcb;
     let ta = TxApply {
-        tx: TxRecord {
-            txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(txid, 1, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -477,15 +469,7 @@ fn two_script_pay(tag: u8, spk: bitcoin::ScriptBuf) -> TxApply {
     txid[0] = tag;
     txid[31] = 0xaa;
     TxApply {
-        tx: TxRecord {
-            txid,
-            version: 2,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(txid, 2, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,

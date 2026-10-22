@@ -1,19 +1,10 @@
 use rbitcoin_primitives::write_uleb128;
-use rbitcoin_primitives::Fk;
 use rbitcoin_store::compact::{amount_exp_mantissa, SCRIPT_KIND_V17_P2TR};
 use rbitcoin_store::tx_table::packed::*;
 use rbitcoin_store::tx_table::*;
 
 fn packed_p2tr_body(value: u64) -> Vec<u8> {
-    let meta = TxRecord {
-        txid: [0u8; 32],
-        version: 2,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 0,
-        output_start_fk: Fk::NULL,
-        output_count: 1,
-    };
+    let meta = TxRecord::class_a([0u8; 32], 2, 0, 0, 1);
     let mut raw = Vec::new();
     meta.encode_body_meta_into(&mut raw);
     if value > i64::MAX as u64 {
@@ -41,15 +32,7 @@ fn scan_packed_p2tr_outs_ok_value() {
 
 #[test]
 fn scan_packed_p2tr_outs_exp_mantissa_is_sats() {
-    let meta = TxRecord {
-        txid: [0u8; 32],
-        version: 2,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 0,
-        output_start_fk: Fk::NULL,
-        output_count: 1,
-    };
+    let meta = TxRecord::class_a([0u8; 32], 2, 0, 0, 1);
     let mut raw = Vec::new();
     meta.encode_body_meta_into(&mut raw);
     raw.push(SCRIPT_KIND_V17_P2TR | (8 << 4));
@@ -92,15 +75,7 @@ fn decode_seqsigwit_secret_zero_count_walks_payload() {
 }
 
 fn three_out_packed() -> (Vec<u8>, usize) {
-    let tx = TxRecord {
-        txid: [0x11u8; 32],
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: 3,
-    };
+    let tx = TxRecord::class_a([0x11u8; 32], 1, 0, 1, 3);
     let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outputs = vec![
         OutputRecord::unspent(1, vec![0x51]),

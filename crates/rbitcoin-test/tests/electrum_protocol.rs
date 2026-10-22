@@ -2543,7 +2543,7 @@ async fn electrum_tweaks_subscribe_streams_then_done() {
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
     use rbitcoin_consensus::{tweak_from_tx, Milestone};
-    use rbitcoin_primitives::{Fk, Height};
+    use rbitcoin_primitives::Height;
     use rbitcoin_query::accept_and_connect_block;
     use rbitcoin_query::testutil::FixtureChain;
     use rbitcoin_query::TxApply;
@@ -2585,15 +2585,7 @@ async fn electrum_tweaks_subscribe_streams_then_done() {
         weight: 0,
     };
     let ta1 = TxApply {
-        tx: TxRecord {
-            txid: create_txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(create_txid, 1, 0, 1, 1),
         inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         outputs: vec![OutputRecord::unspent(50_0000_0000, p2wpkh.clone())],
     };
@@ -2617,15 +2609,7 @@ async fn electrum_tweaks_subscribe_streams_then_done() {
         weight: 0,
     };
     let ta2 = TxApply {
-        tx: TxRecord {
-            txid: spend_txid,
-            version: 2,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(spend_txid, 2, 0, 1, 1),
         inputs: vec![InputRecord {
             prev_txid: create_txid,
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -2656,15 +2640,7 @@ async fn electrum_tweaks_subscribe_streams_then_done() {
         weight: 0,
     };
     let ta3 = TxApply {
-        tx: TxRecord {
-            txid: dummy_txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        },
+        tx: TxRecord::class_a(dummy_txid, 1, 0, 1, 1),
         inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x03], vec![])],
         outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
     };

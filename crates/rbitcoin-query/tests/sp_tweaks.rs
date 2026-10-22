@@ -66,15 +66,7 @@ fn put_sp_tweaks_rejects_header_fk_mismatch() {
             Height(0),
             &h0,
             &[TxApply {
-                tx: TxRecord {
-                    txid: [1u8; 32],
-                    version: 1,
-                    locktime: 0,
-                    input_start_fk: Fk::NULL,
-                    input_count: 1,
-                    output_start_fk: Fk::NULL,
-                    output_count: 1,
-                },
+                tx: TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
                 inputs: vec![InputRecord::coinbase(u32::MAX, vec![0x00], vec![])],
                 outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
             }],

@@ -494,9 +494,8 @@ reader fills from that locator). Bits 5–6 reserved (nonzero → Corrupt).
 New 25 writes omit the uleb (v2+locktime 0 is **1 B**). Leftover 24 rows
 keep the uleb (typical v2+locktime 0 is **2 B**).
 `CreateLocPair.n_out` (≥ 1) fills `TxRecord.output_count`. Schema-15 16-byte
-prefixes (v1 starts `01 00 00 00`) are not accepted. `input_start_fk` /
-`output_start_fk` stay null in RAM. Soft `TxRecord.txid` is filled from the
-sidefile on get paths.
+prefixes (v1 starts `01 00 00 00`) are not accepted. Soft `TxRecord.txid` is
+filled from the sidefile on get paths.
 
 ### Create / seqsigwit locators (`create.loc` / `seqsigwit.loc`)
 

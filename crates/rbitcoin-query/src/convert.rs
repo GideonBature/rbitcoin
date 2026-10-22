@@ -104,15 +104,13 @@ pub fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConfirmE
         .collect();
 
     Ok(TxApply {
-        tx: TxRecord {
+        tx: TxRecord::class_a(
             txid,
-            version: tx.version.0,
-            locktime: tx.lock_time.to_consensus_u32(),
-            input_start_fk: Fk::NULL,
-            input_count: inputs.len() as u32,
-            output_start_fk: Fk::NULL,
-            output_count: outputs.len() as u32,
-        },
+            tx.version.0,
+            tx.lock_time.to_consensus_u32(),
+            inputs.len() as u32,
+            outputs.len() as u32,
+        ),
         inputs,
         outputs,
     })

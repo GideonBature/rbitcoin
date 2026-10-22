@@ -123,15 +123,7 @@ fn put_n(t: &TxTable, n: u8) -> Vec<Fk> {
     for i in 0..n {
         let mut txid = [0u8; 32];
         txid[0] = i.wrapping_add(1);
-        let tx = TxRecord {
-            txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1 + (i % 3) as u32,
-        };
+        let tx = TxRecord::class_a(txid, 1, 0, 1, 1 + (i % 3) as u32);
         let inputs = vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -186,15 +178,7 @@ fn pipeline_outs_coalesces_same_page_peeks() {
 #[test]
 fn pipeline_outs_extends_past_first_page() {
     let (dir, t) = temp_tx();
-    let tx = TxRecord {
-        txid: [0x7eu8; 32],
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: 1,
-    };
+    let tx = TxRecord::class_a([0x7eu8; 32], 1, 0, 1, 1);
     let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let outs = vec![OutputRecord::unspent(1, vec![0x51; 6000])];
     let fk = t
@@ -220,15 +204,7 @@ fn pipeline_outs_extends_past_first_page() {
 }
 
 fn fat_many_outs(n_out: u32) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
-    let tx = TxRecord {
-        txid: [0x5au8; 32],
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: n_out,
-    };
+    let tx = TxRecord::class_a([0x5au8; 32], 1, 0, 1, n_out);
     let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let mut outs = Vec::with_capacity(n_out as usize);
     outs.push(OutputRecord::unspent(1, vec![0x51]));
@@ -261,15 +237,7 @@ fn pad_until_page_room(t: &TxTable, room_lo: u64, room_hi: u64) {
         } else {
             1
         };
-        let tx = TxRecord {
-            txid,
-            version: 1,
-            locktime: 0,
-            input_start_fk: Fk::NULL,
-            input_count: 1,
-            output_start_fk: Fk::NULL,
-            output_count: 1,
-        };
+        let tx = TxRecord::class_a(txid, 1, 0, 1, 1);
         let inputs = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
         let outs = vec![OutputRecord::unspent(1, vec![0x51; script_len])];
         t.put_full_batch_indexed(&[(tx, inputs, outs)], true)

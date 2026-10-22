@@ -49,15 +49,7 @@ fn hdr_merkle(prev: Fk, parent_hash: [u8; 32], salt: u8, merkle: [u8; 32]) -> He
 }
 
 fn put_coinbase(s: &Store, salt: u8) -> Fk {
-    let rec = TxRecord {
-        txid: [salt; 32],
-        version: 1,
-        locktime: 0,
-        input_start_fk: Fk::NULL,
-        input_count: 1,
-        output_start_fk: Fk::NULL,
-        output_count: 1,
-    };
+    let rec = TxRecord::class_a([salt; 32], 1, 0, 1, 1);
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![salt], vec![])];
     let outs = vec![OutputRecord::unspent(50, vec![0x51])];
     s.put_tx_full_batch_indexed(&[(rec, ins, outs)], true)

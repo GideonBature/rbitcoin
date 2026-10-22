@@ -2026,15 +2026,7 @@ fn chain_work_sums_distinct_header_bits() {
                 Height(label),
                 &rec,
                 &[TxApply {
-                    tx: TxRecord {
-                        txid,
-                        version: 1,
-                        locktime: 0,
-                        input_start_fk: Fk::NULL,
-                        input_count: 1,
-                        output_start_fk: Fk::NULL,
-                        output_count: 1,
-                    },
+                    tx: TxRecord::class_a(txid, 1, 0, 1, 1),
                     inputs: vec![InputRecord::coinbase(u32::MAX, vec![label as u8], vec![])],
                     outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
                 }],
