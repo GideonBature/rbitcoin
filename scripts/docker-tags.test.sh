@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # Hermetic pin for scripts/docker-tags.sh (image tag policy). No docker.
 set -euo pipefail
-# repo() runs in $(...); a failed git there must stop the test, not leave
-# a repo with no tags for the policy checks.
-shopt -s inherit_errexit
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAGS="$ROOT/scripts/docker-tags.sh"
@@ -21,15 +18,17 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rbitcoin-docker-tags.XXXXXX")"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
-# Fresh repo with one commit and the given lightweight tags.
+# Fresh repo with one commit and the given lightweight tags. Callers use
+# $(...), where set -e is off, so each git failure returns explicitly and
+# the outer assignment stops the test (bash 3.2 has no inherit_errexit).
 repo() {
   local dir="$WORKDIR/$1"
   shift
-  git init -q "$dir"
-  git -C "$dir" commit -q --allow-empty -m init
+  git init -q "$dir" || return 1
+  git -C "$dir" commit -q --allow-empty -m init || return 1
   local t
   for t in "$@"; do
-    git -C "$dir" tag "$t"
+    git -C "$dir" tag "$t" || return 1
   done
   printf '%s\n' "$dir"
 }
