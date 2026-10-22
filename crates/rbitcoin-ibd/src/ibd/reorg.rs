@@ -721,7 +721,12 @@ fn rewind_tip_still(
     }
 }
 
-static AFTER_PREPARE: Mutex<Option<(ThreadId, fn())>> = Mutex::new(None);
+struct PreparedHook {
+    thread: ThreadId,
+    hook: fn(),
+}
+
+static AFTER_PREPARE: Mutex<Option<PreparedHook>> = Mutex::new(None);
 
 /// Runs on this thread after a rewind is prepared and before it is committed.
 /// The header-thread stand-in in the stale-commit pin uses this. An empty
@@ -729,15 +734,18 @@ static AFTER_PREPARE: Mutex<Option<(ThreadId, fn())>> = Mutex::new(None);
 #[doc(hidden)]
 pub fn arm_after_header_rewind_prepare_for_test(hook: Option<fn()>) {
     let mut slot = AFTER_PREPARE.lock().unwrap_or_else(|err| err.into_inner());
-    *slot = hook.map(|hook| (std::thread::current().id(), hook));
+    *slot = hook.map(|hook| PreparedHook {
+        thread: std::thread::current().id(),
+        hook,
+    });
 }
 
 fn fire_after_prepare() {
     let hook = {
         let mut slot = AFTER_PREPARE.lock().unwrap_or_else(|err| err.into_inner());
         match slot.as_ref() {
-            Some((id, hook)) if *id == std::thread::current().id() => {
-                let hook = *hook;
+            Some(armed) if armed.thread == std::thread::current().id() => {
+                let hook = armed.hook;
                 *slot = None;
                 Some(hook)
             }
