@@ -1529,6 +1529,34 @@ fn getblock_verbosity_2_size_weight_and_tx_fee() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn object_keys(v: &serde_json::Value) -> Vec<&str> {
+    v.as_object()
+        .expect("header object")
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+/// `serde_json::Map` walks in sorted order (`preserve_order` is off). This is
+/// the order `keys()` and `to_string` show for an active header with no
+/// previous or next hash.
+const HEADER_KEYS_ACTIVE: &[&str] = &[
+    "bits",
+    "chainwork",
+    "confirmations",
+    "difficulty",
+    "hash",
+    "height",
+    "mediantime",
+    "merkleroot",
+    "nTx",
+    "nonce",
+    "target",
+    "time",
+    "version",
+    "versionHex",
+];
+
 #[test]
 fn getblock_named_verbose_genesis_and_hex() {
     let (ctx, dir, _hub) = ctx_regtest_hub();
@@ -1547,6 +1575,11 @@ fn getblock_named_verbose_genesis_and_hex() {
         genesis_hdr.get("previousblockhash").is_none(),
         "{genesis_hdr}"
     );
+    assert_eq!(
+        object_keys(&genesis_hdr),
+        HEADER_KEYS_ACTIVE,
+        "{genesis_hdr}"
+    );
     assert_eq!(genesis_hdr["target"].as_str().unwrap().len(), 64);
     let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
     assert_eq!(info["bits"], genesis_hdr["bits"]);
@@ -1561,9 +1594,17 @@ fn getblock_named_verbose_genesis_and_hex() {
     .unwrap();
     let parent = dispatch(&ctx, "getblockheader", vec![genesis]).unwrap();
     assert!(parent["nextblockhash"].as_str().is_some(), "{parent}");
+    let mut parent_keys = HEADER_KEYS_ACTIVE.to_vec();
+    parent_keys.push("nextblockhash");
+    parent_keys.sort_unstable();
+    assert_eq!(object_keys(&parent), parent_keys, "{parent}");
     let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
     let tip_hdr = dispatch(&ctx, "getblockheader", vec![tip.clone()]).unwrap();
     assert!(tip_hdr.get("nextblockhash").is_none(), "{tip_hdr}");
+    let mut tip_keys = HEADER_KEYS_ACTIVE.to_vec();
+    tip_keys.push("previousblockhash");
+    tip_keys.sort_unstable();
+    assert_eq!(object_keys(&tip_hdr), tip_keys, "{tip_hdr}");
     let parent_hash = tip_hdr["previousblockhash"].clone();
     dispatch(&ctx, "invalidateblock", vec![tip.clone()]).unwrap();
     let gone = dispatch(&ctx, "getblockheader", vec![tip.clone()]).unwrap();
@@ -5088,6 +5129,11 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
         tip.prev_blockhash.to_string(),
         "{held_hdr}"
     );
+    assert!(held_hdr.get("nextblockhash").is_none(), "{held_hdr}");
+    let mut held_keys = HEADER_KEYS_ACTIVE.to_vec();
+    held_keys.push("previousblockhash");
+    held_keys.sort_unstable();
+    assert_eq!(object_keys(&held_hdr), held_keys, "{held_hdr}");
     let held_raw = dispatch(&ctx, "getblockheader", vec![json!(held_hash), json!(false)]).unwrap();
     assert_eq!(held_raw.as_str().unwrap().len(), 160, "{held_raw}");
     let held_body = dispatch(&ctx, "getblock", vec![json!(held_hash), json!(1)]).unwrap();
@@ -5108,6 +5154,11 @@ fn shipped_rpc_reads_cover_fallback_and_reject_arms() {
     let off = dispatch(&ctx, "getblockheader", vec![json!(off_hash), json!(true)]).unwrap();
     assert_eq!(off["confirmations"], -1, "{off}");
     assert!(off["height"].as_u64().is_some(), "{off}");
+    assert!(off.get("nextblockhash").is_none(), "{off}");
+    let mut off_keys = HEADER_KEYS_ACTIVE.to_vec();
+    off_keys.push("previousblockhash");
+    off_keys.sort_unstable();
+    assert_eq!(object_keys(&off), off_keys, "{off}");
     let off_raw = dispatch(&ctx, "getblockheader", vec![json!(off_hash), json!(false)]).unwrap();
     assert_eq!(off_raw.as_str().unwrap().len(), 160, "{off_raw}");
     let undownloaded = dispatch(&ctx, "getblock", vec![json!(off_hash)]).unwrap_err();

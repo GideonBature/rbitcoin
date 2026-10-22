@@ -280,6 +280,70 @@ pub fn getblockheader(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Val
     Err(rpc_error(ERR_INVALID_ADDRESS_OR_KEY, "Block not found"))
 }
 
+/// Where `height` is inserted. Held puts it after `target`. Active and
+/// off-chain put it after `confirmations`. `serde_json::Map` sorts keys, so
+/// both slots serialize the same way until `preserve_order` is on.
+enum HeaderHeightSlot {
+    AfterConfirmations,
+    AfterTarget,
+}
+
+struct VerboseHeader<'a> {
+    hash: &'a str,
+    confirmations: Value,
+    height: Option<u32>,
+    height_slot: HeaderHeightSlot,
+    version: i32,
+    merkle_root: &'a str,
+    time: u32,
+    mediantime: u32,
+    nonce: u32,
+    bits: u32,
+    chainwork: &'a str,
+    n_tx: usize,
+    previousblockhash: Option<&'a str>,
+    nextblockhash: Option<&'a str>,
+}
+
+fn insert_header_height(obj: &mut Value, height: Option<u32>) {
+    if let Some(h) = height {
+        obj["height"] = json!(h);
+    }
+}
+
+/// Verbose `getblockheader` object. Callers still choose confirmations,
+/// height, `nTx`, chainwork, median time, and whether `nextblockhash` is set.
+fn verbose_header_object(f: VerboseHeader<'_>) -> Value {
+    let mut obj = json!({
+        "hash": f.hash,
+        "confirmations": f.confirmations,
+    });
+    if matches!(f.height_slot, HeaderHeightSlot::AfterConfirmations) {
+        insert_header_height(&mut obj, f.height);
+    }
+    obj["version"] = json!(f.version);
+    obj["versionHex"] = json!(format!("{:08x}", f.version));
+    obj["merkleroot"] = json!(f.merkle_root);
+    obj["time"] = json!(f.time);
+    obj["mediantime"] = json!(f.mediantime);
+    obj["nonce"] = json!(f.nonce);
+    obj["bits"] = json!(format!("{:08x}", f.bits));
+    obj["difficulty"] = core_f64_json(difficulty_from_bits(f.bits));
+    obj["chainwork"] = json!(f.chainwork);
+    obj["nTx"] = json!(f.n_tx);
+    obj["target"] = json!(target_hex(f.bits));
+    if matches!(f.height_slot, HeaderHeightSlot::AfterTarget) {
+        insert_header_height(&mut obj, f.height);
+    }
+    if let Some(prev) = f.previousblockhash {
+        insert_previousblockhash(&mut obj, prev);
+    }
+    if let Some(next) = f.nextblockhash {
+        obj["nextblockhash"] = json!(next);
+    }
+    obj
+}
+
 #[doc(hidden)]
 pub fn active_block_header(
     ctx: &RpcContext,
@@ -308,28 +372,27 @@ pub fn active_block_header(
     } else {
         String::new()
     };
-    let mut obj = json!({
-        "hash": hash_hex_display(&rec.hash),
-        "confirmations": confirmations(ctx, height),
-        "height": height.0,
-        "version": rec.version,
-        "versionHex": format!("{:08x}", rec.version),
-        "merkleroot": hash_hex_display(&rec.merkle_root),
-        "time": rec.timestamp,
-        "mediantime": rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
+    let hash = hash_hex_display(&rec.hash);
+    let merkle = hash_hex_display(&rec.merkle_root);
+    let chainwork = chainwork_hex(ctx, Some(height));
+    let next = nextblockhash_at(ctx, height);
+    Ok(verbose_header_object(VerboseHeader {
+        hash: &hash,
+        confirmations: json!(confirmations(ctx, height)),
+        height: Some(height.0),
+        height_slot: HeaderHeightSlot::AfterConfirmations,
+        version: rec.version,
+        merkle_root: &merkle,
+        time: rec.timestamp,
+        mediantime: rbitcoin_query::median_time_past(ctx.query.as_ref(), height)
             .unwrap_or(rec.timestamp),
-        "nonce": rec.nonce,
-        "bits": format!("{:08x}", rec.bits),
-        "difficulty": core_f64_json(difficulty_from_bits(rec.bits)),
-        "chainwork": chainwork_hex(ctx, Some(height)),
-        "nTx": ctx.query.block_tx_fks(height).map(|v| v.len()).unwrap_or(0),
-        "target": target_hex(rec.bits),
-    });
-    insert_previousblockhash(&mut obj, &prev);
-    if let Some(n) = nextblockhash_at(ctx, height) {
-        obj["nextblockhash"] = json!(n);
-    }
-    Ok(obj)
+        nonce: rec.nonce,
+        bits: rec.bits,
+        chainwork: &chainwork,
+        n_tx: ctx.query.block_tx_fks(height).map(|v| v.len()).unwrap_or(0),
+        previousblockhash: Some(&prev),
+        nextblockhash: next.as_deref(),
+    }))
 }
 
 #[doc(hidden)]
@@ -559,26 +622,25 @@ pub fn off_chain_header_value(
         .flatten()
         .map(|v| v.len())
         .unwrap_or(0);
-    let mut obj = json!({
-        "hash": hash_hex_display(&loc.rec.hash),
-        "confirmations": -1,
-        "height": loc.height,
-        "version": loc.rec.version,
-        "versionHex": format!("{:08x}", loc.rec.version),
-        "merkleroot": hash_hex_display(&loc.rec.merkle_root),
-        "time": loc.rec.timestamp,
-        "mediantime": loc.mediantime,
-        "nonce": loc.rec.nonce,
-        "bits": format!("{:08x}", loc.rec.bits),
-        "difficulty": core_f64_json(difficulty_from_bits(loc.rec.bits)),
-        "chainwork": loc.chainwork,
-        "nTx": n_tx,
-        "target": target_hex(loc.rec.bits),
-    });
-    if let Some(p) = loc.prev_hash {
-        insert_previousblockhash(&mut obj, &hash_hex_display(&p));
-    }
-    Ok(obj)
+    let hash = hash_hex_display(&loc.rec.hash);
+    let merkle = hash_hex_display(&loc.rec.merkle_root);
+    let previous = loc.prev_hash.map(|p| hash_hex_display(&p));
+    Ok(verbose_header_object(VerboseHeader {
+        hash: &hash,
+        confirmations: json!(-1),
+        height: Some(loc.height),
+        height_slot: HeaderHeightSlot::AfterConfirmations,
+        version: loc.rec.version,
+        merkle_root: &merkle,
+        time: loc.rec.timestamp,
+        mediantime: loc.mediantime,
+        nonce: loc.rec.nonce,
+        bits: loc.rec.bits,
+        chainwork: &loc.chainwork,
+        n_tx,
+        previousblockhash: previous.as_deref(),
+        nextblockhash: None,
+    }))
 }
 
 #[doc(hidden)]
@@ -591,28 +653,25 @@ pub fn held_header_value(ctx: &RpcContext, block: &Block, verbose: bool) -> Resu
     let prev = block.header.prev_blockhash.to_byte_array();
     let mediantime = median_time_from_wire(ctx, block.header.time, prev)?;
     let (height, chainwork) = held_height_and_work_hex(ctx, block);
-    let mut obj = json!({
-        "hash": hash_hex_display(&block.block_hash().to_byte_array()),
-        "confirmations": -1,
-        "version": version,
-        "versionHex": format!("{:08x}", version),
-        "merkleroot": hash_hex_display(&block.header.merkle_root.to_byte_array()),
-        "time": block.header.time,
-        "mediantime": mediantime,
-        "nonce": block.header.nonce,
-        "bits": format!("{:08x}", bits),
-        "difficulty": core_f64_json(difficulty_from_bits(bits)),
-        "chainwork": chainwork,
-        "nTx": block.txdata.len(),
-        "target": target_hex(bits),
-    });
-    if let Some(h) = height {
-        obj["height"] = json!(h);
-    }
-    if prev != [0u8; 32] {
-        insert_previousblockhash(&mut obj, &hash_hex_display(&prev));
-    }
-    Ok(obj)
+    let hash = hash_hex_display(&block.block_hash().to_byte_array());
+    let merkle = hash_hex_display(&block.header.merkle_root.to_byte_array());
+    let previous = (prev != [0u8; 32]).then(|| hash_hex_display(&prev));
+    Ok(verbose_header_object(VerboseHeader {
+        hash: &hash,
+        confirmations: json!(-1),
+        height,
+        height_slot: HeaderHeightSlot::AfterTarget,
+        version,
+        merkle_root: &merkle,
+        time: block.header.time,
+        mediantime,
+        nonce: block.header.nonce,
+        bits,
+        chainwork: &chainwork,
+        n_tx: block.txdata.len(),
+        previousblockhash: previous.as_deref(),
+        nextblockhash: None,
+    }))
 }
 
 /// 32-byte BE chainwork hex (regtest = 2 per block). Empty store → 64 zeros.
