@@ -45,7 +45,8 @@ pub struct WorkStructureSizes {
 ///
 /// Getdata cannot be cancelled. A peer dropped from the race moves to
 /// `retired`: it no longer counts as a racer, but it still holds the request,
-/// so the hash stays requested and that peer is not asked for it again.
+/// so the hash stays requested. Except for the racerless re-ask after
+/// [`super::assign::TIP_HOLE_RX_STALE`], a retired peer is not asked for it again.
 /// Retired peers still count toward the ask cap.
 #[derive(Debug, Clone)]
 pub struct InflightReq {
@@ -106,15 +107,15 @@ impl InflightReq {
         added
     }
 
-    /// When racing owner `peer` was asked.
+    /// When racing or retired owner `peer` was asked.
     pub fn owner_asked_at(&self, peer: usize) -> Option<Instant> {
         self.asked_at.get(&peer).copied()
     }
 
-    /// Stop counting `peer` as a racer. It keeps the request.
+    /// Stop counting `peer` as a racer. It keeps the request and its ask time,
+    /// so a racerless hash can re-ask it once the hold has aged out.
     pub fn retire_peer(&mut self, peer: usize) {
         if self.peers.remove(&peer) {
-            self.asked_at.remove(&peer);
             self.retired.insert(peer);
         }
     }

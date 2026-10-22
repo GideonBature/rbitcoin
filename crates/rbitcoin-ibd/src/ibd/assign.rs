@@ -1199,12 +1199,45 @@ pub fn tip_hole_owner_to_drop(
 }
 
 /// Stop counting `pid` as a racer on `hash`. Getdata cannot be cancelled, so
-/// the peer keeps the request in its `in_flight` and is not asked again.
+/// the peer keeps the request in its `in_flight` and is not asked again
+/// unless the hash goes racerless and the hold ages out [`TIP_HOLE_RX_STALE`].
 #[doc(hidden)]
 pub fn retire_hash_owner(st: &mut IbdWorkState, hash: BlockHash, pid: usize) {
     if let Some(req) = st.inflight.get_mut(&hash) {
         req.retire_peer(pid);
     }
+}
+
+/// Re-send `hash` to the longest-held retired owner once it has held for at
+/// least [`TIP_HOLE_RX_STALE`]. Getdata cannot be cancelled, so the peer just
+/// gets a second request; the original may still answer. This keeps an
+/// all-retired hole moving instead of freezing once every live peer has been
+/// asked once.
+fn reask_aged_retired_owner(st: &mut IbdWorkState, hash: BlockHash) -> bool {
+    let now = Instant::now();
+    let Some(pid) = st.inflight.get(&hash).and_then(|req| {
+        req.retired
+            .iter()
+            .copied()
+            .filter_map(|pid| {
+                let asked = req.owner_asked_at(pid)?;
+                (now.duration_since(asked) >= TIP_HOLE_RX_STALE).then_some((pid, asked))
+            })
+            .min_by_key(|(_, asked)| *asked)
+            .map(|(pid, _)| pid)
+    }) else {
+        return false;
+    };
+    let Some(idx) = st.slots.iter().position(|s| s.id == pid && s.alive) else {
+        return false;
+    };
+    st.slots[idx].track_insert(hash);
+    st.slots[idx].getdata_wire.queue(1);
+    let _ = st.slots[idx]
+        .cmd_tx
+        .send(PeerCmd::GetData { hashes: vec![hash] });
+    inflight_add_peer(&mut st.inflight, hash, pid);
+    true
 }
 
 #[doc(hidden)]
@@ -1419,7 +1452,8 @@ pub fn cover_tip_batch_holes(
 /// it too long and another peer exists. The whole race set is never cleared on
 /// request age. A dropped owner is retired: it keeps the request it was sent,
 /// still counts toward its queue and toward the ask cap, and is not asked
-/// for this hash again.
+/// for this hash again unless the hash goes racerless and the hold has aged
+/// out [`TIP_HOLE_RX_STALE`].
 pub fn cover_tip_holes(
     st: &mut IbdWorkState,
     hub: &ChainHub,
@@ -1459,15 +1493,15 @@ pub fn cover_tip_holes(
         let already = st.inflight.get(&h).map(|e| e.holders()).unwrap_or(0);
         let want = max_peers;
         // A retired-only holder set is not coverage: nobody is pulling. Race
-        // one fresh peer as densify does (`inflight_needs_racer`), or the
-        // hash — and the in-order tip behind it — freezes while densify sits
-        // at its hole-open zero cap. Retired still counts the cap once a
-        // racer lives.
+        // fresh peers as densify does (`inflight_needs_racer`), or the hash —
+        // and the in-order tip behind it — freezes while densify sits at its
+        // hole-open zero cap. Retired still counts the cap once a racer
+        // lives.
         let racerless = st.inflight.get(&h).is_some_and(inflight_needs_racer);
         if already >= want && !racerless {
             continue;
         }
-        let mut need = if racerless { 1 } else { want - already };
+        let mut need = want.saturating_sub(already).max(usize::from(racerless));
         let mut placed_any = false;
         let ranked = rank_peers_for_tip_hole(&st.slots, alive, &avoid);
         for &pid in &ranked {
@@ -1498,6 +1532,13 @@ pub fn cover_tip_holes(
                 placed_any = true;
                 need = need.saturating_sub(1);
             }
+        }
+        // Every alive peer is already a retired holder: re-ask an aged one
+        // rather than freeze until restart.
+        while need > 0 && racerless && reask_aged_retired_owner(st, h) {
+            placed_any = true;
+            issued += 1;
+            need = need.saturating_sub(1);
         }
         if already == 0 && !placed_any {
             break;
