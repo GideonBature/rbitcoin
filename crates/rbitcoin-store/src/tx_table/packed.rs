@@ -580,21 +580,11 @@ pub fn decode_input_run_prefix(
 /// OS page size (legacy constant; body packing is 8-byte aligned only in schema 13).
 pub const BODY_PAGE_SIZE: u64 = 4096;
 
-/// Encode `txout.body` payload (schema **17**): thin meta || output_run.
+/// Encode `txout.body` (schema 17) with optional at-rest XOR of scriptPubKey.
 ///
-/// Inputs/witness go to [`encode_seqsigwit_with_secret`]. Spender slots go to
-/// [`encode_spent_zeros`]. `inputs` is accepted for call-site compatibility
-/// (count assert only).
-pub fn encode_packed_tx(
-    tx: &TxRecord,
-    inputs: &[InputRecord],
-    outputs: &[OutputRecord],
-    out: &mut Vec<u8>,
-) {
-    encode_packed_tx_with_secret(tx, inputs, outputs, out, None);
-}
-
-/// Encode `txout` with optional at-rest XOR of scriptPubKey.
+/// Inputs and witness go to [`encode_seqsigwit_with_secret`]. Spender slots
+/// go to [`encode_spent_zeros`]. `inputs` is the count assert only.
+/// `secret: None` is the no-XOR path.
 pub fn encode_packed_tx_with_secret(
     tx: &TxRecord,
     inputs: &[InputRecord],

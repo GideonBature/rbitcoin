@@ -1124,7 +1124,7 @@ fn scan_packed_meta_and_prevouts_no_output_alloc() {
     ];
     let outputs = vec![OutputRecord::unspent(50, vec![0x51])];
     let mut raw = Vec::new();
-    encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
+    encode_packed_tx_with_secret(&tx, &inputs, &outputs, &mut raw, None);
     let (meta, _) = TxRecord::decode_body_meta(&raw).unwrap();
     assert_eq!(meta.txid, [0u8; 32], "body scan has no leading txid");
     assert_eq!(meta.input_count, 0, "txout meta omits n_in");
@@ -1164,7 +1164,7 @@ fn packed_output_spender_rels_multi_vout_one_walk() {
         OutputRecord::unspent(4, vec![0x51]),
     ];
     let mut raw = Vec::new();
-    encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
+    encode_packed_tx_with_secret(&tx, &inputs, &outputs, &mut raw, None);
     // Schema 15: decode rels are txout output starts (not spent denserels).
     let (_, _, decode_rels) = decode_packed_tx_outs_with_spender_rels(&raw, 4).unwrap();
     assert_eq!(decode_rels.len(), 4);
@@ -1241,7 +1241,7 @@ fn denserels_layout_exact_matches_encode_decode_shapes() {
             );
         }
         let mut raw = Vec::new();
-        encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
+        encode_packed_tx_with_secret(&tx, &inputs, &outputs, &mut raw, None);
         let (_, _, decode_rels) =
             decode_packed_tx_outs_with_spender_rels(&raw, outputs.len() as u32).unwrap();
         assert_eq!(decode_rels.len(), outputs.len());
@@ -2346,7 +2346,7 @@ fn packed_tx_roundtrip() {
         OutputRecord::unspent(1, vec![0x00, 0x14]),
     ];
     let mut enc = Vec::new();
-    encode_packed_tx(&tx, &inputs, &outputs, &mut enc);
+    encode_packed_tx_with_secret(&tx, &inputs, &outputs, &mut enc, None);
     assert!(TxRecord::decode_body_meta(&enc).is_ok());
     assert!(enc.len() >= 3, "thin LAYOUT17 meta");
     let (dtx, douts, _) = decode_packed_tx_outs_with_spender_rels(&enc, 2).unwrap();
@@ -2649,7 +2649,7 @@ fn packed_encode_decode_flags_and_error_arms() {
     let inputs = vec![coin.clone(), non_final.clone()];
     let outputs = vec![o_true.clone(), o_script.clone()];
     let mut raw = Vec::new();
-    encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
+    encode_packed_tx_with_secret(&tx, &inputs, &outputs, &mut raw, None);
     assert!(TxRecord::decode_body_meta(&raw).is_ok());
     assert!(TxRecord::decode_body_meta(&[]).is_err());
     assert!(TxRecord::decode_body_meta(&[0u8; 15]).is_err());
@@ -2818,11 +2818,12 @@ fn packed_encode_decode_flags_and_error_arms() {
         ));
         // non-zero trailing on outs_only path
         let mut good = Vec::new();
-        encode_packed_tx(
+        encode_packed_tx_with_secret(
             &TxRecord::class_a([1; 32], 1, 0, 1, 1),
             &inputs,
             &outputs,
             &mut good,
+            None,
         );
         let mut trail = good.clone();
         trail.push(0xee);

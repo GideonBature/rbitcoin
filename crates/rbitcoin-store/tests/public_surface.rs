@@ -1,7 +1,8 @@
 //! Pin the crate-root names other crates actually import (X-04 keep list).
 //! This test only asserts those names still resolve. Dropped names
-//! (`AddressHead`, `NetConfig`, `P2PHandle`, `LiveShardTable`, …) are
-//! denied by `lint/ast-grep/rules/crate-root-dropped-pub.yml`.
+//! (`AddressHead`, `NetConfig`, `P2PHandle`, `LiveShardTable`,
+//! `encode_packed_tx`, …) are denied by
+//! `lint/ast-grep/rules/crate-root-dropped-pub.yml`.
 use rbitcoin_primitives::{merkle_branch, merkle_root_from_txids, merkle_root_mutated};
 use rbitcoin_store::address_head::{is_probe_exhausted_error, is_store_corrupt_display};
 use rbitcoin_store::block_queue::{BlockQueue, QueuedBlockMeta, TakenRaw};
@@ -35,7 +36,7 @@ use rbitcoin_store::store_secret::StoreSecret;
 use rbitcoin_store::tx_table::HeadResizeSizeSnapshot;
 use rbitcoin_store::tx_table::{
     decode_packed_tx_outs_with_spender_rels, decode_packed_tx_outs_with_spender_rels_secret,
-    decode_packed_tx_with_spender_rels_secret, decode_seqsigwit_secret, encode_packed_tx,
+    decode_packed_tx_with_spender_rels_secret, decode_seqsigwit_secret,
     encode_packed_tx_with_secret, encode_txout_meta_and_outs, encode_unspent_output_into_secret,
     spend_meta_backend, spent_abs, InputRecord, OutputRecord, PackedCreate, TxRecord,
 };
@@ -95,7 +96,6 @@ fn crate_root_exports_cross_crate_names() {
     let _ = decode_packed_tx_outs_with_spender_rels;
     let _ = decode_packed_tx_outs_with_spender_rels_secret;
     let _ = decode_packed_tx_with_spender_rels_secret;
-    let _ = encode_packed_tx;
     let _ = encode_packed_tx_with_secret;
     let _ = encode_txout_meta_and_outs;
     let _ = encode_unspent_output_into_secret;

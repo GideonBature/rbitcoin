@@ -83,7 +83,7 @@ fn three_out_packed() -> (Vec<u8>, usize) {
         OutputRecord::unspent(3, vec![0x53; 80]),
     ];
     let mut raw = Vec::new();
-    encode_packed_tx(&tx, &inputs, &outputs, &mut raw);
+    encode_packed_tx_with_secret(&tx, &inputs, &outputs, &mut raw, None);
     let (_, mut off) = TxRecord::decode_body_meta(&raw).unwrap();
     off += OutputRecord::skip_at(&raw[off..]).unwrap();
     (raw, off)
