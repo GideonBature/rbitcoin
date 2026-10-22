@@ -3951,7 +3951,6 @@ pub fn check_block_proposal_with(
     );
     // Structure counts legacy sigops only. Prevouts are already in hand, so
     // P2SH and witness sigops count here (BIP141 limit, 80_000).
-    const MAX_BLOCK_SIGOPS_COST: u64 = 80_000;
     let mut sigops = rbitcoin_consensus::tx_sigop_cost(
         &block.txdata[0],
         &[],
@@ -3966,7 +3965,7 @@ pub fn check_block_proposal_with(
             flags.bip16_active,
             flags.witness_active,
         ));
-        if sigops > MAX_BLOCK_SIGOPS_COST {
+        if sigops > rbitcoin_consensus::block::MAX_BLOCK_SIGOPS_COST {
             return Err("bad-blk-sigops".into());
         }
         rbitcoin_consensus::verify_tx_scripts_with_flags(ins, tx.clone(), flags)

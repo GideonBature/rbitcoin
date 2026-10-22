@@ -253,8 +253,6 @@ pub fn validate_block_structure_with_pres(
     }
 
     {
-        const WITNESS_SCALE: u64 = 4;
-        const MAX_BLOCK_SIGOPS_COST: u64 = 80_000;
         let mut cost = 0u64;
         for p in pres.iter() {
             cost = cost.saturating_add(p.sigops.saturating_mul(WITNESS_SCALE));
@@ -521,7 +519,6 @@ pub fn witness_sigop_count(tx: &Transaction, prev_spks: &[&[u8]]) -> u64 {
 }
 
 pub fn prevout_spk_sigops(inp: &bitcoin::TxIn, spk: &[u8], bip16: bool, witness: bool) -> u64 {
-    const WITNESS_SCALE: u64 = 4;
     let mut n = 0u64;
     if bip16 {
         n = n.saturating_add(p2sh_sigops_one(inp, spk).saturating_mul(WITNESS_SCALE));
@@ -534,7 +531,6 @@ pub fn prevout_spk_sigops(inp: &bitcoin::TxIn, spk: &[u8], bip16: bool, witness:
 
 /// Full Core-style sigop cost for one tx given prevout scripts (BIP16 + BIP141).
 pub fn tx_sigop_cost(tx: &Transaction, prev_spks: &[&[u8]], bip16: bool, witness: bool) -> u64 {
-    const WITNESS_SCALE: u64 = 4;
     let mut cost = legacy_sigop_count(tx).saturating_mul(WITNESS_SCALE);
     for (i, inp) in tx.input.iter().enumerate() {
         let Some(spk) = prev_spks.get(i) else {
@@ -1065,7 +1061,6 @@ pub type PendingCreates = TxidMap<rbitcoin_primitives::Fk>;
 /// `MAX_BLOCK_SIGOPS_COST` (20_000 legacy sigops × witness scale 4).
 #[inline]
 pub fn exceeds_sigops_limit(cost: u64) -> bool {
-    const MAX_BLOCK_SIGOPS_COST: u64 = 80_000;
     cost > MAX_BLOCK_SIGOPS_COST
 }
 
@@ -1221,6 +1216,12 @@ pub fn block_subsidy(height: u32, params: &ChainParams) -> i64 {
 
 /// BIP65/113 nLockTime threshold: values below are block heights, above are unix times.
 pub const LOCKTIME_THRESHOLD: u32 = 500_000_000;
+
+/// BIP141 witness scale factor. Legacy sigops are multiplied by this.
+pub const WITNESS_SCALE: u64 = 4;
+
+/// BIP141 block sigop-cost limit (`20_000` legacy sigops × [`WITNESS_SCALE`]).
+pub const MAX_BLOCK_SIGOPS_COST: u64 = 80_000;
 
 /// Absolute locktime vs block height / time cutoff.
 ///

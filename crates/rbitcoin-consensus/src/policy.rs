@@ -116,7 +116,8 @@ pub fn check_libre_annex(tx: &Transaction) -> PolicyResult {
 
 /// Core `CScript::IsUnspendable`: leading `OP_RETURN`, or over `MAX_SCRIPT_SIZE`.
 pub fn is_unspendable(script: &[u8]) -> bool {
-    script.first() == Some(&0x6a) || script.len() > 10_000
+    script.first() == Some(&0x6a)
+        || script.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY
 }
 
 /// Libre has no dust *limit*; a 0-value spendable output is still dust.
@@ -141,7 +142,7 @@ pub fn check_libre_shape(tx: &Transaction, weight: u64) -> PolicyResult {
     }
     if tx.output.iter().any(|o| {
         let spk = o.script_pubkey.as_bytes();
-        spk.len() > 10_000 && spk.first() != Some(&0x6a)
+        spk.len() > crate::script::interpreter::MAX_SCRIPT_SIZE_LEGACY && spk.first() != Some(&0x6a)
     }) {
         return PolicyResult::NonStandard("scriptpubkey");
     }

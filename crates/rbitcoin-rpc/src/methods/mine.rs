@@ -747,7 +747,7 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         "mintime": mintime,
         "mutable": ["time", "transactions", "prevblock"],
         "noncerange": "00000000ffffffff",
-        "sigoplimit": 80_000,
+        "sigoplimit": rbitcoin_consensus::block::MAX_BLOCK_SIGOPS_COST,
         "sizelimit": 4_000_000,
         "weightlimit": 4_000_000,
         "curtime": curtime,
