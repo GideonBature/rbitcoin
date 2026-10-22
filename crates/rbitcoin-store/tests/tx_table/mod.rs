@@ -17,6 +17,7 @@ use rbitcoin_store::compact::{
 };
 use rbitcoin_store::hashhead::HeadScale;
 use rbitcoin_store::tx_table::*;
+use std::io::{Seek, Write};
 
 fn tempfile_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -360,6 +361,30 @@ fn input_n_in_scans_both_prevouts() {
     assert_eq!(meta.input_count, 2);
     assert_eq!(prevs.len(), 2);
     assert_eq!(t.input.n_in(fk).unwrap(), Some(2));
+    // Schema-17 meta omits n_in. Clearing the input.loc slot must not treat
+    // seqsigwit as a prevout source (that arm is only for a meta that still
+    // carries the count).
+    let id = fk.get().unwrap();
+    let mut loc = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join("input.loc"))
+        .unwrap();
+    loc.seek(std::io::SeekFrom::Start(
+        rbitcoin_store::file::FILE_HEADER_LEN as u64 + (id - 1) * 2,
+    ))
+    .unwrap();
+    loc.write_all(&0u16.to_le_bytes()).unwrap();
+    drop(loc);
+    assert_eq!(t.input.n_in(fk).unwrap(), None);
+    assert!(
+        t.get_meta_and_prevouts(fk).is_err(),
+        "omitted n_in does not decode seqsigwit prevouts"
+    );
+    t.set_prune_seqsigwit_mode(true);
+    assert!(matches!(
+        t.get_meta_and_prevouts(fk),
+        Err(StoreError::NotFound)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
