@@ -2789,7 +2789,7 @@ fn class_a_coinbase(
 ) {
     (
         rbitcoin_store::TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

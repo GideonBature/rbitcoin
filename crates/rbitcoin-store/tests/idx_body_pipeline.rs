@@ -124,7 +124,7 @@ fn put_n(t: &TxTable, n: u8) -> Vec<Fk> {
         let mut txid = [0u8; 32];
         txid[0] = i.wrapping_add(1);
         let tx = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -256,7 +256,7 @@ fn pad_until_page_room(t: &TxTable, room_lo: u64, room_hi: u64) {
             1
         };
         let tx = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

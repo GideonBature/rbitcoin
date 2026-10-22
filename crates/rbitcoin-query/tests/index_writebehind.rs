@@ -678,7 +678,7 @@ fn tx_apply(
 ) -> rbitcoin_query::TxApply {
     rbitcoin_query::TxApply {
         tx: rbitcoin_store::TxRecord {
-            txid: txid,
+            txid,
             version: 2,
             locktime: 0,
             input_count: inputs.len() as u32,

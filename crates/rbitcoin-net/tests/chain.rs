@@ -2027,7 +2027,7 @@ fn chain_work_sums_distinct_header_bits() {
                 &rec,
                 &[TxApply {
                     tx: TxRecord {
-                        txid: txid,
+                        txid,
                         version: 1,
                         locktime: 0,
                         input_count: 1,

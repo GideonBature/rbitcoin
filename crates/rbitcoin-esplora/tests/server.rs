@@ -60,7 +60,7 @@ fn coinbase(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRecord, T
     txid[31] = 0xcb;
     let ta = TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -476,7 +476,7 @@ fn two_script_pay(tag: u8, spk: bitcoin::ScriptBuf) -> TxApply {
     txid[31] = 0xaa;
     TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 2,
             locktime: 0,
             input_count: 1,

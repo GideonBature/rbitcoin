@@ -61,7 +61,7 @@ fn coinbase(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRecord, T
     txid[31] = 0xcb;
     let ta = TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

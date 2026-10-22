@@ -933,7 +933,7 @@ fn pin_megakey_block_disconnect(q: &Query, tip: Height, tip_hash: [u8; 32]) {
             txid[4..8].copy_from_slice(&i.to_le_bytes());
             TxApply {
                 tx: TxRecord {
-                    txid: txid,
+                    txid,
                     version: 1,
                     locktime: 0,
                     input_count: 1,
@@ -1097,7 +1097,7 @@ fn chain_connect_reorg_and_growth() {
         };
         let ta = TxApply {
             tx: TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,

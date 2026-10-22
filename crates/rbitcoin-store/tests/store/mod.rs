@@ -256,7 +256,7 @@ fn coinbase_item(
     let n_out = outs.len() as u32;
     (
         TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1198,7 +1198,7 @@ fn tiponly_unconnected_identity_miss_on_fence() {
     let s = Store::create_tiny(&dir).unwrap();
     let txid = [0x22u8; 32];
     let rec = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 0,
@@ -1581,7 +1581,7 @@ fn resolve_txid_prefers_connected_over_newer_unconnected() {
     let s = Store::create_tiny(&dir).unwrap();
     let txid = [0xABu8; 32];
     let rec = |lock| TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: lock,
         input_count: 0,
@@ -1668,7 +1668,7 @@ fn tip_then_any_connected_in_cold_beats_unconnected_hot() {
 
     fn put_one(s: &Store, txid: [u8; 32], lock: u32) -> Fk {
         let rec = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: lock,
             input_count: 0,

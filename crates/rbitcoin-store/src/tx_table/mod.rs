@@ -202,9 +202,9 @@ pub fn decode_body_meta_v17(buf: &[u8]) -> Result<(TxRecord, usize), StoreError>
     Ok((
         TxRecord {
             txid: [0u8; 32],
-            version: version,
-            locktime: locktime,
-            input_count: input_count,
+            version,
+            locktime,
+            input_count,
             output_count: 0,
         },
         off,

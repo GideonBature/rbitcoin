@@ -215,7 +215,7 @@ fn sp_spend(
     txid[0] = tag;
     TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 2,
             locktime: 0,
             input_count: 1,

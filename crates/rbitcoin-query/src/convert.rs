@@ -105,7 +105,7 @@ pub fn tx_to_apply(tx: &Transaction, txid: [u8; 32]) -> Result<TxApply, ConfirmE
 
     Ok(TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: tx.version.0,
             locktime: tx.lock_time.to_consensus_u32(),
             input_count: inputs.len() as u32,

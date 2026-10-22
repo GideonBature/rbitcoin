@@ -31,7 +31,7 @@ pub fn op_true_apply(tag: u8) -> TxApply {
     txid[31] = 0xcb;
     TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

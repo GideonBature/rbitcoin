@@ -101,7 +101,7 @@ fn test_pin(id: u64) -> rbitcoin_query::CreatePin {
     txid[..8].copy_from_slice(&id.to_le_bytes());
     rbitcoin_query::CreatePinInner::records(
         TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 0,

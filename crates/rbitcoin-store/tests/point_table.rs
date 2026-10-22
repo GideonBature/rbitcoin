@@ -27,7 +27,7 @@ fn put_create(txs: &TxTable, txid: [u8; 32], n_out: u32) -> Fk {
         .collect();
     let item = (
         TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

@@ -48,7 +48,7 @@ fn coinbase_block(
     txid[31] = 0xcb;
     let ta = rbitcoin_query::TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

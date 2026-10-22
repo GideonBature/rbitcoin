@@ -731,7 +731,7 @@ fn get_history_height_window_and_status_full() {
         txid[31] = 0xcb;
         let ta = TxApply {
             tx: TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -855,7 +855,7 @@ async fn chain_view_reorg_notifies_dropped_scripthash() {
     txid[31] = 0xcb;
     let ta = TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1165,7 +1165,7 @@ async fn tweaks_subscribe_dones_when_the_first_wave_finishes_count() {
         txid[31] = 0xcb;
         let ta = TxApply {
             tx: TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -1372,7 +1372,7 @@ async fn tweaks_subscribe_pre_taproot_collapses_empty_heights() {
         txid[31] = 0xcb;
         let ta = TxApply {
             tx: TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,

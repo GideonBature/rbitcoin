@@ -513,7 +513,7 @@ fn pending_head_resolve_before_drain() {
     let mut txid = [0u8; 32];
     txid[0] = 0x51;
     let rec = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 0,
@@ -604,7 +604,7 @@ fn pending_head_reopen_backfills_lagging_head() {
         let mut txid = [0u8; 32];
         txid[0] = 0x77;
         let rec = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 0,
@@ -636,7 +636,7 @@ fn open_repairs_body_leading_txid_count() {
             let mut txid = [0u8; 32];
             txid[0] = i.wrapping_add(1);
             let tx = TxRecord {
-                txid: txid,
+                txid,
                 version: 2,
                 locktime: 0,
                 input_count: 0,
@@ -667,7 +667,7 @@ fn open_repairs_body_leading_txid_count() {
     let mut txid = [0u8; 32];
     txid[0] = 99;
     let tx = TxRecord {
-        txid: txid,
+        txid,
         version: 2,
         locktime: 0,
         input_count: 0,
@@ -1409,7 +1409,7 @@ fn body_txid_range_matches_serial() {
         txid[0..8].copy_from_slice(&i.to_le_bytes());
         txid[8] = 0xce;
         let rec = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1463,7 +1463,7 @@ fn body_txid_thin_prefix_matches_fat_packed_body() {
     let mut txid = [0xabu8; 32];
     txid[0] = 0x7e;
     let tx = TxRecord {
-        txid: txid,
+        txid,
         version: 2,
         locktime: 0,
         input_count: 1,
@@ -1507,7 +1507,7 @@ fn bulk_body_range_matches_sequential() {
         let mut txid = [0u8; 32];
         txid[0] = i.wrapping_add(10);
         let tx = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1573,7 +1573,7 @@ fn get_fk_by_txid_batch_multi_cand_then_outs() {
     let txid = [0x5a; 32];
     let mk = |hint: u8, value: u64| {
         let rec = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1668,7 +1668,7 @@ fn streaming_resolve_early_exit_fewer_body_lookups() {
     let txid = [0xcd; 32];
     let mk = |hint: u8| {
         let rec = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1712,7 +1712,7 @@ fn get_fk_by_txid_batch_depth_wins_with_workers() {
         let txid = [0xab; 32];
         let mk = |hint: u8| {
             let rec = TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -1799,7 +1799,7 @@ fn get_fk_by_txid_batch_matches_single() {
         let mut txid = [0u8; 32];
         txid[0] = i.wrapping_add(1);
         let tx = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1920,7 +1920,7 @@ fn get_outs_by_range_batch_skips_extend_when_need_in_first_page() {
     txid[0] = 0x5a;
     let n_out = 80u32;
     let tx = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,
@@ -1992,7 +1992,7 @@ fn head_insert_many_tiny_roundtrip() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -2051,7 +2051,7 @@ fn head_leading_truncated_class_a_rebuilds_on_open() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
             let rec = TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -3187,7 +3187,7 @@ fn put_full_aligns_record_starts_and_txid_prefix() {
         txid[0] = i;
         txid[1] = 0xA5;
         let tx = TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -3227,7 +3227,7 @@ fn put_full_aligns_record_starts_and_txid_prefix() {
         txid[0] = i;
         more.push((
             TxRecord {
-                txid: txid,
+                txid,
                 version: 2,
                 locktime: 0,
                 input_count: 1,
@@ -3267,7 +3267,7 @@ fn span_prevouts_match_per_create() {
         txid[0..4].copy_from_slice(&i.to_le_bytes());
         items.push((
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -3353,7 +3353,7 @@ fn get_full_span_matches_per_fk_get_full() {
         txid[0] = i.saturating_add(1);
         items.push((
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -3391,7 +3391,7 @@ fn pread_two_spans_parallel_matches_serial() {
         txid[0] = i.saturating_add(9);
         items.push((
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -3454,7 +3454,7 @@ fn bip30_duplicate_txid_seal_succeeds_and_resolves() {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
         rest.push(TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 0,
@@ -3504,7 +3504,7 @@ fn open_tags_a_meta_v1_head() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -3553,7 +3553,7 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
                 let mut txid = [0u8; 32];
                 txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
                 TxRecord {
-                    txid: txid,
+                    txid,
                     version: 1,
                     locktime: 0,
                     input_count: 0,
@@ -3575,7 +3575,7 @@ fn reopen_mid_segment_then_seal_no_fuse_fn() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -3620,7 +3620,7 @@ fn orphan_class_a_bodies_do_not_drop_head_entries_at_seal() {
         let mut txid = [0u8; 32];
         txid[0..8].copy_from_slice(&i.to_le_bytes());
         TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 0,
@@ -3694,7 +3694,7 @@ fn seal_without_retained_keys_matches_fuse_contains() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -3729,7 +3729,7 @@ fn fat_creates_do_not_roll_head() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
             let tx = TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -3778,7 +3778,7 @@ fn segmented_head_roll_and_lookup_via_tx_table() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -3839,7 +3839,7 @@ fn empty_occupancy_head_open_rebuilds_mphf_not_oa_backfill() {
                         let mut txid = [0u8; 32];
                         txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
                         TxRecord {
-                            txid: txid,
+                            txid,
                             version: 1,
                             locktime: 0,
                             input_count: 0,
@@ -3881,7 +3881,7 @@ fn rebuild_head_direct_mphf_empty_tail() {
                         let mut txid = [0u8; 32];
                         txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
                         TxRecord {
-                            txid: txid,
+                            txid,
                             version: 1,
                             locktime: 0,
                             input_count: 0,
@@ -3958,7 +3958,7 @@ fn rebuild_head_reports_live_progress() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -3996,7 +3996,7 @@ fn rebuild_head_failure_keeps_sealed_ranges_counted() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -4039,7 +4039,7 @@ fn rebuild_head_direct_mphf_bip30_newest_first() {
                         let mut txid = [0u8; 32];
                         txid[0..8].copy_from_slice(&i.to_le_bytes());
                         TxRecord {
-                            txid: txid,
+                            txid,
                             version: 1,
                             locktime: 0,
                             input_count: 0,
@@ -4075,7 +4075,7 @@ fn plan_head_rebuild_ranges_chunks_seal_bits_not_oa_load() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 0,
@@ -4115,7 +4115,7 @@ fn plan_head_rebuild_ranges_ignores_body_soft_span() {
             let mut txid = [0u8; 32];
             txid[0..8].copy_from_slice(&i.to_le_bytes());
             let tx = TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -4250,7 +4250,7 @@ fn open_seals_unsealed_nontail_after_copied_roll() {
                 let mut txid = [0u8; 32];
                 txid[0..8].copy_from_slice(&(i + 1).to_le_bytes());
                 TxRecord {
-                    txid: txid,
+                    txid,
                     version: 1,
                     locktime: 0,
                     input_count: 0,
@@ -4293,8 +4293,8 @@ fn open_seals_unsealed_nontail_after_copied_roll() {
 fn rec_meta(version: i32, locktime: u32, n_in: u32, n_out: u32) -> TxRecord {
     TxRecord {
         txid: [0u8; 32],
-        version: version,
-        locktime: locktime,
+        version,
+        locktime,
         input_count: n_in,
         output_count: n_out,
     }
@@ -4761,7 +4761,7 @@ fn fat_seqsigwit_uses_delta_loc_not_idx() {
             let mut txid = [0u8; 32];
             txid[0] = i.wrapping_add(1);
             let tx = TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -4798,7 +4798,7 @@ fn put_n_out(t: &TxTable, tag: u8, n_out: u32) -> Fk {
     let mut txid = [0u8; 32];
     txid[0] = tag;
     let tx = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,

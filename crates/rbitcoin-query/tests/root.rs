@@ -305,7 +305,7 @@ fn coinbase_block(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRec
     txid[31] = 0xcb;
     let ta = TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -1118,7 +1118,7 @@ fn spend_apply(tag: u8, prev_txid: [u8; 32], keep_sat: i64) -> TxApply {
     txid[31] = 0x5e;
     TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 2,
             locktime: 0,
             input_count: 1,
@@ -1403,7 +1403,7 @@ fn confirm_txstat_miss_is_corrupt() {
         txdata: vec![spend],
     });
     let txrec = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,
@@ -1493,7 +1493,7 @@ fn archive_plan_fee_rows_follow_packed_txs() {
         txdata: vec![spend],
     });
     let txrec = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,

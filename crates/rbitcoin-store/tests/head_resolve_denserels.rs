@@ -304,7 +304,7 @@ fn miss_and_deepest_create_wins() {
     let mk = |hint: u8| {
         (
             TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,

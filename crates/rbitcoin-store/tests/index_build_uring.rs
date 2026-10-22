@@ -73,7 +73,7 @@ fn tx(mark: u8) -> TxRecord {
     let mut txid = [0u8; 32];
     txid[0] = mark;
     TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,

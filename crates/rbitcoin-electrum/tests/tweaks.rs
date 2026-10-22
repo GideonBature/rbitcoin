@@ -98,7 +98,7 @@ fn first_subscribe_wave_indexed_shares_batch_and_pre_taproot_is_empty() {
         txid[31] = 0xcb;
         let ta = TxApply {
             tx: TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -200,7 +200,7 @@ fn remaining_lines_pre_taproot_are_one_empty_wave() {
         txid[31] = 0xcb;
         let ta = TxApply {
             tx: TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,

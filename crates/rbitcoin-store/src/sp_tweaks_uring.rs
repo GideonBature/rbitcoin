@@ -161,7 +161,7 @@ pub fn run_stage(
 #[doc(hidden)]
 pub fn empty_rec(txid: [u8; 32]) -> TxRecord {
     TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 0,

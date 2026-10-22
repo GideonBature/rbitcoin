@@ -70,7 +70,7 @@ fn vin_inner_scripts_follow_prevout_type() {
     txid[31] = 0xcb;
     let parent = TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,
@@ -282,7 +282,7 @@ fn utxo_list_json_status_from_join_height_without_tx_head() {
         };
         let ta = TxApply {
             tx: TxRecord {
-                txid: txid,
+                txid,
                 version: 1,
                 locktime: 0,
                 input_count: 1,
@@ -521,7 +521,7 @@ fn pruned_tx_json_has_fee_from_txstat() {
     txid[31] = 0xcb;
     let ta0 = TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

@@ -87,8 +87,8 @@ pub fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDi
     let mut s = format!(
         "leftover probe diag txid={} mix={} page_base={} bits={} file_id={} first_fk={} age={} \
          hit_empty={} depth_end={} empty_local={} occ={} ncand={}",
-        rbitcoin_primitives::hex_encode(&d.txid),
-        rbitcoin_primitives::hex_encode(&d.mixed_prefix),
+        rbitcoin_primitives::hex_encode(d.txid),
+        rbitcoin_primitives::hex_encode(d.mixed_prefix),
         d.page_base,
         d.bits,
         d.file_id,
@@ -107,7 +107,7 @@ pub fn format_leftover_probe_diag(d: &crate::head_resolve_stats::LeftoverProbeDi
             c.local,
             c.rel,
             c.abs_fk,
-            rbitcoin_primitives::hex_encode(&c.body_prefix),
+            rbitcoin_primitives::hex_encode(c.body_prefix),
             u8::from(c.body_match),
         ));
     }

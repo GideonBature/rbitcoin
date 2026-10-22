@@ -12,7 +12,7 @@ fn put_tx(q: &Query, seed: u8) -> Fk {
     let mut txid = [0u8; 32];
     txid[0] = seed;
     let tx = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,
@@ -439,7 +439,7 @@ fn obfuscation_on_disk_via_store_put() {
     let mut txid = [0u8; 32];
     txid[0] = 0xee;
     let tx = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,

@@ -747,7 +747,7 @@ pub fn plan_in_from_txin(inp: &bitcoin::TxIn) -> PlanIn {
 #[doc(hidden)]
 pub fn tx_record_from_wire(tx: &bitcoin::Transaction, txid: [u8; 32]) -> TxRecord {
     TxRecord {
-        txid: txid,
+        txid,
         version: tx.version.0,
         locktime: tx.lock_time.to_consensus_u32(),
         input_count: tx.input.len() as u32,

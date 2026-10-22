@@ -432,7 +432,7 @@ fn plant_coinbase_with_outputs(
     first.output = outputs;
     let txid = first.compute_txid().to_byte_array();
     let rec = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 1,
@@ -2398,7 +2398,7 @@ fn resolve_prevout_rejects_an_unspendable_script() {
     let txid = [0x42u8; 32];
     let fk = Fk(7);
     let rec = TxRecord {
-        txid: txid,
+        txid,
         version: 1,
         locktime: 0,
         input_count: 0,

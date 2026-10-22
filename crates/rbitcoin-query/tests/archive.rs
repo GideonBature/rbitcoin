@@ -113,7 +113,7 @@ fn coinbase_apply(i: u64) -> TxApply {
     txid[8] = 0xcb;
     TxApply {
         tx: TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 1,

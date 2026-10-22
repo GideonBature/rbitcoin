@@ -227,7 +227,7 @@ fn three_stage_write_filter_and_scripts_surface() {
     metered.batch_parents.insert_owned(
         rbitcoin_primitives::Fk(1),
         rbitcoin_store::TxRecord {
-            txid: txid,
+            txid,
             version: 1,
             locktime: 0,
             input_count: 0,
