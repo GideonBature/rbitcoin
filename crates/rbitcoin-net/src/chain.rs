@@ -728,6 +728,24 @@ impl ChainHub {
         g.insert(hash);
     }
 
+    /// One in-flight body ask. Connected and held bodies are not claims.
+    /// A hash already asked is not claimed again. The set clears at 4096,
+    /// the same cap as [`Self::note_asked_block`].
+    #[doc(hidden)]
+    pub fn claim_block_ask(&self, hash: &BlockHash) -> bool {
+        if self.is_connected(hash) || self.held_body(hash).is_some() {
+            return false;
+        }
+        let mut g = self.asked_blocks.write().unwrap();
+        if g.contains(hash) {
+            return false;
+        }
+        if g.len() >= 4096 {
+            g.clear();
+        }
+        g.insert(*hash)
+    }
+
     pub fn forget_asked_block(&self, hash: &BlockHash) {
         self.asked_blocks.write().unwrap().remove(hash);
     }

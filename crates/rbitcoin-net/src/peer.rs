@@ -4039,6 +4039,7 @@ fn classify_headers(
                 );
                 want.retain(|h| !have_bodies.contains(h) && !requested.contains(h));
                 want.truncate(MAX_SERVE_BLOCKS.saturating_sub(requested.len()));
+                want.retain(|h| hub.claim_block_ask(h));
                 apply.want_bodies = want;
             }
         }
