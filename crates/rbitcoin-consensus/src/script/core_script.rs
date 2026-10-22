@@ -27,7 +27,7 @@ pub fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
             }
             let s = &src[start..i];
             i += 1;
-            push_data(&mut out, s.as_bytes());
+            crate::script::interpreter::encode_push(&mut out, s.as_bytes());
             continue;
         }
         if b[i] == b'0' && i + 1 < b.len() && (b[i + 1] == b'x' || b[i + 1] == b'X') {
@@ -66,7 +66,7 @@ pub fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
                 out.push(0x50 + n as u8); // OP_1 .. OP_16
             } else {
                 let enc = rbitcoin_primitives::scriptnum_encode(n);
-                push_data(&mut out, &enc);
+                crate::script::interpreter::encode_push(&mut out, &enc);
             }
             continue;
         }
@@ -74,24 +74,6 @@ pub fn assemble_script(src: &str) -> Result<Vec<u8>, String> {
         out.push(op);
     }
     Ok(out)
-}
-
-#[doc(hidden)]
-pub fn push_data(out: &mut Vec<u8>, data: &[u8]) {
-    let n = data.len();
-    if n < 0x4c {
-        out.push(n as u8);
-    } else if n <= 0xff {
-        out.push(0x4c);
-        out.push(n as u8);
-    } else if n <= 0xffff {
-        out.push(0x4d);
-        out.extend_from_slice(&(n as u16).to_le_bytes());
-    } else {
-        out.push(0x4e);
-        out.extend_from_slice(&(n as u32).to_le_bytes());
-    }
-    out.extend_from_slice(data);
 }
 
 #[doc(hidden)]
