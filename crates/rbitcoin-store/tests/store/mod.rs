@@ -1548,6 +1548,18 @@ fn unspent_create_vouts_batch_matches_serial() {
         );
     }
     assert!(s.unspent_create_vouts_batch(&[]).unwrap().is_empty());
+    // A create with no locator fails in spent_range. The None arm must
+    // return that error, not a later spent-body metas error.
+    let missing = Fk(9_000_001);
+    let err = s.unspent_create_vouts(missing, &[0, 1], None).unwrap_err();
+    let range_err = s.txs.spent_range(missing).unwrap_err();
+    assert!(
+        matches!(
+            (&err, &range_err),
+            (StoreError::NotFound, StoreError::NotFound)
+        ),
+        "missing create is the spent_range error, not a metas error: {err:?} vs {range_err:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
