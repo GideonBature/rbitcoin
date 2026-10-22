@@ -30,8 +30,9 @@ assert_fail "single stage (no cargo build)" grep -qE '^FROM .* AS ' "$DF"
 # No RUN, so one runner assembles amd64 + arm64 without emulation.
 assert_fail "no RUN" grep -qE '^RUN( |$)' "$DF"
 assert_ok "per-platform binaries" has 'ARG TARGETARCH'
-assert_ok "copies node and cli" \
-  has 'COPY ${TARGETARCH}/rbitcoin-node ${TARGETARCH}/rbitcoin-cli /usr/local/bin/'
+# Artifact download drops the exec bit, so the mode is set here.
+assert_ok "copies node and cli executable" \
+  has 'COPY --chmod=0755 ${TARGETARCH}/rbitcoin-node ${TARGETARCH}/rbitcoin-cli /usr/local/bin/'
 
 # Node and cli both default to ./datadir. WORKDIR after USER is created
 # owned by that uid, so /data/datadir is the datadir with no flag.

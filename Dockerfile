@@ -22,7 +22,7 @@ ARG TARGETARCH
 ARG VERSION=unknown
 ARG REVISION=unknown
 
-COPY ${TARGETARCH}/rbitcoin-node ${TARGETARCH}/rbitcoin-cli /usr/local/bin/
+COPY --chmod=0755 ${TARGETARCH}/rbitcoin-node ${TARGETARCH}/rbitcoin-cli /usr/local/bin/
 
 USER 10001:10001
 WORKDIR /data
