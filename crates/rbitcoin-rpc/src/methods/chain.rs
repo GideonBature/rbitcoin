@@ -1248,6 +1248,15 @@ pub fn wait_for_tip(
     }
 }
 
+fn block_missing_or_misc(e: impl std::fmt::Display) -> Value {
+    let s = e.to_string();
+    if s.contains("Block not found") {
+        rpc_error(ERR_INVALID_ADDRESS_OR_KEY, "Block not found")
+    } else {
+        rpc_error(ERR_MISC, s)
+    }
+}
+
 pub fn require_chain(ctx: &RpcContext) -> Result<&rbitcoin_net::ChainHub, Value> {
     ctx.chain
         .as_deref()
@@ -1264,14 +1273,7 @@ pub fn invalidateblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Va
     params.reject_unknown(&["blockhash"])?;
     let hub = require_chain(ctx)?;
     let hash = parse_blockhash_param(params)?;
-    hub.invalidate_block(hash).map_err(|e| {
-        let s = e.to_string();
-        if s.contains("Block not found") {
-            rpc_error(ERR_INVALID_ADDRESS_OR_KEY, "Block not found")
-        } else {
-            rpc_error(ERR_MISC, s)
-        }
-    })?;
+    hub.invalidate_block(hash).map_err(block_missing_or_misc)?;
     Ok(Value::Null)
 }
 
@@ -1311,13 +1313,6 @@ pub fn preciousblock(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
     params.reject_unknown(&["blockhash"])?;
     let hub = require_chain(ctx)?;
     let hash = parse_blockhash_param(params)?;
-    hub.precious_block(hash).map_err(|e| {
-        let s = e.to_string();
-        if s.contains("Block not found") {
-            rpc_error(ERR_INVALID_ADDRESS_OR_KEY, "Block not found")
-        } else {
-            rpc_error(ERR_MISC, s)
-        }
-    })?;
+    hub.precious_block(hash).map_err(block_missing_or_misc)?;
     Ok(Value::Null)
 }

@@ -40,7 +40,7 @@ kept = [
     "/repo/crates/rbitcoin-store/src/scripthash.rs",
     "/repo/crates/rbitcoin-net/src/peer.rs",
     "/repo/crates/rbitcoin-ibd/src/ibd/mod.rs",
-    "/repo/crates/rbitcoin-node/src/regtest_rpc.rs",
+    "/repo/crates/rbitcoin-query/src/regtest_pad.rs",
     "/repo/crates/rbitcoin-consensus/src/regtest_pad.rs",
     "/repo/crates/rbitcoin-node/src/run.rs",
     "/repo/crates/rbitcoin-rpc/src/methods/chain.rs",

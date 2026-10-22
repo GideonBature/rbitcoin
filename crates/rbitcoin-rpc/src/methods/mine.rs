@@ -669,12 +669,7 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         .chain
         .as_ref()
         .map(|c| c.params.clone())
-        .unwrap_or_else(|| match ctx.network {
-            Network::Regtest => rbitcoin_consensus::ChainParams::regtest(),
-            Network::Signet => rbitcoin_consensus::ChainParams::signet(),
-            Network::Testnet => rbitcoin_consensus::ChainParams::testnet(),
-            Network::Mainnet => rbitcoin_consensus::ChainParams::mainnet(),
-        });
+        .unwrap_or_else(|| rbitcoin_consensus::ChainParams::for_network(ctx.network));
     let now = ctx
         .chain
         .as_ref()
