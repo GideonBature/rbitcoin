@@ -1191,14 +1191,6 @@ pub fn sample(
 }
 
 #[doc(hidden)]
-pub fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-#[doc(hidden)]
 pub fn ser_process_owned<S: serde::Serializer>(
     o: &ProcessOwnedSizes,
     ser: S,
@@ -1290,7 +1282,10 @@ pub struct TipPerfLog {
 pub fn tip_perf_json(s: &TipPerfLog) -> String {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("ts".to_string(), serde_json::Value::from(unix_ms()));
+        obj.insert(
+            "ts".to_string(),
+            serde_json::Value::from(rbitcoin_consensus::clock::unix_ms()),
+        );
     }
     v.to_string()
 }
@@ -1300,7 +1295,10 @@ pub fn tip_perf_json(s: &TipPerfLog) -> String {
 pub fn perf_sample_json(s: &IbdPerfSample) -> String {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("ts".to_string(), serde_json::Value::from(unix_ms()));
+        obj.insert(
+            "ts".to_string(),
+            serde_json::Value::from(rbitcoin_consensus::clock::unix_ms()),
+        );
     }
     v.to_string()
 }

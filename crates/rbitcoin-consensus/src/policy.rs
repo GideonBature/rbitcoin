@@ -49,6 +49,15 @@ pub fn vbytes_ceil(weight: u64) -> u64 {
     Weight::from_wu(weight).to_vbytes_ceil()
 }
 
+/// Zero `max_sat_vb` is unlimited. Otherwise the fee is over
+/// `max_sat_vb * vbytes_ceil(weight)`.
+pub fn fee_exceeds_max(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
+    if max_sat_vb == 0 {
+        return false;
+    }
+    fee_sat > max_sat_vb.saturating_mul(vbytes_ceil(weight))
+}
+
 /// True if `fee_sat` meets the minimum relay feerate for `weight` (WU).
 ///
 /// Uses integer compare: `fee * 1000 >= vsize * MIN_RELAY_FEE_RATE_SAT_PER_KVB`.

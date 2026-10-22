@@ -124,12 +124,7 @@ pub const RBFR_RATIO_DEN: u64 = 4;
 pub const ROLLING_FEE_HALFLIFE_MS: u64 = 12 * 60 * 60 * 1000;
 
 #[doc(hidden)]
-pub fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+pub use rbitcoin_consensus::clock::unix_ms;
 
 /// Eviction bump decays by half toward `min_relay` once per halflife.
 pub fn decayed_relay_floor(rolling: u64, min_relay: u64, elapsed_ms: u64) -> u64 {

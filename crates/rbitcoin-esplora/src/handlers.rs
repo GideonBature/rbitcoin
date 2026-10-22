@@ -2179,15 +2179,6 @@ pub fn parse_maxfeerate_btc_kvb(q: MaxFeeQuery) -> Result<u64, Response> {
     Ok(sat.max(1))
 }
 
-#[doc(hidden)]
-pub fn fee_exceeds_sat_vb(fee_sat: u64, weight: u64, max_sat_vb: u64) -> bool {
-    if max_sat_vb == 0 {
-        return false;
-    }
-    let vsize = rbitcoin_consensus::policy::vbytes_ceil(weight);
-    fee_sat > max_sat_vb.saturating_mul(vsize)
-}
-
 pub async fn post_txs_test(
     State(st): State<AppState>,
     AxumQuery(q): AxumQuery<MaxFeeQuery>,
@@ -2256,7 +2247,8 @@ pub async fn post_txs_test(
             let wtxid = format!("{}", tx.compute_wtxid());
             match mp.test_accept(&tx) {
                 Ok(r) => {
-                    if fee_exceeds_sat_vb(r.fee_sat, r.weight, max_sat_vb) {
+                    if rbitcoin_consensus::policy::fee_exceeds_max(r.fee_sat, r.weight, max_sat_vb)
+                    {
                         out.push(json!({
                             "txid": txid,
                             "wtxid": wtxid,

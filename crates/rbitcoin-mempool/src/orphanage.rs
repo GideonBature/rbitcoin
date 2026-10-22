@@ -145,7 +145,7 @@ impl Orphanage {
         missing: BTreeSet<Txid>,
         from: Option<u64>,
     ) -> bool {
-        self.insert_from_at(tx, missing, from, unix_ms())
+        self.insert_from_at(tx, missing, from, crate::accept::unix_ms())
     }
 
     /// [`Self::insert_from`] at an explicit unix millisecond clock.
@@ -571,12 +571,4 @@ impl Orphanage {
         }
         self.fifo.retain(|t| self.by_txid.contains_key(t));
     }
-}
-
-#[doc(hidden)]
-pub fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
