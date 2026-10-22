@@ -3157,9 +3157,10 @@ impl MempoolHub {
 
     /// Pool transactions one `generate` may put in the first block.
     ///
-    /// The live set is unchanged. [`Self::commit_generated_txids`] runs only
-    /// after that mine returns. Catch-up must not call this (that block stays
-    /// coinbase-only). [`Self::remove_for_block`] drops nothing while relay is off.
+    /// The live set is unchanged. RPC `generate` commits them once that block
+    /// is accepted, before a later block of the same call is mined. Catch-up
+    /// must not call this (that block stays coinbase-only).
+    /// [`Self::remove_for_block`] drops nothing while relay is off.
     pub fn select_generate_txs(&self, min_sat_kvb: u64) -> Vec<Transaction> {
         let deltas = self.fee_deltas.lock().unwrap().clone();
         let g = self.lock_write();
@@ -3171,11 +3172,11 @@ impl MempoolHub {
             .collect()
     }
 
-    /// Remove `txids` that a successful `generate` placed in a block.
+    /// Remove `txids` once the block that contains them has been accepted.
     ///
     /// Entries connect already removed are left alone, so their confirm-memory
-    /// sample is not recorded twice. A mine that returned an error must not
-    /// call this: the pool stays as it was.
+    /// sample is not recorded twice. A failure before that block must not
+    /// call this. A later block in the same `generate` can still fail.
     pub fn commit_generated_txids(&self, txids: &[Txid]) -> Result<(), AcceptError> {
         if txids.is_empty() {
             return Ok(());

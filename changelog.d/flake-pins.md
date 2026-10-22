@@ -9,5 +9,7 @@ Fixed
 - **`generate` removes the pool transactions it mined before it returns.**
   The set placed in the block was a separate step from the set deleted, and
   a strip while relay is off deletes nothing, so those transactions could
-  still be listed afterward. A mine that does not finish leaves the pool as
-  it was. A node still catching up mines only the coinbase.
+  still be listed afterward. They leave when the block that contains them
+  is accepted, even if a later block in that call fails. A call that mines
+  nothing leaves the pool as it was. A node still catching up mines only
+  the coinbase.

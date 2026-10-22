@@ -148,8 +148,9 @@ pub fn generate_with_mempool(
     }
     let listing = ctx.pool_listing();
     // Catch-up leaves confirmed transactions in the pool, so mine the coinbase
-    // only. Any other listing is removed after the mine succeeds, including
-    // while relay is off. A mine that returns an error leaves the pool as it was.
+    // only. Any other listing is removed when the block that contains it is
+    // accepted, including while relay is off, and before a later block of this
+    // call is mined. A refusal before that block leaves the pool as it was.
     let extras = if matches!(listing, PoolListing::Downloading) {
         Vec::new()
     } else {
@@ -163,14 +164,9 @@ pub fn generate_with_mempool(
             .map(|mp| mp.select_generate_txs(min))
             .unwrap_or_default()
     };
-    let mined: Vec<Txid> = extras.iter().map(|tx| tx.compute_txid()).collect();
     let hashes = miner
         .generate_to_script(nblocks, script, extras)
         .map_err(|e| rpc_error(ERR_MISC, e))?;
-    if let Some(mp) = ctx.mempool.as_ref().filter(|_| !mined.is_empty()) {
-        mp.commit_generated_txids(&mined)
-            .map_err(|e| rpc_error(ERR_MISC, e.to_string()))?;
-    }
     if let Some(c) = ctx.chain.as_ref() {
         c.note_gbt_assembled();
     }

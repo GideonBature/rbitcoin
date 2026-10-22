@@ -818,6 +818,45 @@ fn generate_over_cap_leaves_the_pool() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The block that holds the pool transactions can be accepted while a later
+/// block in the same `generate` fails. Those txids have to be gone already:
+/// the next `generate` would select them again and could not connect them.
+#[test]
+fn generate_later_block_failure_still_drops_the_mined_tx() {
+    let (mut ctx, dir, hub) = ctx_from_mature_pad(300_000_000);
+    ctx.blocksonly = true;
+    ctx.mempool.as_ref().unwrap().set_relay_enabled(false);
+    let (hex, spend) = mature_coinbase_spend_hex(&ctx, 50_0000_0000 - 1_000);
+    let txid = spend.compute_txid();
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let before = dispatch(&ctx, "getblockcount", vec![])
+        .unwrap()
+        .as_u64()
+        .unwrap();
+    hub.generate_fail_before.store(1, Ordering::Relaxed);
+    let err = dispatch(&ctx, "generate", vec![json!(2)]).unwrap_err();
+    hub.generate_fail_before.store(0, Ordering::Relaxed);
+    assert!(
+        !ctx.mempool.as_ref().unwrap().contains(&txid),
+        "accepted block left its tx in the pool: {err}"
+    );
+    let raw = dispatch(&ctx, "getrawmempool", vec![]).unwrap();
+    assert_eq!(raw, json!([]), "{raw}");
+    let height = dispatch(&ctx, "getblockcount", vec![])
+        .unwrap()
+        .as_u64()
+        .unwrap();
+    assert_eq!(height, before + 1, "only the block with the tx was accepted");
+    let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
+    let block = dispatch(&ctx, "getblock", vec![tip]).unwrap();
+    assert_eq!(block["nTx"].as_u64(), Some(2), "{block}");
+    let hashes = dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let hash = hashes[0].as_str().unwrap();
+    let next = dispatch(&ctx, "getblock", vec![json!(hash)]).unwrap();
+    assert_eq!(next["nTx"].as_u64(), Some(1), "{next}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn parse_wrapped_multi_sh_wsh_and_wsh() {
     let pk = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
