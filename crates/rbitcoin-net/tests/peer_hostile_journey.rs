@@ -230,12 +230,21 @@ async fn hostile_peer_session() {
     assert_eq!(first.len(), 200, "locator after genesis walks the tip");
     let mut queued = 1usize;
     for _ in 0..400 {
-        if peer.send_over_budget() {
-            break;
-        }
-        on_getheaders(&hub, &out_tx, &mut follow, Some(&peer), &gh)
-            .await
-            .unwrap();
+        handle_decoded_peer_msg(
+            RawNetworkMessage::new(
+                Magic::from(Network::Regtest),
+                NetworkMessage::GetHeaders(GetHeadersMessage::new(
+                    vec![genesis],
+                    BlockHash::from_byte_array([0u8; 32]),
+                )),
+            ),
+            &hub,
+            &out_tx,
+            &mut follow,
+            Some(&peer),
+        )
+        .await
+        .unwrap();
         match out_rx.try_recv() {
             Ok(_) => queued += 1,
             Err(_) => break,

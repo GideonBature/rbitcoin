@@ -2761,9 +2761,22 @@ pub async fn handle_decoded_peer_msg(
 ) -> Result<(), NetError> {
     match msg.into_payload() {
         NetworkMessage::GetData(inv) => serve_getdata(hub, out_tx, follow, session, inv).await?,
-        NetworkMessage::GetHeaders(gh) => on_getheaders(hub, out_tx, follow, session, &gh).await?,
-        NetworkMessage::GetBlocks(gb) => on_getblocks(hub, out_tx, follow, session, &gb).await?,
+        NetworkMessage::GetHeaders(gh) => {
+            if session.is_some_and(|s| s.send_over_budget()) {
+                return Ok(());
+            }
+            on_getheaders(hub, out_tx, follow, session, &gh).await?
+        }
+        NetworkMessage::GetBlocks(gb) => {
+            if session.is_some_and(|s| s.send_over_budget()) {
+                return Ok(());
+            }
+            on_getblocks(hub, out_tx, follow, session, &gb).await?
+        }
         NetworkMessage::Headers(headers) => {
+            if session.is_some_and(|s| s.send_over_budget()) {
+                return Ok(());
+            }
             on_headers(hub, out_tx, follow, session, &headers).await?
         }
         NetworkMessage::Block(block) => on_block(hub, out_tx, follow, session, &block).await?,
