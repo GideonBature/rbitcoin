@@ -255,7 +255,13 @@ fn coinbase_item(
 ) -> (TxRecord, Vec<InputRecord>, Vec<OutputRecord>) {
     let n_out = outs.len() as u32;
     (
-        TxRecord::class_a(txid, 1, 0, 1, n_out),
+        TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: n_out,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         outs,
     )
@@ -291,7 +297,13 @@ fn coinbase_fk_at_heights_matches_first_tx() {
     let cb_fks = s
         .put_tx_full_batch_indexed(&[(cb_tx, cb_in, cb_out)], false)
         .unwrap();
-    let non_tx = TxRecord::class_a([11u8; 32], 1, 0, 1, 1);
+    let non_tx = TxRecord {
+        txid: [11u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let non_in = vec![InputRecord {
         prev_txid: [10u8; 32],
         parent: rbitcoin_store::InputParent::Prevout {
@@ -440,7 +452,13 @@ fn store_create_open_archive_spend_and_meta_errors() {
 
     // Second tx spends create vout 0.
     let spend = (
-        TxRecord::class_a([11u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [11u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord {
             prev_txid: [10u8; 32],
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -456,7 +474,13 @@ fn store_create_open_archive_spend_and_meta_errors() {
     s.put_spend_create(create_fk, 0, spend_fk, 0).unwrap();
     // Multi promote: second spender.
     let spend2 = (
-        TxRecord::class_a([12u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [12u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord {
             prev_txid: [10u8; 32],
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -472,7 +496,13 @@ fn store_create_open_archive_spend_and_meta_errors() {
 
     // Third spender prepends multi list.
     let spend3 = (
-        TxRecord::class_a([13u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [13u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord {
             prev_txid: [10u8; 32],
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -789,7 +819,13 @@ fn put_full_and_seqsigwit_prevouts_at() {
     let dir = tmp();
     let s = Store::create_tiny(&dir).unwrap();
     let item = (
-        TxRecord::class_a([8u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [8u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
@@ -879,12 +915,24 @@ fn class_a_v17_roundtrip_templates() {
     let high_ver = i32::from_le_bytes([0x00, 0x00, 0x00, 0x80]);
 
     let v1 = (
-        TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![OutputRecord::unspent(1, p2pkh.clone())],
     );
     let v2 = (
-        TxRecord::class_a([2u8; 32], 2, 0, 1, 2),
+        TxRecord {
+            txid: [2u8; 32],
+            version: 2,
+            locktime: 0,
+            input_count: 1,
+            output_count: 2,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![
             OutputRecord::unspent(2, p2tr.clone()),
@@ -892,7 +940,13 @@ fn class_a_v17_roundtrip_templates() {
         ],
     );
     let v3 = (
-        TxRecord::class_a([3u8; 32], 3, 0, 1, 2),
+        TxRecord {
+            txid: [3u8; 32],
+            version: 3,
+            locktime: 0,
+            input_count: 1,
+            output_count: 2,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![
             OutputRecord::unspent(0, opreturn.clone()),
@@ -900,7 +954,13 @@ fn class_a_v17_roundtrip_templates() {
         ],
     );
     let hi = (
-        TxRecord::class_a([4u8; 32], high_ver, 0, 1, 1),
+        TxRecord {
+            txid: [4u8; 32],
+            version: high_ver,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         vec![OutputRecord::unspent(5, vec![0x51])],
     );
@@ -1137,7 +1197,13 @@ fn tiponly_unconnected_identity_miss_on_fence() {
     let dir = tmp();
     let s = Store::create_tiny(&dir).unwrap();
     let txid = [0x22u8; 32];
-    let rec = TxRecord::class_a(txid, 1, 0, 0, 1);
+    let rec = TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 1,
+    };
     let _fk = s
         .put_tx_full_batch_indexed(
             &[(rec, vec![], vec![OutputRecord::unspent(1, vec![0x51])])],
@@ -1165,7 +1231,13 @@ fn tiponly_same_page_foreigner_records_probe_diag() {
     let dir = tmp();
     let s = Store::create_tiny(&dir).unwrap();
     let a = [0xAAu8; 32];
-    let rec = TxRecord::class_a(a, 1, 0, 0, 1);
+    let rec = TxRecord {
+        txid: a,
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 1,
+    };
     let a_fk = s
         .put_tx_full_batch_indexed(
             &[(rec, vec![], vec![OutputRecord::unspent(1, vec![0x51])])],
@@ -1508,7 +1580,13 @@ fn resolve_txid_prefers_connected_over_newer_unconnected() {
     let dir = tmp();
     let s = Store::create_tiny(&dir).unwrap();
     let txid = [0xABu8; 32];
-    let rec = |lock| TxRecord::class_a(txid, 1, lock, 0, 1);
+    let rec = |lock| TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: lock,
+        input_count: 0,
+        output_count: 1,
+    };
     let out = vec![OutputRecord::unspent(1, vec![0x51])];
     let old = s
         .put_tx_full_batch_indexed(&[(rec(1), vec![], out.clone())], true)
@@ -1540,7 +1618,13 @@ fn resolve_txid_prefers_connected_over_newer_unconnected() {
     let spender = s
         .put_tx_full_batch_indexed(
             &[(
-                TxRecord::class_a([0xBAu8; 32], 1, 0, 1, 1),
+                TxRecord {
+                    txid: [0xBAu8; 32],
+                    version: 1,
+                    locktime: 0,
+                    input_count: 1,
+                    output_count: 1,
+                },
                 vec![InputRecord {
                     prev_txid: txid,
                     parent: rbitcoin_store::InputParent::Prevout {
@@ -1583,7 +1667,13 @@ fn tip_then_any_connected_in_cold_beats_unconnected_hot() {
     use rbitcoin_store::tx_table::OutputRecord;
 
     fn put_one(s: &Store, txid: [u8; 32], lock: u32) -> Fk {
-        let rec = TxRecord::class_a(txid, 1, lock, 0, 1);
+        let rec = TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: lock,
+            input_count: 0,
+            output_count: 1,
+        };
         let out = vec![OutputRecord::unspent(1, vec![0x51])];
         s.put_tx_full_batch_indexed(&[(rec, vec![], out)], true)
             .unwrap()[0]
@@ -1602,7 +1692,13 @@ fn tip_then_any_connected_in_cold_beats_unconnected_hot() {
         dummy[0..8].copy_from_slice(&(u64::from(i) + 10).to_le_bytes());
         dummy[15] = 0xee;
         items.push((
-            TxRecord::class_a(dummy, 1, i, 0, 1),
+            TxRecord {
+                txid: dummy,
+                version: 1,
+                locktime: i,
+                input_count: 0,
+                output_count: 1,
+            },
             vec![],
             vec![OutputRecord::unspent(1, vec![0x51])],
         ));

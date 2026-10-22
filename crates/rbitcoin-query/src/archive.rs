@@ -746,13 +746,13 @@ pub fn plan_in_from_txin(inp: &bitcoin::TxIn) -> PlanIn {
 
 #[doc(hidden)]
 pub fn tx_record_from_wire(tx: &bitcoin::Transaction, txid: [u8; 32]) -> TxRecord {
-    TxRecord::class_a(
-        txid,
-        tx.version.0,
-        tx.lock_time.to_consensus_u32(),
-        tx.input.len() as u32,
-        tx.output.len() as u32,
-    )
+    TxRecord {
+        txid: txid,
+        version: tx.version.0,
+        locktime: tx.lock_time.to_consensus_u32(),
+        input_count: tx.input.len() as u32,
+        output_count: tx.output.len() as u32,
+    }
 }
 
 #[doc(hidden)]

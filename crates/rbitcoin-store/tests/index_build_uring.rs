@@ -72,7 +72,13 @@ fn index_read_above_the_cap_is_refused() {
 fn tx(mark: u8) -> TxRecord {
     let mut txid = [0u8; 32];
     txid[0] = mark;
-    TxRecord::class_a(txid, 1, 0, 1, 1)
+    TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    }
 }
 
 fn spend(parent: Fk) -> InputRecord {

@@ -431,7 +431,13 @@ fn plant_coinbase_with_outputs(
     let mut first = coinbase(1);
     first.output = outputs;
     let txid = first.compute_txid().to_byte_array();
-    let rec = TxRecord::class_a(txid, 1, 0, 1, first.output.len() as u32);
+    let rec = TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: first.output.len() as u32,
+    };
     let outs = first
         .output
         .iter()
@@ -1369,7 +1375,13 @@ fn script_job_shares_prevout_script() {
     let mut parents = BatchParents::new();
     parents.insert_owned(
         Fk(10),
-        TxRecord::class_a(parent_txid, 1, 0, 1, 1),
+        TxRecord {
+            txid: parent_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![(0, OutputRecord::unspent(50_0000_0000, hist_script.clone()))],
         vec![0],
         Some(false),
@@ -2029,7 +2041,13 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
     spk.extend_from_slice(h.as_byte_array());
     let mut parent_txid = [0u8; 32];
     parent_txid[0] = 0x42;
-    let rec = TxRecord::class_a(parent_txid, 1, 0, 1, 1);
+    let rec = TxRecord {
+        txid: parent_txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let mut parents = BatchParents::new();
     parents.insert_owned(
         Fk(7),
@@ -2113,7 +2131,13 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
     use rbitcoin_store::{OutputRecord, TxRecord};
     let mut parent_txid = [0u8; 32];
     parent_txid[0] = 0x42;
-    let rec = TxRecord::class_a(parent_txid, 1, 0, 1, 1);
+    let rec = TxRecord {
+        txid: parent_txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let mut parents = BatchParents::new();
     parents.insert_owned(
         Fk(7),
@@ -2233,7 +2257,13 @@ fn plant_confirmed_spend(
 ) {
     use rbitcoin_primitives::Fk;
     use rbitcoin_store::{InputRecord, OutputRecord, TxRecord};
-    let rec = TxRecord::class_a([0x5e; 32], 1, 0, 1, 1);
+    let rec = TxRecord {
+        txid: [0x5e; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let input = InputRecord {
         prev_txid: create_txid,
         parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -2367,7 +2397,13 @@ fn resolve_prevout_rejects_an_unspendable_script() {
     use rbitcoin_store::{OutputRecord, TxRecord};
     let txid = [0x42u8; 32];
     let fk = Fk(7);
-    let rec = TxRecord::class_a(txid, 1, 0, 0, 1);
+    let rec = TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 1,
+    };
     let op = OutPoint {
         txid: bitcoin::Txid::from_byte_array(txid),
         vout: 0,

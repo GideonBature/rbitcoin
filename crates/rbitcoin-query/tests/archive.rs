@@ -33,7 +33,13 @@ fn commit_stamped_defer(
 #[test]
 fn txstat_stamp_uses_plan_base_total() {
     let (path, _q) = temp_query("txstat-plan-sizes");
-    let tx = TxRecord::class_a([0x61; 32], 1, 0, 0, 0);
+    let tx = TxRecord {
+        txid: [0x61; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 0,
+    };
     let mut plan = rbitcoin_query::archive::ArchiveWritePlan::empty();
     plan.packed = vec![(
         rbitcoin_query::CreatePinInner::records(tx, Vec::new()),
@@ -69,7 +75,13 @@ fn size_plan(tag: u8, with_size: bool) -> rbitcoin_query::archive::ArchiveWriteP
     let mut plan = rbitcoin_query::archive::ArchiveWritePlan::empty();
     plan.packed = vec![(
         rbitcoin_query::CreatePinInner::records(
-            TxRecord::class_a([tag; 32], 1, 0, 0, 0),
+            TxRecord {
+                txid: [tag; 32],
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            },
             Vec::new(),
         ),
         Vec::new(),
@@ -100,7 +112,13 @@ fn coinbase_apply(i: u64) -> TxApply {
     txid[0..8].copy_from_slice(&i.to_le_bytes());
     txid[8] = 0xcb;
     TxApply {
-        tx: TxRecord::class_a(txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -298,7 +316,13 @@ fn overlap_plan_resolves_parent_via_inflight_creates() {
     let mut child_txid = [0u8; 32];
     child_txid[0] = 0xee;
     let child = TxApply {
-        tx: TxRecord::class_a(child_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: child_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: parent_txid,
             parent: rbitcoin_store::InputParent::Unstamped,
@@ -319,7 +343,13 @@ fn overlap_plan_resolves_parent_via_inflight_creates() {
 
     // Rebuild child (need_b was drained on failure).
     let child = TxApply {
-        tx: TxRecord::class_a(child_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: child_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: parent_txid,
             parent: rbitcoin_store::InputParent::Unstamped,
@@ -357,7 +387,13 @@ fn child_spend(prev_txid: [u8; 32], marker: u8) -> TxApply {
     let mut child_txid = [0u8; 32];
     child_txid[0] = marker;
     TxApply {
-        tx: TxRecord::class_a(child_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: child_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid,
             parent: rbitcoin_store::InputParent::Unstamped,
@@ -414,7 +450,13 @@ fn leftover_keeps_prev_pack_after_drain_done() {
     let mut child_txid = [0u8; 32];
     child_txid[0] = 0xea;
     let child = TxApply {
-        tx: TxRecord::class_a(child_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: child_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: parent_txid,
             parent: rbitcoin_store::InputParent::Unstamped,
@@ -751,7 +793,13 @@ fn plan_inflight_creates_only_fills_parent_body_range() {
     let mut child_txid = [0u8; 32];
     child_txid[0] = 0xee;
     let child = TxApply {
-        tx: TxRecord::class_a(child_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: child_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: parent_txid,
             parent: rbitcoin_store::InputParent::Unstamped,
@@ -958,7 +1006,13 @@ fn wire_parent_child_big_script_sig() -> (bitcoin::Block, Vec<[u8; 32]>, Vec<u8>
 fn create_pin_loc_set_once_after_append() {
     use rbitcoin_store::CreateLocPair;
     let pin = rbitcoin_query::CreatePinInner::records(
-        TxRecord::class_a([1u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [1u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
     let first = CreateLocPair {
@@ -1124,7 +1178,13 @@ fn commit_refuses_empty_packed_ins() {
     }
 
     let pin = rbitcoin_query::CreatePinInner::records(
-        TxRecord::class_a([9u8; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [9u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![OutputRecord::unspent(1, vec![0x51])],
     );
     let mut records = rbitcoin_query::ArchiveWritePlan::empty();
@@ -1407,7 +1467,13 @@ fn stamp_inflight_hit_carries_create_pin() {
         t
     };
     let pin = rbitcoin_query::CreatePinInner::records(
-        rbitcoin_store::TxRecord::class_a(parent_txid, 1, 0, 0, 1),
+        rbitcoin_store::TxRecord {
+            txid: parent_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 1,
+        },
         vec![rbitcoin_store::OutputRecord::unspent(1, vec![0x51])],
     );
     let mut log = rbitcoin_query::InFlight::new();
@@ -1512,7 +1578,16 @@ fn retain_headers_needing_body_strips_archived() {
     plan.per_header_ranges = vec![(Fk(10), Fk(1), 2), (Fk(20), Fk(3), 1)];
     // Minimal packed rows so retain can compact.
     let dummy_pin = |i: u8| {
-        rbitcoin_query::CreatePinInner::records(TxRecord::class_a([i; 32], 1, 0, 0, 0), Vec::new())
+        rbitcoin_query::CreatePinInner::records(
+            TxRecord {
+                txid: [i; 32],
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            },
+            Vec::new(),
+        )
     };
     plan.packed = vec![
         (dummy_pin(1), Vec::new()),
@@ -1534,7 +1609,16 @@ fn retain_headers_needing_body_strips_archived() {
 #[test]
 fn retain_headers_needing_body_edge_matrix() {
     let dummy_pin = |i: u8| {
-        rbitcoin_query::CreatePinInner::records(TxRecord::class_a([i; 32], 1, 0, 0, 0), Vec::new())
+        rbitcoin_query::CreatePinInner::records(
+            TxRecord {
+                txid: [i; 32],
+                version: 1,
+                locktime: 0,
+                input_count: 0,
+                output_count: 0,
+            },
+            Vec::new(),
+        )
     };
 
     // No per_header_ranges: keep iff packed non-empty.
@@ -1595,7 +1679,13 @@ fn retain_headers_needing_body_edge_matrix() {
 #[test]
 fn retain_headers_missing_first_fk_is_corrupt() {
     let dummy_pin = rbitcoin_query::CreatePinInner::records(
-        TxRecord::class_a([5u8; 32], 1, 0, 0, 0),
+        TxRecord {
+            txid: [5u8; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 0,
+            output_count: 0,
+        },
         Vec::new(),
     );
     let mut plan = rbitcoin_query::archive::ArchiveWritePlan::empty();

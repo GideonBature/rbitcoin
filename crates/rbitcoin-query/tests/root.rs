@@ -304,7 +304,13 @@ fn coinbase_block(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRec
     txid[0..4].copy_from_slice(&h.to_le_bytes());
     txid[31] = 0xcb;
     let ta = TxApply {
-        tx: TxRecord::class_a(txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -376,7 +382,13 @@ fn spend_op_true(
         weight: 0,
     };
     let spend = TxApply {
-        tx: TxRecord::class_a(spend_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: spend_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: create_txid,
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -1055,7 +1067,13 @@ fn sh_pending_join_holds_while_job_is_in_flight() {
     q.commit_class_a_only(
         &h1,
         &[TxApply {
-            tx: TxRecord::class_a(spend_txid, 1, 0, 1, 1),
+            tx: TxRecord {
+                txid: spend_txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: 1,
+            },
             inputs: vec![InputRecord {
                 prev_txid: create_txid,
                 parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -1099,7 +1117,13 @@ fn spend_apply(tag: u8, prev_txid: [u8; 32], keep_sat: i64) -> TxApply {
     let mut txid = [tag; 32];
     txid[31] = 0x5e;
     TxApply {
-        tx: TxRecord::class_a(txid, 2, 0, 1, 1),
+        tx: TxRecord {
+            txid: txid,
+            version: 2,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid,
             parent: rbitcoin_store::InputParent::Unstamped,
@@ -1260,7 +1284,13 @@ fn index_mode_helpers_and_batch_helpers() {
     assert!(bp.is_empty());
     bp.put_resolved(
         Fk(1),
-        TxRecord::class_a([1; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [1; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         &[(0, OutputRecord::unspent(1, vec![0x51]))],
         &[0],
         Some(true),
@@ -1291,7 +1321,13 @@ fn index_mode_helpers_and_batch_helpers() {
     let mut bp2 = BatchParents::new();
     bp2.insert_owned(
         Fk(2),
-        TxRecord::class_a([2; 32], 1, 0, 1, 2),
+        TxRecord {
+            txid: [2; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 2,
+        },
         vec![
             (0, OutputRecord::unspent(1, vec![0x51])),
             (1, OutputRecord::unspent(2, vec![0x51])),
@@ -1366,7 +1402,13 @@ fn confirm_txstat_miss_is_corrupt() {
         },
         txdata: vec![spend],
     });
-    let txrec = TxRecord::class_a(txid, 1, 0, 1, 1);
+    let txrec = TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let pin = CreatePinInner::wire(std::sync::Arc::clone(&block), 0, txrec);
     let child_fk = Fk(parent_fk.get().unwrap() + 1);
     let mut plan = ArchiveWritePlan::empty();
@@ -1450,7 +1492,13 @@ fn archive_plan_fee_rows_follow_packed_txs() {
         },
         txdata: vec![spend],
     });
-    let txrec = TxRecord::class_a(txid, 1, 0, 1, 1);
+    let txrec = TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let mut bad = ArchiveWritePlan::empty();
     assert!(bad.is_empty());
     bad.packed = vec![(
@@ -1490,7 +1538,13 @@ fn archive_plan_fee_rows_follow_packed_txs() {
         let mut plan = ArchiveWritePlan::empty();
         plan.packed = vec![(
             CreatePinInner::records(
-                TxRecord::class_a([fee as u8; 32], 1, 0, 0, 1),
+                TxRecord {
+                    txid: [fee as u8; 32],
+                    version: 1,
+                    locktime: 0,
+                    input_count: 0,
+                    output_count: 1,
+                },
                 vec![OutputRecord::unspent(1, vec![0x51])],
             ),
             Vec::new(),
@@ -1545,7 +1599,13 @@ fn sh_collect_write_pin_skips_store() {
     let expected_sh = script_hash(&script);
     let fk = Fk(9_876_543);
     let pin = CreatePinInner::records(
-        TxRecord::class_a([0xce; 32], 1, 0, 1, 1),
+        TxRecord {
+            txid: [0xce; 32],
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![OutputRecord::unspent(42, script)],
     );
 

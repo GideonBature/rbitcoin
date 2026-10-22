@@ -12,7 +12,13 @@ fn pin(id: u64) -> CreatePin {
 
 fn pin_with_txid(txid: [u8; 32]) -> CreatePin {
     CreatePinInner::records(
-        TxRecord::class_a(txid, 1, 0, 1, 1),
+        TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         vec![OutputRecord::unspent(1, vec![0x51])],
     )
 }

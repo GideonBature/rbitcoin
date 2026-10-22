@@ -53,8 +53,8 @@ pub fn tx_head_rebuild_workers_for_free_ram(cpus: usize, free_bytes: u64) -> usi
 ///
 /// On-disk `txout.body` (schema **17**): thin LAYOUT17 meta then outputs (no spender).
 /// Identity lives in [`crate::txid_body::TxidBody`]. `txid` is filled in-memory
-/// from the sidefile (or caller) after decode. `input_count` and `output_count`
-/// are caller-supplied; schema-17 body meta stores version and locktime.
+/// from the sidefile (or caller) after decode. Body meta stores version,
+/// locktime, and leftover schema-24 `n_in` only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxRecord {
     pub txid: [u8; 32],
@@ -65,23 +65,6 @@ pub struct TxRecord {
 }
 
 impl TxRecord {
-    /// Class A row. Counts are caller-supplied; body meta stores version and locktime.
-    pub fn class_a(
-        txid: [u8; 32],
-        version: i32,
-        locktime: u32,
-        input_count: u32,
-        output_count: u32,
-    ) -> Self {
-        Self {
-            txid,
-            version,
-            locktime,
-            input_count,
-            output_count,
-        }
-    }
-
     /// Upper bound for buffer estimates (schema-15 16 B; v17 typical is 3).
     pub const BODY_META_LEN: usize = 4 + 4 + 4 + 4;
     /// Full in-memory encode size (txid + body meta); used for estimates only.
@@ -217,7 +200,13 @@ pub fn decode_body_meta_v17(buf: &[u8]) -> Result<(TxRecord, usize), StoreError>
         nin as u32
     };
     Ok((
-        TxRecord::class_a([0u8; 32], version, locktime, input_count, 0),
+        TxRecord {
+            txid: [0u8; 32],
+            version: version,
+            locktime: locktime,
+            input_count: input_count,
+            output_count: 0,
+        },
         off,
     ))
 }
@@ -1675,7 +1664,13 @@ impl TxTable {
             return Err(StoreError::NotFound);
         }
         let mut tx = if let Some(n_in) = self.input.n_in(fk)? {
-            TxRecord::class_a([0u8; 32], 0, 0, n_in, 0)
+            TxRecord {
+                txid: [0u8; 32],
+                version: 0,
+                locktime: 0,
+                input_count: n_in,
+                output_count: 0,
+            }
         } else {
             self.get(fk)?
         };

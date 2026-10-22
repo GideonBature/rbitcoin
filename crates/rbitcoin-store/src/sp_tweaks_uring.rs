@@ -160,7 +160,13 @@ pub fn run_stage(
 
 #[doc(hidden)]
 pub fn empty_rec(txid: [u8; 32]) -> TxRecord {
-    TxRecord::class_a(txid, 1, 0, 0, 0)
+    TxRecord {
+        txid: txid,
+        version: 1,
+        locktime: 0,
+        input_count: 0,
+        output_count: 0,
+    }
 }
 
 /// Load outs for `fks`; seqsigwit + extra parents only for P2TR creates.

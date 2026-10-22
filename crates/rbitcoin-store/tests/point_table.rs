@@ -26,7 +26,13 @@ fn put_create(txs: &TxTable, txid: [u8; 32], n_out: u32) -> Fk {
         .map(|i| OutputRecord::unspent(i as u64 + 1, vec![0x51]))
         .collect();
     let item = (
-        TxRecord::class_a(txid, 1, 0, 1, n_out),
+        TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: n_out,
+        },
         vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])],
         outs,
     );

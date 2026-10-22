@@ -69,7 +69,13 @@ fn vin_inner_scripts_follow_prevout_type() {
     let mut txid = [0u8; 32];
     txid[31] = 0xcb;
     let parent = TxApply {
-        tx: TxRecord::class_a(txid, 1, 0, 1, spks.len() as u32),
+        tx: TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: spks.len() as u32,
+        },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -275,7 +281,13 @@ fn utxo_list_json_status_from_join_height_without_tx_head() {
             vec![OutputRecord::unspent(50_0000_0000, vec![0x51])]
         };
         let ta = TxApply {
-            tx: TxRecord::class_a(txid, 1, 0, 1, outputs.len() as u32),
+            tx: TxRecord {
+                txid: txid,
+                version: 1,
+                locktime: 0,
+                input_count: 1,
+                output_count: outputs.len() as u32,
+            },
             inputs: vec![InputRecord {
                 prev_txid: [0u8; 32],
                 parent: rbitcoin_store::InputParent::Coinbase,
@@ -385,7 +397,13 @@ fn build_tx_json_prevout_is_outs_only_and_txid_from_body() {
     let mut create_txid = [0u8; 32];
     create_txid[31] = 0xcb;
     let ta0 = TxApply {
-        tx: TxRecord::class_a(create_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: create_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: [0u8; 32],
             parent: rbitcoin_store::InputParent::Coinbase,
@@ -414,7 +432,13 @@ fn build_tx_json_prevout_is_outs_only_and_txid_from_body() {
     spend1_txid[0] = 0x11;
     spend1_txid[31] = 0xcd;
     let ta1 = TxApply {
-        tx: TxRecord::class_a(spend1_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: spend1_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: create_txid,
             parent: rbitcoin_store::InputParent::Prevout { create_fk, vout: 0 },
@@ -443,7 +467,13 @@ fn build_tx_json_prevout_is_outs_only_and_txid_from_body() {
     spend2_txid[0] = 0x22;
     spend2_txid[31] = 0xce;
     let ta2 = TxApply {
-        tx: TxRecord::class_a(spend2_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: spend2_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: spend1_txid,
             parent: rbitcoin_store::InputParent::Prevout {
@@ -490,7 +520,13 @@ fn pruned_tx_json_has_fee_from_txstat() {
     let mut txid = [0u8; 32];
     txid[31] = 0xcb;
     let ta0 = TxApply {
-        tx: TxRecord::class_a(txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord::coinbase(u32::MAX, vec![0], vec![])],
         outputs: vec![OutputRecord::unspent(50_0000_0000, vec![0x51])],
     };
@@ -521,7 +557,13 @@ fn pruned_tx_json_has_fee_from_txstat() {
         weight: 0,
     };
     let spend = TxApply {
-        tx: TxRecord::class_a(spend_txid, 1, 0, 1, 1),
+        tx: TxRecord {
+            txid: spend_txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
         inputs: vec![InputRecord {
             prev_txid: txid,
             parent: rbitcoin_store::InputParent::Prevout {

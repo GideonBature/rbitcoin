@@ -24,8 +24,20 @@ fn filter_marks_only_p2tr_need_seqsigwit() {
         s
     };
     let op_true = vec![0x51];
-    let a = TxRecord::class_a([1u8; 32], 1, 0, 1, 1);
-    let b = TxRecord::class_a([2u8; 32], 1, 0, 1, 1);
+    let a = TxRecord {
+        txid: [1u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
+    let b = TxRecord {
+        txid: [2u8; 32],
+        version: 1,
+        locktime: 0,
+        input_count: 1,
+        output_count: 1,
+    };
     let ins = vec![InputRecord::coinbase(u32::MAX, vec![0x01], vec![])];
     let fks = t
         .put_full_batch_indexed(
