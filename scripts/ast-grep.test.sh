@@ -60,6 +60,8 @@ assert_ok "bad fixtures report crate-root-dropped-pub" \
   grep -q 'crate-root-dropped-pub' <<<"$bad_json"
 assert_ok "bad fixtures include pub use AddressHead" \
   python3 -c 'import json,sys; d=json.load(sys.stdin); assert any("AddressHead" in e["text"] for e in d)' <<<"$bad_json"
+assert_ok "bad fixtures include pub use encode_packed_tx" \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); assert any(e["text"].strip()=="pub use tx_table::encode_packed_tx;" for e in d)' <<<"$bad_json"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "ast-grep.test.sh: $PASS passed, $FAIL failed"

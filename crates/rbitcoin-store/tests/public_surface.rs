@@ -1,7 +1,8 @@
 //! Pin the crate-root names other crates actually import (X-04 keep list).
 //! This test only asserts those names still resolve. Dropped names
-//! (`AddressHead`, `NetConfig`, `P2PHandle`, `LiveShardTable`, …) are
-//! denied by `lint/ast-grep/rules/crate-root-dropped-pub.yml`.
+//! (`AddressHead`, `NetConfig`, `P2PHandle`, `LiveShardTable`,
+//! `encode_packed_tx`, …) are denied by
+//! `lint/ast-grep/rules/crate-root-dropped-pub.yml`.
 use rbitcoin_primitives::{merkle_branch, merkle_root_from_txids, merkle_root_mutated};
 use rbitcoin_store::address_head::{is_probe_exhausted_error, is_store_corrupt_display};
 use rbitcoin_store::block_queue::{BlockQueue, QueuedBlockMeta, TakenRaw};
