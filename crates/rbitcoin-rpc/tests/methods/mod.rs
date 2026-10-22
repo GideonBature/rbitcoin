@@ -1875,6 +1875,40 @@ fn gettxout_leftover_is_connected_not_unconfirmed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `gettxout` describes its coin with the same `scriptPubKey` object as
+/// `getrawtransaction`, in the mempool and once confirmed: Core's `type`
+/// and, for a standard script, `address`.
+#[test]
+fn gettxout_script_pubkey_matches_getrawtransaction() {
+    let (ctx, dir, _hub) = ctx_from_mature_pad(300_000_000);
+    let p2wpkh = ScriptBuf::from_bytes([&[0x00, 0x14][..], &[0x07; 20]].concat());
+    let (hex, spend) = mature_coinbase_spend(&ctx, 50_0000_0000 - 1_000, p2wpkh);
+    dispatch(&ctx, "sendrawtransaction", vec![json!(hex)]).unwrap();
+    let txid = hash_hex_display(&spend.compute_txid().to_byte_array());
+    let described = || {
+        let raw = dispatch(&ctx, "getrawtransaction", vec![json!(txid), json!(true)]).unwrap();
+        raw["vout"][0]["scriptPubKey"].clone()
+    };
+
+    let unconfirmed = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
+    assert_eq!(unconfirmed["confirmations"], 0, "{unconfirmed}");
+    assert_eq!(unconfirmed["scriptPubKey"], described());
+    assert_eq!(unconfirmed["scriptPubKey"]["type"], "witness_v0_keyhash");
+    assert!(
+        unconfirmed["scriptPubKey"]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with("bcrt1q"),
+        "{unconfirmed}"
+    );
+
+    dispatch(&ctx, "generate", vec![json!(1)]).unwrap();
+    let confirmed = dispatch(&ctx, "gettxout", vec![json!(txid), json!(0)]).unwrap();
+    assert_eq!(confirmed["confirmations"], 1, "{confirmed}");
+    assert_eq!(confirmed["scriptPubKey"], described());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn mature_coinbase_spend(
     ctx: &RpcContext,
     keep_sat: u64,
