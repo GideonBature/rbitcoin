@@ -1217,9 +1217,9 @@ pub fn apply_confirm_reject(
     };
     let class = class.isolate_if_batched(batch_len);
     // A batched stamp isolates to Cascade and would requeue this hash.
-    // Off-path BadPrev is a competing fork: the soft arm drops the height
-    // and does not ask for the same block again. Tip and committing
-    // parents stay on the retry below.
+    // Off-path BadPrev is a competing fork: the soft arm drops that height
+    // and every later block on the same download, and does not ask for
+    // those blocks again. Tip and committing parents stay on the retry below.
     if super::reorg::is_bad_prev_err(err)
         && bad_prev_parent(st, hub, hash, height) == BadPrevParent::OffPath
     {
@@ -1285,13 +1285,10 @@ pub fn apply_soft_wire_reject(
             if rewound {
                 return;
             }
-            if !retry_tip_child && st.height_to_hash.get(&height) == Some(&hash) {
-                st.height_to_hash.remove(&height);
-                remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
-            }
-        } else if st.height_to_hash.get(&height) == Some(&hash) {
-            st.height_to_hash.remove(&height);
-            remove_from_ordered(&mut st.ordered, &mut st.ordered_set, hash);
+        }
+        if !retry_tip_child && st.height_to_hash.get(&height) == Some(&hash) {
+            let q = query.or_else(|| hub.map(|h| h.query.as_ref()));
+            evict_off_path_suffix(st, height, q);
         }
     }
     clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
@@ -1354,6 +1351,40 @@ pub fn apply_soft_wire_reject(
         warn!(
             "ibd: confirm reject BadPrev @{height} {hash}: {err} (slot evicted, not re-get same hash)"
         );
+    }
+}
+
+/// Drop the work path and body queue from `height` upward.
+///
+/// One BadPrev names one block. Later blocks of that fork stay queued, and
+/// `block_queue_unresolved_heights` stops at the first missing height, so a
+/// valid header cannot take those slots. The named hash must still occupy
+/// `height`; a stale stamp for a different occupant does not call this.
+fn evict_off_path_suffix(
+    st: &mut IbdWorkState,
+    height: u32,
+    query: Option<&rbitcoin_query::Query>,
+) {
+    let keep = height.saturating_sub(1);
+    let mut dropped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (ht, hash) in &st.height_to_hash {
+        if *ht > keep && seen.insert(*hash) {
+            dropped.push(*hash);
+        }
+    }
+    for hash in &st.ordered {
+        if seen.contains(hash) {
+            continue;
+        }
+        if !matches!(st.hash_height.get(hash), Some(ht) if *ht <= keep) && seen.insert(*hash) {
+            dropped.push(*hash);
+        }
+    }
+    super::header_walk::drop_dead_path(st, query, keep);
+    for hash in dropped {
+        clear_hash_inflight(&mut st.slots, &mut st.inflight, hash);
+        st.body.stop_reget(hash);
     }
 }
 
