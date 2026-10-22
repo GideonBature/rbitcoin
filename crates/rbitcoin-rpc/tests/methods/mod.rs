@@ -846,7 +846,11 @@ fn generate_later_block_failure_still_drops_the_mined_tx() {
         .unwrap()
         .as_u64()
         .unwrap();
-    assert_eq!(height, before + 1, "only the block with the tx was accepted");
+    assert_eq!(
+        height,
+        before + 1,
+        "only the block with the tx was accepted"
+    );
     let tip = dispatch(&ctx, "getbestblockhash", vec![]).unwrap();
     let block = dispatch(&ctx, "getblock", vec![tip]).unwrap();
     assert_eq!(block["nTx"].as_u64(), Some(2), "{block}");
