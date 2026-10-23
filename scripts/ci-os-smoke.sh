@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Native OS smoke for ci.yml windows / macos (and local). Store tests that
 # hit OS-specific IO / RAM / mmap probes, a few-block query confirm (IOCP /
-# pool vs uring), plus rbitcoin-node --smoke. Not a packaged snapshot.
+# pool vs uring), Darwin's RPC / Esplora unix socket binds, plus
+# rbitcoin-node --smoke. Not a packaged snapshot.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,6 +35,10 @@ QUERY_PLATFORM_FILTERS=(
 # full workspace suite, so this is appended per-platform below: the Windows
 # smoke is the SSE2 pin, the Darwin smoke the aarch64 NEON pin.
 PRIMITIVES_PLATFORM_FILTERS=()
+# Unix socket binds under TMPDIR. Darwin's default TMPDIR leaves the
+# 104-byte sun_path little room, and Linux CI's tmpfs TMPDIR is short.
+RPC_PLATFORM_FILTERS=()
+ESPLORA_PLATFORM_FILTERS=()
 # Windows OVERLAPPED + concurrent grow can `pread short` and abort the
 # process (STATUS_STACK_BUFFER_OVERRUN). Same-thread fuse roundtrip, seal
 # roll, and query confirm still run. CI_OS_SMOKE_UNAME overrides uname
@@ -50,6 +55,8 @@ case "${CI_OS_SMOKE_UNAME:-$(uname -s)}" in
     ;;
   Darwin*)
     PRIMITIVES_PLATFORM_FILTERS+=(loc_simd::)
+    RPC_PLATFORM_FILTERS+=(unix_socket)
+    ESPLORA_PLATFORM_FILTERS+=(unix)
     ;;
 esac
 
@@ -58,6 +65,8 @@ if [[ "${CI_OS_SMOKE_DRY_RUN:-}" == "1" ]]; then
   echo "filters=${STORE_PLATFORM_FILTERS[*]}"
   echo "query=${QUERY_PLATFORM_FILTERS[*]}"
   echo "primitives=${PRIMITIVES_PLATFORM_FILTERS[*]:-}"
+  echo "rpc=${RPC_PLATFORM_FILTERS[*]:-}"
+  echo "esplora=${ESPLORA_PLATFORM_FILTERS[*]:-}"
   echo "skip=${STORE_PLATFORM_SKIPS[*]:-}"
   exit 0
 fi
@@ -96,6 +105,16 @@ done
 for f in ${PRIMITIVES_PLATFORM_FILTERS[@]+"${PRIMITIVES_PLATFORM_FILTERS[@]}"}; do
   assert_filter_matches rbitcoin-primitives "$f"
   cargo test -p rbitcoin-primitives --test suite -- "$f"
+done
+
+for f in ${RPC_PLATFORM_FILTERS[@]+"${RPC_PLATFORM_FILTERS[@]}"}; do
+  assert_filter_matches rbitcoin-rpc "$f"
+  cargo test -p rbitcoin-rpc --test suite -- "$f"
+done
+
+for f in ${ESPLORA_PLATFORM_FILTERS[@]+"${ESPLORA_PLATFORM_FILTERS[@]}"}; do
+  assert_filter_matches rbitcoin-esplora "$f"
+  cargo test -p rbitcoin-esplora --test suite -- "$f"
 done
 
 cargo build -p rbitcoin-node -p rbitcoin-cli

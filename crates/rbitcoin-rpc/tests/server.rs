@@ -1332,7 +1332,7 @@ async fn bind_unix_socket_does_not_strip_dir_search() {
             }
         })
     };
-    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-umask").expect("temp dir");
+    let dir = rbitcoin_store::testutil::TempDir::for_socket().expect("temp dir");
     for i in 0..200 {
         let sock = dir.path().join(format!("s{i}.sock"));
         let listener = rbitcoin_rpc::server::bind_unix_mode(&sock, 0o600).expect("bind");
@@ -1388,7 +1388,7 @@ async fn unix_socket_without_tcp_refuses_without_af_unix() {
 #[cfg(unix)]
 #[tokio::test]
 async fn unix_socket_needs_no_http_auth() {
-    let dir = rbitcoin_store::testutil::TempDir::labeled("rpc-sock").expect("temp dir");
+    let dir = rbitcoin_store::testutil::TempDir::for_socket().expect("temp dir");
     let sock = dir.path().join("rpc.sock");
     let q = Arc::new(Query::open_or_create_tiny(dir.join("store")).unwrap());
     let cfg = RpcConfig {

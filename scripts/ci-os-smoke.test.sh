@@ -68,10 +68,16 @@ assert_ok "Darwin dry-run still confirms a few blocks" \
   grep -q "chain_view_pin_asof_reorg" <<<"$out"
 assert_ok "Darwin dry-run pins loc SIMD (NEON) vs scalar" \
   grep -qx "primitives=loc_simd::" <<<"$out"
+assert_ok "Darwin dry-run binds RPC unix sockets under its TMPDIR" \
+  grep -qx "rpc=unix_socket" <<<"$out"
+assert_ok "Darwin dry-run binds Esplora unix sockets under its TMPDIR" \
+  grep -qx "esplora=unix" <<<"$out"
 
 out="$(CI_OS_SMOKE_DRY_RUN=1 CI_OS_SMOKE_UNAME=Linux "$RUN")"
 assert_ok "Linux dry-run leaves loc SIMD to the full suite" \
   grep -qx "primitives=" <<<"$out"
+assert_ok "Linux dry-run leaves unix sockets to the full suite" \
+  grep -qx "rpc=" <<<"$out"
 
 if [[ "$FAIL" -ne 0 ]]; then
   echo "ci-os-smoke.test.sh: $PASS passed, $FAIL failed"

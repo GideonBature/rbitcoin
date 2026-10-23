@@ -310,8 +310,9 @@ async fn esplora_unix_internal() {
     use std::os::unix::fs::PermissionsExt;
 
     let pad = pad_hub("unix-internal", 4);
+    let sock_dir = rbitcoin_query::testutil::TempDir::for_socket().expect("temp dir");
     let (handle, sock) = run_unix(
-        pad.dir.as_ref(),
+        sock_dir.path(),
         Arc::clone(&pad.q),
         Some(Arc::clone(&pad.hub)),
     )
