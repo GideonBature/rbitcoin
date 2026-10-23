@@ -161,7 +161,6 @@ fn stock_above_matches_weight_above_on_best_first_chunks() {
 
 #[test]
 fn frontier_prefers_high_rate_chunks_and_depth() {
-    // Two independent txs: high rate then low rate.
     let mut g = TxGraph::new();
     let a = spend_op([1u8; 32], 50_000, 40_000); // fee 10k, high rate
     let b = spend_op([2u8; 32], 50_000, 49_000); // fee 1k, low rate
@@ -177,7 +176,6 @@ fn frontier_prefers_high_rate_chunks_and_depth() {
     let r_deep = g.frontier_feerate_sat_per_kvb(wa + wb).unwrap();
     assert!(r_hi >= r_deep);
     assert!(g.weight_above_feerate(0) >= wa);
-    // Shared-slice helpers match full-graph methods (fee snapshot path).
     let ch = g.mining_chunks_best_first();
     assert_eq!(
         frontier_feerate_from_chunks(&ch, 1),
@@ -218,7 +216,6 @@ fn select_block_txids_empty_parent_before_child_and_weight_cap() {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    // Child pays more than parent so its chunk ranks first — still emit parent first.
     g.insert(entry_for(&parent, 1_000, 0), &parent);
     g.insert(entry_for(&child, 10_000, 1), &child);
     let order = select_ids(&g, budget(TxGraph::template_tx_weight()), |_| 0);
@@ -480,7 +477,6 @@ fn parent_child_same_cluster_linearized() {
 
     let c = g.cluster_of(&pid).unwrap();
     assert_eq!(c.members.len(), 2);
-    // Parent must come before child.
     assert_eq!(c.linearization, vec![pid, cid]);
 
     let ps = g.graph_stats(&pid).unwrap();
@@ -590,7 +586,6 @@ fn diamond_cheap_parent_hot_children_cheap_sink_two_chunks() {
 #[test]
 fn oversize_cluster_detected() {
     let mut g = TxGraph::new();
-    // Build a chain of MAX_CLUSTER_COUNT txs.
     let mut prev_id = txid_n(0xee);
     let mut last = txid_n(0);
     for i in 0..MAX_CLUSTER_COUNT {
@@ -602,7 +597,6 @@ fn oversize_cluster_detected() {
     }
     let c = g.cluster_of(&last).unwrap();
     assert_eq!(c.members.len(), MAX_CLUSTER_COUNT);
-    // New child would exceed count.
     let parents: BTreeSet<Txid> = [last].into_iter().collect();
     assert!(g.cluster_would_exceed(&parents, 1, 100));
 }
@@ -632,7 +626,6 @@ fn cluster_weight_cap_matches_core_101kvb() {
     assert_eq!(MAX_CLUSTER_WEIGHT, 404_000);
     let g = TxGraph::new();
     let empty = BTreeSet::new();
-    // Single-tx 200 kWU (~50 kvB) is under the cap.
     assert!(!g.cluster_would_exceed(&empty, 1, 200_000));
     // Single-tx 405 kWU exceeds (would also fail MAX_STANDARD_TX_WEIGHT=400k).
     assert!(g.cluster_would_exceed(&empty, 1, 405_000));
@@ -653,7 +646,6 @@ fn conflict_set_fee_weight_remove_and_worst() {
     let cid = ce.txid;
     g.insert(ce, &child);
 
-    // Missing cluster.
     assert!(g.cluster_of(&txid_n(0xff)).is_none());
 
     let direct = vec![pid];
@@ -666,7 +658,6 @@ fn conflict_set_fee_weight_remove_and_worst() {
 
     assert!(g.worst_chunk().is_some());
 
-    // Remove child then parent.
     assert!(g.remove(&cid, &child).is_some());
     assert!(!g.contains(&cid));
     assert!(g.remove(&pid, &parent).is_some());
@@ -781,7 +772,6 @@ fn block_min_fee_matches_core_getfee() {
     assert!(meets_block_min_feerate(1, 800, 1));
     assert!(meets_block_min_feerate(0, 800, 0));
     assert!(!meets_block_min_feerate(0, 800, 1));
-    // 250 vB at 1000 sat/kvB needs 250 sat.
     assert!(meets_block_min_feerate(250, 1000, 1000));
     assert!(!meets_block_min_feerate(249, 1000, 1000));
     // 40 sat/kvB on 111 vB (5 sat) must not meet a 50 sat/kvB floor.

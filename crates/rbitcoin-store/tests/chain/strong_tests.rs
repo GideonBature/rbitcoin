@@ -225,7 +225,6 @@ fn strong_partial_bytes_unstrong_range_and_errors() {
         assert!(t.is_strong(Fk(i)).unwrap(), "i={i}");
     }
     assert!(!t.is_strong(Fk(2)).unwrap());
-    // count==0 no-op
     t.set_strong_range(Fk(1), 0, Fk(1)).unwrap();
     t.set_unstrong_range(Fk(1), 0).unwrap();
     // Clear a mid-range with partial ends.

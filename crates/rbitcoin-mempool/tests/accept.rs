@@ -1007,7 +1007,6 @@ fn accept_error_display_and_reject_paths() {
         assert!(!e.to_string().is_empty());
         let _ = e as &dyn Error;
     }
-    // From MempoolError.
     let from_io: AcceptError = MempoolError::BadMagic.into();
     assert!(from_io.to_string().contains("durable"));
     let from_full: AcceptError = MempoolError::Full.into();
@@ -1017,7 +1016,6 @@ fn accept_error_display_and_reject_paths() {
     let (op, _, utxos) = chain_utxo(100_000);
     let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
 
-    // Coinbase reject.
     let cb = Transaction {
         version: Version::TWO,
         lock_time: LockTime::ZERO,
@@ -1037,12 +1035,10 @@ fn accept_error_display_and_reject_paths() {
         Err(AcceptError::Coinbase)
     ));
 
-    // Package empty / too large.
     assert!(matches!(
         mp.accept_package(&[], &utxos, TIP_OK),
         Err(AcceptError::PackageEmpty)
     ));
-    // Count over MAX_PACKAGE_COUNT (25).
     let many: Vec<Transaction> = (0..MAX_PACKAGE_COUNT + 1)
         .map(|i| {
             spend_tx(
@@ -1065,13 +1061,11 @@ fn accept_error_display_and_reject_paths() {
 
     let tx = spend_tx(op, 99_000);
     mp.accept_tx(&tx, &utxos, TIP_OK).unwrap();
-    // Duplicate.
     assert!(matches!(
         mp.accept_tx(&tx, &utxos, TIP_OK),
         Err(AcceptError::Duplicate(_))
     ));
 
-    // Missing prevout → parked in orphanage (soft accept).
     let (_op2, _, empty) = chain_utxo(50_000);
     let missing = spend_tx(
         OutPoint {
@@ -1088,10 +1082,8 @@ fn accept_error_display_and_reject_paths() {
     assert!(mp.orphanage.contains(&missing_id));
     assert_eq!(mp.orphan_count(), 1);
 
-    // maybe_compact with only live → None.
     assert!(mp.maybe_compact().unwrap().is_none());
 
-    // Package coinbase / not topo / oversized count.
     assert!(matches!(
         mp.accept_package(&[cb], &utxos, TIP_OK),
         Err(AcceptError::Coinbase)
@@ -1104,18 +1096,15 @@ fn accept_error_display_and_reject_paths() {
         },
         97_000,
     );
-    // Child before parent → not topo.
     assert!(matches!(
         mp.accept_package(&[b.clone(), a.clone()], &utxos, TIP_OK),
         Err(AcceptError::PackageNotTopo)
     ));
-    // Duplicate in package.
     assert!(matches!(
         mp.accept_package(&[a.clone(), a.clone()], &utxos, TIP_OK),
         Err(AcceptError::Duplicate(_))
     ));
 
-    // remove unknown.
     assert!(matches!(
         mp.remove_txid(&Txid::from_byte_array([0xee; 32])),
         Err(AcceptError::NotFound(_))
@@ -1128,10 +1117,8 @@ fn accept_error_display_and_reject_paths() {
         Err(AcceptError::Policy(_))
     ));
 
-    // rbf_pays_for_replacement pure unit.
     assert!(!rbf_pays_for_replacement(100, 400, 100, 400));
     assert!(!rbf_pays_for_replacement(100, 400, 200, 400));
-    // Higher fee and rate with incremental cover.
     assert!(rbf_pays_for_replacement(50_000, 400, 1_000, 400));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1327,7 +1314,6 @@ fn accept_grows_legacy_tiny_slot_table() {
     // Large weight budget so eviction is not the free-slot path.
     let mut mp = ActiveMempool::open_or_create_with_limit(&dir, 300_000_000).unwrap();
     assert_eq!(mp.store.meta().slot_cap, 4);
-    // Four independent chain utxos → four live slots.
     for i in 0..4u8 {
         let op = OutPoint {
             txid: Txid::from_byte_array({

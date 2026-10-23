@@ -258,7 +258,6 @@ impl Store {
                     if let Some(fk) = self.confirmed.get(tip)? {
                         if let Ok(rec) = self.headers.get(fk) {
                             if rec.hash != seal.tip_hash {
-                                // Tip hash disagrees with seal — drop tip block.
                                 let lg = tip.0.checked_sub(1);
                                 self.shrink_tip_to(lg, &mut report)?;
                             }

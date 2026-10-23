@@ -80,7 +80,6 @@ fn record_height_structure_sizes_and_hygiene() {
     assert_eq!(st.hash_height.get(&tip), Some(&10));
     assert_eq!(st.height_to_hash.get(&10), Some(&tip));
 
-    // Height change removes stale inverse.
     st.record_height(tip, 11);
     assert!(!st.height_to_hash.contains_key(&10));
     assert_eq!(st.height_to_hash.get(&11), Some(&tip));
@@ -114,7 +113,6 @@ fn record_height_structure_sizes_and_hygiene() {
     assert_eq!(sizes.inflight, 0);
     assert_eq!(sizes.peer_inflight, 0);
 
-    // Inflight keeps auxiliary keys across hygiene.
     let keep = h(200);
     st.inflight.insert(keep, InflightReq::new(0));
     st.record_height(keep, 999);

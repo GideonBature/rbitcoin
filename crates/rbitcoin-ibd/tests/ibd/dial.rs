@@ -295,7 +295,6 @@ fn samp(id: usize, bps: u64, inflight: bool) -> RelativeSlowSample {
 
 #[test]
 fn relative_slow_pick_respects_cluster_and_outlier() {
-    // Thin samples
     assert_eq!(relative_slow_pick(&[samp(0, 1_000_000, true)], 8), None);
     // Tight pack — slowest is still in-cluster
     let tight = [

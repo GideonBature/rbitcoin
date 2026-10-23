@@ -212,7 +212,6 @@ fn decode_body_rejects_absurd_fingerprint_len() {
 
 #[test]
 fn decode_body_rejects_invalid_geometry_and_truncation() {
-    // Short header.
     assert!(decode_body(&[0u8; 10]).is_err());
     // Valid geometry header but fingerprints truncated.
     let mut body = Vec::new();
@@ -301,7 +300,6 @@ fn open_unknown_version_is_corrupt() {
     raw.extend_from_slice(&0u64.to_le_bytes());
     std::fs::write(&path, &raw).unwrap();
     assert!(open_file(&path).is_err());
-    // Bad magic.
     std::fs::write(
         &path,
         b"XXXX\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",

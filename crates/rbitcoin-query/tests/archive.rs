@@ -289,7 +289,6 @@ fn plan_from_reserves_fks_for_overlap_then_commit_in_order() {
     let need_b = vec![(Fk(20), vec![coinbase_apply(20)])];
     let plan_b = plan_applies(&q, &need_b, next, &empty, None).unwrap();
     assert_eq!(plan_b.planned_fks, vec![Fk(4)]);
-    // Durable count still 1 until commit.
     assert_eq!(q.tx_body_count(), 1);
 
     commit_stamped(&q, plan_a).unwrap();
@@ -334,14 +333,12 @@ fn overlap_plan_resolves_parent_via_inflight_creates() {
     };
     let need_b = vec![(Fk(2), vec![child])];
 
-    // Without in_flight → unresolved.
     let err = plan_applies(&q, &need_b, 2, &empty, None).unwrap_err();
     assert!(
         err.to_string().contains("create_fk unresolved"),
         "expected unresolved without inflight, got {err}"
     );
 
-    // Rebuild child (need_b was drained on failure).
     let child = TxApply {
         tx: TxRecord {
             txid: child_txid,
@@ -1632,7 +1629,6 @@ fn retain_headers_needing_body_edge_matrix() {
         .retain_headers_needing_body(|_| Ok(false))
         .unwrap());
 
-    // All headers already have body → clear plan, false.
     let mut all_have = rbitcoin_query::archive::ArchiveWritePlan::empty();
     all_have.planned_fks = vec![Fk(1), Fk(2)];
     all_have.per_header_ranges = vec![(Fk(10), Fk(1), 1), (Fk(20), Fk(2), 1)];
@@ -1643,7 +1639,6 @@ fn retain_headers_needing_body_edge_matrix() {
     assert!(all_have.is_empty());
     assert!(all_have.per_header_ranges.is_empty());
 
-    // Full keep (no strip): true without compact.
     let mut full = rbitcoin_query::archive::ArchiveWritePlan::empty();
     full.planned_fks = vec![Fk(1)];
     full.per_header_ranges = vec![(Fk(10), Fk(1), 1)];
@@ -1652,7 +1647,6 @@ fn retain_headers_needing_body_edge_matrix() {
     assert!(full.retain_headers_needing_body(|_| Ok(false)).unwrap());
     assert_eq!(full.planned_fks, vec![Fk(1)]);
 
-    // Null planned fk skipped during compact.
     let mut with_null = rbitcoin_query::archive::ArchiveWritePlan::empty();
     with_null.planned_fks = vec![Fk::NULL, Fk(5)];
     with_null.per_header_ranges = vec![(Fk(1), Fk::NULL, 1), (Fk(2), Fk(5), 1)];
@@ -1664,7 +1658,6 @@ fn retain_headers_needing_body_edge_matrix() {
         .unwrap());
     assert_eq!(with_null.planned_fks, vec![Fk(5)]);
 
-    // external_parent_txid / clear_external / append empty other.
     let mut plan = rbitcoin_query::archive::ArchiveWritePlan::empty();
     plan.external_parents
         .insert(7, rbitcoin_query::ParentIdent::new([0xab; 32]));

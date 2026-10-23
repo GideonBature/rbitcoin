@@ -361,14 +361,12 @@ fn script_hash_record_helpers_and_table_flush_open() {
     drop(t);
     let t = ScriptHashTable::open_tiny(&dir).unwrap();
     assert_eq!(t.entries(&sh).unwrap().len(), 1);
-    // for_each_live across table
     let mut n = 0u32;
     t.for_each_live_create(|_fk| {
         n += 1;
     })
     .unwrap();
     assert_eq!(n, 1);
-    // missing key
     assert!(t.entries(&[0u8; 32]).unwrap().is_empty());
     assert!(t.head_value(&[0u8; 32]).unwrap().is_none());
     let _ = std::fs::remove_dir_all(&dir);
@@ -598,7 +596,6 @@ fn put_create_batch_skips_leq_max_appends_higher() {
     for (i, (_, e)) in got.iter().enumerate() {
         assert_eq!(e.create_tx_fk.0, (i as u64) + 1);
     }
-    // Only-lower batch is no-op.
     assert_eq!(put_create_batch(&t, [rec(sh, 1, 0), rec(sh, 2, 0)]), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -927,7 +924,6 @@ fn open_empty_alloc_v1_upgrades_to_v2() {
     let body = TableFile::open(&body_path, TableKind::ScriptHash).unwrap();
     let (state, ver) = read_alloc_header(&body).unwrap();
     assert_eq!(ver, SH_ALLOC_VERSION);
-    // Write v1 stamp with same empty state.
     let mut buf = vec![0u8; SH_ALLOC_HEADER_LEN];
     buf[0..4].copy_from_slice(&SH_ALLOC_MAGIC);
     buf[4..6].copy_from_slice(&1u16.to_le_bytes());
@@ -951,7 +947,6 @@ fn open_empty_alloc_v1_upgrades_to_v2() {
         SH_ALLOC_VERSION,
         "empty v1 must be rewritten to current alloc version"
     );
-    // Reopen stays v2.
     let t = ScriptHashTable::open_tiny(&dir).unwrap();
     put_create(&t, rec(script_hash(&[0x42]), 1, 0));
     assert_eq!(t.entries(&script_hash(&[0x42])).unwrap().len(), 1);
@@ -1315,7 +1310,6 @@ fn bulk_session_put_chain_roundtrip() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let mut session = t.pack_shard_session(0).unwrap();
-    // Many distinct keys, mix of inline and slab.
     for i in 0..50u32 {
         let mut sh = [0u8; 32];
         sh[0] = i as u8;
@@ -1334,7 +1328,6 @@ fn bulk_session_put_chain_roundtrip() {
     let mut sh0 = [0u8; 32];
     sh0[1] = 0xab;
     assert_eq!(t.entries(&sh0).unwrap().len(), 8);
-    // Spot-check inline.
     let mut sh1 = [0u8; 32];
     sh1[0] = 1;
     sh1[1] = 0xab;

@@ -81,7 +81,6 @@ fn block_queue_via_query_enqueue_reopen_empty() {
         q.block_queue_payload(42).unwrap().as_deref(),
         Some(payload.as_slice())
     );
-    // Confirm-write hook: dequeue by height.
     assert_eq!(q.block_queue_dequeue_height(42).unwrap(), 1);
     assert_eq!(q.block_queue_stats().1, 0);
     // Restart: RAM queue is empty (by design — redownload, no double disk write).
@@ -176,7 +175,6 @@ fn block_queue_soft_free_bytes_and_confirm_window() {
         100,
         "rate cold → tip-adjacent only"
     );
-    // Window clamp to densify_hi when rate is high.
     assert_eq!(
         soft_densify_band_hi(100, 110, over, Some(5.0), u64::MAX, None),
         110,

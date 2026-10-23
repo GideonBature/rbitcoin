@@ -26,7 +26,6 @@ fn append_and_get_roundtrip() {
     assert_eq!(t.get(Fk(1)).unwrap(), a);
     assert_eq!(t.get(Fk(2)).unwrap(), b);
     assert_eq!(t.get_range(1, 2).unwrap(), vec![a, b]);
-    // reopen
     drop(t);
     let t2 = TxidBody::open(&dir).unwrap();
     assert_eq!(t2.count(), 2);
@@ -93,33 +92,26 @@ fn truncate_get_many_logical_and_errors() {
     let c = [0xCCu8; 32];
     t.append_batch(0, &[a, b, c]).unwrap();
     assert!(t.logical_len() >= 32 * 3);
-    // get_many: empty + mix of present / past-end.
     assert!(t.get_many(&[]).unwrap().is_empty());
     let many = t.get_many(&[Fk(1), Fk(2), Fk(99), Fk(3)]).unwrap();
     assert_eq!(many[0], Some(a));
     assert_eq!(many[1], Some(b));
     assert_eq!(many[2], None);
     assert_eq!(many[3], Some(c));
-    // NotFound on single get past end.
     assert!(matches!(t.get(Fk(99)), Err(StoreError::NotFound)));
-    // Truncate to shorter prefix.
     t.truncate_to_count(2).unwrap();
     assert_eq!(t.count(), 2);
     assert_eq!(t.get(Fk(2)).unwrap(), b);
     assert!(matches!(t.get(Fk(3)), Err(StoreError::NotFound)));
-    // No-op truncate to same count.
     t.truncate_to_count(2).unwrap();
-    // Past-count truncate is corrupt.
     assert!(matches!(
         t.truncate_to_count(5),
         Err(StoreError::Corrupt(_))
     ));
-    // Append at wrong expected count.
     assert!(matches!(
         t.append_batch(0, &[[0u8; 32]]),
         Err(StoreError::Corrupt(_))
     ));
-    // Empty append is fine.
     t.append_batch(2, &[]).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -139,7 +131,6 @@ fn get_many_page_grouped_matches_serial_and_caps_pages() {
     }
     t.append_batch(0, &all).unwrap();
 
-    // Dense run within page 0 (fks 1..10).
     let dense: Vec<Fk> = (1u64..=10).map(Fk).collect();
     let (map_d, pages_d) = t.get_many_page_grouped(&dense).unwrap();
     let serial_d = t.get_many_serial(&dense).unwrap();
@@ -152,19 +143,16 @@ fn get_many_page_grouped_matches_serial_and_caps_pages() {
     let serial_s = t.get_many_serial(&sparse).unwrap();
     assert_eq!(map_s, serial_s);
     assert_eq!(pages_s, 3, "three distinct pages → three bulk reads");
-    // get_many order scatter
     let many = t.get_many(&sparse).unwrap();
     assert_eq!(many[0], Some(all[0]));
     assert_eq!(many[1], Some(all[128]));
     assert_eq!(many[2], Some(all[256]));
     assert_eq!(many[3], Some(all[0]));
 
-    // Cluster within page 1: fks 130, 140, 150 → one page.
     let cluster: Vec<Fk> = [130u64, 140, 150].into_iter().map(Fk).collect();
     let (_m, pages_c) = t.get_many_page_grouped(&cluster).unwrap();
     assert_eq!(pages_c, 1);
 
-    // Out-of-range ignored.
     let (empty_map, p0) = t.get_many_page_grouped(&[Fk(9999), Fk(0)]).unwrap();
     assert!(empty_map.is_empty());
     assert_eq!(p0, 0);

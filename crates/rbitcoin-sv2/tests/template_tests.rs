@@ -629,7 +629,6 @@ async fn submit_solution_checks_pow_before_accept() {
     c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
         .await
         .unwrap();
-    // Frames are handled in order: this reply follows the submit.
     c.request_transaction_data(template_id).await.unwrap();
     let f = recv_in_time(&mut c).await;
     assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
@@ -646,7 +645,6 @@ async fn submit_solution_checks_pow_before_accept() {
     c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
         .await
         .unwrap();
-    // The new tip's template follows the accept.
     let f = recv_in_time(&mut c).await;
     assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
     let solved = header.block_hash();

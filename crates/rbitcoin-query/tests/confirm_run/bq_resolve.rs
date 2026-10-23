@@ -460,7 +460,6 @@ fn hold_partial_table() {
     assert!(!bq_resolve_wave_hold_partial(
         330, 0, 4_000, 1, 100, 250, false, MAX_IN, MAX_BL
     ));
-    // nothing collected
     assert!(!bq_resolve_wave_hold_partial(
         330, 180, 0, 0, 100, 100, true, MAX_IN, MAX_BL
     ));

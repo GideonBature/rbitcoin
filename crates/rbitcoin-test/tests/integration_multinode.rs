@@ -1729,7 +1729,6 @@ async fn serve_after_restart_via_reconstruct() {
             .hash;
         assert_eq!(peer_tip, tip_hash.to_byte_array());
 
-        // Peer can reconstruct every height from its own store.
         for h in 0..=10u32 {
             let b = peer
                 .query
@@ -2117,7 +2116,6 @@ async fn reorg_to_longer_branch() {
     assert_eq!(hub.query.basic_filter_hwm().unwrap(), Some(4));
     let old_3 = hub.query.basic_filter_at(3).unwrap().unwrap().0;
 
-    // Fork from height 2: build longer branch 3',4',5',6'
     let fork_parent = hub
         .query
         .header_at_height(Height(2))

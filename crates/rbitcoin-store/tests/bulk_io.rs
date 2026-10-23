@@ -50,7 +50,6 @@ fn bulk_io_edges_empty_serial_rmw_workers() {
     let w = bulk_io_workers();
     assert!(w >= 1);
 
-    // Empty batches
     pread_batch(&mut []);
     pwrite_batch(&mut []);
 
@@ -70,7 +69,6 @@ fn bulk_io_edges_empty_serial_rmw_workers() {
     let f = std::fs::File::open(&path).unwrap();
     let fd = rbitcoin_store::io_handle::IoHandle::from_file(&f);
 
-    // Empty bufs
     let mut empty = [];
     let mut ops = [ReadOp {
         fd,
@@ -107,7 +105,6 @@ fn bulk_io_edges_empty_serial_rmw_workers() {
     }
     assert_eq!(&bufs[0][..], &data[0..64]);
 
-    // pread_one short read past EOF
     let mut past = [0u8; 16];
     let mut ro = ReadOp {
         fd,

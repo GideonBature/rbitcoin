@@ -85,7 +85,6 @@ mod tests {
 
     #[test]
     fn p2wpkh_mainnet_is_stable_scripthash() {
-        // bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq
         let line = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
         let sh = parse_target_line(line).unwrap().unwrap();
         assert_eq!(sh.len(), 64);

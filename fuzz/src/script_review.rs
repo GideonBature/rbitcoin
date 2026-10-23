@@ -306,7 +306,6 @@ pub fn cms_empty_sig_spend() -> (Vec<TxOut>, Transaction) {
     spk.push(0x21);
     spk.extend_from_slice(&pk);
     spk.extend_from_slice(&[0x52, 0xae, 0x91]);
-    // dummy, empty sig, empty sig
     spend(vec![0x00, 0x00, 0x00], spk, Witness::new())
 }
 

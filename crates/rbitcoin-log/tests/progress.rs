@@ -136,6 +136,5 @@ fn resumed_stage_eta_counts_only_this_run() {
         elapsed: Duration::from_secs(10),
         started_at: SystemTime::UNIX_EPOCH,
     };
-    // 10 units in 10s this run, 40 left.
     assert_eq!(after.eta(), Some(Duration::from_secs(40)));
 }

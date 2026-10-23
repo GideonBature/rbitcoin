@@ -123,7 +123,6 @@ macro_rules! confirm_window {
 }
 
 confirm_window! {
-    // lookup / load / scripts / write (isolation pin)
     load_ns,
     script_ns,
     milestone_gate_ns,
@@ -186,7 +185,6 @@ confirm_window! {
     phase_prep_prepare_ns,
     phase_prep_filter_plan_ns,
     phase_blocks,
-    // load pin
     load_win_ns,
     load_blocks,
     utxo_parents,
@@ -227,7 +225,6 @@ confirm_window! {
     // SH table sync before a durable include_hwm advance (write-behind)
     sh_sync_n,
     sh_sync_ns,
-    // archive prep/write
     arch_blocks,
     ext_need,
     head_need,
@@ -262,7 +259,6 @@ confirm_window! {
     arch_write_txstat_ns,
     arch_write_flush_ns,
     arch_write_blocks,
-    // lookup wave
     lookup_blocks,
     lookup_parents,
     lookup_already,
@@ -276,7 +272,6 @@ confirm_window! {
     lookup_precompute_ns,
     lookup_wave_head_ns,
     lookup_wave_spent_ns,
-    // plan stamp sub
     stamp_struct_ns,
     stamp_struct_txid_ns,
     stamp_struct_wtxid_ns,

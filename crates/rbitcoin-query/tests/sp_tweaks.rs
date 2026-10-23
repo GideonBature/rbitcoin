@@ -47,7 +47,6 @@ fn put_and_load_noop_when_disabled() {
     assert!(q.sptweaks_enabled());
     assert_eq!(q.sptweaks_origin(), Height(0));
     assert_eq!(q.sptweaks_next_height(), Some(Height(0)));
-    // No confirmed header → hole.
     assert!(q.load_thin_tweaks(Height(0)).unwrap().is_none());
     // Not next height is a no-op.
     q.put_sp_tweaks_block(Height(3), Fk(1), &[None]).unwrap();

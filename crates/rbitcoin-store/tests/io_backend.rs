@@ -66,7 +66,6 @@ fn global_env_io_uring_off_and_aliases() {
     );
     assert_eq!(global_write_from_env(), None);
     clear_io_envs();
-    // Unknown RBITCOIN_IO token → None (fall through).
     std::env::set_var("RBITCOIN_IO", "not-a-backend");
     assert_eq!(global_read_from_env(), None);
     assert_eq!(global_write_from_env(), None);

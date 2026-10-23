@@ -7,7 +7,6 @@ use rbitcoin_consensus::policy::*;
 
 #[test]
 fn min_relay_fee_point_one_sat_vb() {
-    // 1000 vB → weight 4000; 0.1 sat/vB → 100 sat min.
     assert!(meets_min_relay_fee(100, 4000));
     assert!(!meets_min_relay_fee(99, 4000));
     assert_eq!(fee_rate_sat_per_kvb(100, 4000), 100);
@@ -101,10 +100,8 @@ fn bare_tx(fee_out: u64) -> Transaction {
 
 #[test]
 fn libre_allows_op_true_and_dust_outputs() {
-    // weight of bare_tx is small; fee = 50_000 - 1 = large enough.
     let tx = bare_tx(1);
     let weight = tx.weight().to_wu();
-    // pretend input value 50_000
     let fee = 50_000u64.saturating_sub(1);
     assert!(check_libre_admission(&tx, fee, weight).is_ok());
 
@@ -151,7 +148,6 @@ fn vsize_fee_zero_and_libre_gates() {
     assert_eq!(fee_rate_sat_per_kvb(100, 0), 0);
     assert_eq!(Weight::from_wu(1).to_vbytes_ceil(), 1);
 
-    // Coinbase rejected.
     let cb = Transaction {
         version: Version::ONE,
         lock_time: LockTime::ZERO,
@@ -171,7 +167,6 @@ fn vsize_fee_zero_and_libre_gates() {
         PolicyResult::NonStandard("coinbase")
     );
 
-    // No inputs / no outputs.
     let mut no_in = bare_tx(1);
     no_in.input.clear();
     assert_eq!(

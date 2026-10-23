@@ -35,11 +35,9 @@ fn append_get_chain() {
     t.flush().unwrap();
     t.flush_async().unwrap();
     drop(t);
-    // open existing
     let t = SpenderTable::open(&dir).unwrap();
     assert_eq!(t.count(), 2);
     assert_eq!(t.get(a).unwrap(), (Fk(10), 3, Fk::NULL));
-    // open creates when body missing
     let dir2 = dir.with_extension("empty");
     let _ = std::fs::remove_dir_all(&dir2);
     std::fs::create_dir_all(&dir2).unwrap();

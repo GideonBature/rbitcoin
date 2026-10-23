@@ -295,14 +295,11 @@ fn pack_confirm_run_len(
 #[test]
 fn pack_confirm_run_len_policy() {
     use rbitcoin_ibd::ibd::confirm::{CONFIRM_BATCH_INPUTS_DEFAULT, CONFIRM_RUN_MAX_BLOCKS};
-    // Under budget: take all.
     assert_eq!(pack_confirm_run_len(&[10, 10, 10], 8000, 144), 3);
     // Soft overshoot: include crossing block then stop.
     // 7990 + 100 = 8090 > 8000 → n=2
     assert_eq!(pack_confirm_run_len(&[7990, 100, 50], 8000, 144), 2);
-    // First block alone exceeds soft → n=1
     assert_eq!(pack_confirm_run_len(&[50_000, 10], 8000, 144), 1);
-    // Block hard cap
     let ones = vec![1u32; 200];
     assert_eq!(
         pack_confirm_run_len(&ones, CONFIRM_BATCH_INPUTS_DEFAULT, CONFIRM_RUN_MAX_BLOCKS),
@@ -312,7 +309,6 @@ fn pack_confirm_run_len_policy() {
     // Exactly at soft: sum==soft continues? policy is sum > soft stop after take.
     // 4000+4000=8000 not > 8000 → can take more if present
     assert_eq!(pack_confirm_run_len(&[4000, 4000, 1], 8000, 144), 3);
-    // After third, sum=8001 > 8000 stops at 3
     assert_eq!(pack_confirm_run_len(&[4000, 4000, 1, 1], 8000, 144), 3);
 }
 
@@ -700,7 +696,6 @@ fn pipeline_parents_meter_prep_and_write() {
     q.note_write_recv(3, 2_000, 80);
     let c2 = q.content_snap();
     assert_eq!(c2.parents_total(), 0);
-    // Over-recv saturates at 0.
     q.note_write_recv(1, 1, 99);
     assert_eq!(q.content_snap().write_parents, 0);
 }
@@ -1057,7 +1052,6 @@ fn offer_confirm_ready_walks_height_map() {
     assert_eq!(n, 0, "pending without body queue must not note");
     assert_eq!(feed.size_snap().0, 0);
 
-    // Rejected tip+1 stops and notes zero new.
     body.mark_rejected(h1);
     let n2 = offer_confirm_ready(
         &feed,
@@ -1266,7 +1260,6 @@ fn thr_stats_all_stages_and_note_wire_prefer() {
         assert!(g.inflight.is_empty());
     }
 
-    // pack_stop_after edges.
     assert!(!rbitcoin_ibd::ibd::confirm::pack_stop_after(
         0, 0, 8000, 144
     ));

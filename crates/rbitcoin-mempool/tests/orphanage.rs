@@ -158,7 +158,6 @@ fn fifo_evicts_under_count_cap() {
 fn core_like_budget_constants() {
     assert_eq!(ORPHAN_RESERVED_WEIGHT_PER_PEER, 404_000);
     assert_eq!(DEFAULT_ORPHAN_MAX_WEIGHT, 404_000 * 25);
-    // ~10 MiB class weight budget for unique orphans.
     const {
         assert!(DEFAULT_ORPHAN_MAX_WEIGHT > 10_000_000);
         assert!(DEFAULT_ORPHAN_MAX_WEIGHT < 11_000_000);
@@ -169,7 +168,6 @@ fn core_like_budget_constants() {
 fn reject_oversize_duplicate_and_remove() {
     let mut o = Orphanage::with_limits(DEFAULT_ORPHAN_MAX_WEIGHT, 100);
     let p = txid_n(3);
-    // Empty missing parents → refuse.
     let tx = make_orphan(p, 1);
     assert!(!o.insert_from(tx.clone(), BTreeSet::new(), None));
     let mut miss = BTreeSet::new();
@@ -179,7 +177,6 @@ fn reject_oversize_duplicate_and_remove() {
     let tid = tx.compute_txid();
     o.remove_txid(&tid);
     assert!(!o.contains(&tid));
-    // take_children on unknown parent is empty.
     assert!(o.take_children_of(&txid_n(99)).is_empty());
     // Count-cap eviction (with_limits floors max_weight at MAX_ORPHAN_TX_WEIGHT).
     let mut o2 = Orphanage::with_limits(DEFAULT_ORPHAN_MAX_WEIGHT, 3);
@@ -190,7 +187,6 @@ fn reject_oversize_duplicate_and_remove() {
         o2.insert_from(t, m, None);
     }
     assert!(o2.len() <= 3);
-    // erase_for_block drops matching orphans.
     let t3 = make_orphan(p, 50);
     let tid3 = t3.compute_txid();
     let mut m = BTreeSet::new();

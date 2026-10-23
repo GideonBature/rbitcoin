@@ -187,7 +187,6 @@ fn validate_header_genesis_and_bad_prev() {
     let (h1, ta1) = coinbase(1, prev, Some(h0.hash));
     q.connect_block(Height(1), &h1, &[ta1]).unwrap();
 
-    // Header with wrong prev hash at height 1.
     let mut hdr = g.header;
     hdr.prev_blockhash = bitcoin::BlockHash::from_byte_array([0xee; 32]);
     hdr.time = 2_000;

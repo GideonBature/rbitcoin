@@ -104,7 +104,6 @@ fn hop_scan_page_stops_at_empty() {
     // h1=0, h2=1 → locals 0,1,2,...
     buf[0..4].copy_from_slice(&1u32.to_le_bytes());
     buf[4..8].copy_from_slice(&2u32.to_le_bytes());
-    // slot 2 empty
     let s = hop_scan_page(&buf, 0, 1, 4, MAX_PROBE);
     assert!(s.hit_empty);
     assert_eq!(
@@ -174,7 +173,6 @@ fn probe_bits_26_to_32_in_range() {
         assert!(idx < (1u64 << bits), "bits={bits} idx={idx}");
         let idx2 = probe_index(&k, 7, bits);
         assert!(idx2 < (1u64 << bits));
-        // Same page for all depths.
         if bits > PAGE_SLOT_BITS {
             assert_eq!(idx >> PAGE_SLOT_BITS, idx2 >> PAGE_SLOT_BITS);
         }
@@ -325,7 +323,6 @@ fn probe_during_page_pwrite_keeps_every_published_key() {
 #[test]
 fn load_trigger_at_80_percent() {
     let slots = 1024u64;
-    // Segment roll uses floor(0.80 * slots).
     let thr = ((slots as f64) * HEAD_LOAD_START).floor() as u64;
     assert_eq!(thr, 819); // floor(0.80 * 1024)
     assert!(thr - 1 < thr);
@@ -335,7 +332,6 @@ fn load_trigger_at_80_percent() {
 
 #[test]
 fn default_layout_is_fixed_segment_geometry() {
-    // Capacity growth is segment roll, not bits-widen.
     let layout = default_layout(HeadScale::Tiny);
     assert_eq!(layout.bits, bits_for_scale(HeadScale::Tiny));
     assert_eq!(
@@ -561,9 +557,7 @@ fn probe_fks_batch_matches_serial() {
         let serial = probe_one(&h, txid).unwrap();
         assert_eq!(batch[i], serial, "key {i}");
     }
-    // Empty batch.
     assert!(probe_batch(&h, &[]).unwrap().is_empty());
-    // Same-page multi-key still correct.
     let mut same_page = Vec::new();
     for i in 0..8 {
         let mut t = [0u8; 32];
@@ -647,7 +641,6 @@ fn insert_many_same_txid_preserves_depth_order() {
     // probe_fks is home→deep (hop order); first insert is shallower.
     assert_eq!(cands[0], Fk(1));
     assert_eq!(cands[1], Fk(2));
-    // Deepest wins for body resolve semantics.
     assert_eq!(*cands.last().unwrap(), Fk(2));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(meta_path(&path));
@@ -667,7 +660,6 @@ fn insert_many_sole_no_sort_roundtrip() {
         entries.push((txid, Fk(i)));
     }
     h.insert_many_in_place(&mut entries).unwrap();
-    // Idempotent re-insert.
     h.insert_many_in_place(&mut entries[..10]).unwrap();
     for (txid, fk) in &entries {
         assert!(
@@ -740,7 +732,6 @@ fn sole_writer_with_concurrent_probes_all_found() {
             "missing fk {i}"
         );
     }
-    // Idempotent re-insert of a subset.
     let mut again = Vec::new();
     for i in 1..=20u64 {
         let mut txid = [0u8; 32];
@@ -758,7 +749,6 @@ fn sole_writer_with_concurrent_probes_all_found() {
 #[test]
 fn mainnet_default_bits_is_25() {
     assert_eq!(MAINNET_BITS, 25);
-    // 4 B × 1024 = 4 KiB pages at mainnet default.
     assert_eq!(PAGE_SLOTS as usize * 4, 4096);
 }
 
@@ -766,13 +756,11 @@ fn mainnet_default_bits_is_25() {
 #[test]
 fn insert_fk_page_buf_error_arms() {
     let txid = [0x11u8; 32];
-    // Null fk
     let mut page = vec![0u8; 4096];
     assert!(matches!(
         insert_fk_into_page_buf(&mut page, 12, &txid, Fk::NULL),
         Err(StoreError::InvalidFk)
     ));
-    // A slot can't hold fk > u32::MAX
     assert!(matches!(
         insert_fk_into_page_buf(&mut page, 12, &txid, Fk(u64::from(u32::MAX) + 1)),
         Err(StoreError::InvalidFk)
@@ -786,12 +774,10 @@ fn insert_fk_page_buf_error_arms() {
         !page.iter().any(|&b| b != 0),
         "a rejected rel writes nothing"
     );
-    // Happy path insert + idempotent
     let r = insert_fk_into_page_buf(&mut page, 12, &txid, Fk(7)).unwrap();
     assert!(r.wrote_new);
     let r2 = insert_fk_into_page_buf(&mut page, 12, &txid, Fk(7)).unwrap();
     assert!(!r2.wrote_new);
-    // probe_index bits ≤ PAGE_SLOT_BITS branch
     let _ = probe_index(&txid, 0, MIN_BITS);
     let _ = probe_index(&txid, 3, PAGE_SLOT_BITS);
     let load_ratio = |tx_count: u64, slots: u64| -> f64 {
@@ -803,7 +789,6 @@ fn insert_fk_page_buf_error_arms() {
     };
     assert_eq!(load_ratio(10, 0), 0.0);
     assert_eq!((100_f64 * HEAD_LOAD_START).floor() as u64, 80);
-    // bits_for_scale env out of range falls back to the explicit scale
     let prev = std::env::var_os("RBITCOIN_TX_HEAD_BITS");
     std::env::set_var("RBITCOIN_TX_HEAD_BITS", "999");
     assert_eq!(bits_for_scale(HeadScale::Tiny), TINY_BITS);
@@ -861,7 +846,6 @@ fn head_access_env_probe_stats_and_layout_helpers() {
     let (dec, gen) = decode_layout_ext(&ext).unwrap();
     assert_eq!(dec.bits, layout.bits);
     assert_eq!(gen, 7);
-    // Bad decode
     let bad = [0u8; 16];
     assert!(decode_layout_ext(&bad).is_err());
     let path = std::env::temp_dir().join(format!(

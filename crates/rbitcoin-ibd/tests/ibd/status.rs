@@ -36,7 +36,6 @@ fn loop_stats_sample_dominant_and_live() {
     assert_eq!(sample.confirm_us_per_block(), 2500);
     assert_eq!(sample.dominant(), "confirm");
     assert_eq!(sample.confirm_reject_stops, 1);
-    // Reset clears counters.
     let z = s.sample_and_reset();
     assert_eq!(z.confirm_ns, 0);
     assert_eq!(z.dominant(), "idle");

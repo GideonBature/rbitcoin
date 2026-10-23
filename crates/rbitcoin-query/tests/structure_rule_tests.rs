@@ -889,7 +889,6 @@ fn merkle_root_bytes_single_and_odd() {
     assert_eq!(merkle_root_bytes(&[a]), a);
     let b = [2u8; 32];
     let root2 = merkle_root_bytes(&[a, b]);
-    // odd: third leaf duplicated
     let root3 = merkle_root_bytes(&[a, b, a]);
     assert_ne!(root2, root3);
     assert_eq!(merkle_root_bytes(&[]), [0u8; 32]);
@@ -952,7 +951,6 @@ fn script_sigop_count_and_last_push_helpers() {
         script_sigop_count(&[0x4e, 0x01, 0x00, 0x00, 0x00, 0xee, 0xac], false),
         1
     );
-    // last_script_push variants
     assert_eq!(
         last_script_push(&[0x02, 0x11, 0x22]),
         Some(&[0x11, 0x22][..])
@@ -970,7 +968,6 @@ fn script_sigop_count_and_last_push_helpers() {
         Some(&[0x77][..])
     );
     assert_eq!(last_script_push(&[]), Some(&[][..]));
-    // Program shape helpers
     let mut p2sh = vec![0xa9, 0x14];
     p2sh.extend_from_slice(&[0u8; 20]);
     p2sh.push(0x87);
@@ -1026,14 +1023,11 @@ fn p3_default_milestone_heights() {
 
 #[test]
 fn s8_accepts_witness_commitment_with_reserved_value() {
-    // Build a valid commitment using non-zero witness reserved in coinbase witness.
     let mut spend = non_coinbase_spend(11);
     spend.input[0].witness = Witness::from_slice(&[vec![0xab]]);
     let mut cb = coinbase(1);
-    // Place reserved value as last coinbase witness stack item.
     let reserved = [0x42u8; 32];
     cb.input[0].witness = Witness::from_slice(&[reserved.as_slice()]);
-    // Compute expected commitment: SHA256D(witness_root || reserved)
     let wtxid = spend.compute_wtxid().to_byte_array();
     let leaves = vec![[0u8; 32], wtxid];
     let witness_root = merkle_root_bytes(&leaves);
@@ -1079,7 +1073,6 @@ fn s8_rejects_empty_or_multi_item_coinbase_witness_reserved() {
             value: Amount::ZERO,
             script_pubkey: ScriptBuf::from_bytes(spk.clone()),
         });
-        // witness empty
         let b = block_with(vec![cb, spend.clone()]);
         let err = validate_block_structure(&b, &ctx_h(1)).unwrap_err();
         assert!(
@@ -1282,7 +1275,6 @@ fn assemble_rejects_empty_and_fk_mismatch() {
     .err()
     .expect("fk mismatch");
     assert_bad_block(rule_err(err2), "archived tx fk");
-    // first tx not coinbase
     let bad = block_with(vec![non_coinbase_spend(1)]);
     spent.clear();
     creates.clear();

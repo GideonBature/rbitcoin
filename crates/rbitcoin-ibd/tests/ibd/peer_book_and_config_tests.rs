@@ -28,7 +28,6 @@ fn peer_book_session_injects_seeds_and_flushes_on_drop() {
             .book()
             .entry_of(&rbitcoin_net::NetAddr::from_socket(sa(2)))
             .is_some());
-        // Mutate book via book_mut.
         sess.book_mut().add(sa(3));
         assert!(sess
             .book()

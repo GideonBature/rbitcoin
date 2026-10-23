@@ -26,7 +26,6 @@ fn short_id_roundtrip_common() {
 /// Live IBD + tip-follow + tip-tx command set must map to Core BIP324 short IDs.
 #[test]
 fn short_ids_cover_live_ibd_tip_commands() {
-    // Commands used on current sync / tip follow / tip tx relay paths.
     let live = [
         ("addr", 1u8),
         ("block", 2),
@@ -50,7 +49,6 @@ fn short_ids_cover_live_ibd_tip_commands() {
     for (cmd, id) in live {
         assert_eq!(short_id_for_command(cmd), Some(id), "short id for {cmd}");
         assert_eq!(command_for_short_id(id), Some(cmd));
-        // Round-trip through encode/parse for empty-payload or simple msgs.
     }
     // Application handshake uses long form (not short-id).
     assert!(short_id_for_command("version").is_none());
@@ -120,7 +118,6 @@ fn parse_v2_regtest_named_junk_does_not_panic() {
 fn encode_parse_verack_long_form() {
     let magic = signet_magic();
     let contents = encode_v2_contents(NetworkMessage::Verack).unwrap();
-    // version/verack use long form: 0x00 + "verack" + pad + empty payload
     assert_eq!(contents[0], 0);
     assert_eq!(&contents[1..7], b"verack");
     let frame = parse_v2_contents(magic, &contents).unwrap();
@@ -198,7 +195,6 @@ async fn bip324_duplex_ping_pong() {
             .await
             .expect("server handshake");
         let (mut r, mut w) = protocol.into_split();
-        // read genuine packet
         loop {
             let p = r.read().await.expect("server read");
             if p.packet_type() == PacketType::Genuine {
@@ -427,7 +423,6 @@ async fn oversized_v2_length_prefix_rejects_before_body() {
 
     let magic = signet_magic();
     let magic_b = magic.to_bytes();
-    // Handshake + 3-byte length only; body is never sent.
     let (client, server) = duplex(8 * 1024);
 
     let server_task = tokio::spawn(async move {
@@ -454,7 +449,6 @@ async fn oversized_v2_length_prefix_rejects_before_body() {
     cipher
         .encrypt(&plaintext, &mut packet, PacketType::Genuine, None)
         .expect("encrypt oversized length");
-    // Length prefix only — Core disconnects here.
     raw_w.write_all(&packet[..3]).await.unwrap();
     raw_w.flush().await.unwrap();
 

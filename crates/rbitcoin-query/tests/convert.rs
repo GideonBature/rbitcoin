@@ -94,7 +94,6 @@ fn txid_count_mismatch_and_prev_null_genesis() {
         nonce: 0,
     };
     let txid = tx.compute_txid().to_byte_array();
-    // Mismatch paths.
     assert!(matches!(
         block_to_apply_with_txids_prev(Fk::NULL, &header, std::slice::from_ref(&tx), &[]),
         Err(ConfirmError::Rules(ConsensusError::BadBlock(_)))

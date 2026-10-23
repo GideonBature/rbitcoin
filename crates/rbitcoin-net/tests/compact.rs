@@ -113,7 +113,6 @@ fn reconstruct_full_from_mempool_map() {
     let b2 = spend(2);
     let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
     let hsi = HeaderAndShortIds::from_block(&block, 0xdead_beef, 2, &[]).unwrap();
-    // Available: both non-coinbase from "mempool"
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1, &b2]);
     let recon = try_reconstruct(&hsi, &avail).expect("full fill");
     assert_eq!(recon.txdata.len(), 3);
@@ -293,7 +292,6 @@ fn partial_mempool_plus_blocktxn() {
     let b2 = spend(6);
     let block = sealed_block(vec![coinbase(), b1.clone(), b2.clone()]);
     let hsi = HeaderAndShortIds::from_block(&block, 3, 2, &[]).unwrap();
-    // Only b1 in "mempool"
     let avail = shortid_map_from_txs(&block.header, hsi.nonce, 2, [&b1]);
     let partial = must_partial(&hsi, &avail);
     assert_eq!(partial.missing(), [2]); // abs index of b2
@@ -444,7 +442,6 @@ fn wrong_count_blocktxn_errors() {
 
 #[test]
 fn empty_compact_and_ambiguous_shortid() {
-    // total=0 → empty error.
     let hsi = HeaderAndShortIds {
         header: dummy_header(),
         nonce: 0,
@@ -490,7 +487,6 @@ fn empty_compact_and_ambiguous_shortid() {
     let missing = try_reconstruct(&hsi, &avail).unwrap_err();
     assert_eq!(missing, vec![1]);
 
-    // prefilled absolute indexes differential walk.
     let idxs = prefilled_absolute_indexes(&hsi);
     assert!(!idxs.is_empty());
     assert_eq!(idxs[0].0, 0); // coinbase at abs 0

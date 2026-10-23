@@ -19,7 +19,6 @@ fn tmp() -> std::path::PathBuf {
 #[test]
 fn confirmed_tx_height_header_txs_surface() {
     let dir = tmp();
-    // Confirmed
     let c = ConfirmedTable::create(&dir).unwrap();
     assert!(c.tip_height().is_none());
     c.set(Height(0), Fk(1)).unwrap();
@@ -55,7 +54,6 @@ fn confirmed_tx_height_header_txs_surface() {
     c.flush().unwrap();
     c.flush_async().unwrap();
 
-    // HeaderTxs
     let ht = HeaderTxsTable::create(&dir).unwrap();
     assert!(ht.get_range(Fk(1)).unwrap().is_none());
     ht.put_range(Fk(1), Fk(100), 3).unwrap();

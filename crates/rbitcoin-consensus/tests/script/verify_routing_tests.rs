@@ -415,7 +415,6 @@ fn bip143_sighash_arms_single_acp_and_p2wsh() {
     let sc = Script::from_bytes(&[0x51]);
     let amt = Amount::from_sat(50_000);
 
-    // Bad index.
     let pre = rbitcoin_consensus::TxPrecompute::from_tx(&tx);
     assert!(crypto::bip143_signature_hash(&tx, 9, sc, amt, 0x01, &pre).is_err());
 

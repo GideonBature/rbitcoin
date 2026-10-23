@@ -44,7 +44,6 @@ fn display_source_and_from() {
 
     let store: NodeError = StoreError::Corrupt("x").into();
     assert!(format!("{store}").contains("x"));
-    // StoreError itself is the source for NodeError::Store.
     assert!(store.source().is_some());
 
     let locked = NodeError::Locked(PathBuf::from("/dd"));

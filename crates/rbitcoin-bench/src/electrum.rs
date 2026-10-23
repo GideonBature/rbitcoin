@@ -108,7 +108,6 @@ mod tests {
             let mut br = BufReader::new(r);
             let mut line = String::new();
             let _ = br.read_line(&mut line).await;
-            // handshake
             w.write_all(b"{\"id\":1,\"result\":[\"ok\",\"1.4\"]}\n")
                 .await
                 .unwrap();

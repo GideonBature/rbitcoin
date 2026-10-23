@@ -512,7 +512,6 @@ async fn electrum_server_version_history_balance() {
         "version[0] must track workspace.package.version, got {server:?}"
     );
 
-    // OP_TRUE scripthash
     let sh_hex = electrum_scripthash_hex(&[0x51]);
     let req = json!({
         "jsonrpc":"2.0","id":2,
@@ -551,7 +550,6 @@ async fn electrum_server_version_history_balance() {
     let v: Value = serde_json::from_str(&resp_line).unwrap();
     assert!(v["result"]["confirmed"].as_i64().unwrap_or(0) > 0);
 
-    // Empty mempool
     let req = json!({
         "jsonrpc":"2.0","id":4,
         "method":"blockchain.scripthash.get_mempool",
@@ -566,7 +564,6 @@ async fn electrum_server_version_history_balance() {
     let v: Value = serde_json::from_str(&resp_line).unwrap();
     assert_eq!(v["result"], json!([]));
 
-    // Headers subscribe returns tip
     let req = json!({
         "jsonrpc":"2.0","id":5,
         "method":"blockchain.headers.subscribe",
@@ -761,7 +758,6 @@ async fn electrum_server_version_history_balance() {
     .await;
     assert!(extra.is_err(), "untouched tip must not restatus: {extra:?}");
 
-    // Coinbase of height 1 via id_from_pos.
     let v = rpc(
         &mut stream,
         10,
@@ -950,7 +946,6 @@ async fn electrum_server_version_history_balance() {
     let v = rpc(&mut stream, 16, "mempool.get_fee_histogram", json!([])).await;
     assert!(v["result"].as_array().is_some());
 
-    // Missing tx.
     let v = rpc(
         &mut stream,
         17,
@@ -960,11 +955,9 @@ async fn electrum_server_version_history_balance() {
     .await;
     assert!(v.get("error").is_some(), "{v}");
 
-    // Unknown method.
     let v = rpc(&mut stream, 18, "no.such.method", json!([])).await;
     assert!(v.get("error").is_some());
 
-    // Broadcast without mempool → error.
     let v = rpc(
         &mut stream,
         19,
@@ -982,7 +975,6 @@ async fn electrum_server_version_history_balance() {
     .await;
     assert!(v.get("error").is_some(), "{v}");
 
-    // Bad params.
     let v = rpc(&mut stream, 20, "blockchain.block.header", json!(["x"])).await;
     assert!(v.get("error").is_some());
 
@@ -2960,7 +2952,6 @@ fn direct_indexes_then_sh_bulk_at_tip() {
     }
     assert_eq!(q.tip_height(), Some(Height(5)));
     assert!(q.tx_body_count() >= 6);
-    // Direct writes tx.head on archive/connect path.
     assert!(q.tx_head_occupied() >= 6, "head filled under Direct");
     let b1 = q.reconstruct_block_at_height(Height(1)).unwrap();
     let cb_txid = b1.txdata[0].compute_txid().to_byte_array();
@@ -2973,7 +2964,6 @@ fn direct_indexes_then_sh_bulk_at_tip() {
     let inserted = q.backfill_tx_index(|_, _, _| {}).unwrap();
     assert_eq!(inserted, 0, "no missing head entries after Direct");
 
-    // OP_TRUE coinbase outputs from mine_regtest_block appear under that scripthash.
     let sh = {
         use rbitcoin_store::script_hash;
         script_hash(&[0x51])
