@@ -582,6 +582,25 @@ async fn batch_line_answers_every_item_in_one_array() {
         "a batch of notifications writes nothing"
     );
 
+    let noted = format!("{:064x}", 0xabc);
+    let watched = format!("{:064x}", 0xdef);
+    let subs = [
+        json!({"jsonrpc":"2.0","method":"blockchain.scripthash.subscribe","params":[noted]}),
+        json!({"jsonrpc":"2.0","id":10,"method":"blockchain.scripthash.subscribe","params":[watched]}),
+    ];
+    let reply = electrum_tcp_batch(&mut stream, &subs).await;
+    assert_eq!(reply.as_array().map(Vec::len), Some(1), "{reply}");
+    assert!(reply[0].get("result").is_some(), "{reply}");
+    let unsub = "blockchain.scripthash.unsubscribe";
+    let was = electrum_tcp_rpc(&mut stream, 11, unsub, json!([watched])).await;
+    assert_eq!(was["result"], json!(true), "{was}");
+    let was = electrum_tcp_rpc(&mut stream, 12, unsub, json!([noted])).await;
+    assert_eq!(
+        was["result"],
+        json!(false),
+        "a notification is skipped, so it subscribes nothing: {was}"
+    );
+
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

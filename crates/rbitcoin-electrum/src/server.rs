@@ -256,6 +256,11 @@ pub async fn run_electrum(
                         continue;
                     };
                     rbitcoin_log::info!("electrum: connect {peer}");
+                    // Replies, batch slots included, are small writes the
+                    // client waits on whole; Nagle would hold them for an ACK.
+                    if let Err(e) = stream.set_nodelay(true) {
+                        rbitcoin_log::warn!("electrum: {peer} set_nodelay: {e}");
+                    }
                     let q = query.clone();
                     let cfg = config.clone();
                     let p = params.clone();
@@ -740,8 +745,9 @@ async fn answer_batch<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// `None` for a notification (no `id` member, unlike `"id": null`): it
-/// runs, but JSON-RPC 2.0 gives it no slot in the reply.
+/// `None` for a notification (no `id` member, unlike `"id": null`). It is
+/// not run: no reply means no slot write to hold back a client that stops
+/// reading, and Electrum clients never send notifications.
 async fn answer_batch_item(
     ctx: &RequestCtx<'_>,
     conn: &mut ElectrumConn,
@@ -751,14 +757,10 @@ async fn answer_batch_item(
     let Some(obj) = item.as_object() else {
         return Ok(Some(invalid_request(Value::Null, "Invalid Request")));
     };
-    let streams = request_stream(item).is_some();
     let Some(id) = obj.get("id") else {
-        if !streams {
-            answer_one(ctx, conn, last_sent, item).await?;
-        }
         return Ok(None);
     };
-    if streams {
+    if request_stream(item).is_some() {
         return Ok(Some(invalid_request(
             id.clone(),
             "streaming method cannot be sent in a batch",
