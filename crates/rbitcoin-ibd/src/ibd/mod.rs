@@ -109,10 +109,99 @@ use rbitcoin_net::error::NetError;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+/// Coordinator hold of `shared`. The flag drops with the guard.
+struct HeldShared<'a> {
+    guard: MutexGuard<'a, state::IbdWorkState>,
+    _coord: rbitcoin_store::CoordSharedLock,
+}
+
+impl<'a> HeldShared<'a> {
+    fn lock(shared: &'a std::sync::Mutex<state::IbdWorkState>) -> Self {
+        let guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+        Self {
+            guard,
+            _coord: rbitcoin_store::CoordSharedLock::enter(),
+        }
+    }
+}
+
+impl std::ops::Deref for HeldShared<'_> {
+    type Target = state::IbdWorkState;
+    fn deref(&self) -> &state::IbdWorkState {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for HeldShared<'_> {
+    fn deref_mut(&mut self) -> &mut state::IbdWorkState {
+        &mut self.guard
+    }
+}
+
+/// Off-path split heights are compared with the confirmed header. That
+/// read is store IO, so `shared` is not held across it. A height that
+/// appears while the lock is down is absent from the map and waits.
+fn settle_off_path_splits<'a>(
+    mut st_guard: HeldShared<'a>,
+    shared: &'a std::sync::Mutex<state::IbdWorkState>,
+    hub: &ChainHub,
+) -> HeldShared<'a> {
+    let off_path = header_walk::split_heights_off_path(&st_guard);
+    if off_path.is_empty() {
+        return st_guard;
+    }
+    drop(st_guard);
+    let mut confirmed = HashMap::with_capacity(off_path.len());
+    for height in off_path {
+        confirmed.insert(height, peer_chain::confirmed_at(hub, height));
+    }
+    st_guard = HeldShared::lock(shared);
+    header_walk::apply_split_confirms(&mut st_guard, &confirmed);
+    st_guard
+}
+
+/// Same drop, read, and apply as the coordinator assign turn.
+#[doc(hidden)]
+pub fn settle_off_path_for_test(shared: &std::sync::Mutex<state::IbdWorkState>, hub: &ChainHub) {
+    let st_guard = HeldShared::lock(shared);
+    drop(settle_off_path_splits(st_guard, shared, hub));
+}
+
+/// A heavier-fork check reads headers. `shared` is down across that read.
+/// No candidate keeps the lock. The commit waits until the header thread
+/// is out of its own rewind, and it is skipped when that thread already
+/// moved the tip.
+fn settle_disconnected_heavier<'a>(
+    st_guard: HeldShared<'a>,
+    shared: &'a std::sync::Mutex<state::IbdWorkState>,
+    hub: &ChainHub,
+) -> HeldShared<'a> {
+    let (cands, invalid) = match reorg::heavier_fork_candidates(&st_guard, hub) {
+        Ok(pair) => pair,
+        Err(_) => return st_guard,
+    };
+    if cands.is_empty() {
+        return st_guard;
+    }
+    drop(st_guard);
+    let _ = reorg::apply_off_lock_rewind(shared, hub, &cands, &invalid);
+    HeldShared::lock(shared)
+}
+
+/// Same drop, header walk, and commit as the coordinator assign turn.
+#[doc(hidden)]
+pub fn settle_disconnected_heavier_for_test(
+    shared: &std::sync::Mutex<state::IbdWorkState>,
+    hub: &ChainHub,
+) {
+    let st_guard = HeldShared::lock(shared);
+    drop(settle_disconnected_heavier(st_guard, shared, hub));
+}
 
 /// Default max **concurrent** unique block downloads (in-flight getdata).
 ///
@@ -590,8 +679,15 @@ pub async fn ibd_cancellable(
     update_confirm_lag(&confirm_lag, hub.tip_height(), st.max_ready_height);
 
     let shared = Arc::new(std::sync::Mutex::new(st));
-    let header_thread =
-        spawn_header_thread(Arc::clone(&shared), Arc::clone(&hub), header_rx, header_fks);
+    let header_probe = rbitcoin_store::HeaderThreadProbe::arm();
+    rbitcoin_query::reset_header_lookups_under_coord_lock();
+    let header_thread = spawn_header_thread(
+        Arc::clone(&shared),
+        Arc::clone(&hub),
+        header_rx,
+        header_fks,
+        header_probe,
+    );
     hub.query.publish_progress_snapshots();
     let _ = header_tx.try_send(HeaderCmd::Reseed);
     let _ = header_tx.try_send(HeaderCmd::Ask);
@@ -621,59 +717,61 @@ pub async fn ibd_cancellable(
         }
 
         let pending_redial = {
-            let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
-            let st = &mut *st_guard;
-            let tip_before_confirm = hub.tip_height();
-            apply_confirm_events(
-                st,
-                hub.as_ref(),
-                &confirm_ev_rx,
-                &archive_write_next,
-                &max_ready_shared,
-                &mut last_progress,
-                Some(confirm_feed.as_ref()),
-            );
-            if hub.tip_height() < tip_before_confirm {
-                confirm_feed.clear();
-            }
-            if let Some(msg) = st.halt.take() {
-                warn!("ibd: engine fault halt: {msg}");
-                halt_err = Some(msg);
-                break;
-            }
-
-            if !drain_ready_peer_and_body_events(
-                st,
-                hub.as_ref(),
-                &mut body_rx,
-                &mut ctrl_rx,
-                &archive_write_next,
-                &loop_stats,
-                peer_sess.book_mut(),
-                local_addr,
-                Some(confirm_feed.as_ref()),
-            )? {
-                break;
-            }
-
-            let tip_now = hub.tip_height().unwrap_or(0);
-            while let Some(&front) = st.ordered.front() {
-                let past = hub.has_block(&front)
-                    || st.hash_height.get(&front).is_some_and(|&ht| ht <= tip_now);
-                if past {
-                    st.ordered.pop_front();
-                    st.ordered_set.remove(&front);
-                } else {
+            let mut st_guard = HeldShared::lock(&shared);
+            let now_cadence = Instant::now();
+            {
+                let st = &mut *st_guard;
+                let tip_before_confirm = hub.tip_height();
+                apply_confirm_events(
+                    st,
+                    hub.as_ref(),
+                    &confirm_ev_rx,
+                    &archive_write_next,
+                    &max_ready_shared,
+                    &mut last_progress,
+                    Some(confirm_feed.as_ref()),
+                );
+                if hub.tip_height() < tip_before_confirm {
+                    confirm_feed.clear();
+                }
+                if let Some(msg) = st.halt.take() {
+                    warn!("ibd: engine fault halt: {msg}");
+                    halt_err = Some(msg);
                     break;
                 }
-            }
-            let now_cadence = Instant::now();
-            if cadence.hygiene_due(now_cadence, st.ordered_bloated()) {
-                st.hygiene();
-                cadence.mark_hygiene(now_cadence);
+
+                if !drain_ready_peer_and_body_events(
+                    st,
+                    hub.as_ref(),
+                    &mut body_rx,
+                    &mut ctrl_rx,
+                    &archive_write_next,
+                    &loop_stats,
+                    peer_sess.book_mut(),
+                    local_addr,
+                    Some(confirm_feed.as_ref()),
+                )? {
+                    break;
+                }
+
+                let tip_now = hub.tip_height().unwrap_or(0);
+                while let Some(&front) = st.ordered.front() {
+                    let past = hub.has_block(&front)
+                        || st.hash_height.get(&front).is_some_and(|&ht| ht <= tip_now);
+                    if past {
+                        st.ordered.pop_front();
+                        st.ordered_set.remove(&front);
+                    } else {
+                        break;
+                    }
+                }
+                if cadence.hygiene_due(now_cadence, st.ordered_bloated()) {
+                    st.hygiene();
+                    cadence.mark_hygiene(now_cadence);
+                }
             }
 
-            if cadence.assign_due(now_cadence, st.inflight.is_empty()) {
+            if cadence.assign_due(now_cadence, st_guard.inflight.is_empty()) {
                 let tip_rate_opt = tip_rate_tracker.eta_rate(now_cadence);
                 let _ = hub.query.block_queue_update_soft_pressure(tip_rate_opt);
                 let (bq_bytes, bq_count) = hub.query.block_queue_stats();
@@ -682,20 +780,30 @@ pub async fn ibd_cancellable(
                     bq_bytes,
                     tip_rate_opt,
                 );
-                let depth = if bq_pipeline_saturated(st.inflight.len(), bq_window_covered) {
+                let depth = if bq_pipeline_saturated(st_guard.inflight.len(), bq_window_covered) {
                     AssignDepth::Critical
                 } else {
                     AssignDepth::Full
                 };
                 let tip_before_assign = hub.tip_height();
-                assign_work_ordered(st, hub.as_ref(), &cfg, &loop_stats, depth, tip_rate_opt);
+                st_guard = settle_off_path_splits(st_guard, &shared, hub.as_ref());
+                st_guard = settle_disconnected_heavier(st_guard, &shared, hub.as_ref());
+                assign_work_ordered(
+                    &mut st_guard,
+                    hub.as_ref(),
+                    &cfg,
+                    &loop_stats,
+                    depth,
+                    tip_rate_opt,
+                );
                 if hub.tip_height() < tip_before_assign {
                     confirm_feed.clear();
                 }
-                sample_peer_rates(&mut st.slots, peer_io::ibd_mono_ms());
+                sample_peer_rates(&mut st_guard.slots, peer_io::ibd_mono_ms());
                 cadence.mark_assign(now_cadence);
             }
 
+            let st = &mut *st_guard;
             offer_confirm_ready(
                 &confirm_feed,
                 &st.height_to_hash,
@@ -853,7 +961,7 @@ pub async fn ibd_cancellable(
         if let Some(h) = pending_redial {
             match h.await {
                 Ok(result) => {
-                    let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                    let mut st_guard = HeldShared::lock(&shared);
                     let st = &mut *st_guard;
                     apply_dial_result(
                         peer_sess.book_mut(),
@@ -913,7 +1021,7 @@ pub async fn ibd_cancellable(
         // When *all* peers are dead (network blip), do not wait for the 15s
         // interval — redial immediately so we never race the exit check.
         {
-            let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+            let mut st_guard = HeldShared::lock(&shared);
             let st = &mut *st_guard;
             let alive_n = st.slots.iter().filter(|s| s.alive).count();
             let target = cfg.target_peers.max(1);
@@ -1122,7 +1230,7 @@ pub async fn ibd_cancellable(
                     break;
                 }
                 let Some(ev) = peer_ev else { break };
-                let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let mut st_guard = HeldShared::lock(&shared);
                 let st = &mut *st_guard;
                 apply_peer_event(
                     st,
@@ -1140,7 +1248,7 @@ pub async fn ibd_cancellable(
                     break;
                 }
                 let Some(ev) = peer_ev else { break };
-                let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let mut st_guard = HeldShared::lock(&shared);
                 let st = &mut *st_guard;
                 apply_peer_event(
                     st,
@@ -1157,7 +1265,7 @@ pub async fn ibd_cancellable(
                     warn!("ibd: cancel requested — stopping IBD");
                     break;
                 }
-                let mut st_guard = shared.lock().unwrap_or_else(|err| err.into_inner());
+                let mut st_guard = HeldShared::lock(&shared);
                 let st = &mut *st_guard;
                 offer_confirm_ready(
                     &confirm_feed,
@@ -1219,7 +1327,7 @@ pub async fn ibd_cancellable(
     let _ = status_thread.join();
     drop(header_tx);
     {
-        let mut st = shared.lock().unwrap_or_else(|err| err.into_inner());
+        let mut st = HeldShared::lock(&shared);
         st.header_cmd = None;
         disconnect_all_peers(&mut st);
     }

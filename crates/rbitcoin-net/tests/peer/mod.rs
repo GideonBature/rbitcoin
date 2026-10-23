@@ -289,7 +289,12 @@ fn ignored_full_header_batch_does_not_page() {
     }
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut follow = PeerFollowState::new();
-    on_headers(&hub, &tx, &mut follow, None, &headers).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(on_headers(&hub, &tx, &mut follow, None, &headers))
+        .unwrap();
     assert!(
         rx.try_recv().is_err(),
         "an ignored 2,000-header batch does not ask for the next page"
@@ -4938,6 +4943,444 @@ include!("../peer_tip_announce_journey.rs");
 include!("../peer_header_dos_journey.rs");
 include!("../peer_header_sync_journey.rs");
 include!("../peer_blocksonly_journey.rs");
+
+/// A headers batch and a getheaders reply must not read or write the store
+/// on the session worker.
+#[test]
+fn headers_store_runs_off_the_reactor() {
+    use bitcoin::block::{Header, Version};
+    use bitcoin::p2p::message_blockdata::GetHeadersMessage;
+    use bitcoin::CompactTarget;
+    use bitcoin::TxMerkleNode;
+
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("headers-off-reactor");
+    hub.ensure_genesis().unwrap();
+    let prev = hub.tip_hash().unwrap();
+    let hdr = Header {
+        version: Version::TWO,
+        prev_blockhash: prev,
+        merkle_root: TxMerkleNode::from_byte_array([1u8; 32]),
+        time: 1_700_000_000,
+        bits: CompactTarget::from_consensus(0x207fffff),
+        nonce: 1,
+    };
+    let hub = hub.into_arc();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        tokio::spawn(async move {
+            let (out_tx, _rx) = mpsc::unbounded_channel();
+            let mut follow = PeerFollowState::new();
+            let gh = GetHeadersMessage::new(vec![], BlockHash::from_byte_array([0u8; 32]));
+            on_getheaders(&hub, &out_tx, &mut follow, None, &gh)
+                .await
+                .expect("getheaders");
+            on_headers(&hub, &out_tx, &mut follow, None, &[hdr])
+                .await
+                .expect("headers");
+        })
+        .await
+        .expect("reactor task")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Inbound compact reconstruction must not run on the session worker.
+#[test]
+fn inbound_cmpct_reconstruct_runs_off_the_reactor() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("cmpct-recon-off-reactor");
+    hub.ensure_genesis().unwrap();
+    let block = block_for_peer(&hub.cache, &hub.query, &hub.tip_hash().unwrap())
+        .unwrap()
+        .expect("genesis");
+    let hash = block.block_hash();
+    let hsi = HeaderAndShortIds::from_block(&block, 1, 2, &[0]).unwrap();
+    // A live node holds the hub in an `Arc`, so accept awaits the tip lane.
+    let hub = hub.into_arc();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        tokio::spawn(async move {
+            let (out_tx, _rx) = mpsc::unbounded_channel();
+            let mut follow = PeerFollowState::new();
+            follow.requested_blocks.insert(hash);
+            on_cmpctblock_reconstruct(&hub, &out_tx, &mut follow, None, &hsi, hash)
+                .await
+                .expect("reconstruct");
+        })
+        .await
+        .expect("reactor task")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A block `getdata` must not look up headers on the session worker. The
+/// missing hash and the genesis body both resolve on the blocking pool.
+#[test]
+fn getdata_block_lookup_stays_off_the_reactor() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("getdata-lookup-off-reactor");
+    hub.ensure_genesis().unwrap();
+    let hash = hub.tip_hash().unwrap();
+    let missing = bitcoin::BlockHash::from_byte_array([9u8; 32]);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        tokio::spawn(async move {
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+            let mut follow = PeerFollowState::new();
+            let before = rbitcoin_query::header_lookup_count();
+            serve_getdata(
+                &hub,
+                &out_tx,
+                &mut follow,
+                None,
+                vec![
+                    Inventory::WitnessBlock(missing),
+                    Inventory::WitnessBlock(hash),
+                ],
+            )
+            .await
+            .expect("getdata");
+            assert_eq!(
+                rbitcoin_query::header_lookup_count(),
+                before,
+                "block getdata looked up a header on the session worker"
+            );
+            let block = out_rx.try_recv().expect("genesis body");
+            let served = served_block(block);
+            assert_eq!(served.block_hash(), hash);
+            match out_rx.try_recv().map(PeerOut::expect_msg) {
+                Ok(NetworkMessage::NotFound(v)) => {
+                    assert!(v.contains(&Inventory::WitnessBlock(missing)));
+                }
+                other => panic!("missing hash is notfound, got {other:?}"),
+            }
+        })
+        .await
+        .expect("reactor task")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A store error on an announced tip wtxid is `notfound`, not a dropped peer.
+#[test]
+fn announced_wtx_store_error_is_notfound() {
+    let miss = announced_wtx_from_reconstruct(Err(NetError::Consensus("disk".into())));
+    assert!(miss.is_none(), "a store error is notfound");
+    assert!(announced_wtx_from_reconstruct(Ok(None)).is_none());
+    let tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let hit = announced_wtx_from_reconstruct(Ok(Some(tx))).expect("tx kept");
+    assert!(hit.input.is_empty());
+}
+
+/// A failed compact-relay blocking job is a protocol error, not a missing body.
+#[tokio::test]
+async fn cmpct_relay_join_failure_is_protocol() {
+    let joined = tokio::task::spawn_blocking(|| -> Option<NetworkMessage> {
+        panic!("short ids");
+    })
+    .await;
+    let err = map_cmpct_relay_join(joined).expect_err("join failure");
+    assert!(err.to_string().contains("cmpct relay join failed"), "{err}");
+}
+
+/// A headers batch already taken off the socket is stored when the send
+/// budget is spent. The locator latch clears and nothing else is queued.
+#[tokio::test]
+async fn over_budget_headers_are_stored_without_a_follow_up() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hdr-over-budget");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peer = live_peer(&peers, 18510, 31, false);
+    peer.note_awaiting_headers();
+    peer.note_send_queued(rbitcoin_net::peers::PEER_SEND_BUDGET + 1);
+    assert!(peer.send_over_budget());
+    let header = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        hub.tip_header().unwrap().time.saturating_add(600),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    )
+    .header;
+    let hash = header.block_hash();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut follow = PeerFollowState::new();
+    let before = hub.headers_reply_count();
+    handle_decoded_peer_msg(
+        RawNetworkMessage::new(
+            Magic::from(Network::Regtest),
+            NetworkMessage::Headers(vec![header]),
+        ),
+        &hub,
+        &out_tx,
+        &mut follow,
+        Some(peer.as_ref()),
+    )
+    .await
+    .expect("headers");
+    assert!(
+        hub.headers_reply_count() > before,
+        "the batch is handled, not dropped"
+    );
+    assert!(!peer.is_awaiting_headers(), "the locator latch clears");
+    assert!(
+        out_rx.try_recv().is_err(),
+        "no getdata or getheaders while the send budget is spent"
+    );
+    assert!(hub.header_of(&hash).is_some(), "the header is stored");
+    assert!(
+        !hub.already_have_or_asked_block(&hash),
+        "an unsent body is not left in flight"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A closed writer fails the getdata. The claim from that attempt is released
+/// so another peer can ask.
+#[tokio::test]
+async fn failed_body_queue_releases_the_ask() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hdr-ask-release");
+    hub.ensure_genesis().unwrap();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let peer = live_peer(&peers, 18511, 32, false);
+    let header = rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        hub.tip_header().unwrap().time.saturating_add(600),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    )
+    .header;
+    let hash = header.block_hash();
+    let (out_tx, out_rx) = mpsc::unbounded_channel();
+    drop(out_rx);
+    let mut follow = PeerFollowState::new();
+    let err = on_headers(&hub, &out_tx, &mut follow, Some(peer.as_ref()), &[header])
+        .await
+        .expect_err("closed writer");
+    assert!(err.to_string().contains("peer write half closed"), "{err}");
+    assert!(!hub.already_have_or_asked_block(&hash));
+    assert!(!follow.requested_blocks.contains(&hash));
+    assert!(hub.header_of(&hash).is_some(), "the header is stored");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn hb_tip_child(hub: &rbitcoin_net::chain::ChainHub) -> bitcoin::Block {
+    rbitcoin_consensus::mine_regtest_paying(
+        hub.tip_hash().unwrap(),
+        hub.tip_header().unwrap().time.saturating_add(600),
+        hub.tip_height().unwrap().saturating_add(1),
+        ScriptBuf::from_bytes(vec![0x51]),
+        vec![],
+    )
+}
+
+/// No offered high-bandwidth peer means the compact build does not run.
+/// `from` has a live hub, so this reaches the offer filter. A stack hub
+/// would persist the header on this thread.
+#[test]
+fn hb_relay_skips_the_build_when_no_peer_is_offered_it() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-relay-no-peer");
+    hub.ensure_genesis().unwrap();
+    hub.set_prefill_compact(true);
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18520, 41, false);
+    let quiet = live_peer(&peers, 18521, 42, false);
+    quiet.note_best_known(hub.tip_hash().unwrap());
+    let block = hb_tip_child(&hub);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rbitcoin_net::chain::reset_ensure_header_fk_count();
+    rt.block_on(relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())));
+    assert_eq!(
+        rbitcoin_net::chain::ensure_header_fk_count(),
+        0,
+        "a peer that was not offered the block does not persist its header"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One offered high-bandwidth peer builds the prefill and short ids off the
+/// worker. `assert_not_reactor` panics if that build stays on `tokio-rt-worker`.
+#[test]
+fn hb_relay_offered_build_runs_off_the_reactor() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("hb-relay-off-reactor");
+    hub.ensure_genesis().unwrap();
+    hub.set_prefill_compact(true);
+    let genesis = hub.tip_hash().unwrap();
+    let block = hb_tip_child(&hub);
+    let hub = hub.into_arc();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let from = live_peer(&peers, 18522, 43, false);
+    let target = live_peer(&peers, 18523, 44, false);
+    target.set_hb_from(true);
+    target.note_best_known(genesis);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    target.attach_out(out_tx);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        tokio::spawn(async move {
+            relay_new_pow_valid_block(&hub, &block, Some(from.as_ref())).await;
+            assert!(
+                matches!(
+                    out_rx.try_recv().map(PeerOut::expect_msg),
+                    Ok(NetworkMessage::CmpctBlock(_))
+                ),
+                "the offered peer receives the compact block"
+            );
+        })
+        .await
+        .expect("reactor task")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Compact tip short ids are built with the body load, off the session worker.
+#[test]
+fn cmpct_tip_announce_shortids_run_off_the_reactor() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("cmpct-tip-off-reactor");
+    hub.ensure_genesis().unwrap();
+    let hub = hub.into_arc();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        tokio::spawn(async move {
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+            let mut follow = PeerFollowState::new();
+            follow.send_cmpct = true;
+            follow.cmpct_version = 2;
+            let ev = rbitcoin_net::chain::TipEvent {
+                height: hub.tip_height().unwrap(),
+                hash: hub.tip_hash().unwrap(),
+                header: hub.tip_header().unwrap(),
+                reorg_branch_len: 0,
+            };
+            on_tip_event(&hub, &out_tx, &mut follow, None, Ok(ev))
+                .await
+                .expect("tip");
+            assert!(
+                matches!(
+                    out_rx.try_recv().map(PeerOut::expect_msg),
+                    Ok(NetworkMessage::CmpctBlock(_))
+                ),
+                "genesis tip is a compact announcement"
+            );
+        })
+        .await
+        .expect("reactor task")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Compact getdata and an announced tip wtxid reconstruct off the reactor.
+/// `assert_not_reactor` panics when `block_for_peer` runs on `tokio-rt-worker`.
+#[test]
+fn compact_and_wtxid_serve_run_off_the_reactor() {
+    let (dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("compact-off-reactor");
+    hub.ensure_genesis().unwrap();
+    let hash = hub.tip_hash().unwrap();
+    let block = block_for_peer(&hub.cache, &hub.query, &hash)
+        .unwrap()
+        .expect("genesis body");
+    let wtxid = block.txdata[0].compute_wtxid();
+    let peers = rbitcoin_net::peers::PeerHub::new();
+    let session = live_peer(&peers, 18450, 11, false);
+    session.note_announced_wtx(wtxid);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("tokio-rt-worker")
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        let hub = hub;
+        tokio::spawn(async move {
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+            let mut follow = PeerFollowState::new();
+            follow.cmpct_version = 2;
+            serve_getdata(
+                &hub,
+                &out_tx,
+                &mut follow,
+                Some(session.as_ref()),
+                vec![Inventory::CompactBlock(hash)],
+            )
+            .await
+            .expect("compact serve");
+            assert!(
+                matches!(
+                    out_rx.try_recv().map(PeerOut::expect_msg),
+                    Ok(NetworkMessage::CmpctBlock(_))
+                ),
+                "genesis getdata is a compact block"
+            );
+            let mut follow = PeerFollowState::new();
+            serve_getdata(
+                &hub,
+                &out_tx,
+                &mut follow,
+                Some(session.as_ref()),
+                vec![Inventory::WTx(wtxid)],
+            )
+            .await
+            .expect("wtxid serve");
+            assert!(
+                matches!(
+                    out_rx.try_recv().map(PeerOut::expect_msg),
+                    Ok(NetworkMessage::Tx(_))
+                ),
+                "announced wtxid comes from the tip block"
+            );
+            let missing = bitcoin::BlockHash::from_byte_array([9u8; 32]);
+            serve_getdata(
+                &hub,
+                &out_tx,
+                &mut follow,
+                Some(session.as_ref()),
+                vec![Inventory::CompactBlock(missing)],
+            )
+            .await
+            .expect("missing compact is not a session error");
+            assert!(
+                out_rx.try_recv().is_err(),
+                "a header-less hash stays silent"
+            );
+        })
+        .await
+        .expect("reactor task")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 /// Core `PrepareBlockFilterRequest`: start past stop, or a range of 1000+
 /// cfilters / 2000+ cfheaders, disconnects instead of being clamped.

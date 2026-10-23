@@ -1,9 +1,61 @@
 use rbitcoin_net::tip_accept::*;
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+
+/// The tip-accept lane and the park-gate atomics are process-wide. Cargo
+/// runs this binary's tests in parallel, so one permit keeps them apart.
+fn lane_gate() -> &'static (Mutex<bool>, Condvar) {
+    static LANE: std::sync::OnceLock<(Mutex<bool>, Condvar)> = std::sync::OnceLock::new();
+    LANE.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+
+struct LanePermit;
+
+impl LanePermit {
+    fn take() -> Self {
+        let (mu, cv) = lane_gate();
+        let mut busy = mu.lock().unwrap_or_else(|p| p.into_inner());
+        while *busy {
+            busy = cv.wait(busy).unwrap_or_else(|p| p.into_inner());
+        }
+        *busy = true;
+        Self
+    }
+}
+
+impl Drop for LanePermit {
+    fn drop(&mut self) {
+        let (mu, cv) = lane_gate();
+        *mu.lock().unwrap_or_else(|p| p.into_inner()) = false;
+        cv.notify_one();
+    }
+}
+
+/// A panic while the debug park gate is armed must not leave later senders
+/// asleep in `wait_park_gate`.
+struct ParkGate;
+
+impl ParkGate {
+    fn arm() -> Self {
+        TIP_PARK_ENTERED.store(0, Ordering::SeqCst);
+        TIP_PARK_GO.store(false, Ordering::SeqCst);
+        TIP_PARK_DELAY.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ParkGate {
+    fn drop(&mut self) {
+        TIP_PARK_GO.store(true, Ordering::SeqCst);
+        TIP_PARK_DELAY.store(false, Ordering::SeqCst);
+        tip_park_gate_notify();
+    }
+}
 
 #[test]
 fn lane_runs_on_named_thread() {
+    let _lane = LanePermit::take();
     let name = run_on_tip_accept(|| thread::current().name().map(str::to_string));
     assert_eq!(name.as_deref(), Some(TIP_ACCEPT_THREAD_NAME));
 }
@@ -13,6 +65,7 @@ fn wait_idle_blocks_until_job_finishes() {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    let _lane = LanePermit::take();
     let (started_tx, started_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let worker = thread::spawn(move || {
@@ -39,6 +92,7 @@ fn wait_current_job_returns_while_second_job_queued() {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    let _lane = LanePermit::take();
     let (started1_tx, started1_rx) = mpsc::sync_channel(1);
     let (release1_tx, release1_rx) = mpsc::sync_channel(1);
     let (started2_tx, started2_rx) = mpsc::sync_channel(1);
@@ -95,11 +149,13 @@ fn wait_tip_idle_from_env_only_one_and_true() {
 
 #[tokio::test]
 async fn lane_sync_from_current_thread_runtime() {
+    let _lane = LanePermit::take();
     assert_eq!(run_on_tip_accept(|| 7), 7);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lane_async_is_not_tokio_worker() {
+    let _lane = LanePermit::take();
     let task = tokio::spawn(async {
         let caller = thread::current().name().map(str::to_string);
         let name = run_on_tip_accept_async(|| thread::current().name().map(str::to_string)).await;
@@ -118,9 +174,9 @@ async fn lane_async_is_not_tokio_worker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn drop_join_does_not_park_worker() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Condvar;
     use std::time::{Duration, Instant};
 
+    let _lane = LanePermit::take();
     let started = Arc::new(AtomicBool::new(false));
     let release = Arc::new((std::sync::Mutex::new(false), Condvar::new()));
     // A failed assert must still wake the job. The tip-accept thread is
@@ -161,6 +217,26 @@ async fn drop_join_does_not_park_worker() {
     drop(_wake);
 }
 
+struct ReleaseFillers(Vec<std::sync::mpsc::SyncSender<()>>);
+
+impl Drop for ReleaseFillers {
+    fn drop(&mut self) {
+        for tx in self.0.drain(..) {
+            tx.send(()).ok();
+        }
+    }
+}
+
+/// `Full` stops the filler. A blocking `send` waits for a slot while the
+/// holder is the tip-accept thread, so that slot never frees.
+fn enqueue_or_full(job: Job) -> bool {
+    match sender().try_send(job) {
+        Ok(()) => true,
+        Err(std::sync::mpsc::TrySendError::Full(_)) => false,
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => panic!("tip-accept thread"),
+    }
+}
+
 struct ReleaseOnDrop(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
 
 impl Drop for ReleaseOnDrop {
@@ -172,11 +248,202 @@ impl Drop for ReleaseOnDrop {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_lane_parks_instead_of_spinning() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let _lane = LanePermit::take();
+    let (holder_tx, holder_rx) = mpsc::sync_channel(1);
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let _wake = ReleaseOnDrop(Arc::clone(&release));
+    let rel = Arc::clone(&release);
+    let holder = thread::spawn(move || {
+        run_on_tip_accept(move || {
+            holder_tx.send(()).ok();
+            let (lock, cv) = &*rel;
+            let mut g = lock.lock().unwrap();
+            while !*g {
+                g = cv.wait(g).unwrap();
+            }
+        });
+    });
+    holder_rx.recv().expect("holder running");
+
+    let filler = thread::spawn(move || {
+        let mut queued = Vec::with_capacity(QUEUE_CAP);
+        for _ in 0..QUEUE_CAP {
+            let (tx, rx) = mpsc::sync_channel::<()>(1);
+            if !enqueue_or_full(Box::new(move || {
+                let _ = rx.recv();
+            })) {
+                break;
+            }
+            queued.push(tx);
+        }
+        queued
+    });
+    let releases = filler.join().expect("filler queued");
+
+    FULL_QUEUE_SPINS.store(0, Ordering::Relaxed);
+    let ninth = tokio::spawn(async { run_on_tip_accept_async(|| 9u8).await });
+    let started = std::time::Instant::now();
+    let mut last = 0usize;
+    let mut stable = 0u32;
+    let parked = loop {
+        let now = FULL_QUEUE_SPINS.load(Ordering::Relaxed);
+        if now > 8 {
+            break now;
+        }
+        if now > 0 && now == last {
+            stable += 1;
+            if stable >= 3 {
+                break now;
+            }
+        } else {
+            stable = 0;
+            last = now;
+        }
+        if started.elapsed() > Duration::from_secs(2) {
+            break now;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(
+        (1..=8).contains(&parked),
+        "a full queue parks after a handful of failed sends, saw {parked}"
+    );
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let spins = FULL_QUEUE_SPINS.load(Ordering::Relaxed);
+    assert_eq!(
+        spins, parked,
+        "a parked sender must not keep retrying ({parked} -> {spins})"
+    );
+    assert!(!ninth.is_finished(), "the ninth job must still be waiting");
+
+    {
+        let (lock, cv) = &*release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    for tx in releases {
+        tx.send(()).ok();
+    }
+    let got = tokio::time::timeout(Duration::from_secs(2), ninth)
+        .await
+        .expect("ninth job parked forever")
+        .expect("ninth");
+    assert_eq!(got, 9);
+    holder.join().expect("holder");
+    wait_idle();
+}
+
+/// Two senders that both saw a full queue must both enqueue once two slots
+/// are free, even while the lane is still inside a job. `notify_one` before
+/// either waiter registers keeps only one permit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_full_senders_both_enqueue() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let _lane = LanePermit::take();
+    wait_idle();
+    let (holder_tx, holder_rx) = mpsc::sync_channel(1);
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let _wake = ReleaseOnDrop(Arc::clone(&release));
+    let rel = Arc::clone(&release);
+    let holder = thread::spawn(move || {
+        run_on_tip_accept(move || {
+            holder_tx.send(()).ok();
+            let (lock, cv) = &*rel;
+            let mut g = lock.lock().unwrap();
+            while !*g {
+                g = cv.wait(g).unwrap();
+            }
+        });
+    });
+    holder_rx.recv().expect("holder running");
+
+    let filler = thread::spawn(move || {
+        let mut started = Vec::with_capacity(QUEUE_CAP);
+        let mut releases = Vec::with_capacity(QUEUE_CAP);
+        for _ in 0..QUEUE_CAP {
+            let (go_tx, go_rx) = mpsc::sync_channel::<()>(1);
+            let (ran_tx, ran_rx) = mpsc::sync_channel::<()>(1);
+            if !enqueue_or_full(Box::new(move || {
+                ran_tx.send(()).ok();
+                let _ = go_rx.recv();
+            })) {
+                break;
+            }
+            started.push(ran_rx);
+            releases.push(go_tx);
+        }
+        (started, releases)
+    });
+    let (started, release_txs) = filler.join().expect("filler queued");
+    let mut releases = ReleaseFillers(release_txs);
+    assert!(
+        started.len() >= 2,
+        "need two of this test's jobs queued to free two slots, queued {}",
+        started.len()
+    );
+
+    let _park = ParkGate::arm();
+    let first = tokio::spawn(async { run_on_tip_accept_async(|| 1u8).await });
+    let second = tokio::spawn(async { run_on_tip_accept_async(|| 2u8).await });
+    let t0 = Instant::now();
+    while TIP_PARK_ENTERED.load(Ordering::SeqCst) < 2 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "both senders must see a full queue"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    {
+        let (lock, cv) = &*release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    releases.0[0].send(()).ok();
+    started[0].recv().expect("first queued job started");
+    started[1].recv().expect("second queued job started");
+
+    TIP_ASYNC_ENQUEUED.store(0, Ordering::SeqCst);
+    TIP_PARK_GO.store(true, Ordering::SeqCst);
+    TIP_PARK_DELAY.store(false, Ordering::SeqCst);
+    tip_park_gate_notify();
+    let t1 = Instant::now();
+    while TIP_ASYNC_ENQUEUED.load(Ordering::SeqCst) < 2 {
+        assert!(
+            t1.elapsed() < Duration::from_millis(500),
+            "one coalesced wake left a free tip-accept slot with a sender still parked"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    for tx in releases.0.drain(..).skip(1) {
+        tx.send(()).ok();
+    }
+    let (a, b) = tokio::time::timeout(Duration::from_secs(2), async {
+        let a = first.await.expect("first");
+        let b = second.await.expect("second");
+        (a, b)
+    })
+    .await
+    .expect("jobs finish");
+    holder.join().expect("holder");
+    wait_idle();
+    assert_eq!((a, b), (1, 2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_job_finishes_after_waiter_abort() {
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    let _lane = LanePermit::take();
     let saw = Arc::new(AtomicU8::new(0));
     let saw_job = Arc::clone(&saw);
     let (started_tx, started_rx) = mpsc::sync_channel(1);

@@ -49,7 +49,7 @@ Three thread kinds only. **Tokio workers must not wait on a `std` mutex/rwlock, 
 
 | Role | Notes |
 |------|--------|
-| `peer_session` (split read/write) | Serve + reconstruct compact/body. Offers reconstructed blocks to **`tip-accept`** (does **not** take `connect_lock` or run confirm on the tokio worker). A reconstructed/received body whose header has valid PoW and **extends the current tip** is announced as `cmpctblock` to peers who sent `sendcmpct` announce=1 and already have the parent **before** connect (Core `NewPoWValidBlock`). That is not a connected tip. P2P `tx` is `accept_tx_async` (blocking pool). INV / getdata / compact **first-pass** fill use mempool **`try_read` only** (busy write → skip that item; never park). A pending compact owns those clones; `blocktxn` apply does not `try_read` again. Handshake `FeeFilter` reads the **atomic** published fee floor (no `inner`). 50 ms tick: age-INV is a due-log cursor (newly due only); `clock_due` / unbroadcast may full-walk ≤1/30 s. `any_tx_inv_due` is min live `accept_at`, not a map walk. `PeerHub::on_session_heartbeat` (headers-sync stall timeout). While the writer is past the 4 MiB send budget, or a paused `getdata` tail waits for serve room, the reader reads no frame; the heartbeat still runs, so the ping timeout still fires. Inbound accept is `inbound_connect_and_handshake` (60 s VERSION/VERACK); timeout drops the `max_inbound` permit. |
+| `peer_session` (split read/write) | Serve getdata. Full-block, compact, and `getblocktxn` reconstruct run on the blocking pool (block-decode permit). Inbound `cmpctblock` reconstruct uses that same permit. `headers` persist and `getheaders` / `getblocks` replies run on the blocking pool under the header-decode permit. The session applies notes, ban, and queued `getdata` after that join. Offers reconstructed blocks to **`tip-accept`** (does **not** take `connect_lock` or run confirm on the tokio worker). A reconstructed/received body whose header has valid PoW and **extends the current tip** is announced as `cmpctblock` to peers who sent `sendcmpct` announce=1 and already have the parent **before** connect (Core `NewPoWValidBlock`). That is not a connected tip. P2P `tx` is `accept_tx_async` (blocking pool). INV / getdata / compact **first-pass** fill use mempool **`try_read` only** (busy write → skip that item; never park). A pending compact owns those clones; `blocktxn` apply does not `try_read` again. Handshake `FeeFilter` reads the **atomic** published fee floor (no `inner`). 50 ms tick: age-INV is a due-log cursor (newly due only); `clock_due` / unbroadcast may full-walk ≤1/30 s. `any_tx_inv_due` is min live `accept_at`, not a map walk. `PeerHub::on_session_heartbeat` (headers-sync stall timeout). While the writer is past the 4 MiB send budget, or a paused `getdata` tail waits for serve room, the reader reads no frame; the heartbeat still runs, so the ping timeout still fires. Inbound accept is `inbound_connect_and_handshake` (60 s VERSION/VERACK); timeout drops the `max_inbound` permit. |
 | `tip-accept` | **One** process-wide OS thread. Queue depth 8. Sole production thread for `accept_block` / `accept_branch` / `accept_received_block` / `generate_to_script` / `connect_lock` at tip. Confirm is **`confirm_wire_run_preverified`** (lookup stamp, load pin/assemble, `confirm_scripts_phase` → `rbtc-scripts-*`, write + `ibd-confirm-head` drain). TLS uring is this thread’s `with_thread_local` session. SIGINT stays on tokio; the current job finishes, then the session sees shutdown. Dropping the session’s join future **detaches** (does not condvar-wait on the worker). |
 | `rbtc-sh-wb` | **One** Class B scripthash appender. Used for tip follow **and** short catch-up when a durable SH head already exists. Confirm enqueues RAM records; `connect_at` / `note_confirmed_tip` **release** after `tip_tx`. This thread `put_create_batch_append` only for released heights, then advances `sh_indexed_through`. Apply errors re-queue and halt. Post-IBD Class A collect uses pack sessions (not a second appender); it runs while still Direct so this thread no-ops. |
 | `rbtc-idx-wb` / `rbtc-idx-cpu` | **One** block index builder for BIP158 basic filters (`--block-filter-index`) and BIP-352 tweaks (`--sp-tweaks`), spawned at tip entry only when an enabled watermark is still behind the tip after startup repair. Live batches append on the confirm write thread; this reader does not walk a chain that was indexed as it connected. Waits on the same release gate as `rbtc-sh-wb` (`index_released_through`). The IO thread plans windows (≤64 heights / ≤50k creates) from the lower index watermark to the released tip and reads each with `read_index_window` on one completion session (locators, block spans, parent locators + P2TR-output `seqsigwit` + parent txids, parent records). One CPU worker, at most two windows behind, publishes one job per height to `rbtc-scripts-*` (filter GCS and tweak EC). That wave claims one height, so a short window still spreads across the pool. The CPU worker commits each index once per window under the index write-behind mutex, only if its watermark and every `confirmed[h]` are unchanged; `disconnect_tip_with` takes that mutex before truncating both. A failed commit (reorg) makes the IO thread re-plan from the watermarks. Apply errors halt the node. |
@@ -121,6 +121,101 @@ cannot pin bitcoind RPC — we can).
 | Not OK | Pause queries during write, MVCC Class C, serving a disconnected hash |
 
 API tokens: [`COMPAT.md`](../COMPAT.md) (Esplora headers, Electrum JSON-RPC extra members, status preimage).
+
+## Wakeups and handoffs
+
+What was checked against lock contention, wasted wakeups, and extra
+handoffs. Each line is fixed or deferred. Tokio's eager driver handoff
+stays off (`tokio_unstable` is not set). There is no second thread pool
+and no environment knob for these choices.
+
+**Fixed.** `wake_steal_workers` (`script_pool.rs`) unparks one parked
+`rbtc-scripts-*` worker per unclaimed steal chunk and per detached job,
+capped by how many workers are parked. A worker is on that idle list only
+while it is not holding a job. The epoch check still runs after the debug
+park delay, so a wave published after the steal check is not missed.
+`steal_publish_wakes_idle_workers` is the pin.
+
+**Fixed.** `serve_getdata_tail` used to call `ChainHub::knows_header` on
+the session worker for every block `getdata`. An unknown hash took
+`get_header_by_hash` there. `serve_getdata_full_block` already
+reconstructs on the blocking pool and returns false when the header or
+the body is missing, so the session check is gone.
+`getdata_block_lookup_stays_off_the_reactor` is the pin.
+
+**Fixed.** A compact tip announcement used to call `block_for_peer` on the
+session inside `on_tip_event`, then build short ids there.
+`cmpct_announce_msg` now does both on the blocking pool, under the
+block-decode permit. A missing body still falls through to a headers
+announcement. High-bandwidth relay of a body already in hand persists that
+header, builds the prefill, and builds those short ids on that pool
+too, and only when a high-bandwidth peer would be offered the block.
+A failed high-bandwidth join is logged and skips that announcement.
+A failed compact tip-announce join still ends that session.
+An unsolicited compact block that does not
+reconstruct yet persists that header path on the header-job pool.
+`cmpct_tip_announce_shortids_run_off_the_reactor`,
+`hb_relay_skips_the_build_when_no_peer_is_offered_it`, and
+`hb_relay_offered_build_runs_off_the_reactor` are the pins.
+
+**Fixed.** The IBD coordinator holds `shared` across the turn, the
+redial apply, and the event drains. A peer split whose height has left
+the download path is compared with the confirmed header only while that
+lock is down. An unplanted header-walk candidate is checked for a
+heavier fork the same way: the header walk runs with the lock down, and
+only the commit takes `shared` again. That commit shares one rewind
+exclusion with the header thread. It runs only when the tip is still the
+block the prepare disconnected to, so a header-thread rewind that already
+moved the tip is left in place. `tip_height`, `has_block`, and
+`block_queue_*` under the lock are RAM. The header thread still reads
+the store (`load_origin`, resume) with the lock dropped around that IO.
+`coord_shared_lock_skips_header_and_store_io`,
+`off_path_split_settles_outside_the_coord_lock`,
+`unplanted_walk_reads_headers_outside_the_coord_lock`, and
+`stale_heavier_rewind_does_not_commit_after_the_tip_moves` are the pins.
+
+**Deferred.** Headers decode and classify are still two blocking joins.
+`decode_framed_offload` drops its permit inside the decode job.
+`on_headers` then takes the header-decode permit in `run_header_job`.
+Fusing them would hold one permit across classify and tie the frame's
+lifetime to `HeadersApply`. The session runs neither piece. One extra
+join is not the stall.
+
+**Deferred.** `queue_getheaders` still builds the locator on the caller
+(`headers_sync_locator` / `locator_from_height`, about ten
+`header_at_height` calls). Callers are the handshake, inv, and a missing
+block parent. The headers-apply path already queues the locator
+`classify_headers` built inside the header job (`queue_headers_locator`).
+A second builder for that short walk is not the fix.
+
+**Deferred.** These session checks are still one hash, not a batch:
+`on_inv_block_needs_headers`, the `on_block` parent check, compact parent
+checks, `header_announcement_connects`, and `stale_relay_allowed` after a
+body was found. `is_connected` is the published height index and does not
+read the header file. The per-item getdata loop was the batch, and that
+moved.
+
+**Deferred.** Mempool accept, Electrum, Esplora, RPC, block decode,
+compact reconstruct, and header jobs share Tokio's blocking pool (nCPU,
+minimum 4). A private pool would be a second pool. RPC can delay a
+reconstruct until one replacement lane exists.
+
+**Fixed.** Each failed async `try_send` on a full tip-accept queue
+increments `FULL_QUEUE_SPINS`, then the sender parks on `Notify`. A yield
+loop keeps moving that counter. `full_lane_parks_instead_of_spinning`
+requires the count to settle in the single digits and stay there for
+40ms. `notify_one` stores one permit when no waiter is registered, so
+each sender that already saw a full queue tries again before it sleeps,
+and a successful async enqueue wakes one more waiter.
+`two_full_senders_both_enqueue` holds the lane inside a job with two
+free slots and requires both senders to enqueue.
+
+**Deferred.** Stack hubs that are not in an `Arc` still use the sync
+wait. The node uses `ChainHub::into_arc`.
+
+**Deferred.** `unpark_script_publisher` wakes every registered scripts
+stage. A process has one (IBD or tip). That is not a pool-sized herd.
+`Wave::notify_if_complete` is the caller.
 
 ## Practical rules
 

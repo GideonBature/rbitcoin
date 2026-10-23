@@ -16,7 +16,7 @@ use rbitcoin_net::seeds::AddrMan;
 use bitcoin::TxMerkleNode;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 fn mine(prev: BlockHash, n: u32) -> Header {
@@ -2034,7 +2034,9 @@ fn two_peers_reserve_the_header_walk() {
         .note_headers(&st.height_to_hash, confirmed, 2, 3, &[w3]);
     st.header_walk.tip.hash = Some(w3.block_hash());
     st.header_walk.tip.height = 3;
-    assert!(rbitcoin_ibd::ibd::reorg::consider_disconnected_heavier(&mut st, &hub7).unwrap());
+    let shared = Mutex::new(st);
+    assert!(rbitcoin_ibd::ibd::reorg::consider_disconnected_heavier(&shared, &hub7).unwrap());
+    let st = shared.into_inner().unwrap_or_else(|err| err.into_inner());
     assert_eq!(st.height_to_hash.get(&1), Some(&w1.block_hash()));
     assert!(
         !may_serve(&st, 17, &w1.block_hash()),

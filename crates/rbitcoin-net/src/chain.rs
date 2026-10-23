@@ -728,6 +728,24 @@ impl ChainHub {
         g.insert(hash);
     }
 
+    /// One in-flight body ask. Connected and held bodies are not claims.
+    /// A hash already asked is not claimed again. The set clears at 4096,
+    /// the same cap as [`Self::note_asked_block`].
+    #[doc(hidden)]
+    pub fn claim_block_ask(&self, hash: &BlockHash) -> bool {
+        if self.is_connected(hash) || self.held_body(hash).is_some() {
+            return false;
+        }
+        let mut g = self.asked_blocks.write().unwrap();
+        if g.contains(hash) {
+            return false;
+        }
+        if g.len() >= 4096 {
+            g.clear();
+        }
+        g.insert(*hash)
+    }
+
     pub fn forget_asked_block(&self, hash: &BlockHash) {
         self.asked_blocks.write().unwrap().remove(hash);
     }
@@ -807,6 +825,9 @@ impl ChainHub {
         if self.tip_hash() != Some(block.header.prev_blockhash) {
             return;
         }
+        // Wtxid membership walks every transaction. Callers on a Tokio worker
+        // enter a blocking region first.
+        crate::reactor::assert_not_reactor("cmpct prefill");
         let hash = block.block_hash();
         {
             let g = self.prefill_plan.lock().expect("prefill plan");
@@ -1642,6 +1663,7 @@ impl ChainHub {
     /// Fail closed: missing parent is the same error as [`Self::ensure_header_fk`].
     /// Output fks align with `headers`.
     pub fn ensure_headers_batch(&self, headers: &[Header]) -> Result<Vec<Fk>, NetError> {
+        crate::reactor::assert_not_reactor("header persist");
         ENSURE_HEADERS_BATCH_N.with(|c| c.set(c.get().saturating_add(1)));
         if headers.is_empty() {
             return Ok(Vec::new());

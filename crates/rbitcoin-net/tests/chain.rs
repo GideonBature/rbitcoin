@@ -53,6 +53,38 @@ fn tmp_hub() -> (rbitcoin_query::testutil::TempDir, ChainHub) {
     rbitcoin_net::chain::tiny_regtest_hub_labeled("chain")
 }
 
+/// Two classifies of one announcement must not both ask. The claim is the
+/// check and the insert under one write lock.
+#[test]
+fn two_threads_claiming_one_block_produce_one_ask() {
+    let (_dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let tip = hub.tip_hash().unwrap();
+    assert!(
+        !hub.claim_block_ask(&tip),
+        "a connected block is not an ask"
+    );
+    let hash = BlockHash::from_byte_array([0x41; 32]);
+    let hub = Arc::new(hub);
+    let start = Arc::new(std::sync::Barrier::new(2));
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let hub = Arc::clone(&hub);
+        let start = Arc::clone(&start);
+        threads.push(std::thread::spawn(move || {
+            start.wait();
+            hub.claim_block_ask(&hash)
+        }));
+    }
+    let wins: usize = threads
+        .into_iter()
+        .map(|t| usize::from(t.join().expect("claim thread")))
+        .sum();
+    assert_eq!(wins, 1, "one claim wins the ask");
+    assert!(hub.already_have_or_asked_block(&hash));
+    assert!(!hub.claim_block_ask(&hash), "the loser stays a loser");
+}
+
 /// A full `block.invalid` drops its oldest hash for a new failure, so the
 /// newest one survives restart.
 #[test]
