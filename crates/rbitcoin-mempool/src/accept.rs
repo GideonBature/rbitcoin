@@ -181,6 +181,9 @@ pub struct AcceptResult {
     /// Accept times of [`Self::replaced_txs`], so a rollback restores each
     /// with its own time.
     pub replaced_accept_secs: std::collections::HashMap<Txid, u64>,
+    /// Replaced txids that were trust-marked. Rollback puts the mark back
+    /// before those bodies are re-admitted.
+    pub replaced_trust: Vec<Txid>,
     /// Txids dropped to free a slot or the weight budget while admitting this tx.
     /// Distinct from [`Self::replaced`]. The admitted tx is not in this list
     /// when the commit succeeds.
@@ -284,6 +287,56 @@ impl From<MempoolError> for AcceptError {
             MempoolError::Full => AcceptError::Policy("mempool full"),
             other => AcceptError::Durable(other.to_string()),
         }
+    }
+}
+
+fn is_trust_tx_fault(err: &AcceptError) -> bool {
+    matches!(
+        err,
+        AcceptError::ImmatureCoinbase | AcceptError::NotFinal | AcceptError::NonBip68Final
+    ) && rbitcoin_consensus::reason_is_warn_and_apply(&err.mempool_reject_reason())
+}
+
+/// Reorg eviction uses the same keep as [`ActiveMempool::evict_nonfinal`].
+pub fn trust_keeps_structural(trust: bool, err: &AcceptError) -> bool {
+    trust && is_trust_tx_fault(err)
+}
+
+fn trust_script_reason(trust: bool, err: &AcceptError) -> Option<String> {
+    let AcceptError::Script(_) = err else {
+        return None;
+    };
+    let reason = err.mempool_reject_reason();
+    if !trust || !rbitcoin_consensus::reason_is_warn_and_apply(&reason) {
+        return None;
+    }
+    Some(reason)
+}
+
+fn push_trust_warn(slot: &mut Option<Vec<String>>, reason: String) {
+    slot.get_or_insert_with(Vec::new).push(reason);
+}
+
+fn warn_trust_tx(applied: bool, txid: Txid, reason: &str) {
+    let verb = if applied { "applied" } else { "not applied" };
+    rbitcoin_log::warn!("trust-peer: {verb} tx {txid}: {reason}");
+}
+
+fn duplicate_inputs(trust: bool, txid: Txid) -> AcceptError {
+    if trust {
+        warn_trust_tx(false, txid, "inputs-duplicate");
+    }
+    AcceptError::InputsDuplicate
+}
+
+fn kept_trust_structural(
+    trust: bool,
+    err: AcceptError,
+) -> Result<Option<AcceptError>, AcceptError> {
+    if trust && is_trust_tx_fault(&err) {
+        Ok(Some(err))
+    } else {
+        Err(err)
     }
 }
 
@@ -423,6 +476,16 @@ pub fn verify_tx_scripts(tx: &Transaction, prevouts: Vec<TxOut>) -> Result<(), A
         .map_err(|e| AcceptError::Script(e.to_string()))
 }
 
+/// Knobs for [`ActiveMempool::prepare_admit`]. One argument so the admit
+/// helper stays within the argument cap.
+#[doc(hidden)]
+pub struct PrepareOpts {
+    pub fee_delta: i64,
+    pub report_orphans: bool,
+    pub min_relay: Option<u64>,
+    pub waive: bool,
+}
+
 /// Result of accept prepare (resolve + policy + structural), before script verify.
 ///
 /// Script runs outside the mempool exclusive lock; [`ActiveMempool::commit_after_script`]
@@ -443,6 +506,19 @@ pub struct PreparedAdmit {
     /// Accept time to persist instead of now. Set when a failed replacement
     /// puts an already-admitted conflict back, so it keeps its own time.
     pub keep_accept_secs: Option<u64>,
+    /// Warn-and-apply faults. Logged only after [`ActiveMempool::finish_commit`]
+    /// inserts the tx. Empty on the flag-off path.
+    pub trust_warn: Option<Vec<String>>,
+    /// This tx was already marked and is being put back. The new slot keeps
+    /// the byte even when this admit itself does not warn.
+    pub keep_mark: bool,
+}
+
+struct AdmitInputs {
+    prevouts: Vec<TxOut>,
+    chain_coins: Vec<Option<Coin>>,
+    input_value: u64,
+    utxo_us: u64,
 }
 
 /// Graph spend edges for one tx (conflicts + mempool parents).
@@ -475,6 +551,8 @@ pub struct IngestedLive {
     pub vin_aux: std::collections::HashMap<Txid, Vec<VinAux>>,
     /// `(txid, wtxid, accept_secs)` per loaded record.
     pub accept_secs: Vec<(Txid, Wtxid, u64)>,
+    /// Txids whose slot trust byte was set.
+    pub trust_kept: HashSet<Txid>,
 }
 
 /// Mempool with RAM TxGraph layered on durable store.
@@ -518,6 +596,10 @@ pub struct ActiveMempool {
     pub node_clock: Arc<AtomicU64>,
     /// Accept times of the records loaded at open, until the hub takes them.
     pub loaded_accept: Vec<(Txid, Wtxid, u64)>,
+    /// Txids a trusted-session admit warned on. Eviction and restore read this.
+    /// A flag-off open removes those transactions and their descendants. A
+    /// removal that does not finish leaves the mark.
+    pub trust_kept: HashSet<Txid>,
 }
 
 /// A parked package member, taken out before admit.
@@ -676,7 +758,86 @@ impl ActiveMempool {
             undone_accept_secs: std::collections::HashMap::new(),
             node_clock: Arc::new(AtomicU64::new(0)),
             loaded_accept: ingested.accept_secs,
+            trust_kept: ingested.trust_kept,
         })
+    }
+
+    /// Drop every LIVE trust slot and its descendants. A flag-off open uses
+    /// this so a warned body is not an ordinary pool transaction.
+    ///
+    /// A slot or a descendant that is still in the graph stays marked, and
+    /// this returns an error before any trust byte is cleared and before
+    /// deaths are synced. A dead slot is not reloaded, so its trust byte can
+    /// stay.
+    pub fn discard_trust_marks(&mut self) -> Result<(), MempoolError> {
+        let marked = self.live_trust_slots();
+        let mut removed = false;
+        for (slot, txid) in marked {
+            let in_graph = self.graph.get(&txid).is_some_and(|e| e.slot == slot);
+            if in_graph {
+                self.unlink_marked_tree(&txid)?;
+            } else {
+                self.store.mark_slot_dead(slot)?;
+            }
+            removed = true;
+        }
+        if self.live_trust_slots().is_empty() {
+            self.trust_kept.clear();
+            if removed {
+                self.store.sync_deaths()?;
+            }
+            return Ok(());
+        }
+        Err(MempoolError::Corrupt("marked tx still live"))
+    }
+
+    /// Unlink descendants, then `txid`. The root stays when a descendant stays.
+    fn unlink_marked_tree(&mut self, txid: &Txid) -> Result<(), MempoolError> {
+        let mut seen = BTreeSet::new();
+        self.unlink_marked_from(txid, &mut seen)
+    }
+
+    fn unlink_marked_from(
+        &mut self,
+        txid: &Txid,
+        seen: &mut BTreeSet<Txid>,
+    ) -> Result<(), MempoolError> {
+        if !seen.insert(*txid) {
+            return Ok(());
+        }
+        let children: Vec<Txid> = self
+            .graph
+            .get(txid)
+            .map(|e| e.children.iter().copied().collect())
+            .unwrap_or_default();
+        for child in children {
+            self.unlink_marked_from(&child, seen)?;
+        }
+        if !self.graph.contains(txid) {
+            return Ok(());
+        }
+        if self.unlink_txid(txid).is_err() || self.graph.contains(txid) {
+            return Err(MempoolError::Corrupt("marked tx still live"));
+        }
+        Ok(())
+    }
+
+    /// LIVE slots whose trust byte is set, in slot order.
+    fn live_trust_slots(&self) -> Vec<(u32, Txid)> {
+        use crate::store::{SLOTS_HEADER, SLOT_LIVE, SLOT_REC};
+        use bitcoin::hashes::Hash;
+
+        let mut out = Vec::new();
+        for slot in 0..self.store.slot_cap {
+            let off = SLOTS_HEADER + (slot as usize) * SLOT_REC;
+            if self.store.slots[off] != SLOT_LIVE || self.store.slots[off + 1] == 0 {
+                continue;
+            }
+            let txid =
+                Txid::from_byte_array(self.store.slots[off + 16..off + 48].try_into().unwrap());
+            out.push((slot, txid));
+        }
+        out
     }
 
     pub fn live_count(&self) -> usize {
@@ -757,6 +918,7 @@ impl ActiveMempool {
         self.graph = ingested.graph;
         self.bodies = ingested.bodies;
         self.vin_aux = ingested.vin_aux;
+        self.trust_kept = ingested.trust_kept;
         self.store.set_live_count(live);
         Ok((live, body_len))
     }
@@ -768,8 +930,12 @@ impl ActiveMempool {
         let mut vin_aux = std::collections::HashMap::new();
         let mut items = Vec::with_capacity(loaded.len());
         let mut accept_secs = Vec::with_capacity(loaded.len());
+        let mut trust_kept = HashSet::new();
         for live in loaded {
             let p = live.packed;
+            if live.trust_kept {
+                trust_kept.insert(p.txid);
+            }
             accept_secs.push((p.txid, p.wtxid, p.accept_secs));
             let tx = Arc::new(p.tx);
             let entry = TxEntry {
@@ -794,6 +960,7 @@ impl ActiveMempool {
             bodies,
             vin_aux,
             accept_secs,
+            trust_kept,
         }
     }
 
@@ -852,7 +1019,19 @@ impl ActiveMempool {
         report_orphans: bool,
         min_relay: Option<u64>,
     ) -> Result<AcceptResult, AcceptError> {
-        let prep = self.prepare_admit(tx, utxos, tip, fee_delta, report_orphans, min_relay)?;
+        // Local `accept_tx` stays strict. The session bit is on the hub admit.
+        let waive = false;
+        let mut prep = self.prepare_admit(
+            tx,
+            utxos,
+            tip,
+            PrepareOpts {
+                fee_delta,
+                report_orphans,
+                min_relay,
+                waive,
+            },
+        )?;
         self.last_accept_stages.utxo_us = prep.utxo_us;
         let t_script = Instant::now();
         let script_res = verify_tx_scripts(tx, prep.prevouts.clone());
@@ -861,8 +1040,13 @@ impl ActiveMempool {
             .script_us
             .saturating_add(t_script.elapsed().as_micros() as u64);
         if let Err(e) = script_res {
-            self.note_accept_failure(tx, &e);
-            return Err(e);
+            match trust_script_reason(waive, &e) {
+                Some(reason) => push_trust_warn(&mut prep.trust_warn, reason),
+                None => {
+                    self.note_accept_failure(tx, &e);
+                    return Err(e);
+                }
+            }
         }
         self.commit_after_script(tx, prep)
     }
@@ -939,10 +1123,14 @@ impl ActiveMempool {
         tx: &Transaction,
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
-        fee_delta: i64,
-        report_orphans: bool,
-        min_relay: Option<u64>,
+        opts: PrepareOpts,
     ) -> Result<PreparedAdmit, AcceptError> {
+        let PrepareOpts {
+            fee_delta,
+            report_orphans,
+            min_relay,
+            waive,
+        } = opts;
         if tx.is_coinbase() {
             return Err(AcceptError::Coinbase);
         }
@@ -972,11 +1160,72 @@ impl ActiveMempool {
             let mut seen = BTreeSet::new();
             for inp in &tx.input {
                 if !seen.insert(inp.previous_output) {
-                    return Err(AcceptError::InputsDuplicate);
+                    return Err(duplicate_inputs(waive, txid));
                 }
             }
         }
 
+        let AdmitInputs {
+            prevouts,
+            chain_coins,
+            input_value,
+            utxo_us,
+        } = self.collect_admit_inputs(tx, txid, utxos, report_orphans)?;
+
+        let trust_structural = match check_mempool_structural(tx, &chain_coins, tip) {
+            Ok(()) => None,
+            Err(err) => kept_trust_structural(waive, err)?,
+        };
+
+        let sigop_cost = block_fit_sigop_cost(tx, &prevouts, self.graph.block_reserved_sigops())?;
+
+        let fee_sat = checked_fee_sat(tx, input_value)?;
+        let weight = tx.weight().to_wu();
+        let admit_fee = (i128::from(fee_sat).saturating_add(i128::from(fee_delta))).max(0) as u64;
+
+        let floor = self.mempool_min_fee_sat_kvb();
+        let min_relay = min_relay.unwrap_or(floor);
+        // Standardness on raw weight; the fee floor on sigop-adjusted vsize.
+        if let PolicyResult::NonStandard(s) =
+            policy::check_libre_admission_at(tx, admit_fee, weight, 0)
+        {
+            return Err(AcceptError::Policy(s));
+        }
+        let adj = sigops_adjusted_weight(weight, sigop_cost, self.graph.bytes_per_sigop());
+        if !policy::meets_min_relay_fee_at(admit_fee, adj, min_relay) {
+            return Err(AcceptError::Policy(if floor > self.min_relay_sat_kvb {
+                "mempool min fee"
+            } else {
+                "min relay fee"
+            }));
+        }
+        let trust_warn = trust_structural
+            .as_ref()
+            .map(|err| vec![err.mempool_reject_reason()]);
+
+        Ok(PreparedAdmit {
+            txid,
+            wtxid,
+            fee_sat,
+            fee_delta,
+            weight,
+            sigop_cost,
+            prevouts,
+            chain_coins,
+            utxo_us,
+            keep_accept_secs: None,
+            trust_warn,
+            keep_mark: false,
+        })
+    }
+
+    fn collect_admit_inputs(
+        &self,
+        tx: &Transaction,
+        txid: Txid,
+        utxos: &impl UtxoProvider,
+        report_orphans: bool,
+    ) -> Result<AdmitInputs, AcceptError> {
         let t_utxo = Instant::now();
         let mut prevouts: Vec<TxOut> = Vec::with_capacity(tx.input.len());
         let mut chain_coins: Vec<Option<Coin>> = Vec::with_capacity(tx.input.len());
@@ -1011,67 +1260,44 @@ impl ActiveMempool {
             chain_coins.push(chain_coin);
         }
         let utxo_us = t_utxo.elapsed().as_micros() as u64;
-
         if !missing_parents.is_empty() {
-            if let Some(op) = first_missing_outpoint(tx, &missing_parents, |op| {
-                self.recent_invalid.contains(&op.txid)
-            }) {
-                return Err(AcceptError::MissingPrevout(op));
-            }
-            if report_orphans {
-                match policy::check_libre_shape(tx, tx.weight().to_wu()) {
-                    policy::PolicyResult::Standard => {}
-                    policy::PolicyResult::NonStandard(s) => return Err(AcceptError::Policy(s)),
-                }
-                return Err(AcceptError::Orphaned {
-                    txid,
-                    missing: missing_parents,
-                    fresh: true,
-                });
-            }
-            return Err(AcceptError::MissingPrevout(
-                first_missing_outpoint(tx, &missing_parents, |_| true)
-                    .expect("missing_parents is built from tx.input"),
-            ));
+            return Err(self.missing_parent_error(tx, txid, missing_parents, report_orphans));
         }
-
-        check_mempool_structural(tx, &chain_coins, tip)?;
-
-        let sigop_cost = block_fit_sigop_cost(tx, &prevouts, self.graph.block_reserved_sigops())?;
-
-        let fee_sat = checked_fee_sat(tx, input_value)?;
-        let weight = tx.weight().to_wu();
-        let admit_fee = (i128::from(fee_sat).saturating_add(i128::from(fee_delta))).max(0) as u64;
-
-        let floor = self.mempool_min_fee_sat_kvb();
-        let min_relay = min_relay.unwrap_or(floor);
-        // Standardness on raw weight; the fee floor on sigop-adjusted vsize.
-        if let PolicyResult::NonStandard(s) =
-            policy::check_libre_admission_at(tx, admit_fee, weight, 0)
-        {
-            return Err(AcceptError::Policy(s));
-        }
-        let adj = sigops_adjusted_weight(weight, sigop_cost, self.graph.bytes_per_sigop());
-        if !policy::meets_min_relay_fee_at(admit_fee, adj, min_relay) {
-            return Err(AcceptError::Policy(if floor > self.min_relay_sat_kvb {
-                "mempool min fee"
-            } else {
-                "min relay fee"
-            }));
-        }
-
-        Ok(PreparedAdmit {
-            txid,
-            wtxid,
-            fee_sat,
-            fee_delta,
-            weight,
-            sigop_cost,
+        Ok(AdmitInputs {
             prevouts,
             chain_coins,
+            input_value,
             utxo_us,
-            keep_accept_secs: None,
         })
+    }
+
+    fn missing_parent_error(
+        &self,
+        tx: &Transaction,
+        txid: Txid,
+        missing_parents: BTreeSet<Txid>,
+        report_orphans: bool,
+    ) -> AcceptError {
+        if let Some(op) = first_missing_outpoint(tx, &missing_parents, |op| {
+            self.recent_invalid.contains(&op.txid)
+        }) {
+            return AcceptError::MissingPrevout(op);
+        }
+        if report_orphans {
+            match policy::check_libre_shape(tx, tx.weight().to_wu()) {
+                policy::PolicyResult::Standard => {}
+                policy::PolicyResult::NonStandard(s) => return AcceptError::Policy(s),
+            }
+            return AcceptError::Orphaned {
+                txid,
+                missing: missing_parents,
+                fresh: true,
+            };
+        }
+        AcceptError::MissingPrevout(
+            first_missing_outpoint(tx, &missing_parents, |_| true)
+                .expect("missing_parents is built from tx.input"),
+        )
     }
 
     /// Park `tx` waiting on `missing` parent txids (from `prepare_admit`).
@@ -1188,6 +1414,13 @@ impl ActiveMempool {
         replaced_scripthashes.dedup();
 
         // Kept until success so a later error can put these bodies back.
+        // `unlink_txid` drops the trust mark. Put it back if this commit
+        // does not finish, so the restore admits the victim again.
+        let kept_conflicts: Vec<Txid> = conflict_set
+            .iter()
+            .copied()
+            .filter(|id| self.trust_kept.contains(id))
+            .collect();
         self.undone_replacements = replaced_txs;
         for c in conflict_set.iter().rev() {
             let _ = self.unlink_txid(c);
@@ -1196,7 +1429,13 @@ impl ActiveMempool {
         let _ = self.store.sync_deaths();
 
         self.last_evicted.clear();
-        let mut evicted = self.ensure_free_slot(Some(txid))?;
+        let mut evicted = match self.ensure_free_slot(Some(txid)) {
+            Ok(evicted) => evicted,
+            Err(e) => {
+                self.trust_kept.extend(kept_conflicts);
+                return Err(e);
+            }
+        };
 
         let aux = Self::vin_aux_from_prep(tx, &prep);
         let accept_secs = prep
@@ -1216,6 +1455,7 @@ impl ActiveMempool {
             Ok(slot) => slot,
             Err(e) => {
                 self.last_evicted = evicted;
+                self.trust_kept.extend(kept_conflicts);
                 return Err(e.into());
             }
         };
@@ -1244,6 +1484,7 @@ impl ActiveMempool {
                 Ok(more) => evicted.extend(more),
                 Err(e) => {
                     self.last_evicted = evicted;
+                    self.trust_kept.extend(kept_conflicts);
                     return Err(e);
                 }
             }
@@ -1252,13 +1493,23 @@ impl ActiveMempool {
         // A lone protected tx stays.
         if trim && !self.graph.contains(&txid) {
             self.last_evicted = evicted;
+            self.trust_kept.extend(kept_conflicts);
             return Err(AcceptError::Policy("mempool full"));
+        }
+        if prep.trust_warn.is_some() || prep.keep_mark {
+            self.trust_kept.insert(txid);
+            self.store.set_slot_trust_kept(slot, true);
         }
         self.last_evicted.clear();
         debug_assert!(
             !evicted.contains(&txid),
             "a successful admit is not in its own eviction set"
         );
+        if let Some(reasons) = &prep.trust_warn {
+            for reason in reasons {
+                rbitcoin_log::warn!("trust-peer: applied tx {txid}: {reason}");
+            }
+        }
         let replaced_txs = std::mem::take(&mut self.undone_replacements);
         let replaced_accept_secs = std::mem::take(&mut self.undone_accept_secs);
 
@@ -1272,6 +1523,7 @@ impl ActiveMempool {
             replaced_scripthashes,
             replaced_txs,
             replaced_accept_secs,
+            replaced_trust: kept_conflicts,
             evicted,
         })
     }
@@ -1294,6 +1546,7 @@ impl ActiveMempool {
             replaced_scripthashes: Vec::new(),
             replaced_txs: Vec::new(),
             replaced_accept_secs: std::collections::HashMap::new(),
+            replaced_trust: Vec::new(),
             evicted: Vec::new(),
         })
     }
@@ -1716,7 +1969,7 @@ impl ActiveMempool {
                 Err(e) => {
                     self.restore_undone(utxos, tip);
                     self.rollback_accepted_package(&accepted, utxos, tip);
-                    for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0) {
+                    for item in self.repark_lifted(&lifted, utxos, tip, &|_| 0, None) {
                         let id = item.tx.compute_txid();
                         match self.accept_tx_with(&item.tx, utxos, tip, 0, true, None) {
                             Ok(r) => {
@@ -1782,6 +2035,7 @@ impl ActiveMempool {
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
         fee_delta: &impl Fn(&Txid) -> i64,
+        trusted: Option<u64>,
     ) -> Vec<LiftedOrphan> {
         let mut ready = Vec::new();
         for item in lifted {
@@ -1790,7 +2044,17 @@ impl ActiveMempool {
                 self.orphanage.forget_taken_gen(&txid, item.taken_gen);
                 continue;
             }
-            match self.prepare_admit(&item.tx, utxos, tip, fee_delta(&txid), true, None) {
+            match self.prepare_admit(
+                &item.tx,
+                utxos,
+                tip,
+                PrepareOpts {
+                    fee_delta: fee_delta(&txid),
+                    report_orphans: true,
+                    min_relay: None,
+                    waive: trusted.is_some_and(|id| item.announcers.contains(&id)),
+                },
+            ) {
                 Err(AcceptError::Orphaned { missing, .. }) => {
                     self.park_announced(&item.tx, missing, &item.announcers);
                 }
@@ -1852,6 +2116,9 @@ impl ActiveMempool {
             .iter()
             .flat_map(|r| r.replaced_accept_secs.iter().map(|(t, s)| (*t, *s)))
             .collect();
+        for id in accepted.iter().flat_map(|r| r.replaced_trust.iter()) {
+            self.trust_kept.insert(*id);
+        }
         for r in accepted.iter().rev() {
             let _ = self.unlink_tree(&r.txid);
         }
@@ -1915,9 +2182,26 @@ impl ActiveMempool {
         utxos: &impl UtxoProvider,
         tip: ChainTipCtx,
     ) -> Result<AcceptResult, AcceptError> {
-        let mut prep = self.prepare_admit(tx, utxos, tip, 0, false, Some(0))?;
+        let waive = self.trust_kept.contains(&tx.compute_txid());
+        let mut prep = self.prepare_admit(
+            tx,
+            utxos,
+            tip,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: false,
+                min_relay: Some(0),
+                waive,
+            },
+        )?;
+        prep.keep_mark = waive;
         prep.keep_accept_secs = accept_secs;
-        verify_tx_scripts(tx, prep.prevouts.clone())?;
+        if let Err(e) = verify_tx_scripts(tx, prep.prevouts.clone()) {
+            match trust_script_reason(waive, &e) {
+                Some(reason) => push_trust_warn(&mut prep.trust_warn, reason),
+                None => return Err(e),
+            }
+        }
         self.commit_after_script(tx, prep)
     }
 
@@ -1941,6 +2225,10 @@ impl ActiveMempool {
                 Err(_) => {
                     if !self.undone_replacements.is_empty() {
                         noted.extend(self.restore_conflicts(utxos, tip, orphans));
+                    }
+                    let id = victims[i].compute_txid();
+                    if !self.graph.contains(&id) {
+                        self.trust_kept.remove(&id);
                     }
                 }
             }
@@ -1986,6 +2274,7 @@ impl ActiveMempool {
         self.graph.remove(txid, &tx);
         self.bodies.remove(txid);
         self.vin_aux.remove(txid);
+        self.trust_kept.remove(txid);
         Ok(())
     }
 
@@ -2314,7 +2603,17 @@ impl ActiveMempool {
                         break;
                     }
                 }
-                if missing_chain || check_mempool_structural(&tx, &chain_coins, tip).is_err() {
+                let structural = check_mempool_structural(&tx, &chain_coins, tip);
+                let keep_fault = structural
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| trust_keeps_structural(self.trust_kept.contains(&id), e));
+                if keep_fault && !missing_chain {
+                    if let Err(e) = &structural {
+                        warn_trust_tx(true, id, &e.mempool_reject_reason());
+                    }
+                }
+                if missing_chain || (structural.is_err() && !keep_fault) {
                     let _ = self.unlink_txid(&id);
                     removed = true;
                 }
@@ -2435,7 +2734,7 @@ impl ActiveMempool {
         delta: impl Fn(Txid) -> i64,
     ) -> Vec<(Arc<Transaction>, Selected)> {
         self.graph
-            .select_block_template(budget, delta)
+            .select_block_template(budget, delta, |id| self.trust_kept.contains(id))
             .into_iter()
             .filter_map(|s| self.bodies.get(&s.txid).map(|tx| (Arc::clone(tx), s)))
             .collect()

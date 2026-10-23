@@ -416,7 +416,17 @@ fn prepare_admit_output_sum_overflow_is_policy_not_panic() {
     };
     let mp = ActiveMempool::open_or_create(&dir).unwrap();
     let err = mp
-        .prepare_admit(&tx, &utxos, TIP_OK, 0, false, None)
+        .prepare_admit(
+            &tx,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: false,
+                min_relay: None,
+                waive: false,
+            },
+        )
         .expect_err("overflowing output sum");
     assert!(
         matches!(err, AcceptError::Policy("bad-txns-txouttotal-toolarge")),
@@ -432,7 +442,17 @@ fn prepare_admit_rejects_negative_fee() {
     let tx = spend_tx(op, 100_001);
     let mp = ActiveMempool::open_or_create(&dir).unwrap();
     let err = mp
-        .prepare_admit(&tx, &utxos, TIP_OK, 0, false, None)
+        .prepare_admit(
+            &tx,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: false,
+                min_relay: None,
+                waive: false,
+            },
+        )
         .expect_err("outputs exceed inputs");
     assert!(matches!(err, AcceptError::Policy("negative fee")));
     let _ = std::fs::remove_dir_all(&dir);
@@ -686,7 +706,17 @@ fn evaluate_after_script_rbf_leaves_conflict() {
     let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
     mp.accept_tx(&low, &utxos, TIP_OK).unwrap();
     let prep = mp
-        .prepare_admit(&high, &utxos, TIP_OK, 0, true, None)
+        .prepare_admit(
+            &high,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: true,
+                min_relay: None,
+                waive: false,
+            },
+        )
         .unwrap();
     let r = mp.evaluate_after_script(&high, prep).expect("preview");
     assert!(r.replaced.contains(&low_id));
@@ -725,7 +755,17 @@ fn evaluate_after_script_enforces_cluster_limits() {
         mp.set_cluster_limits(Some(count), Some(1)); // 1 kvB = 4_000 WU
         mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
         let prep = mp
-            .prepare_admit(child, &utxos, TIP_OK, 0, true, None)
+            .prepare_admit(
+                child,
+                &utxos,
+                TIP_OK,
+                PrepareOpts {
+                    fee_delta: 0,
+                    report_orphans: true,
+                    min_relay: None,
+                    waive: false,
+                },
+            )
             .unwrap();
         mp.evaluate_after_script(child, prep).map(|r| r.txid)
     };
@@ -755,7 +795,17 @@ fn commit_after_script_does_not_take_utxo_provider() {
     let tx = spend_tx(op, 99_000);
     let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
     let prep = mp
-        .prepare_admit(&tx, &utxos, TIP_OK, 0, true, None)
+        .prepare_admit(
+            &tx,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: true,
+                min_relay: None,
+                waive: false,
+            },
+        )
         .unwrap();
     mp.commit_after_script(&tx, prep)
         .expect("commit uses prep.chain_coins");
@@ -770,7 +820,17 @@ fn prepare_admit_stashes_txid() {
     let tx = spend_tx(op, 99_000);
     let mp = ActiveMempool::open_or_create(&dir).unwrap();
     let prep = mp
-        .prepare_admit(&tx, &utxos, TIP_OK, 0, true, None)
+        .prepare_admit(
+            &tx,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: true,
+                min_relay: None,
+                waive: false,
+            },
+        )
         .unwrap();
     assert_eq!(prep.txid, tx.compute_txid());
     assert_eq!(prep.wtxid, tx.compute_wtxid());
@@ -787,7 +847,17 @@ fn commit_after_script_parent_body_missing_is_durable() {
     let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
     mp.accept_tx(&parent, &utxos, TIP_OK).unwrap();
     let prep = mp
-        .prepare_admit(&child, &utxos, TIP_OK, 0, true, None)
+        .prepare_admit(
+            &child,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: true,
+                min_relay: None,
+                waive: false,
+            },
+        )
         .unwrap();
     mp.bodies.remove(&pid);
     let err = mp.commit_after_script(&child, prep).unwrap_err();
@@ -1960,7 +2030,17 @@ fn duplicate_commit_after_prepare_is_duplicate() {
     let tx = spend_tx(op, 90_000);
     let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
     let prep = mp
-        .prepare_admit(&tx, &utxos, TIP_OK, 0, false, None)
+        .prepare_admit(
+            &tx,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: false,
+                min_relay: None,
+                waive: false,
+            },
+        )
         .unwrap();
     mp.accept_tx(&tx, &utxos, TIP_OK).unwrap();
     let err = mp.commit_after_script(&tx, prep).unwrap_err();
@@ -2091,6 +2171,865 @@ fn a_full_pinned_slot_table_evicts_one_chunk_then_stops() {
     assert!(!evict.contains("10_000"));
     assert!(!evict.contains("saturating_add"));
     assert!(!evict.contains("||"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn trust_logs() -> String {
+    rbitcoin_log::take_logs()
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn waive_opts() -> PrepareOpts {
+    PrepareOpts {
+        fee_delta: 0,
+        report_orphans: true,
+        min_relay: None,
+        waive: true,
+    }
+}
+
+/// The session bit is `PrepareOpts::waive`. Script faults are stashed the
+/// same way `accept_tx_with` stashes them, then logged only after commit.
+fn prepare_waived(
+    mp: &ActiveMempool,
+    tx: &Transaction,
+    utxos: &MapUtxoProvider,
+    tip: ChainTipCtx,
+) -> Result<PreparedAdmit, AcceptError> {
+    let mut prep = mp.prepare_admit(tx, utxos, tip, waive_opts())?;
+    if let Err(e) = verify_tx_scripts(tx, prep.prevouts.clone()) {
+        let reason = e.mempool_reject_reason();
+        if !rbitcoin_consensus::reason_is_warn_and_apply(&reason) {
+            return Err(e);
+        }
+        prep.trust_warn.get_or_insert_with(Vec::new).push(reason);
+    }
+    Ok(prep)
+}
+
+fn admit_waived(
+    mp: &mut ActiveMempool,
+    tx: &Transaction,
+    utxos: &MapUtxoProvider,
+    tip: ChainTipCtx,
+) -> Result<AcceptResult, AcceptError> {
+    let prep = prepare_waived(mp, tx, utxos, tip)?;
+    mp.commit_after_script(tx, prep)
+}
+
+/// A failed replacement puts a warned tx back. Reopening with the mode off
+/// drops the mark, so the next non-final eviction removes the tx.
+#[test]
+fn trust_kept_survives_failed_replacement_and_restart() {
+    let dir = tmp_dir();
+    let op = OutPoint {
+        txid: Txid::from_byte_array([0x61; 32]),
+        vout: 0,
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        op,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }),
+    );
+    let utxos = MapUtxoProvider { map };
+    let mut victim = spend_tx(op, 99_000);
+    victim.lock_time = LockTime::from_height(500).unwrap();
+    victim.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let tip = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &victim, &utxos, tip)
+        .expect("nonfinal")
+        .txid;
+    assert!(mp.trust_kept.contains(&id));
+
+    mp.store.fail_next_append = true;
+    let err = mp
+        .accept_tx(&spend_tx(op, 90_000), &utxos, tip)
+        .expect_err("replacement insert fails");
+    assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
+    assert!(
+        mp.graph.contains(&id),
+        "failed replacement dropped the warned tx"
+    );
+    assert!(mp.trust_kept.contains(&id), "trust mark was not restored");
+    mp.evict_nonfinal(&utxos, tip);
+    assert!(mp.graph.contains(&id), "evict dropped the restored tx");
+
+    mp.flush().unwrap();
+    drop(mp);
+    let mut again = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(
+        again.trust_kept.contains(&id),
+        "flag-on open keeps the mark"
+    );
+    again.discard_trust_marks().unwrap();
+    drop(again);
+    let mut off = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(
+        !off.trust_kept.contains(&id),
+        "flag-off reopen reloaded the mark"
+    );
+    off.evict_nonfinal(&utxos, tip);
+    assert!(
+        !off.graph.contains(&id),
+        "eviction after a flag-off reopen kept the tx"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A script-invalid tx is not put back once the mode is off.
+#[test]
+fn review_trust_flag_off_does_not_restore_bad_script() {
+    use bitcoin::WPubkeyHash;
+
+    let dir = tmp_dir();
+    let wpkh = WPubkeyHash::from_byte_array([0x21; 20]);
+    let op = OutPoint {
+        txid: Txid::from_byte_array([0x62; 32]),
+        vout: 0,
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        op,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new_p2wpkh(&wpkh),
+        }),
+    );
+    let utxos = MapUtxoProvider { map };
+    let mut bad = spend_tx(op, 99_000);
+    bad.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &bad, &utxos, TIP_OK)
+        .expect("script warns")
+        .txid;
+    assert!(mp.trust_kept.contains(&id));
+    let child = spend_tx(OutPoint { txid: id, vout: 0 }, 80_000);
+    let child_id = mp
+        .accept_tx(&child, &utxos, TIP_OK)
+        .expect("child of marked")
+        .txid;
+    mp.flush().unwrap();
+    drop(mp);
+    let mut again = ActiveMempool::open_or_create(&dir).unwrap();
+    again.discard_trust_marks().unwrap();
+    assert!(!again.graph.contains(&id), "discard left the marked body");
+    assert!(
+        !again.graph.contains(&child_id),
+        "discard left a descendant"
+    );
+    assert!(!again.trust_kept.contains(&id));
+    drop(again);
+    let mut off = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(!off.graph.contains(&id), "flag-off open reloaded the body");
+    assert!(!off.graph.contains(&child_id));
+    assert!(!off.trust_kept.contains(&id));
+    let picked = off.select_block_template(off.template_budget(0), |_| 0);
+    assert!(
+        picked
+            .iter()
+            .all(|(_, s)| s.txid != id && s.txid != child_id),
+        "a dropped tx was selected"
+    );
+    let err = off.accept_tx(&bad, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(err, AcceptError::Script(_)), "{err}");
+    assert!(!off.graph.contains(&id));
+    assert!(!off.trust_kept.contains(&id), "absent tx still marked");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A missing body makes unlink fail. The mark stays, and a reopen does not
+/// load the body as an ordinary pool transaction.
+#[test]
+fn review_trust_flag_off_unlink_failure_keeps_the_mark() {
+    use bitcoin::WPubkeyHash;
+
+    let dir = tmp_dir();
+    let wpkh = WPubkeyHash::from_byte_array([0x31; 20]);
+    let op = OutPoint {
+        txid: Txid::from_byte_array([0x63; 32]),
+        vout: 0,
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        op,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new_p2wpkh(&wpkh),
+        }),
+    );
+    let utxos = MapUtxoProvider { map };
+    let mut bad = spend_tx(op, 99_000);
+    bad.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &bad, &utxos, TIP_OK)
+        .expect("script warns")
+        .txid;
+    mp.flush().unwrap();
+    mp.bodies.remove(&id);
+    let err = mp.discard_trust_marks().unwrap_err();
+    assert!(
+        mp.trust_kept.contains(&id),
+        "failed removal cleared the mark: {err}"
+    );
+    assert!(mp.graph.contains(&id), "failed removal dropped the entry");
+    drop(mp);
+    let off = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(off.trust_kept.contains(&id), "reopen lost the mark");
+    let picked = off.select_block_template(off.template_budget(0), |_| 0);
+    assert!(
+        picked.iter().all(|(_, s)| s.txid != id),
+        "a marked body was selected"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A missing child body fails before the parent is unlinked. The mark stays,
+/// the child stays in the graph, and the parent's death is not synced.
+#[test]
+fn review_trust_flag_off_child_unlink_keeps_the_mark() {
+    use bitcoin::WPubkeyHash;
+
+    let dir = tmp_dir();
+    let wpkh = WPubkeyHash::from_byte_array([0x33; 20]);
+    let op = OutPoint {
+        txid: Txid::from_byte_array([0x65; 32]),
+        vout: 0,
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        op,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new_p2wpkh(&wpkh),
+        }),
+    );
+    let utxos = MapUtxoProvider { map };
+    let mut bad = spend_tx(op, 99_000);
+    bad.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &bad, &utxos, TIP_OK)
+        .expect("script warns")
+        .txid;
+    let child = spend_tx(OutPoint { txid: id, vout: 0 }, 80_000);
+    let child_id = mp
+        .accept_tx(&child, &utxos, TIP_OK)
+        .expect("child of marked")
+        .txid;
+    mp.flush().unwrap();
+    let syncs = mp.death_sync_counts();
+    mp.bodies.remove(&child_id);
+    let err = mp.discard_trust_marks().unwrap_err();
+    assert!(
+        mp.trust_kept.contains(&id),
+        "failed child removal cleared the mark: {err}"
+    );
+    assert!(
+        mp.graph.contains(&id),
+        "failed child removal dropped the parent"
+    );
+    assert!(
+        mp.graph.contains(&child_id),
+        "failed child removal dropped the child"
+    );
+    assert_eq!(
+        mp.death_sync_counts(),
+        syncs,
+        "a failed discard synced deaths"
+    );
+    drop(mp);
+    let off = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(off.trust_kept.contains(&id), "reopen lost the parent mark");
+    assert!(off.graph.contains(&child_id), "reopen lost the child");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two LIVE slots for one warned txid. Flag-off open must not leave the
+/// leftover slot as an unmarked body a template can select.
+#[test]
+fn review_trust_flag_off_duplicate_live_slot_is_not_ordinary() {
+    use bitcoin::WPubkeyHash;
+
+    let dir = tmp_dir();
+    let wpkh = WPubkeyHash::from_byte_array([0x32; 20]);
+    let op = OutPoint {
+        txid: Txid::from_byte_array([0x64; 32]),
+        vout: 0,
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        op,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new_p2wpkh(&wpkh),
+        }),
+    );
+    let utxos = MapUtxoProvider { map };
+    let mut bad = spend_tx(op, 99_000);
+    bad.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &bad, &utxos, TIP_OK)
+        .expect("script warns")
+        .txid;
+    mp.flush().unwrap();
+    duplicate_live_trust_slot(&mut mp);
+    mp.flush().unwrap();
+    drop(mp);
+    let mut again = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(again.graph.contains(&id));
+    assert!(again.trust_kept.contains(&id));
+    again.discard_trust_marks().unwrap();
+    drop(again);
+    let off = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(!off.graph.contains(&id), "duplicate slot reloaded the body");
+    assert!(!off.trust_kept.contains(&id));
+    let picked = off.select_block_template(off.template_budget(0), |_| 0);
+    assert!(
+        picked.iter().all(|(_, s)| s.txid != id),
+        "an unmarked leftover was selected"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Copy one LIVE trust slot onto a free index. The node never writes this.
+fn duplicate_live_trust_slot(mp: &mut ActiveMempool) {
+    use rbitcoin_mempool::store::{SLOTS_HEADER, SLOT_FREE, SLOT_LIVE, SLOT_REC};
+
+    let cap = mp.store.slot_cap as usize;
+    let mut src = None;
+    let mut dst = None;
+    for slot in 0..cap {
+        let off = SLOTS_HEADER + slot * SLOT_REC;
+        match mp.store.slots[off] {
+            SLOT_LIVE if src.is_none() => src = Some(off),
+            SLOT_FREE if dst.is_none() => dst = Some(off),
+            _ => {}
+        }
+    }
+    let src = src.expect("live slot");
+    let dst = dst.expect("free slot");
+    let rec = mp.store.slots[src..src + SLOT_REC].to_vec();
+    mp.store.slots[dst..dst + SLOT_REC].copy_from_slice(&rec);
+    mp.store.set_live_count(mp.store.live_count + 1);
+}
+
+/// A waived admit that does not warn is not marked. A later low tip evicts it,
+/// and a restart does not bring the mark back.
+#[test]
+fn review_trust_clean_admit_is_not_marked() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(100_000);
+    let mut tx = spend_tx(op, 99_000);
+    tx.lock_time = LockTime::from_height(500).unwrap();
+    tx.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let low = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &tx, &utxos, TIP_OK)
+        .expect("final at TIP_OK")
+        .txid;
+    assert!(!mp.trust_kept.contains(&id), "a clean admit was marked");
+    mp.evict_nonfinal(&utxos, low);
+    assert!(!mp.graph.contains(&id));
+    mp.flush().unwrap();
+    drop(mp);
+    let mut again = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(!again.trust_kept.contains(&id));
+    again.evict_nonfinal(&utxos, low);
+    assert!(!again.graph.contains(&id));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A warned tx put back while it is currently valid keeps the slot byte.
+#[test]
+fn review_trust_restored_mark_survives_restart() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(100_000);
+    let mut tx = spend_tx(op, 99_000);
+    tx.lock_time = LockTime::from_height(500).unwrap();
+    tx.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let low = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &tx, &utxos, low)
+        .expect("nonfinal")
+        .txid;
+    assert!(mp.trust_kept.contains(&id));
+    mp.store.fail_next_append = true;
+    let err = mp
+        .accept_tx(&spend_tx(op, 90_000), &utxos, TIP_OK)
+        .expect_err("replacement insert fails");
+    assert!(matches!(err, AcceptError::Policy("mempool full")), "{err}");
+    assert!(mp.graph.contains(&id));
+    assert!(mp.trust_kept.contains(&id));
+    mp.flush().unwrap();
+    drop(mp);
+    let mut again = ActiveMempool::open_or_create(&dir).unwrap();
+    assert!(again.trust_kept.contains(&id), "restart dropped the mark");
+    again.evict_nonfinal(&utxos, low);
+    assert!(
+        again.graph.contains(&id),
+        "eviction after restart dropped the warned tx"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A package that fails after replacing a warned tx puts that tx back marked.
+#[test]
+fn review_trust_package_rollback_keeps_warned_victim() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(100_000);
+    let mut tx = spend_tx(op, 99_000);
+    tx.lock_time = LockTime::from_height(500).unwrap();
+    tx.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let low = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &tx, &utxos, low)
+        .expect("nonfinal")
+        .txid;
+    let replacement = spend_tx(op, 90_000);
+    let mut child = spend_tx(
+        OutPoint {
+            txid: replacement.compute_txid(),
+            vout: 0,
+        },
+        80_000,
+    );
+    child.lock_time = LockTime::from_height(500).unwrap();
+    child.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let err = mp
+        .accept_package(&[replacement.clone(), child], &utxos, low)
+        .unwrap_err();
+    assert!(matches!(err, AcceptError::NotFinal), "{err}");
+    assert!(!mp.graph.contains(&replacement.compute_txid()));
+    assert!(
+        mp.graph.contains(&id),
+        "failed package lost the warned victim"
+    );
+    assert!(mp.trust_kept.contains(&id));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A victim that cannot be put back does not keep its mark.
+#[test]
+fn review_trust_failed_restore_drops_mark() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(100_000);
+    let mut tx = spend_tx(op, 99_000);
+    tx.lock_time = LockTime::from_height(500).unwrap();
+    tx.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let low = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let id = admit_waived(&mut mp, &tx, &utxos, low)
+        .expect("nonfinal")
+        .txid;
+    let replacement = spend_tx(op, 90_000);
+    let prep = mp
+        .prepare_admit(
+            &replacement,
+            &utxos,
+            TIP_OK,
+            PrepareOpts {
+                fee_delta: 0,
+                report_orphans: false,
+                min_relay: Some(0),
+                waive: false,
+            },
+        )
+        .expect("replacement prepares");
+    mp.store.fail_next_append = true;
+    assert!(mp.commit_after_script(&replacement, prep).is_err());
+    let empty = MapUtxoProvider {
+        map: HashMap::new(),
+    };
+    mp.restore_undone(&empty, low);
+    assert!(!mp.graph.contains(&id));
+    assert!(!mp.trust_kept.contains(&id), "absent tx still marked");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A marked tx is not mined, and neither is a child that needs it.
+/// A clean tx in the same pool still is.
+#[test]
+fn review_trust_template_skips_marked_chunk() {
+    let dir = tmp_dir();
+    let (ops, utxos) = chain_coins(&[100_000, 100_000]);
+    let clean = spend_tx(ops[0], 90_000);
+    let mut bad = spend_tx(ops[1], 90_000);
+    bad.lock_time = LockTime::from_height(500).unwrap();
+    bad.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let low = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let clean_id = mp.accept_tx(&clean, &utxos, TIP_OK).expect("clean").txid;
+    let bad_id = admit_waived(&mut mp, &bad, &utxos, low)
+        .expect("nonfinal")
+        .txid;
+    assert!(mp.trust_kept.contains(&bad_id));
+    let child = spend_tx(
+        OutPoint {
+            txid: bad_id,
+            vout: 0,
+        },
+        80_000,
+    );
+    let child_id = mp
+        .accept_tx(&child, &utxos, TIP_OK)
+        .expect("child of marked")
+        .txid;
+    let picked = mp.select_block_template(mp.template_budget(0), |_| 0);
+    let ids: Vec<_> = picked.iter().map(|(_, s)| s.txid).collect();
+    assert!(ids.contains(&clean_id), "clean tx was skipped");
+    assert!(!ids.contains(&bad_id), "marked tx was selected");
+    assert!(
+        !ids.contains(&child_id),
+        "child of a marked tx was selected"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Script, non-final, immature, and BIP68 faults admit when the session
+/// waive bit is set, and stay through non-final eviction. `accept_tx` stays
+/// strict even when the process flag is on. Policy and a missing parent drop.
+#[test]
+fn trust_peer_admit_keeps_fee_and_skips_evict() {
+    use bitcoin::WPubkeyHash;
+
+    let dir = tmp_dir();
+    let wpkh = WPubkeyHash::from_byte_array([0x11; 20]);
+    let spk = ScriptBuf::new_p2wpkh(&wpkh);
+    let op = OutPoint {
+        txid: Txid::from_byte_array([0xab; 32]),
+        vout: 0,
+    };
+    let txout = TxOut {
+        value: Amount::from_sat(100_000),
+        script_pubkey: spk,
+    };
+    let mut map = HashMap::new();
+    map.insert(op, coin(txout));
+    let utxos = MapUtxoProvider { map };
+    let mut parent = spend_tx(op, 99_000);
+    parent.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+
+    rbitcoin_log::capture_logs(false);
+    rbitcoin_log::capture_logs(true);
+    let off = mp.accept_tx(&parent, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(off, AcceptError::Script(_)), "{off}");
+    assert_eq!(mp.live_count(), 0);
+    let off_log = trust_logs();
+    assert!(!off_log.contains("trust-peer:"), "{off_log}");
+
+    rbitcoin_log::capture_logs(true);
+    let local = mp.accept_tx(&parent, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(local, AcceptError::Script(_)), "{local}");
+    assert_eq!(mp.live_count(), 0);
+    let local_log = trust_logs();
+    assert!(!local_log.contains("trust-peer:"), "{local_log}");
+
+    rbitcoin_log::capture_logs(true);
+    let got = admit_waived(&mut mp, &parent, &utxos, TIP_OK).expect("script warns");
+    assert_eq!(got.fee_sat, 1_000);
+    let parent_id = parent.compute_txid();
+    let entry = mp.graph.get(&parent_id).expect("stored");
+    assert_eq!(entry.fee_sat, 1_000);
+    let on = trust_logs();
+    assert!(
+        on.contains(&format!("trust-peer: applied tx {parent_id}:")),
+        "{on}"
+    );
+    assert!(on.contains("script verification"), "{on}");
+
+    let child = spend_tx(
+        OutPoint {
+            txid: parent_id,
+            vout: 0,
+        },
+        98_000,
+    );
+    let child_got = mp.accept_tx(&child, &utxos, TIP_OK).expect("child");
+    assert_eq!(child_got.fee_sat, 1_000);
+    let child_id = child.compute_txid();
+    assert!(mp
+        .graph
+        .get(&child_id)
+        .expect("child stored")
+        .parents
+        .contains(&parent_id));
+
+    let mut dusty = spend_tx(op, 0);
+    dusty.lock_time = LockTime::from_height(500).unwrap();
+    dusty.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    dusty.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51]);
+    rbitcoin_log::capture_logs(true);
+    let policy = mp.accept_tx(&dusty, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(policy, AcceptError::Policy("dust")), "{policy}");
+    let policy_log = trust_logs();
+    assert!(!policy_log.contains("trust-peer:"), "{policy_log}");
+
+    let (nf_id, op_n, nutxos) = waived_lock_faults_stay(&mut mp);
+    rbitcoin_log::capture_logs(false);
+    rbitcoin_log::capture_logs(true);
+    mp.evict_nonfinal(
+        &MapUtxoProvider {
+            map: HashMap::new(),
+        },
+        ChainTipCtx {
+            height: 100,
+            mtp: u32::MAX,
+        },
+    );
+    assert!(!mp.graph.contains(&nf_id), "a missing parent still leaves");
+    let gone = trust_logs();
+    assert!(!gone.contains("trust-peer:"), "{gone}");
+    assert_duplicate_inputs_not_applied(&mut mp, &nutxos, op_n);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Non-final, immature, and BIP68 admits stay through eviction.
+fn waived_lock_faults_stay(mp: &mut ActiveMempool) -> (Txid, OutPoint, MapUtxoProvider) {
+    let op_n = OutPoint {
+        txid: Txid::from_byte_array([0x22; 32]),
+        vout: 0,
+    };
+    let mut nmap = HashMap::new();
+    nmap.insert(
+        op_n,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }),
+    );
+    let nutxos = MapUtxoProvider { map: nmap };
+    let mut nonfinal = spend_tx(op_n, 99_000);
+    nonfinal.lock_time = LockTime::from_height(500).unwrap();
+    nonfinal.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let tip = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    rbitcoin_log::capture_logs(true);
+    let nf = admit_waived(mp, &nonfinal, &nutxos, tip).expect("nonfinal");
+    let nf_id = nonfinal.compute_txid();
+    assert_eq!(nf.fee_sat, 1_000);
+    let nf_log = trust_logs();
+    assert!(
+        nf_log.contains(&format!("trust-peer: applied tx {nf_id}:")),
+        "{nf_log}"
+    );
+    assert!(nf_log.contains("not final"), "{nf_log}");
+    mp.evict_nonfinal(&nutxos, tip);
+    assert!(mp.graph.contains(&nf_id), "evict keeps the warned fault");
+
+    let op_i = OutPoint {
+        txid: Txid::from_byte_array([0x33; 32]),
+        vout: 0,
+    };
+    let mut imap = HashMap::new();
+    imap.insert(
+        op_i,
+        Coin {
+            txout: TxOut {
+                value: Amount::from_sat(50_0000_0000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            create_height: 50,
+            create_mtp: 0,
+            is_coinbase: true,
+            create_fk: None,
+        },
+    );
+    let iutxos = MapUtxoProvider { map: imap };
+    let immature = spend_tx(op_i, 49_0000_0000);
+    admit_waived(mp, &immature, &iutxos, tip).expect("immature");
+    let im_id = immature.compute_txid();
+    mp.evict_nonfinal(&iutxos, tip);
+    assert!(mp.graph.contains(&im_id));
+
+    let op_b = OutPoint {
+        txid: Txid::from_byte_array([0x44; 32]),
+        vout: 0,
+    };
+    let mut bmap = HashMap::new();
+    bmap.insert(
+        op_b,
+        Coin {
+            txout: TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            create_height: 10,
+            create_mtp: 1_000_000,
+            is_coinbase: false,
+            create_fk: None,
+        },
+    );
+    let butxos = MapUtxoProvider { map: bmap };
+    let mut bip68 = spend_tx(op_b, 49_000);
+    bip68.version = Version::TWO;
+    bip68.input[0].sequence = Sequence::from_consensus((1 << 22) | 2);
+    let btip = ChainTipCtx {
+        height: 20,
+        mtp: 1_001_000,
+    };
+    admit_waived(mp, &bip68, &butxos, btip).expect("bip68");
+    let b_id = bip68.compute_txid();
+    mp.evict_nonfinal(&butxos, btip);
+    assert!(mp.graph.contains(&b_id));
+    (nf_id, op_n, nutxos)
+}
+
+fn assert_duplicate_inputs_not_applied(
+    mp: &mut ActiveMempool,
+    utxos: &MapUtxoProvider,
+    op: OutPoint,
+) {
+    let mut dup = spend_tx(op, 50_000);
+    dup.input.push(dup.input[0].clone());
+    rbitcoin_log::capture_logs(true);
+    let dup_err = mp.accept_tx(&dup, utxos, TIP_OK).unwrap_err();
+    assert!(matches!(dup_err, AcceptError::InputsDuplicate), "{dup_err}");
+    let dup_id = dup.compute_txid();
+    let local_log = trust_logs();
+    assert!(!local_log.contains("trust-peer:"), "{local_log}");
+    rbitcoin_log::capture_logs(true);
+    let waived = mp
+        .prepare_admit(&dup, utxos, TIP_OK, waive_opts())
+        .unwrap_err();
+    assert!(matches!(waived, AcceptError::InputsDuplicate), "{waived}");
+    let dup_log = trust_logs();
+    assert!(
+        dup_log.contains(&format!("trust-peer: not applied tx {dup_id}:")),
+        "{dup_log}"
+    );
+    assert!(dup_log.contains("inputs-duplicate"), "{dup_log}");
+    assert!(!mp.graph.contains(&dup_id));
+}
+
+/// `repark_lifted` is a local retry. The process flag does not waive it.
+#[test]
+fn review_trust_repark_does_not_use_process_bit() {
+    let dir = tmp_dir();
+    let (op, _, utxos) = chain_utxo(100_000);
+    let mut tx = spend_tx(op, 99_000);
+    tx.lock_time = LockTime::from_height(500).unwrap();
+    tx.input[0].sequence = Sequence::from_consensus(0xfffffffe);
+    let tip = ChainTipCtx {
+        height: 100,
+        mtp: u32::MAX,
+    };
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+    let lifted = LiftedOrphan {
+        tx: tx.clone(),
+        announcers: vec![1],
+        taken_gen: 0,
+    };
+    rbitcoin_log::capture_logs(false);
+    rbitcoin_log::capture_logs(true);
+    let ready = mp.repark_lifted(std::slice::from_ref(&lifted), &utxos, tip, &|_| 0, None);
+    assert!(ready.is_empty(), "a local non-final orphan is not ready");
+    assert!(!mp.graph.contains(&tx.compute_txid()));
+    let logs = trust_logs();
+    assert!(!logs.contains("trust-peer:"), "{logs}");
+    rbitcoin_log::capture_logs(false);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A waived script is logged only after the tx is in the pool. A script
+/// fault that then loses the cluster limit logs nothing and stays out.
+#[test]
+fn review_trust_applied_tx_logs_after_commit() {
+    use bitcoin::WPubkeyHash;
+
+    let dir = tmp_dir();
+    let wpkh = WPubkeyHash::from_byte_array([0x11; 20]);
+    let spk = ScriptBuf::new_p2wpkh(&wpkh);
+    let op = OutPoint {
+        txid: Txid::from_byte_array([0xab; 32]),
+        vout: 0,
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        op,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: spk,
+        }),
+    );
+    let utxos = MapUtxoProvider { map };
+    let mut bad = spend_tx(op, 99_000);
+    bad.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let mut mp = ActiveMempool::open_or_create(&dir).unwrap();
+
+    rbitcoin_log::capture_logs(false);
+    rbitcoin_log::capture_logs(true);
+    let local = mp.accept_tx(&bad, &utxos, TIP_OK).unwrap_err();
+    assert!(matches!(local, AcceptError::Script(_)), "{local}");
+    assert!(!mp.graph.contains(&bad.compute_txid()));
+    let local_log = trust_logs();
+    assert!(!local_log.contains("trust-peer:"), "{local_log}");
+
+    rbitcoin_log::capture_logs(true);
+    let got = admit_waived(&mut mp, &bad, &utxos, TIP_OK).expect("script warns");
+    let txid = bad.compute_txid();
+    assert_eq!(got.txid, txid);
+    assert!(mp.graph.contains(&txid));
+    let on = trust_logs();
+    let needle = format!("trust-peer: applied tx {txid}:");
+    assert_eq!(on.matches(&needle).count(), 1, "{on}");
+    assert!(on.contains("script verification"), "{on}");
+
+    let op2 = OutPoint {
+        txid: Txid::from_byte_array([0xcd; 32]),
+        vout: 0,
+    };
+    let mut map2 = HashMap::new();
+    map2.insert(
+        op2,
+        coin(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new_p2wpkh(&wpkh),
+        }),
+    );
+    let utxos2 = MapUtxoProvider { map: map2 };
+    let mut crowded = spend_tx(op2, 99_000);
+    crowded.input[0].witness = Witness::from_slice(&[vec![0x01]]);
+    let prep = prepare_waived(&mp, &crowded, &utxos2, TIP_OK).expect("script stashed");
+    assert!(prep.trust_warn.is_some());
+    mp.set_cluster_limits(None, Some(0));
+    rbitcoin_log::capture_logs(true);
+    let err = mp.commit_after_script(&crowded, prep).unwrap_err();
+    assert!(matches!(err, AcceptError::ClusterTooLarge { .. }), "{err}");
+    let crowded_id = crowded.compute_txid();
+    assert!(!mp.graph.contains(&crowded_id));
+    let lost = trust_logs();
+    assert!(
+        !lost.contains("trust-peer:"),
+        "a waived script that does not commit must not log: {lost}"
+    );
+    rbitcoin_log::capture_logs(false);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -16,8 +16,8 @@ use rbitcoin_mempool::{
     fee_at_target_sat_kvb, fine_candidate_rates, flow_for_depth, frontier_feerate_from_chunks,
     hold_defined_then_monotone, min_rate_for_capacity, percentile_sat, published_depth_rate,
     weight_above_from_chunks, AcceptError, AcceptResult, ActiveMempool, ChainPrevout, ChainTipCtx,
-    Chunk, Coin, FeeFlowMeter, SelectBudget, Selected, StockAbove, UtxoProvider, BLOCK_WEIGHT_WU,
-    MAX_PACKAGE_COUNT,
+    Chunk, Coin, FeeFlowMeter, PrepareOpts, SelectBudget, Selected, StockAbove, UtxoProvider,
+    BLOCK_WEIGHT_WU, MAX_PACKAGE_COUNT,
 };
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
@@ -2074,9 +2074,12 @@ impl MempoolHub {
                 tx,
                 utxo,
                 tip,
-                spec.fee_delta,
-                spec.report_orphans,
-                spec.min_relay,
+                PrepareOpts {
+                    fee_delta: spec.fee_delta,
+                    report_orphans: spec.report_orphans,
+                    min_relay: spec.min_relay,
+                    waive: false,
+                },
             )
         };
         if spec.time_prepare_lock {
@@ -2483,9 +2486,13 @@ impl MempoolHub {
         let deltas = self.prioritised_txs();
         let ready = {
             let mut g = self.lock_write();
-            g.repark_lifted(lifted, &utxo, tip, &|id| {
-                deltas.get(id).copied().unwrap_or(0)
-            })
+            g.repark_lifted(
+                lifted,
+                &utxo,
+                tip,
+                &|id| deltas.get(id).copied().unwrap_or(0),
+                None,
+            )
         };
         for item in ready {
             let id = item.tx.compute_txid();
@@ -4206,6 +4213,7 @@ impl MempoolHub {
             replaced_scripthashes: Vec::new(),
             replaced_txs: Vec::new(),
             replaced_accept_secs: Default::default(),
+            replaced_trust: Vec::new(),
             evicted: Vec::new(),
         })
     }
