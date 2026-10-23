@@ -2,8 +2,10 @@
 # Time-boxed workspace mutants. New lines since the cursor first, then a
 # rotating backlog. One job spends the first half of its budget on new
 # mutants when both queues still have work, then the backlog. A later job
-# in the same night does not open another new window. MISSED is written
-# for humans; it does not fail the run.
+# in the same night does not open another new window. When the backlog
+# walk finishes, both cursors reset at HEAD and the full list is the next
+# backlog; the job keeps walking that list for whatever budget remains.
+# MISSED is written for humans; it does not fail the run.
 # Owner: TESTING.md (Mutation testing).
 set -euo pipefail
 
@@ -74,6 +76,8 @@ echo "mutants-nightly: new=$n_new skip=$new_skip old=$n_old index=$old_index bud
 : >"$OUT/missed.txt"
 : >"$OUT/ran.txt"
 completed_total=0
+completed_new=0
+completed_old=0
 
 new_len="$(grep -c . "$OUT/new.txt" || true)"
 old_len="$(grep -c . "$OUT/old.txt" || true)"
@@ -149,8 +153,10 @@ while ((SECONDS < deadline)); do
   fi
   if [[ "$side" == "new" ]]; then
     new_off=$((new_off + step))
+    completed_new=$((completed_new + step))
   else
     old_off=$((old_off + step))
+    completed_old=$((completed_old + step))
   fi
   now=$((SECONDS - start))
   python3 "$ROOT/scripts/mutants_queue.py" advance-side \
@@ -160,6 +166,19 @@ while ((SECONDS < deadline)); do
     --elapsed "$now" --budget "$BUDGET_SEC" \
     --new-left "$((new_len - new_off))" --old-left "$((old_len - old_off))"
   completed_total=$((completed_total + step))
+  if ((old_len > 0 && old_off >= old_len)); then
+    echo "mutants-nightly: backlog finished; fresh backlog at ${head_sha}"
+    read -r n_new n_old < <(python3 "$ROOT/scripts/mutants_queue.py" rollover \
+      --cursor "$CURSOR" --list "$OUT/all.txt" --head "$head_sha" \
+      --out-new "$OUT/new.txt" --out-old "$OUT/old.txt")
+    new_len="$(grep -c . "$OUT/new.txt" || true)"
+    old_len="$(grep -c . "$OUT/old.txt" || true)"
+    new_off=0
+    old_off=0
+    if ((new_len == 0 && old_len == 0)); then
+      break
+    fi
+  fi
   if ((ec == 124)); then
     echo "mutants-nightly: budget exhausted after $completed_total mutants"
     break
@@ -169,6 +188,12 @@ done
 python3 "$ROOT/scripts/mutants_queue.py" mark-cap \
   --cursor "$CURSOR" --elapsed "$((SECONDS - start))" --budget "$BUDGET_SEC" \
   --new-left "$((new_len - new_off))" --old-left "$((old_len - old_off))"
+python3 "$ROOT/scripts/mutants_queue.py" remember \
+  --cursor "$CURSOR" \
+  --new-len "$n_new" --old-len "$n_old" \
+  --new-remaining "$((new_len - new_off))" \
+  --old-remaining "$((old_len - old_off))" \
+  --completed-new "$completed_new" --completed-old "$completed_old"
 
 # The default cursor path already lives in the artifact directory.
 if [[ ! "$CURSOR" -ef "$OUT/cursor.json" ]]; then

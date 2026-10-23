@@ -251,6 +251,113 @@ assert_ok "a covered new_skip moves new_base to HEAD" \
 assert_ok "a covered new_skip clears the skip" \
   grep -q '"new_skip": 0' "$tmp/stuck.json"
 
+# A finished backlog generation drops both cursors and rebuilds the
+# backlog as every listed mutant at HEAD. The night cap stays.
+printf '%s\n' '{"new_base":"abc","new_skip":4,"old_index":9,"old_name":"crates/old/c.rs:3:1: replace a with b in o3","new_cap_used":true,"run_id":"42","new_len":4,"old_len":9}' >"$tmp/roll.json"
+python3 "$PY" rollover --cursor "$tmp/roll.json" --list "$tmp/split-list.txt" \
+  --head deadbeef --out-new "$tmp/roll-new.txt" --out-old "$tmp/roll-old.txt" >/dev/null
+assert_ok "a finished backlog sets new_base to HEAD" \
+  grep -q '"new_base": "deadbeef"' "$tmp/roll.json"
+assert_ok "a finished backlog clears new_skip" \
+  grep -q '"new_skip": 0' "$tmp/roll.json"
+assert_ok "a finished backlog clears old_index" \
+  grep -q '"old_index": 0' "$tmp/roll.json"
+assert_ok "a finished backlog keeps the night cap" \
+  grep -q '"new_cap_used": true' "$tmp/roll.json"
+assert_ok "a finished backlog keeps the run id" \
+  grep -q '"run_id": "42"' "$tmp/roll.json"
+assert_ok "a fresh backlog has no new file" \
+  test ! -s "$tmp/roll-new.txt"
+assert_ok "a fresh backlog is the full list in order" \
+  cmp -s "$tmp/split-list.txt" "$tmp/roll-old.txt"
+assert_ok "a fresh backlog starts at the first listed mutant" \
+  test "$(head -n 1 "$tmp/roll-old.txt")" = "crates/new/a.rs:1:1: replace a with b in n1"
+assert_ok "a fresh backlog records its length" \
+  grep -q '"old_len": 4' "$tmp/roll.json"
+assert_ok "a fresh backlog records no new mutants" \
+  grep -q '"new_len": 0' "$tmp/roll.json"
+
+python3 "$PY" remember --cursor "$tmp/roll.json" \
+  --new-len 0 --old-len 4 --new-remaining 0 --old-remaining 2 \
+  --completed-new 4 --completed-old 9
+assert_ok "remember stores this job's old progress" \
+  grep -q '"completed_old": 9' "$tmp/roll.json"
+assert_ok "remember stores mutants still in the fresh backlog" \
+  grep -q '"old_remaining": 2' "$tmp/roll.json"
+
+printf '%s\n' '{"new_base":"abc","new_skip":0,"old_index":0,"old_name":"","new_cap_used":false,"run_id":"1"}' >"$tmp/neg.json"
+set +e
+python3 "$PY" remember --cursor "$tmp/neg.json" \
+  --new-len 0 --old-len 1 --new-remaining 0 --old-remaining 1 \
+  --completed-new -1 --completed-old 0 >/dev/null 2>&1
+neg_ec=$?
+set -e
+assert_ok "remember rejects a negative count" test "$neg_ec" -ne 0
+
+# Oldest first is not required: health sorts by at.
+cat >"$tmp/health-up.jsonl" <<'EOF'
+{"date":"2026-10-02","at":"2026-10-02T08:00:00Z","cursor":{"new_base":"aaa","new_remaining":4,"old_remaining":80,"completed_new":3,"completed_old":10,"old_index":4}}
+{"date":"2026-10-01","at":"2026-10-01T08:00:00Z","cursor":{"new_base":"aaa","new_remaining":10,"old_remaining":100,"completed_new":3,"completed_old":10,"old_index":2}}
+EOF
+health_up="$(python3 "$PY" health --jsonl "$tmp/health-up.jsonl")"
+assert_ok "new queue catching up names the catch rate" \
+  grep -q 'catch rate 3.0 mutants/night over 2 nights' <<<"$health_up"
+assert_ok "new queue catching up names outstanding" \
+  grep -q 'Outstanding 4.' <<<"$health_up"
+assert_ok "a shrinking new queue is catching up" \
+  grep -q 'catching up' <<<"$health_up"
+assert_ok "backlog days left uses the pace" \
+  grep -q 'about 8.0 days left' <<<"$health_up"
+
+cat >"$tmp/health-behind.jsonl" <<'EOF'
+{"date":"2026-10-01","at":"2026-10-01T08:00:00Z","cursor":{"new_base":"aaa","new_remaining":4,"old_remaining":50,"completed_new":2,"completed_old":0}}
+{"date":"2026-10-02","at":"2026-10-02T08:00:00Z","cursor":{"new_base":"aaa","new_remaining":20,"old_remaining":50,"completed_new":2,"completed_old":0}}
+EOF
+health_behind="$(python3 "$PY" health --jsonl "$tmp/health-behind.jsonl")"
+assert_ok "a growing new queue is falling behind" \
+  grep -q 'falling behind' <<<"$health_behind"
+assert_ok "zero backlog pace is not a day count" \
+  grep -q 'no recent backlog progress' <<<"$health_behind"
+
+cat >"$tmp/health-one.jsonl" <<'EOF'
+{"date":"2026-10-01","at":"2026-10-01T04:00:00Z","cursor":{"new_base":"aaa","new_remaining":9,"old_remaining":40,"completed_new":4,"completed_old":6}}
+{"date":"2026-10-01","at":"2026-10-01T12:00:00Z","cursor":{"new_base":"aaa","new_remaining":5,"old_remaining":30,"completed_new":6,"completed_old":4}}
+EOF
+health_one="$(python3 "$PY" health --jsonl "$tmp/health-one.jsonl")"
+assert_ok "two jobs in one night add their catches" \
+  grep -q 'catch rate 10.0 mutants/night over 1 night' <<<"$health_one"
+assert_ok "one night does not invent a trend" \
+  grep -q 'Trend needs another night.' <<<"$health_one"
+assert_ok "two jobs in one night add their backlog pace" \
+  grep -q 'pace 10.0 mutants/night over 1 night' <<<"$health_one"
+
+cat >"$tmp/health-reset.jsonl" <<'EOF'
+{"date":"2026-10-01","at":"2026-10-01T08:00:00Z","cursor":{"new_base":"aaa","new_remaining":8,"old_remaining":20,"completed_new":1,"completed_old":5,"old_index":3}}
+{"date":"2026-10-02","at":"2026-10-02T08:00:00Z","cursor":{"new_base":"bbb","new_remaining":0,"old_remaining":200,"completed_new":2,"completed_old":15,"old_index":0}}
+EOF
+health_reset="$(python3 "$PY" health --jsonl "$tmp/health-reset.jsonl")"
+assert_ok "a moved new_base is not catch-up" \
+  grep -q 'not comparable' <<<"$health_reset"
+assert_ok "a moved new_base is a generation restart" \
+  grep -q 'Generation restarted' <<<"$health_reset"
+
+cat >"$tmp/health-base.jsonl" <<'EOF'
+{"date":"2026-10-01","at":"2026-10-01T08:00:00Z","cursor":{"new_base":"aaa","new_remaining":6,"old_remaining":40,"completed_new":1,"completed_old":4,"old_index":3,"old_len":40}}
+{"date":"2026-10-02","at":"2026-10-02T08:00:00Z","cursor":{"new_base":"bbb","new_remaining":0,"old_remaining":30,"completed_new":2,"completed_old":4,"old_index":8,"old_len":40}}
+EOF
+health_base="$(python3 "$PY" health --jsonl "$tmp/health-base.jsonl")"
+assert_ok "finishing the new queue is not a backlog restart" \
+  bash -c '! printf "%s\n" "$1" | grep -q "Generation restarted"' _ "$health_base"
+assert_ok "finishing the new queue still refuses a catch-up claim" \
+  grep -q 'not comparable' <<<"$health_base"
+
+cat >"$tmp/health-old.jsonl" <<'EOF'
+{"date":"2026-10-01","at":"2026-10-01T08:00:00Z","cursor":{"new_base":"aaa","old_remaining":10}}
+EOF
+health_old="$(python3 "$PY" health --jsonl "$tmp/health-old.jsonl")"
+assert_ok "a cursor without completed_new is unknown" \
+  grep -q 'no measured catch rate' <<<"$health_old"
+
 printf '%s\n' '{"new_base":"abc","new_skip":0,"old_index":0,"old_name":"","new_cap_used":false,"run_id":"7"}' >"$tmp/cap.json"
 python3 "$PY" mark-cap --cursor "$tmp/cap.json" --elapsed 500 --budget 1000 --new-left 2 --old-left 2
 assert_ok "half the budget with both sides left consumes the new cap" \
@@ -287,6 +394,14 @@ assert_ok "nightly persists the new cap" \
   grep -q 'mutants_queue.py" mark-cap' "$NIGHTLY"
 assert_ok "nightly advances one side" \
   grep -q 'mutants_queue.py" advance-side' "$NIGHTLY"
+assert_ok "a finished backlog starts a fresh one at HEAD" \
+  grep -q 'mutants_queue.py" rollover' "$NIGHTLY"
+assert_ok "rollover runs only after the backlog file is consumed" \
+  grep -q 'old_len > 0 && old_off >= old_len' "$NIGHTLY"
+assert_ok "a finished backlog rolls over before a timeout stops the job" \
+  awk '/mutants_queue.py" rollover/{r=NR} /ec == 124/{t=NR} END{exit !(r && t && r<t)}' "$NIGHTLY"
+assert_ok "nightly records queue progress on the cursor" \
+  grep -q 'mutants_queue.py" remember' "$NIGHTLY"
 assert_ok "nightly progress ignores extra outcomes" \
   grep -q 'mutants_queue.py" progress' "$NIGHTLY"
 assert_ok "same-file cursor copy is skipped" \
