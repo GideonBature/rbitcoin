@@ -269,13 +269,18 @@ the tip and the tweak index's last height.
 | `GET /tweaks/:h?dustLimit=` | Cut-through: tweaks of eligible txs with a P2TR output not yet spent. `dustLimit` keeps a tx whose largest remaining P2TR output is `>= dustLimit` (BlindBit's edge; **not** `--sp-tweaks-dust`). |
 | `GET /tweak-index/:h?dustLimit=` | Every eligible tx; `dustLimit` over all its P2TR outputs. |
 | `GET /utxos/:h` | Every P2TR output of every eligible tx, with `spent`. BlindBit drops spent rows over time; spent rows stay here. |
-| `GET /filter/new-utxos/:h`, `GET /filter/spent/:h` | BIP158 GCS (P=19, M=784931, keyed by the block hash), `filter_type: 4`. New-utxos holds the x-only key of every P2TR output in the block. Spent holds the spent-index hashes. Built per request from the block and the parents it spends; nothing extra is stored. A key repeated in one block is written once (BlindBit writes it twice); membership is the same. |
+| `GET /filter/new-utxos/:h`, `GET /filter/spent/:h` | BIP158 GCS (P=19, M=784931, keyed by the block hash), `filter_type: 4`. New-utxos holds the x-only key of every P2TR output in the block. Spent holds the spent-index hashes. Built per request from the block and the parents it spends (no witnesses; txids only for P2TR-spent parents); nothing extra is stored. A key repeated in one block is written once (BlindBit writes it twice); membership is the same. |
 | `GET /spent-index/:h` | First 8 bytes of `sha256(txid ‖ vout_le ‖ block_hash)` (internal byte order) for every input whose prevout is P2TR. Always `{"block_hash","data"}`; BlindBit returns a bare `[]` when empty, which spdk cannot parse. |
 | `POST /forward-tx` | `{"data":"<hex>"}` → mempool hub. The answer is the txid as a JSON string (spdk parses it; BlindBit sends an empty 200). Errors are `{"error"}` with **400**, or **503** without a hub. |
 
 A bad height is **400** `could not parse block height`; a height above the
-served height is **404** `height not indexed`. Eligibility is BIP-352 as for
-`blockchain.tweaks.subscribe`.
+served height is **404** `height not indexed`. A reorg of that height between
+the reads one answer is built from is **503** `chain view moved`; ask again.
+Eligibility is BIP-352 as for `blockchain.tweaks.subscribe`.
+
+All `/blindbit/v1/` routes share one limit of **32** requests in flight. spdk
+keeps about 200 filter asks open per scan, so a rescan queues behind that
+limit instead of filling the listener.
 
 ## No Esplora WebSocket
 

@@ -18,17 +18,25 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bitcoin::hashes::{sha256, Hash};
-use rbitcoin_primitives::Height;
+use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::{Query, QueryError, ThinTweakRangeLimits, ThinTweakRow};
 use rbitcoin_store::StoreError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use tower::limit::GlobalConcurrencyLimitLayer;
 
 /// Mount point of the v1 surface on the Esplora listener.
 pub const BLINDBIT_V1_PREFIX: &str = "/blindbit/v1";
 
-/// The v1 read routes, nested under [`BLINDBIT_V1_PREFIX`].
+/// Requests in flight across every `/blindbit/v1/` route. spdk keeps about
+/// 200 filter asks open per scan, and each one reads a block and its parents.
+/// One semaphore for the whole prefix (axum layers each route separately,
+/// so a per-route limit would not bound a scan), so a rescan queues behind
+/// itself and leaves the rest of the listener alone.
+pub const BLINDBIT_MAX_INFLIGHT: usize = 32;
+
+/// The v1 routes, nested under [`BLINDBIT_V1_PREFIX`].
 pub fn blindbit_routes() -> Router<AppState> {
     Router::new().nest(
         BLINDBIT_V1_PREFIX,
@@ -42,7 +50,8 @@ pub fn blindbit_routes() -> Router<AppState> {
             .route("/spent-index/{height}", get(spent_index))
             .route("/filter/new-utxos/{height}", get(filter_new_utxos))
             .route("/filter/spent/{height}", get(filter_spent))
-            .route("/forward-tx", post(forward_tx)),
+            .route("/forward-tx", post(forward_tx))
+            .layer(GlobalConcurrencyLimitLayer::new(BLINDBIT_MAX_INFLIGHT)),
     )
 }
 
@@ -94,8 +103,14 @@ fn error(status: StatusCode, msg: &str) -> Response {
 }
 
 fn store_error(e: QueryError) -> Response {
-    error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+    match e {
+        StoreError::Stale(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
+        e => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
 }
+
+/// `confirmed[h]` moved between the reads one answer is built from.
+pub const CHAIN_MOVED: &str = "chain view moved";
 
 fn not_indexed() -> Response {
     error(StatusCode::NOT_FOUND, "height not indexed")
@@ -117,36 +132,65 @@ fn parse_dust(p: &DustParam) -> Result<u64, Response> {
     }
 }
 
-/// A served height and its confirmed header hash (internal order) and time.
+/// A served height and the confirmed header every read for it must match.
+#[derive(Clone, Copy, Debug)]
+pub struct ServedBlock {
+    pub height: u32,
+    pub header_fk: Fk,
+    /// Internal byte order.
+    pub hash: [u8; 32],
+    pub time: u32,
+}
+
 #[allow(clippy::result_large_err)] // axum Response, as in handlers
-fn served_block(query: &Query, raw: &str) -> Result<(u32, [u8; 32], u32), Response> {
+fn served_block(query: &Query, raw: &str) -> Result<ServedBlock, Response> {
     let h = parse_height(raw)?;
     if served_height(query).is_none_or(|top| h > top) {
         return Err(not_indexed());
     }
     match query.header_at_height(Height(h)) {
-        Ok(Some((_, rec))) => Ok((h, rec.hash, rec.timestamp)),
+        Ok(Some((header_fk, rec))) => Ok(ServedBlock {
+            height: h,
+            header_fk,
+            hash: rec.hash,
+            time: rec.timestamp,
+        }),
         Ok(None) => Err(not_indexed()),
         Err(e) => Err(store_error(e)),
+    }
+}
+
+/// `confirmed[h]` is still `block`. A reorg between two reads of one
+/// answer is [`CHAIN_MOVED`], never data keyed by the other block's hash.
+pub fn still_confirmed(query: &Query, block: &ServedBlock) -> Result<(), QueryError> {
+    match query.header_at_height(Height(block.height))? {
+        Some((fk, _)) if fk == block.header_fk => Ok(()),
+        _ => Err(StoreError::Stale(CHAIN_MOVED)),
     }
 }
 
 /// Thin rows at a served height. The index starts at Taproot activation,
 /// so an earlier height is not indexed.
 #[allow(clippy::result_large_err)] // axum Response, as in handlers
-fn thin_rows(query: &Query, h: u32, cut_through: bool) -> Result<Vec<ThinTweakRow>, Response> {
+pub fn thin_rows(
+    query: &Query,
+    block: &ServedBlock,
+    cut_through: bool,
+) -> Result<Vec<ThinTweakRow>, Response> {
     let limits = ThinTweakRangeLimits {
         max_heights: 1,
         max_eligible: usize::MAX,
         cut_through,
     };
-    match query.load_thin_tweaks_range(Height(h), limits) {
+    let rows = match query.load_thin_tweaks_range(Height(block.height), limits) {
         Ok(mut batch) => match batch.pop() {
-            Some((_, rows)) => Ok(rows),
-            None => Err(not_indexed()),
+            Some((_, rows)) => rows,
+            None => return Err(not_indexed()),
         },
-        Err(e) => Err(store_error(e)),
-    }
+        Err(e) => return Err(store_error(e)),
+    };
+    still_confirmed(query, block).map_err(store_error)?;
+    Ok(rows)
 }
 
 pub async fn info(State(st): State<AppState>) -> Response {
@@ -175,7 +219,7 @@ pub async fn block_height(State(st): State<AppState>) -> Response {
 
 pub async fn block_hash(State(st): State<AppState>, Path(raw): Path<String>) -> Response {
     spawn_join(move || match served_block(&st.query, &raw) {
-        Ok((_, hash, _)) => Json(json!({ "block_hash": block_hash_hex(&hash) })).into_response(),
+        Ok(b) => Json(json!({ "block_hash": block_hash_hex(&b.hash) })).into_response(),
         Err(r) => r,
     })
     .await
@@ -186,11 +230,11 @@ fn tweak_list(st: &AppState, raw: &str, dust: &DustParam, cut_through: bool) -> 
         Ok(d) => d,
         Err(r) => return r,
     };
-    let h = match served_block(&st.query, raw) {
-        Ok((h, _, _)) => h,
+    let block = match served_block(&st.query, raw) {
+        Ok(b) => b,
         Err(r) => return r,
     };
-    match thin_rows(&st.query, h, cut_through) {
+    match thin_rows(&st.query, &block, cut_through) {
         Ok(rows) => {
             let list: Vec<String> = rows
                 .iter()
@@ -222,15 +266,16 @@ pub async fn tweak_index(
 /// Every P2TR output of every eligible tx, with `spent` from the
 /// cut-through view of the same height.
 fn utxos_json(st: &AppState, raw: &str) -> Response {
-    let (h, hash, time) = match served_block(&st.query, raw) {
+    let block = match served_block(&st.query, raw) {
         Ok(b) => b,
         Err(r) => return r,
     };
-    let full = match thin_rows(&st.query, h, false) {
+    let (h, hash, time) = (block.height, block.hash, block.time);
+    let full = match thin_rows(&st.query, &block, false) {
         Ok(rows) => rows,
         Err(r) => return r,
     };
-    let live: HashSet<([u8; 32], u32)> = match thin_rows(&st.query, h, true) {
+    let live: HashSet<([u8; 32], u32)> = match thin_rows(&st.query, &block, true) {
         Ok(rows) => rows
             .iter()
             .flat_map(|r| r.p2tr.iter().map(move |&(vout, _, _)| (r.txid, vout)))
@@ -271,41 +316,55 @@ pub struct BlockSpElements {
     pub spent: Vec<[u8; 8]>,
 }
 
-/// One index-window read of height `h`: the block's outputs, input edges,
-/// and every parent it spends. Bounded by the block, not the chain.
+/// One index-window read of `block`: its outputs, input edges, and every
+/// parent it spends. Bounded by the block, not the chain. The window is read
+/// through `block.header_fk`, so its contents match the hash that salts them.
+/// No witnesses are read; txids are read only for parents whose spent output
+/// is P2TR, in one page-grouped `txid.body` read.
 pub fn block_sp_elements(
     query: &Query,
-    h: u32,
-    block_hash: &[u8; 32],
+    block: &ServedBlock,
 ) -> Result<BlockSpElements, QueryError> {
-    let heights = query.index_heights(h, h, Some(h))?;
+    let h = block.height;
+    let heights = match query.index_heights(h, h, None) {
+        Ok(heights) => heights,
+        // A height disconnected since `block` was read is a moved view.
+        Err(e) => {
+            still_confirmed(query, block)?;
+            return Err(e);
+        }
+    };
+    if heights.first().map(|x| x.header_fk) != Some(block.header_fk) {
+        return Err(StoreError::Stale(CHAIN_MOVED));
+    }
     let window = query.read_index_window(&heights)?;
     let mut new_keys = Vec::new();
-    let mut spent = Vec::new();
-    for block in &window.blocks {
-        for o in block.txs.iter().flat_map(|t| t.outs.iter()) {
+    let mut spent_edges = Vec::new();
+    for b in &window.blocks {
+        for o in b.txs.iter().flat_map(|t| t.outs.iter()) {
             if is_p2tr(&o.script) {
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&o.script[2..]);
                 new_keys.push(key);
             }
         }
-        for e in block.edges.iter().flatten().filter(|e| !e.parent.is_null()) {
+        for e in b.edges.iter().flatten().filter(|e| !e.parent.is_null()) {
             let prev = window
                 .prevout(e.parent, e.vout)
                 .ok_or(StoreError::Corrupt("invariant: blindbit prevout missing"))?;
-            if !is_p2tr(&prev.script) {
-                continue;
+            if is_p2tr(&prev.script) {
+                spent_edges.push((e.parent, e.vout));
             }
-            let txid =
-                window
-                    .txid(e.parent)
-                    .filter(|t| *t != [0u8; 32])
-                    .ok_or(StoreError::Corrupt(
-                        "invariant: blindbit parent txid missing",
-                    ))?;
-            spent.push(spent_short_hash(&txid, e.vout, block_hash));
         }
+    }
+    let parents: Vec<Fk> = spent_edges.iter().map(|&(fk, _)| fk).collect();
+    let txids = query.store().txids_get_many(&parents)?;
+    let mut spent = Vec::with_capacity(spent_edges.len());
+    for ((_, vout), txid) in spent_edges.into_iter().zip(txids) {
+        let txid = txid.ok_or(StoreError::Corrupt(
+            "invariant: blindbit parent txid missing",
+        ))?;
+        spent.push(spent_short_hash(&txid, vout, &block.hash));
     }
     Ok(BlockSpElements { new_keys, spent })
 }
@@ -326,9 +385,9 @@ pub fn sp_filter_bytes<'a>(
 
 #[allow(clippy::result_large_err)] // axum Response, as in handlers
 fn sp_elements_at(st: &AppState, raw: &str) -> Result<(u32, [u8; 32], BlockSpElements), Response> {
-    let (h, hash, _) = served_block(&st.query, raw)?;
-    let elements = block_sp_elements(&st.query, h, &hash).map_err(store_error)?;
-    Ok((h, hash, elements))
+    let block = served_block(&st.query, raw)?;
+    let elements = block_sp_elements(&st.query, &block).map_err(store_error)?;
+    Ok((block.height, block.hash, elements))
 }
 
 fn spent_index_json(st: &AppState, raw: &str) -> Response {

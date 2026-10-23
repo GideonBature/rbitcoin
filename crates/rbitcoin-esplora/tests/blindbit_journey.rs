@@ -233,6 +233,49 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
         let err: Value = serde_json::from_str(&resp).unwrap();
         assert!(err["error"].is_string(), "{resp}");
     }
+
+    // A reorg between the reads one answer is built from is "chain view
+    // moved", never the new block's data under the old block's hash.
+    use rbitcoin_esplora::blindbit::{
+        block_sp_elements, still_confirmed, thin_rows, ServedBlock, CHAIN_MOVED,
+    };
+    let (fk_at_2, rec) = q.header_at_height(Height(2)).unwrap().unwrap();
+    let served = ServedBlock {
+        height: 2,
+        header_fk: fk_at_2,
+        hash: rec.hash,
+        time: rec.timestamp,
+    };
+    assert!(block_sp_elements(&q, &served).is_ok());
+    assert!(thin_rows(&q, &served, false).is_ok());
+    q.disconnect_tip().unwrap();
+    assert!(
+        matches!(block_sp_elements(&q, &served), Err(rbitcoin_store::StoreError::Stale(m)) if m == CHAIN_MOVED),
+        "a disconnected height is a moved view, not a 500"
+    );
+    let (mut other, cb) = coinbase(2, fk1, Some(h1.hash));
+    other.nonce = other.nonce.wrapping_add(1);
+    other.hash = rbitcoin_store::block_header_hash(
+        other.version,
+        &h1.hash,
+        &other.merkle_root,
+        other.timestamp,
+        other.bits,
+        other.nonce,
+    );
+    let other_fk = q.connect_block(Height(2), &other, &[cb]).unwrap();
+    q.put_sp_tweaks_block(Height(2), other_fk, &[None]).unwrap();
+    for moved in [
+        still_confirmed(&q, &served).err(),
+        block_sp_elements(&q, &served).err(),
+    ] {
+        assert!(
+            matches!(moved, Some(rbitcoin_store::StoreError::Stale(m)) if m == CHAIN_MOVED),
+            "{moved:?}"
+        );
+    }
+    let status = thin_rows(&q, &served, false).err().map(|r| r.status());
+    assert_eq!(status, Some(axum::http::StatusCode::SERVICE_UNAVAILABLE));
 }
 
 /// Without `--sp-tweaks` the prefix is not mounted.
@@ -249,4 +292,57 @@ async fn blindbit_v1_routes_need_the_tweak_index() {
     assert_eq!(st, 404);
     let (st, _) = http_get(handle.local_addr, "/blocks/tip/height").await;
     assert_eq!(st, 200, "the rest of the listener is unchanged");
+}
+
+/// One semaphore bounds every `/blindbit/v1/` route. Held asks fill it; the
+/// next BlindBit ask waits while the rest of the listener still answers,
+/// and runs once a slot frees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blindbit_v1_routes_share_one_inflight_limit() {
+    use rbitcoin_esplora::blindbit::BLINDBIT_MAX_INFLIGHT;
+
+    let (_dir, q) = temp_query("blindbit-v1-limit");
+    q.set_sptweaks_enabled(true, Height(0)).unwrap();
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let fk0 = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
+    let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    let handle = run_esplora(cfg, Arc::new(q), None)
+        .await
+        .expect("listen");
+    let addr = handle.local_addr;
+
+    // A forward-tx whose body never arrives holds its slot in the extractor.
+    let mut held = Vec::new();
+    for _ in 0..BLINDBIT_MAX_INFLIGHT {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let req = "POST /blindbit/v1/forward-tx HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                   Content-Type: application/json\r\nContent-Length: 64\r\n\r\n";
+        stream.write_all(req.as_bytes()).await.unwrap();
+        held.push(stream);
+    }
+    let quick = Duration::from_millis(300);
+    let mut waited = false;
+    for _ in 0..50 {
+        if tokio::time::timeout(quick, http_get(addr, "/blindbit/v1/info"))
+            .await
+            .is_err()
+        {
+            waited = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(waited, "a full BlindBit limit makes the next ask wait");
+    let (st, _) = tokio::time::timeout(quick, http_get(addr, "/blocks/tip/height"))
+        .await
+        .expect("the rest of the listener is not behind the BlindBit limit");
+    assert_eq!(st, 200);
+    let tweaks = tokio::spawn(async move { http_get(addr, "/blindbit/v1/tweak-index/0").await });
+    drop(held.pop());
+    let (st, body) = tokio::time::timeout(Duration::from_secs(10), tweaks)
+        .await
+        .expect("a freed slot serves the waiting ask")
+        .unwrap();
+    assert_eq!(st, 200, "{body}");
 }
