@@ -1147,6 +1147,98 @@ fn wire_pin_drops_decoded_block_after_class_a_commit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Publish must finish while a reader is still using the decoded block.
+/// The output copy and the encode callbacks must not hold the shared mutex.
+#[test]
+fn wire_release_finishes_while_a_reader_holds_the_block() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness,
+    };
+    use rbitcoin_query::CreatePinInner;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let tx = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_0000_0000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0xaa]),
+        }],
+    };
+    let txid = tx.compute_txid().to_byte_array();
+    let block = Arc::new(Block {
+        header: Header {
+            version: Version::ONE,
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        },
+        txdata: vec![tx],
+    });
+    let pin = CreatePinInner::wire(
+        Arc::clone(&block),
+        0,
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
+    );
+    let in_callback = Arc::new(AtomicBool::new(false));
+    let release_returned = Arc::new(AtomicBool::new(false));
+    let reader_pin = Arc::clone(&pin);
+    let in_cb = Arc::clone(&in_callback);
+    let released = Arc::clone(&release_returned);
+    let reader = thread::spawn(move || {
+        reader_pin.with_out_parts(0, |value, script| {
+            assert_eq!(value, 50_0000_0000);
+            assert_eq!(script, &[0x51, 0xaa]);
+            in_cb.store(true, Ordering::Release);
+            let start = Instant::now();
+            while !released.load(Ordering::Acquire) && start.elapsed() < Duration::from_millis(400)
+            {
+                thread::yield_now();
+            }
+            released.load(Ordering::Acquire)
+        })
+    });
+    let start = Instant::now();
+    while !in_callback.load(Ordering::Acquire) {
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("reader did not enter with_out_parts");
+        }
+        thread::yield_now();
+    }
+    pin.release_wire_block();
+    release_returned.store(true, Ordering::Release);
+    let saw_release = reader.join().expect("reader").expect("vout 0");
+    assert!(
+        saw_release,
+        "release must return while the reader still holds the block"
+    );
+    let (value, script) = pin.out_parts(0).expect("blob");
+    assert_eq!(value, 50_0000_0000);
+    assert_eq!(script, &[0x51, 0xaa]);
+    assert!(pin.with_wire_tx(|_| ()).is_none());
+}
+
 /// Prune mode serves confirmed script bytes from the append cache.
 /// A wire commit must fill that cache. Falling through to `get_tx_full`
 /// re-reads every transaction during IBD.

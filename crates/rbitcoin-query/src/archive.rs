@@ -181,35 +181,64 @@ impl WireShared {
         self.block.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Run `f` on a cloned block `Arc`. The mutex is not held across `f`, so
+    /// txout and seqsigwit encode do not stall a reader of this block.
     fn with_block<R>(&self, f: impl FnOnce(&bitcoin::Block) -> R) -> Option<R> {
-        self.lock().as_ref().map(|b| f(b))
+        let block = self.clone_block()?;
+        Some(f(&block))
     }
 
     fn clone_block(&self) -> Option<Arc<bitcoin::Block>> {
         self.lock().clone()
     }
 
-    /// Copy this block's outputs, then drop the decoded block.
+    /// Blob if commit has published it, otherwise the decoded block.
+    ///
+    /// `release` installs the blob before it clears the slot. A reader that
+    /// missed the blob and then found the slot empty looks once more.
+    fn bytes(&self) -> Option<WireBytes<'_>> {
+        if let Some(blob) = self.sealed() {
+            return Some(WireBytes::Outs(blob));
+        }
+        if let Some(block) = self.clone_block() {
+            return Some(WireBytes::Block(block));
+        }
+        self.sealed().map(WireBytes::Outs)
+    }
+
+    /// Copy this block's outputs outside the lock, then publish the blob and
+    /// drop the decoded block. A reader waits only for that pointer update.
     ///
     /// Idempotent. Pins of one block share this value, so the first call
     /// publishes and the rest only clear an already-empty slot.
     fn release(&self) {
-        let mut guard = self.lock();
-        if self.outs.get().is_some() {
-            *guard = None;
-            return;
-        }
-        let Some(block) = guard.as_ref() else {
-            return;
+        let block = {
+            let mut guard = self.lock();
+            if self.outs.get().is_some() {
+                *guard = None;
+                return;
+            }
+            let Some(block) = guard.clone() else {
+                return;
+            };
+            block
         };
-        let packed = Arc::new(PackedBlockOuts::from_block(block));
-        let _ = self.outs.set(packed);
+        let packed = Arc::new(PackedBlockOuts::from_block(&block));
+        let mut guard = self.lock();
+        if self.outs.get().is_none() {
+            let _ = self.outs.set(packed);
+        }
         *guard = None;
     }
 
     fn sealed(&self) -> Option<&PackedBlockOuts> {
         self.outs.get().map(|a| a.as_ref())
     }
+}
+
+enum WireBytes<'a> {
+    Block(Arc<bitcoin::Block>),
+    Outs(&'a PackedBlockOuts),
 }
 
 impl std::fmt::Debug for WireShared {
@@ -309,17 +338,15 @@ impl CreatePinInner {
                 shared,
                 tx_index,
                 tx,
-            } => {
-                if let Some(n) = shared.sealed().and_then(|b| b.n_out(*tx_index)) {
-                    return n;
-                }
-                if let Some(n) = shared.with_block(|block| {
-                    block.txdata.get(*tx_index as usize).map(|t| t.output.len())
-                }) {
-                    return n.unwrap_or(0);
-                }
-                tx.output_count as usize
-            }
+            } => match shared.bytes() {
+                Some(WireBytes::Outs(blob)) => blob.n_out(*tx_index).unwrap_or(0),
+                Some(WireBytes::Block(block)) => block
+                    .txdata
+                    .get(*tx_index as usize)
+                    .map(|t| t.output.len())
+                    .unwrap_or(0),
+                None => tx.output_count as usize,
+            },
         }
     }
 
@@ -347,25 +374,25 @@ impl CreatePinInner {
     /// Run `f` on one output. Holds the decoded block for the callback when
     /// the retained blob is not published yet.
     pub fn with_out_parts<R>(&self, vout: u32, f: impl FnOnce(u64, &[u8]) -> R) -> Option<R> {
-        if let Some((value, script)) = self.out_parts(vout) {
-            return Some(f(value, script));
+        match self {
+            Self::Records { .. } => self.out_parts(vout).map(|(value, script)| f(value, script)),
+            Self::Wire {
+                shared, tx_index, ..
+            } => match shared.bytes() {
+                Some(WireBytes::Outs(blob)) => blob
+                    .parts(*tx_index, vout)
+                    .map(|(value, script)| f(value, script)),
+                Some(WireBytes::Block(block)) => {
+                    let o = block
+                        .txdata
+                        .get(*tx_index as usize)?
+                        .output
+                        .get(vout as usize)?;
+                    Some(f(o.value.to_sat(), o.script_pubkey.as_bytes()))
+                }
+                None => None,
+            },
         }
-        let Self::Wire {
-            shared, tx_index, ..
-        } = self
-        else {
-            return None;
-        };
-        shared
-            .with_block(|block| {
-                let o = block
-                    .txdata
-                    .get(*tx_index as usize)?
-                    .output
-                    .get(vout as usize)?;
-                Some(f(o.value.to_sat(), o.script_pubkey.as_bytes()))
-            })
-            .flatten()
     }
 
     #[doc(hidden)]
@@ -391,19 +418,17 @@ impl CreatePinInner {
             }
             Self::Wire {
                 shared, tx_index, ..
-            } => {
-                if let Some(blob) = shared.sealed() {
-                    blob.for_each_script(*tx_index, f);
-                    return;
-                }
-                shared.with_block(|block| {
+            } => match shared.bytes() {
+                Some(WireBytes::Outs(blob)) => blob.for_each_script(*tx_index, f),
+                Some(WireBytes::Block(block)) => {
                     if let Some(tx) = block.txdata.get(*tx_index as usize) {
                         for o in &tx.output {
                             f(o.script_pubkey.as_bytes());
                         }
                     }
-                });
-            }
+                }
+                None => {}
+            },
         }
     }
 
@@ -463,8 +488,8 @@ impl PackedCreate for CreatePinInner {
             Self::Records { outs, .. } => outs.iter().map(|o| o.encoded_len()).sum(),
             Self::Wire {
                 shared, tx_index, ..
-            } => {
-                if let Some(blob) = shared.sealed() {
+            } => match shared.bytes() {
+                Some(WireBytes::Outs(blob)) => {
                     let (start, end) = blob.output_range(*tx_index).unwrap_or((0, 0));
                     blob.script_at
                         .get(start..end)
@@ -474,27 +499,19 @@ impl PackedCreate for CreatePinInner {
                                 .sum()
                         })
                         .unwrap_or(0)
-                } else {
-                    shared
-                        .with_block(|block| {
-                            block
-                                .txdata
-                                .get(*tx_index as usize)
-                                .map(|tx| {
-                                    tx.output
-                                        .iter()
-                                        .map(|o| {
-                                            OutputRecord::encoded_len_for_script(
-                                                o.script_pubkey.len(),
-                                            )
-                                        })
-                                        .sum()
-                                })
-                                .unwrap_or(0)
-                        })
-                        .unwrap_or(0)
                 }
-            }
+                Some(WireBytes::Block(block)) => block
+                    .txdata
+                    .get(*tx_index as usize)
+                    .map(|tx| {
+                        tx.output
+                            .iter()
+                            .map(|o| OutputRecord::encoded_len_for_script(o.script_pubkey.len()))
+                            .sum()
+                    })
+                    .unwrap_or(0),
+                None => 0,
+            },
         };
         16 + TxRecord::BODY_META_LEN + scripts
     }
@@ -547,20 +564,22 @@ pub fn create_pin_approx_bytes(pin: &CreatePin) -> usize {
             let add = |n: &mut usize, len: usize| {
                 *n = n.saturating_add(24).saturating_add(len);
             };
-            if let Some(blob) = shared.sealed() {
-                let bytes = blob.script_bytes(*tx_index);
-                let n_out = blob.n_out(*tx_index).unwrap_or(0);
-                n = n
-                    .saturating_add(24usize.saturating_mul(n_out))
-                    .saturating_add(bytes);
-            } else {
-                shared.with_block(|block| {
+            match shared.bytes() {
+                Some(WireBytes::Outs(blob)) => {
+                    let bytes = blob.script_bytes(*tx_index);
+                    let n_out = blob.n_out(*tx_index).unwrap_or(0);
+                    n = n
+                        .saturating_add(24usize.saturating_mul(n_out))
+                        .saturating_add(bytes);
+                }
+                Some(WireBytes::Block(block)) => {
                     if let Some(tx) = block.txdata.get(*tx_index as usize) {
                         for o in &tx.output {
                             add(&mut n, o.script_pubkey.len());
                         }
                     }
-                });
+                }
+                None => {}
             }
         }
     }
