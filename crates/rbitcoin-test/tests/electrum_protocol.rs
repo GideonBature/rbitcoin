@@ -255,17 +255,45 @@ async fn rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Va
     serde_json::from_str(&resp_line).unwrap()
 }
 
-/// Sparrow `ElectrumServer.getServerCapability`: batch only when lowercased
-/// `version[0]` starts with `electrs/` and the dotted version before the
-/// first `-` is at least 0.9.0.
-fn sparrow_batches(server: &str) -> bool {
+fn dotted_at_least(version: &str, min: &[u64]) -> bool {
+    let parts: Option<Vec<u64>> = version.split('.').map(|p| p.parse().ok()).collect();
+    parts.is_some_and(|p| p.as_slice() >= min)
+}
+
+/// `server.version[0]` as the wallets that branch on it read it.
+/// Sparrow `ElectrumServer.getServerCapability` (lowercased): batches when it
+/// contains `electrumx`, or starts with `electrs/` and the version before the
+/// first `-` is at least 0.9.0. BlueWallet `BlueElectrum.ts` (case-sensitive):
+/// a string starting `ElectrumPersonalServer`, `electrs` or `Fulcrum` stops
+/// batching unless the first space-separated word is `electrs` at 0.9.0 or
+/// `Fulcrum` at 1.9.0 or later. Cake `getNodeIsElectrs` (lowercased) probes
+/// tweaks only when it contains `electrs`.
+fn assert_wallets_read(server: &str) {
     let lower = server.to_ascii_lowercase();
-    let Some(rest) = lower.strip_prefix("electrs/") else {
-        return false;
-    };
-    let dotted = rest.split('-').next().unwrap_or("");
-    let parts: Option<Vec<u64>> = dotted.split('.').map(|p| p.parse().ok()).collect();
-    parts.is_some_and(|p| p >= vec![0, 9, 0])
+    let sparrow = lower.contains("electrumx")
+        || lower
+            .strip_prefix("electrs/")
+            .is_some_and(|rest| dotted_at_least(rest.split('-').next().unwrap_or(""), &[0, 9, 0]));
+    assert!(
+        sparrow,
+        "Sparrow would send one request per line for {server:?}"
+    );
+    let mut words = server.split(' ');
+    let implementation = words.next().unwrap_or("");
+    let version = words.next().unwrap_or("");
+    let bluewallet = !["ElectrumPersonalServer", "electrs", "Fulcrum"]
+        .iter()
+        .any(|p| server.starts_with(p))
+        || match implementation {
+            "electrs" => dotted_at_least(version, &[0, 9, 0]),
+            "Fulcrum" => dotted_at_least(version, &[1, 9, 0]),
+            _ => false,
+        };
+    assert!(bluewallet, "BlueWallet would stop batching for {server:?}");
+    assert!(
+        lower.contains("electrs"),
+        "Cake would skip the tweaks probe for {server:?}"
+    );
 }
 
 /// The page Sparrow sends once it batches: one line, string ids, scripthash
@@ -555,10 +583,6 @@ async fn electrum_server_version_history_balance() {
     assert_eq!(ver[1].as_str(), Some("1.4"));
     let server = ver[0].as_str().expect("server.version[0]");
     assert!(
-        server.to_ascii_lowercase().contains("electrs"),
-        "Cake skips tweaks unless version[0] contains electrs, got {server:?}"
-    );
-    assert!(
         server.to_ascii_lowercase().contains("rbitcoin"),
         "version[0] must still identify rbitcoin, got {server:?}"
     );
@@ -566,10 +590,7 @@ async fn electrum_server_version_history_balance() {
         server.contains(env!("CARGO_PKG_VERSION")),
         "version[0] must track workspace.package.version, got {server:?}"
     );
-    assert!(
-        sparrow_batches(server),
-        "Sparrow sends one request per line unless version[0] reads as electrs >= 0.9.0, got {server:?}"
-    );
+    assert_wallets_read(server);
 
     // OP_TRUE scripthash
     let sh_hex = electrum_scripthash_hex(&[0x51]);

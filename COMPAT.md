@@ -135,7 +135,7 @@ Per-method notes, auth, and the shindex matrix live in
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| server.version / banner / features | done | Banner: libre-relay-class. `server.version[0]` is `electrs/0.10.0-rbitcoin-<workspace.package.version>` — **not electrs**; see below. `server.version` negotiates: omitted → `1.6`; `"1.4"` → `1.4`; `["1.4","1.4.2"]` → `1.4.2`; `["1.4","1.6"]` → `1.6`; `"1.4.2-asof"` (or a range containing it) → as-of dialect. First call wins. `features.protocol_max` is `1.6`; `features.asof_protocol` is `1.4.2-asof`. `features.genesis_hash` is display-order hex (refuse a wrong-chain server before a tweaks scan). `features.tweaks` / `silent_payments` advertise the method; they are not a substitute for the stream. |
+| server.version / banner / features | done | Banner: libre-relay-class. `server.version[0]` is `rbitcoin-electrs <workspace.package.version> electrumx` — **not electrs**; see below. `server.version` negotiates: omitted → `1.6`; `"1.4"` → `1.4`; `["1.4","1.4.2"]` → `1.4.2`; `["1.4","1.6"]` → `1.6`; `"1.4.2-asof"` (or a range containing it) → as-of dialect. First call wins. `features.protocol_max` is `1.6`; `features.asof_protocol` is `1.4.2-asof`. `features.genesis_hash` is display-order hex (refuse a wrong-chain server before a tweaks scan). `features.tweaks` / `silent_payments` advertise the method; they are not a substitute for the stream. |
 | JSON-RPC batch | done | A line holding a JSON array is a JSON-RPC 2.0 batch: one array line back, same order, each slot `{id, result}` or `{id, error}`. Items run in order on the connection, and each slot is written as soon as it is answered. A notification (no `id` member) is skipped: it is not run and gets no slot, and a batch of only notifications writes nothing. A non-object item gets a `-32600` `Invalid Request` slot. `[]` is one `-32600` `empty batch`; more than 345 items is one `-32600` `batch too large`. `blockchain.tweaks.subscribe` and `blockchain.silentpayments.subscribe` stream several lines, so inside a batch they get a `-32600` slot; send them alone. |
 | blockchain.tweaks.subscribe | done | **Stream**, not a one-shot result: JSON-RPC `result` is the **first** height only; remaining heights are unsolicited notifications; `{"message":"done"}` ends the **chunk** (60s wall at a wave boundary, or the requested `count` if sooner) — Cake electrs clamps `count` to 1000 instead. Cake Wallet resubscribes from `syncHeight+1` ([cake_wallet#3574](https://github.com/cake-tech/cake_wallet/issues/3574) persist still lags one event). [kiss-bdk](https://github.com/kkdao/kiss-bdk) today treats `done` as the asked range finished ([kiss-bdk#10](https://github.com/kkdao/kiss-bdk/issues/10)). Each height carries tweak + txid + taproot `output_pubkeys` (client scans locally; no block fetch). Naive walk, or `--sp-tweaks` thin index (`len:tweak` only; one `txout` span per wave; the first height shares that span when indexed). Pre-taproot: **one** notify with ≤1024 empty height keys (Cake `fromJson` last key is progress); probe `[0,1,false]` stays `{"0": {}}`. Param `[2]` (Cake `historicalMode`): `false` **cut-through** (omit confirmed-spent P2TR outs / txs); `true` keeps spent outs. Serve-time `--sp-tweaks-dust` (default **1000**) omits P2TR outs with `value <=` the floor (`0` = all; **546** matches Cake electrs `sp_min_dust`). Sparrow Silent Payments uses Frigate `blockchain.silentpayments.subscribe` (server-side scan) — **not** this method. Cake isolate may still hardcode `electrs.cakewallet.com`. |
 | headers / block headers | done | Tip push on subscribe |
@@ -162,12 +162,14 @@ P2P BIP331 package messages remain **Q-48**. Local Electrum
 
 We are **not** electrs. Cake Wallet `getNodeIsElectrs()` lowercases
 `version[0]` and requires the substring `electrs` before it will call
-`blockchain.tweaks.subscribe`. Sparrow sends JSON-RPC batches only when
-`version[0]` starts with `electrs/` and the version before the first `-` is
-at least 0.9.0; otherwise it sends one request per line. The first element
-is therefore `electrs/0.10.0-rbitcoin-<ver>` (`ver` from
-`workspace.package.version`) so Cake will probe tweaks and Sparrow will
-batch. Other tweaks clients (kiss-bdk) do not need that
+`blockchain.tweaks.subscribe`. Sparrow sends JSON-RPC batches when the
+lowercased `version[0]` contains `electrumx` (or starts with `electrs/` at
+0.9.0 or later); otherwise it sends one request per line. BlueWallet stops
+batching when `version[0]` starts with `electrs` (case-sensitive) unless
+the first word is exactly `electrs` at 0.9.0 or later. The first element is
+therefore `rbitcoin-electrs <ver> electrumx` (`ver` from
+`workspace.package.version`): Cake will probe tweaks, Sparrow will batch,
+and BlueWallet keeps batching. Other tweaks clients (kiss-bdk) do not need that
 substring; they discover the chain via `server.features.genesis_hash`.
 Cake isolate may still hardcode `electrs.cakewallet.com` after a passing
 probe.

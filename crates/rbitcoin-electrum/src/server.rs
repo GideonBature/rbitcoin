@@ -30,13 +30,14 @@ pub const PROTOCOL_MAX: &str = "1.6";
 // Dialect version: trailing `asof:<blockhash>`. Not a dotted-int; `protocol_max` stays 1.6.
 #[doc(hidden)]
 pub const PROTOCOL_ASOF: &str = "1.4.2-asof";
-/// First `server.version` element. Cake Wallet `getNodeIsElectrs()` requires
-/// this string (lowercased) to contain `electrs` before it will probe
-/// `blockchain.tweaks.subscribe [0, 1, false]`. Sparrow sends JSON-RPC
-/// batches only when it starts with `electrs/` and the version before the
-/// first `-` is at least 0.9.0.
+/// First `server.version` element, read by wallets that branch on it.
+/// Sparrow sends JSON-RPC batches when the lowercased string contains
+/// `electrumx`. BlueWallet stops batching only when it starts with
+/// `electrs`, so it keeps batching. Cake Wallet `getNodeIsElectrs()` probes
+/// `blockchain.tweaks.subscribe [0, 1, false]` when it contains `electrs`.
 #[doc(hidden)]
-pub const SERVER_VERSION: &str = concat!("electrs/0.10.0-rbitcoin-", env!("CARGO_PKG_VERSION"));
+pub const SERVER_VERSION: &str =
+    concat!("rbitcoin-electrs ", env!("CARGO_PKG_VERSION"), " electrumx");
 
 /// One JSON-RPC request line. Junk is `None`; must not panic.
 pub fn parse_electrum_request_line(line: &str) -> Option<Value> {

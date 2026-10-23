@@ -16,9 +16,9 @@ security model by itself.
 **`--sh-index` is required for scripthash/address history.** Without it those
 methods return `scripthash index disabled`; the listener still binds.
 
-`server.version[0]` is `electrs/0.10.0-rbitcoin-<ver>` so Cake Wallet
-`getNodeIsElectrs()` will probe silent-payment tweaks and Sparrow will send
-JSON-RPC batches. Other tweaks clients
+`server.version[0]` is `rbitcoin-electrs <ver> electrumx` so Cake Wallet
+`getNodeIsElectrs()` will probe silent-payment tweaks and Sparrow and
+BlueWallet will send JSON-RPC batches. Other tweaks clients
 do not need that substring. We are **not** electrs — see `COMPAT.md`.
 
 **Not a search-box explorer.** We serve clients that already know their
