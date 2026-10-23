@@ -1450,10 +1450,12 @@ pub fn cover_tip_batch_holes(
 /// per call when a sibling is pulling, that owner is a relative-slow outlier
 /// among owners, the owner's FIFO is still on densify, or a solo owner has held
 /// it too long and another peer exists. The whole race set is never cleared on
-/// request age. A dropped owner is retired: it keeps the request it was sent,
-/// still counts toward its queue and toward the ask cap, and is not asked
-/// for this hash again unless the hash goes racerless and the hold has aged
-/// out [`TIP_HOLE_RX_STALE`].
+/// request age. A dropped owner is retired: it keeps the request it was sent
+/// and still counts toward its queue. Retired holders count toward the ask
+/// cap only once a racer is live. A retired-only set is not coverage, so it
+/// is filled with fresh peers, or with one peer when those holders already
+/// meet the cap. A retired owner is not asked again unless the hash is
+/// racerless and the hold has aged out [`TIP_HOLE_RX_STALE`].
 pub fn cover_tip_holes(
     st: &mut IbdWorkState,
     hub: &ChainHub,
@@ -1492,11 +1494,8 @@ pub fn cover_tip_holes(
         }
         let already = st.inflight.get(&h).map(|e| e.holders()).unwrap_or(0);
         let want = max_peers;
-        // A retired-only holder set is not coverage: nobody is pulling. Race
-        // fresh peers as densify does (`inflight_needs_racer`), or the hash —
-        // and the in-order tip behind it — freezes while densify sits at its
-        // hole-open zero cap. Retired still counts the cap once a racer
-        // lives.
+        // `inflight_needs_racer`: a retired-only set is not coverage. Once a
+        // racer is live, retired holders count toward the cap again.
         let racerless = st.inflight.get(&h).is_some_and(inflight_needs_racer);
         if already >= want && !racerless {
             continue;
