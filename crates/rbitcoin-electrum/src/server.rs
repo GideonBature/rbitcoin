@@ -68,7 +68,7 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 /// Max request payload bytes (Electrum: one JSON-RPC line incl. `\n`; Esplora: body).
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1_048_576;
 /// Max requests in one JSON-RPC batch line: the work one line can queue on
-/// a connection. Reply RAM is bounded separately, by writing the reply one
+/// a connection. Reply RAM is bounded separately by writing the reply one
 /// slot at a time. Fulcrum's default `max_batch`; Sparrow pages at 100.
 #[doc(hidden)]
 pub const MAX_BATCH_ITEMS: usize = 345;
