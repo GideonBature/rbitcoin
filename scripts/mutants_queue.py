@@ -279,6 +279,205 @@ def finished_mutants(log: str) -> int:
     return sum(1 for line in log.splitlines() if OUTCOME.match(line))
 
 
+def rollover(cursor: dict, mutants: list[str], head: str) -> tuple[list[str], list[str]]:
+    """The backlog generation is finished. Start the next one at ``head``.
+
+    ``new_base`` becomes HEAD and ``new_skip`` is cleared, so the diff is
+    empty and every listed mutant is backlog. ``old_index`` starts at the
+    first name. The night cap and run id stay; they are not cursors.
+    """
+    names = [line.strip() for line in mutants if parse_mutant(line.strip())]
+    cursor["new_base"] = head
+    cursor["new_skip"] = 0
+    cursor["old_index"] = 0
+    cursor["old_name"] = names[0] if names else ""
+    cursor["new_len"] = 0
+    cursor["old_len"] = len(names)
+    cursor["new_remaining"] = 0
+    cursor["old_remaining"] = len(names)
+    return [], names
+
+
+def remember(
+    cursor: dict,
+    new_len: int,
+    old_len: int,
+    new_remaining: int,
+    old_remaining: int,
+    completed_new: int,
+    completed_old: int,
+) -> None:
+    """Record this job's queue sizes and how many mutants it examined."""
+    counts = (
+        new_len,
+        old_len,
+        new_remaining,
+        old_remaining,
+        completed_new,
+        completed_old,
+    )
+    if any(n < 0 for n in counts):
+        raise ValueError("remember")
+    cursor["new_len"] = new_len
+    cursor["old_len"] = old_len
+    cursor["new_remaining"] = new_remaining
+    cursor["old_remaining"] = old_remaining
+    cursor["completed_new"] = completed_new
+    cursor["completed_old"] = completed_old
+
+
+def _health_nights(entries: list[dict]) -> list[dict]:
+    rows = []
+    for entry in entries:
+        if not isinstance(entry, dict) or "date" not in entry or "cursor" not in entry:
+            raise ValueError("health")
+        rows.append(entry)
+    rows.sort(key=lambda entry: (str(entry.get("at") or entry["date"]), str(entry["date"])))
+    nights: list[dict] = []
+    for entry in rows:
+        date = str(entry["date"])
+        if nights and nights[-1]["date"] == date:
+            nights[-1]["cursors"].append(entry["cursor"])
+        else:
+            nights.append({"date": date, "cursors": [entry["cursor"]]})
+    return nights
+
+
+def _sum_key(cursors: list[dict], key: str) -> int | None:
+    total = 0
+    found = False
+    for cursor in cursors:
+        if key in cursor and cursor[key] is not None:
+            total += int(cursor[key])
+            found = True
+    return total if found else None
+
+
+def _last_key(cursors: list[dict], key: str):
+    for cursor in reversed(cursors):
+        if key in cursor and cursor[key] is not None:
+            return cursor[key]
+    return None
+
+
+def _latest(nights: list[dict], key: str):
+    for night in reversed(nights):
+        value = _last_key(night["cursors"], key)
+        if value is not None:
+            return value
+    return None
+
+
+def _generation_restarted(prev: dict, cur: dict) -> bool:
+    """True when ``cur`` is a new backlog, not merely a finished new queue."""
+    previous_base = prev.get("new_base")
+    current_base = cur.get("new_base")
+    if not previous_base or not current_base or previous_base == current_base:
+        return False
+    if int(cur.get("old_index", -1)) == 0:
+        return True
+    if "old_len" in cur and "old_len" in prev and int(cur["old_len"]) > int(prev["old_len"]):
+        return True
+    if (
+        "old_remaining" in cur
+        and "old_remaining" in prev
+        and int(cur["old_remaining"]) > int(prev["old_remaining"])
+    ):
+        return True
+    return False
+
+
+def health_report(entries: list[dict]) -> str:
+    """How the new queue and the backlog moved across published cursors.
+
+    One UTC date is one night. Jobs that share a date add their
+    ``completed_new`` and ``completed_old`` counts. The later cursor that
+    night supplies the remaining work. A night that omits a completed
+    count is unknown, not zero.
+
+    Outstanding new work is comparable only while ``new_base`` stays put.
+    A moved base means that queue was closed or folded into a new
+    backlog. Folding the backlog (index cleared, or the backlog longer
+    or larger than the night before) is a generation restart: days left
+    describe the new backlog, and the refill is not lost progress.
+    """
+    if not entries:
+        return "No cursor history."
+    nights = _health_nights(entries)
+    lines: list[str] = []
+
+    measured_new = []
+    for night in nights:
+        done = _sum_key(night["cursors"], "completed_new")
+        if done is not None:
+            measured_new.append(done)
+    outstanding = _latest(nights, "new_remaining")
+    outstanding_text = "unknown" if outstanding is None else str(int(outstanding))
+    if not measured_new:
+        lines.append("New: no measured catch rate (completed_new missing).")
+    else:
+        rate = sum(measured_new) / len(measured_new)
+        span = "1 night" if len(measured_new) == 1 else f"{len(measured_new)} nights"
+        lines.append(
+            f"New: catch rate {rate:.1f} mutants/night over {span}. Outstanding {outstanding_text}."
+        )
+
+    with_remaining = []
+    for night in nights:
+        remaining = _last_key(night["cursors"], "new_remaining")
+        if remaining is None:
+            continue
+        base = _last_key(night["cursors"], "new_base")
+        with_remaining.append((int(remaining), "" if base is None else str(base)))
+    if len(with_remaining) < 2:
+        lines.append("New: Trend needs another night.")
+    else:
+        bases = {base for _remaining, base in with_remaining if base}
+        if len(bases) > 1:
+            lines.append("New: new_base moved, so outstanding is not comparable.")
+        else:
+            net = (with_remaining[-1][0] - with_remaining[0][0]) / (len(with_remaining) - 1)
+            if net < 0:
+                trend = "catching up"
+            elif net > 0:
+                trend = "falling behind"
+            else:
+                trend = "even"
+            lines.append(f"New: net {net:.1f} mutants/night, {trend}.")
+
+    measured_old = []
+    for night in nights:
+        done = _sum_key(night["cursors"], "completed_old")
+        if done is not None:
+            measured_old.append(done)
+    left = _latest(nights, "old_remaining")
+    left_text = "unknown" if left is None else str(int(left))
+    if not measured_old:
+        lines.append("Old: no measured backlog pace (completed_old missing).")
+    else:
+        pace = sum(measured_old) / len(measured_old)
+        span = "1 night" if len(measured_old) == 1 else f"{len(measured_old)} nights"
+        lines.append(f"Old: pace {pace:.1f} mutants/night over {span}. Left {left_text}.")
+        if pace <= 0:
+            lines.append("Old: no recent backlog progress.")
+        elif left is None:
+            lines.append("Old: days left unknown.")
+        else:
+            lines.append(f"Old: about {int(left) / pace:.1f} days left.")
+
+    restarted = False
+    for prev, cur in zip(nights, nights[1:]):
+        if _generation_restarted(prev["cursors"][-1], cur["cursors"][-1]):
+            restarted = True
+            break
+    if restarted:
+        lines.append(
+            "Generation restarted (new_base changed). Days left is the current backlog. "
+            "That refill is not lost progress."
+        )
+    return "\n".join(lines)
+
+
 def advance_side(
     cursor: dict,
     side: str,
@@ -433,6 +632,25 @@ def main(argv: list[str]) -> int:
     show_p.add_argument("--cursor", type=Path, required=True)
     show_p.add_argument("--key", required=True)
 
+    roll_p = sub.add_parser("rollover")
+    roll_p.add_argument("--cursor", type=Path, required=True)
+    roll_p.add_argument("--list", type=Path, required=True)
+    roll_p.add_argument("--head", required=True)
+    roll_p.add_argument("--out-new", type=Path, required=True)
+    roll_p.add_argument("--out-old", type=Path, required=True)
+
+    rem_p = sub.add_parser("remember")
+    rem_p.add_argument("--cursor", type=Path, required=True)
+    rem_p.add_argument("--new-len", type=int, required=True)
+    rem_p.add_argument("--old-len", type=int, required=True)
+    rem_p.add_argument("--new-remaining", type=int, required=True)
+    rem_p.add_argument("--old-remaining", type=int, required=True)
+    rem_p.add_argument("--completed-new", type=int, required=True)
+    rem_p.add_argument("--completed-old", type=int, required=True)
+
+    health_p = sub.add_parser("health")
+    health_p.add_argument("--jsonl", type=Path, required=True)
+
     adv_side = sub.add_parser("advance-side")
     adv_side.add_argument("--cursor", type=Path, required=True)
     adv_side.add_argument("--side", required=True)
@@ -556,6 +774,38 @@ def main(argv: list[str]) -> int:
             print(int(cursor.get(key, 0)))
         else:
             print(cursor.get(key, ""))
+        return 0
+
+    if args.cmd == "rollover":
+        cursor = read_cursor(args.cursor)
+        new, old = rollover(cursor, load_mutants(args.list.read_text()), args.head)
+        write_cursor(args.cursor, cursor)
+        args.out_new.write_text("".join(line + "\n" for line in new))
+        args.out_old.write_text("".join(line + "\n" for line in old))
+        print(len(new), len(old))
+        return 0
+
+    if args.cmd == "remember":
+        cursor = read_cursor(args.cursor)
+        remember(
+            cursor,
+            args.new_len,
+            args.old_len,
+            args.new_remaining,
+            args.old_remaining,
+            args.completed_new,
+            args.completed_old,
+        )
+        write_cursor(args.cursor, cursor)
+        return 0
+
+    if args.cmd == "health":
+        entries = []
+        for raw in args.jsonl.read_text().splitlines():
+            line = raw.strip()
+            if line:
+                entries.append(json.loads(line))
+        print(health_report(entries))
         return 0
 
     if args.cmd == "advance-side":
