@@ -258,6 +258,30 @@ pub fn write_phase(
     milestone: Milestone,
     batch: &mut ScriptOkBatch,
 ) -> Result<Vec<rbitcoin_primitives::Fk>, ConfirmError> {
+    let ids: Vec<(u32, [u8; 32])> = batch
+        .prepared
+        .iter()
+        .map(|p| (p.height.0, p.hash))
+        .collect();
+    let scope = super::TrustScope::enter(query);
+    let result = write_phase_inner(query, params, milestone, batch);
+    // Script warns stay quiet until this batch connects. A failed write logs
+    // only its own hard reason.
+    if result.is_ok() && !batch.trust_script_warns.is_empty() {
+        for (h, err) in std::mem::take(&mut batch.trust_script_warns) {
+            let _ = rbitcoin_consensus::soften_at(Some(h), err);
+        }
+    }
+    scope.finish(&ids, result.as_ref().err(), true);
+    result
+}
+
+fn write_phase_inner(
+    query: &Query,
+    params: &ChainParams,
+    milestone: Milestone,
+    batch: &mut ScriptOkBatch,
+) -> Result<Vec<rbitcoin_primitives::Fk>, ConfirmError> {
     let tip = query.tip_height().map(|h| h.0);
     match write_batch_vs_tip(tip, batch.prepared.iter().map(|p| p.height.0)) {
         WriteBatchVsTip::AllOld => return finish_already_committed_write(query, batch),
