@@ -1210,6 +1210,56 @@ fn ibd_cover_tip_holes_recovers_all_retired() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Four retired holders already meet the tip+1 cap. One fresh peer is asked.
+/// The next pass does not add another racer on top of that retired set.
+#[test]
+fn ibd_cover_tip_holes_retired_cap_stays_one_racer() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let n = TIP_HOLE_MAX_PEERS + 1;
+    let (slots, mut wire) = wired_slots(n);
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let cfg = IbdConfig::for_test();
+    let tip1 = hub.tip_height().unwrap_or(0).saturating_add(1);
+    let alive: Vec<usize> = (0..n).collect();
+    restart_on(&mut st, &hub, &mut wire, &alive);
+    let hole = h(0x64);
+    plant_tip_hole(&mut st, hole, tip1);
+    for &pid in &alive {
+        seed_ewma(&mut st.slots[pid], 2_000_000);
+    }
+    for &pid in &alive[..TIP_HOLE_MAX_PEERS] {
+        let mut room = 1;
+        let mut issued = 0;
+        assert!(issue_one(&mut st, pid, hole, &mut room, &mut issued));
+        retire_hash_owner(&mut st, hole, pid);
+    }
+    let r = &st.inflight[&hole];
+    assert!(r.peers.is_empty());
+    assert_eq!(r.holders(), TIP_HOLE_MAX_PEERS);
+
+    assert_eq!(
+        cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], TIP_HOLE_MAX_PEERS),
+        1
+    );
+    let r = &st.inflight[&hole];
+    assert_eq!(
+        r.peers,
+        HashSet::from([TIP_HOLE_MAX_PEERS]),
+        "the peer who does not already hold the hash is the one racer"
+    );
+    assert_eq!(r.holders(), TIP_HOLE_MAX_PEERS + 1);
+
+    assert_eq!(
+        cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], TIP_HOLE_MAX_PEERS),
+        0,
+        "a live racer closes the cap; retired holders still count"
+    );
+    assert_eq!(st.inflight[&hole].len(), 1);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Densify on one hub at genesis across IBD restarts: assign depth, the
 /// tip batch, band limits from the body queue, per-peer caps, hung
 /// owners, and reorg need.
