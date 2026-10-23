@@ -1239,6 +1239,83 @@ fn wire_release_finishes_while_a_reader_holds_the_block() {
     assert!(pin.with_wire_tx(|_| ()).is_none());
 }
 
+/// Edge rows and `n_out` use the counts stored on the pin. They must not
+/// open the decoded block, including after commit has dropped it.
+#[test]
+fn wire_counts_come_from_the_tx_record() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness,
+    };
+    use rbitcoin_query::archive::commit_input_edge_rows;
+    use rbitcoin_query::{ArchiveWritePlan, CreatePinInner, SpendEdge};
+
+    let tx = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let txid = tx.compute_txid().to_byte_array();
+    let block = Arc::new(Block {
+        header: Header {
+            version: Version::ONE,
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        },
+        txdata: vec![tx],
+    });
+    let pin = CreatePinInner::wire(
+        block,
+        0,
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
+    );
+    assert_eq!(pin.n_out(), 1);
+    pin.release_wire_block();
+    assert_eq!(pin.n_out(), 1);
+    assert!(pin.contains_vout(0));
+    assert!(!pin.contains_vout(1));
+    let fk = Fk(7);
+    let mut plan = ArchiveWritePlan::empty();
+    plan.packed = vec![(Arc::clone(&pin), Vec::new())];
+    plan.planned_fks = vec![fk];
+    plan.edges.insert(
+        fk.get().expect("fk"),
+        vec![SpendEdge {
+            prev_txid: [0; 32],
+            vout: u32::MAX,
+            spend_fk: fk,
+            create_fk: Fk::NULL,
+            vin: 0,
+        }],
+    );
+    let rows = commit_input_edge_rows(&plan).expect("edges from the stored input count");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 1);
+    assert!(rows[0][0].parent.is_null());
+}
+
 /// Prune mode serves confirmed script bytes from the append cache.
 /// A wire commit must fill that cache. Falling through to `get_tx_full`
 /// re-reads every transaction during IBD.

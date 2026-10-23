@@ -334,19 +334,7 @@ impl CreatePinInner {
     pub fn n_out(&self) -> usize {
         match self {
             Self::Records { outs, .. } => outs.len(),
-            Self::Wire {
-                shared,
-                tx_index,
-                tx,
-            } => match shared.bytes() {
-                Some(WireBytes::Outs(blob)) => blob.n_out(*tx_index).unwrap_or(0),
-                Some(WireBytes::Block(block)) => block
-                    .txdata
-                    .get(*tx_index as usize)
-                    .map(|t| t.output.len())
-                    .unwrap_or(0),
-                None => tx.output_count as usize,
-            },
+            Self::Wire { tx, .. } => tx.output_count as usize,
         }
     }
 
@@ -1259,7 +1247,7 @@ pub fn edge_of(parent: Fk, vout: u32) -> InputEdge {
 pub fn commit_input_edge_rows(plan: &ArchiveWritePlan) -> Result<Vec<Vec<InputEdge>>, StoreError> {
     let mut rows = Vec::with_capacity(plan.packed.len());
     for (i, (pin, ins)) in plan.packed.iter().enumerate() {
-        if pin.with_wire_tx(|_| ()).is_some() {
+        if pin.wire_tx_index().is_some() {
             let fk = plan
                 .planned_fks
                 .get(i)
@@ -1272,9 +1260,7 @@ pub fn commit_input_edge_rows(plan: &ArchiveWritePlan) -> Result<Vec<Vec<InputEd
                 .edges
                 .get(&sid)
                 .ok_or(StoreError::Corrupt("invariant: wire plan edges missing"))?;
-            let n_in = pin
-                .with_wire_tx(|tx| tx.input.len())
-                .ok_or(StoreError::Corrupt("invariant: wire plan edges missing"))?;
+            let n_in = pin.tx().input_count as usize;
             if eds.len() != n_in {
                 return Err(StoreError::Corrupt("invariant: wire plan edges missing"));
             }
