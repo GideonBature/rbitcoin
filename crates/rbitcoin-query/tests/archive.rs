@@ -1160,9 +1160,8 @@ fn wire_release_finishes_while_a_reader_holds_the_block() {
         TxMerkleNode, TxOut, Witness,
     };
     use rbitcoin_query::CreatePinInner;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::thread;
-    use std::time::{Duration, Instant};
 
     let tx = Transaction {
         version: TxVersion::ONE,
@@ -1201,36 +1200,25 @@ fn wire_release_finishes_while_a_reader_holds_the_block() {
             output_count: 1,
         },
     );
-    let in_callback = Arc::new(AtomicBool::new(false));
-    let release_returned = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(Barrier::new(2));
+    let leave = Arc::new(Barrier::new(2));
     let reader_pin = Arc::clone(&pin);
-    let in_cb = Arc::clone(&in_callback);
-    let released = Arc::clone(&release_returned);
+    let entered_r = Arc::clone(&entered);
+    let leave_r = Arc::clone(&leave);
     let reader = thread::spawn(move || {
         reader_pin.with_out_parts(0, |value, script| {
             assert_eq!(value, 50_0000_0000);
             assert_eq!(script, &[0x51, 0xaa]);
-            in_cb.store(true, Ordering::Release);
-            let start = Instant::now();
-            while !released.load(Ordering::Acquire) && start.elapsed() < Duration::from_millis(400)
-            {
-                thread::yield_now();
-            }
-            released.load(Ordering::Acquire)
+            entered_r.wait();
+            leave_r.wait();
+            true
         })
     });
-    let start = Instant::now();
-    while !in_callback.load(Ordering::Acquire) {
-        if start.elapsed() > Duration::from_secs(2) {
-            panic!("reader did not enter with_out_parts");
-        }
-        thread::yield_now();
-    }
+    entered.wait();
     pin.release_wire_block();
-    release_returned.store(true, Ordering::Release);
-    let saw_release = reader.join().expect("reader").expect("vout 0");
+    leave.wait();
     assert!(
-        saw_release,
+        reader.join().expect("reader").expect("vout 0"),
         "release must return while the reader still holds the block"
     );
     let (value, script) = pin.out_parts(0).expect("blob");

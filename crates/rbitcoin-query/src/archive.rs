@@ -277,6 +277,9 @@ impl CreatePinInner {
         CreatePinArc::wrap(Self::Records { tx, outs })
     }
 
+    /// Each call owns a new `WireShared`. Every transaction of one block
+    /// must use `wire_share` so that block is packed once.
+    #[doc(hidden)]
     pub fn wire(block: Arc<bitcoin::Block>, tx_index: u32, tx: TxRecord) -> CreatePin {
         Self::wire_shared(WireShared::new(block), tx_index, tx)
     }
