@@ -9,6 +9,8 @@
 #![forbid(unsafe_code)]
 
 #[doc(hidden)]
+pub mod blindbit;
+#[doc(hidden)]
 pub mod handlers;
 #[doc(hidden)]
 pub mod internal;

@@ -926,6 +926,11 @@ pub async fn run_esplora(
         .route("/mempool/txids", get(handlers::mempool_txids))
         .route("/mempool/recent", get(handlers::mempool_recent))
         .route("/fee-estimates", get(handlers::fee_estimates));
+    let rest = if state.query.sptweaks_enabled() {
+        rest.merge(crate::blindbit::blindbit_routes())
+    } else {
+        rest
+    };
     #[cfg(unix)]
     let rest = if matches!(config.listen, EsploraListen::Unix(_)) {
         rest.merge(internal_routes())
