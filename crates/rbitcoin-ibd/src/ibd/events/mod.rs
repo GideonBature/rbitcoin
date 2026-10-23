@@ -467,7 +467,16 @@ pub fn apply_peer_event(
         PeerEvent::BlocksInv { peer, hashes } => {
             if !hashes.is_empty() {
                 note_announcement(st, peer);
-                super::header_walk::note_block_inv(st, peer);
+                // Only a block this node has not seen can put the peer back
+                // on the walk: its connect-time height never moves, so a
+                // re-armed peer holds IBD open until it is asked again.
+                let unseen = hashes.iter().any(|h| {
+                    !st.hash_height.contains_key(h)
+                        && !matches!(hub.query.height_of_hash(&h.to_byte_array()), Ok(Some(_)))
+                });
+                if unseen {
+                    super::header_walk::note_block_inv(st, peer);
+                }
             }
         }
         PeerEvent::Addrs { peer, addrs } => {
