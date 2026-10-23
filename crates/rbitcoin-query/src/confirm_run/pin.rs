@@ -167,7 +167,7 @@ pub fn fill_pins(
         let Some(pin) = parent_pin.create_pin(*id).cloned() else {
             continue;
         };
-        if !need.iter().all(|&v| pin.out_parts(v).is_some()) {
+        if !need.iter().all(|&v| pin.contains_vout(v)) {
             continue;
         }
         plan_by_id.insert(*id, pin);
@@ -212,7 +212,7 @@ pub fn apply_plan_pins(
             continue;
         }
         if let Some(pin) = plan_by_id.get(id) {
-            if !need.iter().all(|&v| pin.out_parts(v).is_some()) {
+            if !need.iter().all(|&v| pin.contains_vout(v)) {
                 still_need.insert(*id, need.clone());
                 continue;
             }
@@ -250,14 +250,10 @@ pub fn reject_vout_past_n_out(
         let Some(&max_vout) = need.iter().max() else {
             continue;
         };
-        let wire_n_out = || match plan_by_id.get(id).map(|p| &***p) {
-            Some(crate::CreatePinInner::Wire {
-                block, tx_index, ..
-            }) => block
-                .txdata
-                .get(*tx_index as usize)
-                .map(|t| t.output.len() as u64),
-            _ => None,
+        let wire_n_out = || {
+            let pin = plan_by_id.get(id)?;
+            pin.wire_tx_index()?;
+            Some(pin.n_out() as u64)
         };
         let n_out = parent_pin.n_out(*id).map(u64::from).or_else(wire_n_out);
         rbitcoin_consensus::block::reject_vout_past_n_out(max_vout, n_out)?;
