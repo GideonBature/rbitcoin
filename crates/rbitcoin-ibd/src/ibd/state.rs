@@ -47,7 +47,9 @@ pub struct WorkStructureSizes {
 /// `retired`: it no longer counts as a racer, but it still holds the request,
 /// so the hash stays requested. Except for the racerless re-ask after
 /// [`super::assign::TIP_HOLE_RX_STALE`], a retired peer is not asked for it again.
-/// Retired peers still count toward the ask cap.
+/// Retired peers count toward the ask cap once a racer is live. A retired-only
+/// set is not coverage: cover still places a racer when holders are already
+/// at the cap.
 #[derive(Debug, Clone)]
 pub struct InflightReq {
     /// Racing owners.
