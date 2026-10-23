@@ -426,7 +426,7 @@ pub fn setup_side_block(
 ) -> Result<(), &'static str> {
     match hub.accept_block(block.clone()) {
         Ok(AcceptOutcome::IgnoredWeaker | AcceptOutcome::AlreadyHave) => {
-            hub.hold_body(Arc::new(block.clone()));
+            hub.hold_body(Arc::new(block.clone()), false);
         }
         Ok(AcceptOutcome::Accepted { .. }) => return Err("side became tip"),
         Err(_) => return Err("side reject"),
@@ -2644,9 +2644,9 @@ mod tests {
         );
         stamp_diff_coinbase(&mut s3, next_diff_cb_uniq());
         remine_diff_header(&mut s3);
-        hub.hold_body(Arc::new(s1));
-        hub.hold_body(Arc::new(s2));
-        hub.hold_body(Arc::new(s3));
+        hub.hold_body(Arc::new(s1), false);
+        hub.hold_body(Arc::new(s2), false);
+        hub.hold_body(Arc::new(s3), false);
         store_reorg_step(&hub, StoreReorgOp::Extend).expect("held heavier fork after extend");
         assert!(hub.tip_height().is_some());
         let _ = fs::remove_dir_all(dir);

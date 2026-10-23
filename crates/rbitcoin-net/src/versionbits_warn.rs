@@ -142,8 +142,8 @@ pub fn signals_unknown(version: &i32, bit: i32) -> bool {
     (v & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS && ((v >> bit) & 1) != 0
 }
 
-/// Warning strings for RPC `warnings` arrays.
-pub fn warning_strings(query: &Query, network: Network) -> Vec<String> {
+/// Unknown-version-bit warnings. This is the list `-alertnotify` watches.
+pub fn versionbit_warning_strings(query: &Query, network: Network) -> Vec<String> {
     static SCAN: Mutex<UnknownBitsScan> = Mutex::new(UnknownBitsScan::new());
     SCAN.lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -151,4 +151,13 @@ pub fn warning_strings(query: &Query, network: Network) -> Vec<String> {
         .into_iter()
         .map(unknown_rules_warning)
         .collect()
+}
+
+/// The standing trust-peer line. Absent when the mode is off, including when
+/// a label is passed. It is not a version-bit alert.
+pub fn trust_warning_line(query: &Query, trust_who: Option<&str>) -> Option<String> {
+    if !query.trust_peer() {
+        return None;
+    }
+    trust_who.map(|who| format!("disagreements from trust-peer {who} are warnings"))
 }

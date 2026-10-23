@@ -5,7 +5,7 @@ use super::*;
 use rbitcoin_consensus::block::{verify_one_script_job, ScriptCheckJob};
 use rbitcoin_consensus::script_pool::{
     fg_has_unclaimed, help_steal, set_script_publisher, start_for_each_owned,
-    start_for_each_pooled, OwnedWave,
+    start_for_each_owned_keep, start_for_each_pooled, OwnedWave,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
@@ -23,8 +23,9 @@ pub fn take_script_jobs(
     prepared: &mut [Prepared],
     preverified: &ScriptPreverified,
     stats: &crate::ConfirmStats,
-) -> Vec<ScriptCheckJob> {
+) -> (Vec<ScriptCheckJob>, Vec<u32>) {
     let mut jobs = Vec::new();
+    let mut heights = Vec::new();
     let mut n_skip = 0u64;
     for p in prepared {
         if !p.check_scripts {
@@ -32,11 +33,13 @@ pub fn take_script_jobs(
             p.jobs.shrink_to_fit();
             continue;
         }
+        let height = p.height.0;
         for job in p.jobs.drain(..) {
             if preverified.contains(&job.txid) {
                 n_skip = n_skip.saturating_add(1);
             } else {
                 jobs.push(job);
+                heights.push(height);
             }
         }
         p.jobs.shrink_to_fit();
@@ -45,7 +48,7 @@ pub fn take_script_jobs(
         crate::note_confirm(&stats.script_skip_mempool, n_skip);
     }
     crate::note_confirm(&stats.script_jobs, jobs.len() as u64);
-    jobs
+    (jobs, heights)
 }
 
 #[doc(hidden)]
@@ -55,8 +58,12 @@ pub fn outcome_from(
     index_done_ns: u64,
     seal: super::index::IndexSeal,
     idx_asm_ns: u64,
+    mut trust_script_warns: Vec<(u32, rbitcoin_consensus::ConsensusError)>,
 ) -> ConfirmScriptOutcome {
     crate::note_confirm(&batch.stats.script_ns, work_ns);
+    let mut held = batch.trust_warns;
+    held.append(&mut trust_script_warns);
+    let trust_script_warns = held;
     if idx_asm_ns > 0 {
         crate::note_confirm(&batch.stats.idx_asm_ns, idx_asm_ns);
         crate::note_confirm(&batch.stats.blockfilter_ns, idx_asm_ns);
@@ -68,6 +75,7 @@ pub fn outcome_from(
             batch_parents: batch.batch_parents,
             archive_plan: batch.archive_plan,
             index_seal: seal,
+            trust_script_warns,
         },
         work_ns,
         index_done_ns,
@@ -87,12 +95,16 @@ pub struct Inflight {
     /// Older wave. Workers claim it before the index wave.
     pub script_wave: Option<OwnedWave<ScriptCheckJob>>,
     pub index_wave: Option<OwnedWave<IndexJob>>,
+    pub script_heights: Vec<u32>,
     pub slots: Vec<index::HeightSlots>,
     pub index_started: Arc<OnceLock<Instant>>,
     pub script_done: OnceLock<u64>,
     pub index_done: OnceLock<u64>,
     pub idx_asm: OnceLock<u64>,
     pub meta: ScriptsBatchMeta,
+    /// Warn-and-apply script faults. Moved onto the batch only when this
+    /// wave finishes without a hard stop. A later connect failure drops them.
+    pub script_warns: Vec<(u32, rbitcoin_consensus::ConsensusError)>,
 }
 
 impl Inflight {
@@ -103,32 +115,57 @@ impl Inflight {
     ) -> Result<Self, (ConfirmError, ScriptsBatchMeta)> {
         let t0 = Instant::now();
         let meta = ScriptsBatchMeta::from_batch(&batch, mat_ns);
-        let scripts =
+        let (scripts, script_heights) =
             take_script_jobs(&mut batch.prepared, &batch.script_preverified, &batch.stats);
         let index_jobs = match index::prepare_index_jobs(&batch) {
             Ok(jobs) => jobs,
             Err(e) => return Err((e, meta)),
         };
         let index_started = index_jobs.started;
-        let script_wave = match start_for_each_owned(scripts, apply_script) {
+        let started = if batch.trust_peer {
+            start_for_each_owned_keep(scripts, apply_script)
+        } else {
+            start_for_each_owned(scripts, apply_script)
+        };
+        let mut script_warns = Vec::new();
+        let script_wave = match started {
             Ok(w) => w,
-            Err(e) => return Err((ConfirmError::from(e), meta)),
+            Err(e) => {
+                // A single job runs on this thread inside `start`. Keep a
+                // warn-and-apply fault on the batch. The write stage logs it
+                // only after connect. This stage does not enter TrustCollect.
+                let height = script_heights.first().copied();
+                if batch.trust_peer && rbitcoin_consensus::is_warn_and_apply(&e) {
+                    script_warns.push((fault_height(&batch, height), e));
+                    None
+                } else {
+                    let err = ConfirmError::Rules(e);
+                    log_batch_stop(&batch, &err);
+                    return Err((err, meta));
+                }
+            }
         };
         let index_wave = match start_for_each_pooled(index_jobs.jobs, index::apply_index_job, 1) {
             Ok(w) => w,
-            Err(e) => return Err((ConfirmError::from(e), meta)),
+            Err(e) => {
+                let err = ConfirmError::from(e);
+                log_batch_stop(&batch, &err);
+                return Err((err, meta));
+            }
         };
         let inf = Self {
             batch,
             t0,
             script_wave,
             index_wave,
+            script_heights,
             slots: index_jobs.slots,
             index_started,
             script_done: OnceLock::new(),
             index_done: OnceLock::new(),
             idx_asm: OnceLock::new(),
             meta,
+            script_warns,
         };
         inf.note_clocks();
         Ok(inf)
@@ -169,9 +206,35 @@ impl Inflight {
 
     #[doc(hidden)]
     pub fn finish(mut self) -> Result<(ConfirmScriptOutcome, ScriptsBatchMeta), ConfirmError> {
-        let script_res = match self.script_wave.take() {
-            Some(w) => w.finish(),
-            None => Ok(()),
+        if let Some(w) = self.script_wave.as_ref() {
+            w.wait();
+        }
+        let indexed = self
+            .script_wave
+            .as_ref()
+            .map(|w| w.take_faults())
+            .unwrap_or_default();
+        let mut kept = Vec::new();
+        let mut script_stop = None;
+        for (idx, err) in indexed {
+            let height = self.script_heights.get(idx).copied();
+            if self.batch.trust_peer && rbitcoin_consensus::is_warn_and_apply(&err) {
+                kept.push((height, err));
+            } else {
+                script_stop = Some((height, err));
+                break;
+            }
+        }
+        // `ConsensusError` is not `Clone`. A stop already in hand means the
+        // wave's `first_err` is the same class; skip `finish` so the owned
+        // error is returned once.
+        let wave_stop = if script_stop.is_some() {
+            None
+        } else {
+            match self.script_wave.take() {
+                Some(w) => w.finish().err(),
+                None => None,
+            }
         };
         let _ = self.script_done.set(self.t0.elapsed().as_nanos() as u64);
         let had_index = self.index_wave.is_some();
@@ -182,21 +245,84 @@ impl Inflight {
         if had_index {
             self.stamp_index();
         }
-        script_res?;
-        index_res?;
+        // A hard stop drops the kept script faults. Only the stop is logged,
+        // and only as not applied. Connect is what logs a kept fault.
+        if script_stop.is_none() && wave_stop.is_none() {
+            for (height, err) in kept {
+                let h = fault_height(&self.batch, height);
+                self.script_warns.push((h, err));
+            }
+        }
+        if let Some((height, err)) = script_stop {
+            log_batch_fault(&self.batch, height, &err, false);
+            return Err(crate::ConfirmError::Rules(err));
+        }
+        if let Some(e) = wave_stop {
+            let height = self.script_heights.first().copied();
+            log_batch_fault(&self.batch, height, &e, false);
+            return Err(crate::ConfirmError::Rules(e));
+        }
+        if let Err(e) = index_res {
+            let err = crate::ConfirmError::from(e);
+            log_batch_stop(&self.batch, &err);
+            return Err(err);
+        }
         let seal = if self.slots.is_empty() {
-            index::IndexSeal::default()
+            Ok(index::IndexSeal::default())
         } else {
-            index::rows_from_heights(&self.slots)?
+            index::rows_from_heights(&self.slots)
+        };
+        let seal = match seal {
+            Ok(seal) => seal,
+            Err(e) => {
+                log_batch_stop(&self.batch, &e);
+                return Err(e);
+            }
         };
         let work_ns = self.script_done.get().copied().unwrap_or(0);
         let index_done_ns = self.index_done.get().copied().unwrap_or(0);
         let idx_asm_ns = self.idx_asm.get().copied().unwrap_or(0);
+        let warns = std::mem::take(&mut self.script_warns);
         Ok((
-            outcome_from(self.batch, work_ns, index_done_ns, seal, idx_asm_ns),
+            outcome_from(self.batch, work_ns, index_done_ns, seal, idx_asm_ns, warns),
             self.meta,
         ))
     }
+}
+
+fn fault_height(batch: &LoadedBatch, height: Option<u32>) -> u32 {
+    height
+        .or_else(|| batch.prepared.first().map(|p| p.height.0))
+        .unwrap_or(0)
+}
+
+fn log_batch_fault(
+    batch: &LoadedBatch,
+    height: Option<u32>,
+    err: &rbitcoin_consensus::ConsensusError,
+    applied: bool,
+) {
+    if !batch.trust_peer {
+        return;
+    }
+    let fallback = batch.prepared.first().map(|p| (p.height.0, p.hash));
+    let h = height.or_else(|| fallback.map(|(h, _)| h)).unwrap_or(0);
+    let hash = batch
+        .prepared
+        .iter()
+        .find(|p| p.height.0 == h)
+        .map(|p| p.hash)
+        .or_else(|| fallback.map(|(_, hash)| hash))
+        .unwrap_or([0; 32]);
+    super::warn_trust_block(applied, hash, h, err);
+}
+
+fn log_batch_stop(batch: &LoadedBatch, err: &ConfirmError) {
+    let ConfirmError::Rules(rules) = err else {
+        return;
+    };
+    let height = batch.prepared.first().map(|p| p.height.0);
+    log_batch_fault(batch, height, rules, false);
 }
 
 pub fn confirm_scripts_phase(batch: LoadedBatch) -> Result<ConfirmScriptOutcome, ConfirmError> {

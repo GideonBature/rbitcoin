@@ -726,7 +726,7 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         .map(|(tx, _)| tx.compute_wtxid().to_byte_array())
         .collect();
     let witness_commit = rbitcoin_consensus::witness_commitment_script(wtxids, &[0u8; 32]);
-    Ok(json!({
+    let mut template = json!({
         "capabilities": ["proposal"],
         "version": ctx
             .chain
@@ -750,7 +750,12 @@ pub fn gbt_template(ctx: &RpcContext) -> Result<Value, Value> {
         "height": next_h,
         "rules": ["segwit"],
         "default_witness_commitment": rbitcoin_primitives::hex_encode(&(witness_commit)),
-    }))
+    });
+    let warnings = rpc_warnings(ctx);
+    if !warnings.is_empty() {
+        template["warnings"] = json!(warnings);
+    }
+    Ok(template)
 }
 
 pub fn gbt_proposal(ctx: &RpcContext, req: Option<&Value>) -> Result<Value, Value> {
@@ -1002,8 +1007,9 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
             // Merkle and witness bytes are not the block hash. A coinbase-less
             // 64-byte body can be the header's inner nodes. Those reasons must
             // not stick, so a second submit of the honest body is not
-            // `duplicate-invalid`. Every other cheap consensus reason is.
-            if !submit_reason_is_mutated(&block, &reason) {
+            // `duplicate-invalid`. A warn-and-apply fault stays retryable for
+            // the trusted session. Every other cheap consensus reason sticks.
+            if submit_reason_sticks(hub, &block, &reason) {
                 hub.note_invalid_block(hash);
                 let _ = hub.ensure_header(&block.header);
             }
@@ -1020,10 +1026,9 @@ pub fn submit_received_block(hub: &rbitcoin_net::ChainHub, mut block: Block) -> 
         Err(e) if e.is_local_fault() => SubmitBlockOutcome::Error(e.to_string()),
         Err(e) => {
             let reason = submit_reject_reason(&e);
-            if !e.is_mutated()
-                && reason != "bad-txnmrklroot"
-                && reason != "high-hash"
-                && reason != "prev-blk-not-found"
+            if submit_reason_sticks(hub, &block, &reason)
+                && !(hub.query.trust_peer()
+                    && rbitcoin_net::chain::accept_err_is_warn_and_apply(&e))
             {
                 hub.note_invalid_block(hash);
                 let _ = hub.ensure_header(&block.header);
@@ -1138,6 +1143,15 @@ pub fn read_confirmed_prevout(
             script_pubkey: bitcoin::ScriptBuf::from_bytes(out.script),
         },
     )))
+}
+
+/// Hard consensus rejects stick. Mutated bodies, missing parents, and
+/// warn-and-apply faults stay retryable while `--trust-peer` is on.
+fn submit_reason_sticks(hub: &rbitcoin_net::ChainHub, block: &Block, reason: &str) -> bool {
+    !submit_reason_is_mutated(block, reason)
+        && reason != "high-hash"
+        && reason != "prev-blk-not-found"
+        && !(hub.query.trust_peer() && rbitcoin_consensus::reason_is_warn_and_apply(reason))
 }
 
 /// Witness and merkle bytes are not the block hash. Caching them drops the

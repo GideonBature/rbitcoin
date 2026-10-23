@@ -16,8 +16,8 @@ use rbitcoin_mempool::{
     fee_at_target_sat_kvb, fine_candidate_rates, flow_for_depth, frontier_feerate_from_chunks,
     hold_defined_then_monotone, min_rate_for_capacity, percentile_sat, published_depth_rate,
     weight_above_from_chunks, AcceptError, AcceptResult, ActiveMempool, ChainPrevout, ChainTipCtx,
-    Chunk, Coin, FeeFlowMeter, SelectBudget, Selected, StockAbove, UtxoProvider, BLOCK_WEIGHT_WU,
-    MAX_PACKAGE_COUNT,
+    Chunk, Coin, FeeFlowMeter, PrepareOpts, SelectBudget, Selected, StockAbove, UtxoProvider,
+    BLOCK_WEIGHT_WU, MAX_PACKAGE_COUNT,
 };
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::Query;
@@ -706,6 +706,8 @@ pub struct AdmitSpec {
     pub fee_delta: i64,
     pub time_prepare_lock: bool,
     pub min_relay: Option<u64>,
+    /// This tx came from the current trusted session.
+    pub waive: bool,
 }
 
 /// Shared mempool + relay gate used by peer sessions and tip confirm.
@@ -714,6 +716,8 @@ pub struct MempoolHub {
     pub query: Arc<Query>,
     /// When false, peers' tx inv/tx are ignored (IBD / catch-up).
     pub relay_enabled: AtomicBool,
+    /// Session id of the current trusted peer. [`u64::MAX`] means none.
+    pub trusted_session: AtomicU64,
     /// Broadcast accepts so sessions can inv (origin exclusion is per-session).
     pub announce: broadcast::Sender<MempoolAnnounce>,
     /// `setmocktime` jump: sessions INV live mempool txs (Core scheduler).
@@ -957,6 +961,10 @@ impl MempoolHub {
         if let Some(reserved) = reserved_sigops {
             mp.set_block_reserved_sigops(reserved);
         }
+        if !query.trust_peer() {
+            mp.discard_trust_marks()
+                .map_err(|e| format!("mempool open: {e}"))?;
+        }
         let (announce, _) = broadcast::channel(256);
         let (inv_flush, _) = broadcast::channel(16);
         let (isolated_kick, _) = broadcast::channel(32);
@@ -970,6 +978,7 @@ impl MempoolHub {
             inner: RwLock::new(mp),
             query,
             relay_enabled: AtomicBool::new(false),
+            trusted_session: AtomicU64::new(u64::MAX),
             announce,
             inv_flush,
             recent: Mutex::new(std::collections::VecDeque::with_capacity(
@@ -1852,9 +1861,9 @@ impl MempoolHub {
             v.iter()
                 .filter(|p| {
                     let id = Txid::from_byte_array(p.txid);
-                    g.graph
-                        .get(&id)
-                        .is_some_and(|e| e.wtxid.to_byte_array() == p.wtxid)
+                    g.graph.get(&id).is_some_and(|e| {
+                        e.wtxid.to_byte_array() == p.wtxid && !g.trust_kept.contains(&id)
+                    })
                 })
                 .map(|p| p.txid)
                 .collect::<HashSet<_>>()
@@ -2033,6 +2042,19 @@ impl MempoolHub {
     /// **Staged:** exclusive lock for prepare + commit only. Consensus script
     /// verify runs on the shared `rbtc-scripts` path **outside** the mempool
     /// mutex so concurrent readers are not blocked by interpreter CPU.
+    /// Remember the live session that is the trusted peer. `None` clears it.
+    pub fn set_trusted_session(&self, id: Option<u64>) {
+        self.trusted_session
+            .store(id.unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    fn tx_from_trusted(&self, from: Option<u64>) -> bool {
+        let Some(id) = from else {
+            return false;
+        };
+        id != u64::MAX && id == self.trusted_session.load(Ordering::Relaxed)
+    }
+
     pub fn accept_tx(&self, tx: &Transaction) -> Result<AcceptResult, AcceptError> {
         self.accept_tx_from(tx, None)
     }
@@ -2074,15 +2096,18 @@ impl MempoolHub {
                 tx,
                 utxo,
                 tip,
-                spec.fee_delta,
-                spec.report_orphans,
-                spec.min_relay,
+                PrepareOpts {
+                    fee_delta: spec.fee_delta,
+                    report_orphans: spec.report_orphans,
+                    min_relay: spec.min_relay,
+                    waive: spec.waive,
+                },
             )
         };
         if spec.time_prepare_lock {
             *lock_us = lock_us.saturating_add(t_prep.elapsed().as_micros() as u64);
         }
-        let prep = match prep {
+        let mut prep = match prep {
             Ok(p) => {
                 stages.utxo_us = stages.utxo_us.saturating_add(p.utxo_us);
                 p
@@ -2096,7 +2121,13 @@ impl MempoolHub {
             stages.script_us = stages
                 .script_us
                 .saturating_add(t_script.elapsed().as_micros() as u64);
-            return Err(AcceptError::Script(e.to_string()));
+            let err = AcceptError::Script(e.to_string());
+            let reason = err.mempool_reject_reason();
+            if spec.waive && rbitcoin_consensus::reason_is_warn_and_apply(&reason) {
+                prep.trust_warn.get_or_insert_with(Vec::new).push(reason);
+            } else {
+                return Err(err);
+            }
         }
         stages.script_us = stages
             .script_us
@@ -2274,11 +2305,13 @@ impl MempoolHub {
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
         let delta = self.fee_delta(&tx.compute_txid());
+        let waive = self.tx_from_trusted(from);
         let spec = AdmitSpec {
             report_orphans: true,
             fee_delta: delta,
             time_prepare_lock: false,
             min_relay: None,
+            waive,
         };
         let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -2383,6 +2416,7 @@ impl MempoolHub {
             fee_delta: self.fee_delta(&parent.compute_txid()),
             time_prepare_lock: false,
             min_relay: Some(0),
+            waive: false,
         };
         let prep_p = match self.admit_staged(&parent, utxo, spec_p, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -2413,6 +2447,7 @@ impl MempoolHub {
             fee_delta: self.fee_delta(&child.compute_txid()),
             time_prepare_lock: false,
             min_relay: None,
+            waive: false,
         };
         let prep_c = match self.admit_staged(child, utxo, spec_c, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -2481,23 +2516,31 @@ impl MempoolHub {
         // Read the priority map before the mempool write lock. A child under
         // the raw relay floor is still admissible when its delta clears it.
         let deltas = self.prioritised_txs();
+        let trusted = {
+            let id = self.trusted_session.load(Ordering::Relaxed);
+            (id != u64::MAX).then_some(id)
+        };
         let ready = {
             let mut g = self.lock_write();
-            g.repark_lifted(lifted, &utxo, tip, &|id| {
-                deltas.get(id).copied().unwrap_or(0)
-            })
+            g.repark_lifted(
+                lifted,
+                &utxo,
+                tip,
+                &|id| deltas.get(id).copied().unwrap_or(0),
+                trusted,
+            )
         };
         for item in ready {
             let id = item.tx.compute_txid();
             // Every announcer is restored under the accept lock. A disconnect
             // during the lift already edited the in-flight record.
-            let _ = self.accept_with_utxo(
-                &item.tx,
-                &utxo,
-                item.announcers.first().copied(),
-                false,
-                &item.announcers,
-            );
+            let from = item
+                .announcers
+                .iter()
+                .copied()
+                .find(|&peer| self.tx_from_trusted(Some(peer)))
+                .or_else(|| item.announcers.first().copied());
+            let _ = self.accept_with_utxo(&item.tx, &utxo, from, false, &item.announcers);
             self.forget_taken_orphan(id, item.taken_gen);
         }
     }
@@ -2514,6 +2557,9 @@ impl MempoolHub {
             .collect();
         {
             let mut g = self.lock_write();
+            for id in accepted.iter().flat_map(|r| r.replaced_trust.iter()) {
+                g.trust_kept.insert(*id);
+            }
             for r in accepted.iter().rev() {
                 gone.extend(g.remove_txid_tree(&r.txid));
             }
@@ -2545,7 +2591,14 @@ impl MempoolHub {
                         self.publish_admitted(tx, &result, &prevouts, &utxo);
                     }
                 }
-                Err(_) => self.unindex_if_absent(tx),
+                Err(_) => {
+                    self.unindex_if_absent(tx);
+                    let id = tx.compute_txid();
+                    let mut g = self.lock_write();
+                    if !g.graph.contains(&id) {
+                        g.trust_kept.remove(&id);
+                    }
+                }
             }
         }
     }
@@ -2559,13 +2612,17 @@ impl MempoolHub {
     ) -> Result<(AcceptResult, Vec<TxOut>), AcceptError> {
         let mut stages = rbitcoin_mempool::AcceptStageUs::default();
         let mut lock_us = 0u64;
+        let txid = tx.compute_txid();
+        let waive = self.lock_read().trust_kept.contains(&txid);
         let spec = AdmitSpec {
             report_orphans: false,
-            fee_delta: self.fee_delta(&tx.compute_txid()),
+            fee_delta: self.fee_delta(&txid),
             time_prepare_lock: false,
             min_relay: Some(0),
+            waive,
         };
         let mut prep = self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us)?;
+        prep.keep_mark = waive;
         // Keep the time the hub already holds, so disk and RAM agree.
         prep.keep_accept_secs = self.accept_time_txid(&prep.txid);
         let sample = self.sample_chain_coins(tx, utxo);
@@ -2684,7 +2741,12 @@ impl MempoolHub {
         self.enqueue_noted_orphans(&mut queue);
         while let Some(child) = queue.pop_front() {
             let txid = child.tx.compute_txid();
-            let _ = self.accept_with_utxo(&child.tx, utxo, None, false, &child.announcers);
+            let from = child
+                .announcers
+                .iter()
+                .copied()
+                .find(|&id| self.tx_from_trusted(Some(id)));
+            let _ = self.accept_with_utxo(&child.tx, utxo, from, false, &child.announcers);
             // Admitted or rejected without a repark. A repark already consumed
             // this generation. A newer take of the same txid keeps its own.
             self.forget_taken_orphan(txid, child.taken_gen);
@@ -2763,6 +2825,7 @@ impl MempoolHub {
             fee_delta: delta,
             time_prepare_lock: false,
             min_relay: None,
+            waive: false,
         };
         let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -3065,6 +3128,7 @@ impl MempoolHub {
                 fee_delta: delta,
                 time_prepare_lock: true,
                 min_relay: member_min,
+                waive: false,
             };
             let prep = match self.admit_staged(tx, &utxo, spec, &mut stages, &mut lock_us) {
                 Ok(p) => p,
@@ -3517,6 +3581,7 @@ impl MempoolHub {
             fee_delta: 0,
             time_prepare_lock: false,
             min_relay: None,
+            waive: false,
         };
         let prep = match self.admit_staged(tx, utxo, spec, &mut stages, &mut lock_us) {
             Ok(p) => p,
@@ -3588,7 +3653,7 @@ impl MempoolHub {
         let utxo = self.utxo_provider();
         let tip = self.chain_tip_ctx();
         loop {
-            let snaps: Vec<(Txid, Transaction, Vec<bool>)> = {
+            let snaps: Vec<(Txid, Transaction, Vec<bool>, bool)> = {
                 let g = self.lock_read();
                 g.graph
                     .iter()
@@ -3599,12 +3664,12 @@ impl MempoolHub {
                             .iter()
                             .map(|inp| g.graph.creator(&inp.previous_output).is_some())
                             .collect();
-                        Some((*id, tx, in_mp))
+                        Some((*id, tx, in_mp, g.trust_kept.contains(id)))
                     })
                     .collect()
             };
             let mut to_drop = Vec::new();
-            for (id, tx, in_mp) in snaps {
+            for (id, tx, in_mp, trust) in snaps {
                 utxo.note_spender(&tx);
                 let mut chain_coins = Vec::with_capacity(tx.input.len());
                 let mut missing = false;
@@ -3618,10 +3683,15 @@ impl MempoolHub {
                         break;
                     }
                 }
-                if missing
-                    || rbitcoin_mempool::check_mempool_structural(&tx, &chain_coins, tip).is_err()
-                {
+                if missing {
                     to_drop.push(id);
+                    continue;
+                }
+                if let Err(err) = rbitcoin_mempool::check_mempool_structural(&tx, &chain_coins, tip)
+                {
+                    if !rbitcoin_mempool::trust_keeps_structural(trust, &err) {
+                        to_drop.push(id);
+                    }
                 }
             }
             if to_drop.is_empty() {
@@ -4206,6 +4276,7 @@ impl MempoolHub {
             replaced_scripthashes: Vec::new(),
             replaced_txs: Vec::new(),
             replaced_accept_secs: Default::default(),
+            replaced_trust: Vec::new(),
             evicted: Vec::new(),
         })
     }
