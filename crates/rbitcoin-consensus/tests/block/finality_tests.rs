@@ -78,7 +78,6 @@ fn bip68_disable_flag_and_time_type() {
     let type_flag = 1u32 << 22;
     let n = 2u32; // 2 × 512s relative
     let tx = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(type_flag | n));
-    // coin MTP = 1000; minTime ≈ 1000 + (2<<9) - 1
     let coin_mtp = 1000u32;
     let min_time = coin_mtp as i64 + ((n as i64) << 9) - 1;
     assert!(!sequence_locks_satisfied(
@@ -104,7 +103,6 @@ fn bip68_unresolved_coin_age_fails_closed() {
     let type_flag = 1u32 << 22;
     let tx_h = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(10));
     let tx_t = bare_tx(2, LockTime::ZERO, Sequence::from_consensus(type_flag | 2));
-    // Missing height entry.
     assert!(!sequence_locks_satisfied(&tx_h, &[], &[0], 110, 1_000_000));
     // Height 0 is the genesis coin (relative height 10 spends from block 10).
     assert!(sequence_locks_satisfied(&tx_h, &[0], &[0], 10, 1_000_000));
@@ -124,7 +122,6 @@ fn bip68_unresolved_coin_age_fails_closed() {
         200,
         1_000_000
     ));
-    // Control: known ages still work.
     assert!(sequence_locks_satisfied(&tx_h, &[100], &[0], 110, 0));
 }
 

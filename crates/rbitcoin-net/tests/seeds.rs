@@ -760,7 +760,6 @@ fn addrman_merge_offset_and_ipv4_sort() {
         .is_some());
     assert!(!a.is_empty());
 
-    // Ranked outbound + offset wrap.
     let ranked = a.take_dial_candidates(2, &HashSet::new(), &[]);
     assert_eq!(ranked.len(), 2);
     let offset = a.take_outbound_offset_occupied(3, 1, &[]);
@@ -783,17 +782,14 @@ fn peers_file_load_errors_and_empty() {
     let missing = dir.join("no-such-peers");
     assert!(AddrMan::load(&missing).unwrap().is_empty());
 
-    // Bad magic.
     let bad = dir.join("bad");
     std::fs::write(&bad, "not-magic\n1.2.3.4:8333 0\n").unwrap();
     assert!(AddrMan::load(&bad).is_err());
 
-    // Comment-only / empty after trim → empty book.
     let emptyish = dir.join("emptyish");
     std::fs::write(&emptyish, "# just a comment\n\n").unwrap();
     assert!(AddrMan::load(&emptyish).unwrap().is_empty());
 
-    // Hex + decimal flags parse.
     let ok = dir.join("ok");
     std::fs::write(
         &ok,
@@ -811,7 +807,6 @@ fn peers_file_load_errors_and_empty() {
     assert!(loaded.flags(&addr(1)).is_fast()); // bits 0|1
     assert!(loaded.flags(&addr(2)).failed_last_connect()); // bit 4 = 16
 
-    // Bad address token.
     let bad_addr = dir.join("bad-addr");
     std::fs::write(
         &bad_addr,
@@ -820,7 +815,6 @@ fn peers_file_load_errors_and_empty() {
     .unwrap();
     assert!(AddrMan::load(&bad_addr).is_err());
 
-    // Bad hex flags.
     let bad_hex = dir.join("bad-hex");
     std::fs::write(
         &bad_hex,
@@ -829,7 +823,6 @@ fn peers_file_load_errors_and_empty() {
     .unwrap();
     assert!(AddrMan::load(&bad_hex).is_err());
 
-    // Bad decimal flags + 0X uppercase hex prefix path.
     let bad_dec = dir.join("bad-dec");
     std::fs::write(
         &bad_dec,

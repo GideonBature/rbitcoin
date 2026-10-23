@@ -345,7 +345,6 @@ impl TxidBody {
             if used_session {
                 for (op, (first, blob, _)) in ops.iter().zip(jobs.iter_mut()) {
                     if op.result < 0 || (op.result as usize) != blob.len() {
-                        // Complete short / failed page via libc pread.
                         self.file.pread_at(Self::entry_offset(*first)?, blob)?;
                     }
                 }

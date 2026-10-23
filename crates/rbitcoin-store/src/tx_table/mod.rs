@@ -2777,7 +2777,6 @@ impl TxTable {
     pub fn fks_by_txid(&self, txid: &[u8; 32]) -> Result<Vec<Fk>, StoreError> {
         let mut out: Vec<Fk> = Vec::new();
         let mixed = self.secret.mix_txid(txid);
-        // probe_candidates already open-first then sealed newest→oldest, deep-first within.
         let cands = self.head.probe_candidates(&mixed)?;
         for fk in cands {
             if out.contains(&fk) || self.body_txid(fk)? != *txid {

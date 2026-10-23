@@ -195,7 +195,6 @@ fn work_chain_progress_fetch_hole_requires_body_queue() {
     let p2 = work_chain_progress(&hub, &h2h, &mut body, 50, 10);
     assert_eq!(p2.tip_hole, 3);
 
-    // Rejected tip+1 stops the hole walk.
     body.mark_rejected(h1);
     assert!(!claim_ready(&hub, &mut body, 1, &h1));
     let p3 = work_chain_progress(&hub, &h2h, &mut body, 50, 10);
@@ -301,7 +300,6 @@ fn tip_rate_tracker_eta_surface() {
     tiny.push(t0, 10);
     tiny.push(t0 + Duration::from_millis(100), 11);
     assert!(tiny.eta_rate(t0 + Duration::from_millis(100)).is_none());
-    // tip >= horizon → "done"
     let mut warm = TipRateTracker::new();
     for i in 0u32..=40 {
         warm.push(t0 + Duration::from_secs(u64::from(i) * 2), i * 2);

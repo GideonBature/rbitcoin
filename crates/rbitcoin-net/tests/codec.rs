@@ -236,7 +236,6 @@ fn frame_helpers_ping_headers_notfound_and_encode_cost() {
     assert!(encode_is_cpu_heavy(&NetworkMessage::Block(genesis_block(
         Network::Regtest
     ))));
-    // Small inv is cheap; large is heavy.
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::message_blockdata::Inventory;
     let small = NetworkMessage::Inv(vec![Inventory::Block(bitcoin::BlockHash::from_byte_array(

@@ -110,7 +110,6 @@ fn load_rejects_overlong_secret_file() {
     ));
     // generate forces first byte nonzero path when unlucky zeros — just call once more.
     let mut s = StoreSecret::generate();
-    // force first byte path by reconstructing
     let mut b = *s.as_bytes();
     b[0] = 0;
     // from_bytes keeps zero first byte (generate would fix)

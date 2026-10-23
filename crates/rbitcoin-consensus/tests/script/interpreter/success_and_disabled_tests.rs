@@ -29,7 +29,6 @@ fn eval_with_null_dummy(
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         }],
     };
-    // script_code points into script_bytes via Script::from_bytes
     let script = Script::from_bytes(script_bytes);
     let mut ctx = EvalContext::new(&tx, 0, Amount::from_sat(50_000), script, sig_version);
     ctx.null_dummy = null_dummy;
@@ -536,7 +535,6 @@ fn script_sig_pushes_op_n_and_1negate() {
 
 #[test]
 fn find_and_delete_pushdata_lengths() {
-    // Direct push
     let data = vec![0x11u8; 3];
     let mut script = vec![0x03];
     script.extend_from_slice(&data);

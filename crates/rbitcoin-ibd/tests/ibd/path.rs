@@ -405,7 +405,6 @@ fn seed_work_path_archives_ahead_of_tip() {
     }
     let b3 = mine(tip, time + 3 * 600, 3);
     hub.ensure_header(&b3.header).unwrap();
-    // no Class A body for h=3 → ready_prefix breaks
 
     let mut st = IbdWorkState::new(Vec::new(), hub.tip_hash(), hub.tip_height());
     seed_work_path_from_store(&mut st, &hub);

@@ -355,7 +355,6 @@ fn pin_operator_smokes(td: &TestDatadir) {
 #[allow(clippy::cognitive_complexity)] // one fixture, many CLI/surface arms
 #[test]
 fn node_cli_and_surface_smoke() {
-    // Networks + run_node lifecycle
     for net in [
         Network::Mainnet,
         Network::Testnet,
@@ -408,7 +407,6 @@ fn node_cli_and_surface_smoke() {
     assert_eq!(Network::parse("REGTEST").unwrap(), Network::Regtest);
     assert!(!VERSION.is_empty());
 
-    // Config errors
     let cfg = NodeConfig {
         datadir: std::path::PathBuf::from("").into(),
         ..NodeConfig::default()
@@ -419,7 +417,6 @@ fn node_cli_and_surface_smoke() {
     std::fs::write(&file, b"nope").unwrap();
     assert!(run_node(NodeConfig::default().with_datadir(file)).is_err());
 
-    // CLI entrypoints
     for net in ["mainnet", "testnet", "signet", "regtest"] {
         let d = td.path().join(net);
         assert!(exit_success(node_cli_main([
@@ -464,7 +461,6 @@ fn node_cli_and_surface_smoke() {
         "error",
         "--smoke",
     ])));
-    // Happy-path flag combinations (smoke exits after open).
     let flags_ok = td.path().join("flags-ok");
     assert!(exit_success(node_cli_main([
         "rbitcoin-node",
@@ -566,8 +562,6 @@ fn node_cli_and_surface_smoke() {
         std::env::remove_var("RBITCOIN_TEST_DROP_STORE");
     }
 }
-
-// ─── Store error / corrupt paths (not hit by happy-path chain tests) ────────
 
 #[test]
 fn store_error_and_corrupt_paths() {
@@ -698,8 +692,6 @@ fn store_table_header_and_idx_corrupt() {
 
     let _ = (SCHEMA_VERSION, STORE_MAGIC);
 }
-
-// ─── Synthetic store growth (no PoW; tiny header.head rolls a generation) ───
 
 fn poison_confirmed_merkle_root(store: &std::path::Path, fk: Fk, rec: &HeaderRecord) {
     let mut rec = rec.clone();
@@ -1682,8 +1674,6 @@ fn resume_tx_head_resolves_external_prev() {
     }
 }
 
-// ─── Consensus + reconstruct: one mature mine, many assertions ──────────────
-
 /// Single mature-chain pad covers consensus + scripthash + reconstruct + reorg:
 /// - accept genesis + maturity pad + spend + double-spend reject
 /// - create_fk on spend + reconstruct
@@ -1710,7 +1700,6 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     assert_eq!(chain.tip_hash(), chain.blocks.last().unwrap().block_hash());
     assert!(tip_h >= params.coinbase_maturity() + 2);
 
-    // Spend of height-1 coinbase succeeded at tip.
     assert_eq!(
         q.spenders(chain.matured_coinbase_txid.as_byte_array(), 0)
             .unwrap()
@@ -1784,15 +1773,12 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     let cb1 = q.get_tx(fks[0]).unwrap();
     assert_eq!(cb1.txid, chain.matured_coinbase_txid.to_byte_array());
     let out0 = q.tx_output(&cb1, 0).unwrap();
-    // Coinbase output script is OP_TRUE anyone-can-spend in our miner.
     assert_eq!(out0.script.as_slice(), &[0x51]);
     let full = q.store().get_tx_full(fks[0]).unwrap();
     assert_eq!(full.0.txid, cb1.txid);
     assert!(q.store().is_confirmed_strong(fks[0]).unwrap());
-    // Body/head occupancy counters (store stats used by RPC/status).
     assert!(q.tx_body_count() > 0);
     assert!(q.tx_head_occupied() > 0);
-    // Spentness of the matured coinbase out (spent at tip).
     assert!(q
         .is_outpoint_spent(chain.matured_coinbase_txid.as_byte_array(), 0)
         .unwrap());
@@ -1830,7 +1816,6 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
     let wh0 = q.wire_header_at_height(Height::GENESIS).unwrap();
     assert_eq!(wh0.block_hash(), chain.blocks[0].block_hash());
 
-    // Double-spend must fail (tip still includes original spend).
     let tip_block = chain.blocks.last().unwrap();
     let spend2 = spend_anyone_can_spend(
         chain.matured_coinbase_txid,
@@ -1993,7 +1978,6 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
         tip_bits,
         "regtest no-retarget: next bits == tip bits"
     );
-    // Idempotent ensure_header at tip.
     let tip_rec = q.get_header(tip_fk).unwrap();
     let again = q.ensure_header(&tip_rec).unwrap();
     assert_eq!(again, tip_fk);
@@ -2766,10 +2750,8 @@ fn three_stage_confirm_and_parent_pin_surface() {
     assert_eq!(heights.len(), run.len());
     assert_eq!(mat.batch.len(), run.len());
 
-    // SCRIPTS
     let ok = confirm_scripts_phase(mat.batch).expect("scripts");
 
-    // WRITE
     let fks = confirm_write_phase(&q, &params, ms, ok.batch).expect("write");
     assert_eq!(fks.len(), run.len());
     assert_eq!(q.tip_height(), Some(Height(spend_h)));
@@ -2821,7 +2803,6 @@ fn three_stage_confirm_and_parent_pin_surface() {
 
     // Tip advance prunes plans/headers ≤ tip (body LRU retains under budget).
     q.advance_parent_cache_tip(spend_h);
-    // Combined load entry on empty: reject empty.
     let empty = confirm_wire_load_phase(&q, &params, ms, &[], &none);
     assert!(empty.is_err());
 
@@ -2911,7 +2892,6 @@ fn confirm_load_ahead_of_write_does_not_badprev() {
         "second batch starts at 11"
     );
 
-    // Finish pipeline: scripts + write A then B.
     let ok_a = confirm_scripts_phase(mat_a.batch).expect("scripts A");
     confirm_write_phase(&q, &params, ms, ok_a.batch).expect("write A");
     assert_eq!(q.tip_height(), Some(Height(10)));
@@ -2999,7 +2979,6 @@ fn block_cache_and_mempool_hub_surface() {
     let hdrs = cache.headers_after_locator(&[genesis_hash], stop);
     assert!(!hdrs.is_empty());
     assert_ne!(hdrs[0].block_hash(), genesis_hash);
-    // Bad extension rejected.
     let mut bad = blocks.last().unwrap().clone();
     bad.header.prev_blockhash = BlockHash::from_byte_array([0xee; 32]);
     assert!(cache.push_best(bad).is_err());
@@ -3056,8 +3035,6 @@ fn block_cache_and_mempool_hub_surface() {
     let cb2 = b2.txdata[0].compute_txid().to_byte_array();
     assert!(q_arc.get_tx_by_txid(&cb2).unwrap().is_some());
 }
-
-// ─── Unified wire pipeline (raw block → validated tip) ───────────────────────
 
 /// Multi-height raw wire → tip via split load/scripts/commit (no pre-archive reload).
 #[test]

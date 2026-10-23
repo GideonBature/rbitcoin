@@ -464,7 +464,6 @@ fn pipeline_body_backends_agree() {
 fn pipeline_full_matches_record_range_and_decode() {
     let (dir, t) = temp_tx();
     let fks = put_n(&t, 12);
-    // Unsorted + one pre-known range.
     let (known_off, known_len) = t.body_range(fks[3]).unwrap();
     let mut jobs: Vec<IdxBodyJob> = fks
         .iter()
@@ -478,7 +477,6 @@ fn pipeline_full_matches_record_range_and_decode() {
             IdxBodyJob::new(fk.0, range)
         })
         .collect();
-    // Shuffle order.
     jobs.swap(0, 7);
     jobs.swap(2, 10);
     stamp_txout(&t, &mut jobs);
@@ -592,7 +590,6 @@ fn synthetic_cold_batch_timed_identity() {
     use std::time::Instant;
     let (dir, t) = temp_tx();
     let fks = put_n(&t, 64);
-    // Wave 1: cold idx+body for all
     let mut jobs: Vec<IdxBodyJob> = fks.iter().map(|fk| IdxBodyJob::new(fk.0, None)).collect();
     let t0 = Instant::now();
     stamp_txout(&t, &mut jobs);

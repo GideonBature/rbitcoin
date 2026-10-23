@@ -163,7 +163,6 @@ fn a_rewind_leaves_a_record_stale_until_the_peer_answers() {
     let deeper = at(&extend(ours[1_988].block_hash(), 2, 0x33), 1_990);
     peer.note_rewind(&deeper, 1_989);
     assert!(peer.left_path_by(&deeper, 1_990));
-    // Its answer is the record again.
     peer.note_headers(&on_ours, |_| None, 1_997, 1_998, &ours[1_997..2_000]);
     assert!(!peer.left_path_by(&on_ours, 1_999));
     assert!(

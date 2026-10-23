@@ -492,7 +492,6 @@ async fn peer_catchup_compact_reorg() {
     );
     assert_eq!(hub.tip_hash(), tip_before_low);
 
-    // Mock time: a stale getdata can be asked again.
     let stale_hash = BlockHash::from_byte_array([0x11; 32]);
     let mut requested = HashSet::new();
     requested.insert(stale_hash);

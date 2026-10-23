@@ -267,7 +267,6 @@ fn insert_roll_seal_lookup_roundtrip() {
         "seal publish must map fuse, not keep the build Box"
     );
 
-    // Known members resolve (as candidates).
     for i in [1u64, 400, 819, 820] {
         let cands = h.probe_candidates(&mixed(i)).unwrap();
         assert!(
@@ -275,7 +274,6 @@ fn insert_roll_seal_lookup_roundtrip() {
             "missing fk={i} cands={cands:?}"
         );
     }
-    // Global miss.
     let miss = h.probe_candidates(&mixed(0xDEAD_BEEF)).unwrap();
     assert!(miss.is_empty() || !miss.iter().any(|f| f.0 == 0xDEAD_BEEF));
 

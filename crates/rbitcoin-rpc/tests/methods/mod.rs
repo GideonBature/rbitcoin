@@ -1026,14 +1026,12 @@ fn hash_hex_display_matches_blockhash_display_and_reverses_parse() {
     assert_eq!(disp, via_type);
     let back = parse_hash32_display(&disp).unwrap();
     assert_eq!(back, internal);
-    // Raw internal hex is not equal to display.
     assert_ne!(disp, rbitcoin_primitives::hex_encode(internal));
 }
 
 #[test]
 fn all_methods_callable_empty_or_error() {
     let (ctx, dir) = ctx_empty();
-    // Control / network always succeed on empty store.
     for m in [
         "uptime",
         "getnetworkinfo",
@@ -1083,7 +1081,6 @@ fn all_methods_callable_empty_or_error() {
     let _ = dispatch(&ctx, "estimatesmartfee", vec![json!(6)]).unwrap();
     let _ = dispatch(&ctx, "getblockcount", RpcParams::named(Default::default())).unwrap();
     let _ = dispatch(&ctx, "nosuch", vec![]).unwrap_err();
-    // no mempool
     let ctx2 = RpcContext {
         query: Arc::clone(&ctx.query),
         mempool: None,

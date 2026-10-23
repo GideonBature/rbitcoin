@@ -428,9 +428,7 @@ fn sticky_assemble_reuses_outs_arc() {
     assert_eq!(t0[0], 7);
     assert_eq!(t1[0], 7);
     assert_eq!(t2[0], 7);
-    // Sticky holds parent 7.
     assert_eq!(bp.sticky_outs.borrow().as_ref().map(|(id, _)| *id), Some(7));
-    // Switch parent clears sticky to new id.
     bp.insert_owned(
         Fk(8),
         tx(8),

@@ -108,7 +108,6 @@ fn script_ok_append_contiguous_and_gap() {
     assert!(a.append_contiguous(c).is_ok());
     assert_eq!(a.len(), 3);
 
-    // Empty other is no-op.
     assert!(a
         .append_contiguous(ScriptOkBatch {
             prepared: vec![],
@@ -121,7 +120,6 @@ fn script_ok_append_contiguous_and_gap() {
         .is_ok());
     assert_eq!(a.len(), 3);
 
-    // Empty self absorbs other.
     let mut empty = ScriptOkBatch {
         prepared: vec![],
         wire_blocks: vec![],
@@ -137,7 +135,6 @@ fn script_ok_append_contiguous_and_gap() {
     assert!(empty.approx_wire_bytes() > 0);
     assert_eq!(empty.parent_count(), 0);
 
-    // Wire/prepared length mismatch on contiguous height → Err(other).
     let mut good = batch_one(60);
     let mut bad = batch_one(61);
     bad.wire_blocks.clear();
@@ -2046,7 +2043,6 @@ fn pin_for_wire_incomplete_outs_is_invariant_error() {
 
     let parent_id = 77u64;
     let parent_fk = Fk(parent_id);
-    // Spend needs vout 0 from parent_id.
     let spend_tx = TxRecord {
         txid: [0xCCu8; 32],
         version: 1,

@@ -215,7 +215,6 @@ pub fn log_at_style(level: Level, style: Style, args: fmt::Arguments<'_>) {
     let _ = stderr.flush();
 }
 
-/// Log an error-level line.
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {
@@ -223,7 +222,6 @@ macro_rules! error {
     };
 }
 
-/// Log a warning-level line.
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
@@ -231,7 +229,6 @@ macro_rules! warn {
     };
 }
 
-/// Log an info-level line.
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {
@@ -251,7 +248,6 @@ macro_rules! info_bold {
     };
 }
 
-/// Log a debug-level line.
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
@@ -259,7 +255,6 @@ macro_rules! debug {
     };
 }
 
-/// Log a trace-level line.
 #[macro_export]
 macro_rules! trace {
     ($($arg:tt)*) => {

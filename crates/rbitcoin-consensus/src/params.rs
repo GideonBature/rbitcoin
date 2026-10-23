@@ -232,7 +232,6 @@ impl ChainParams {
         }
     }
 
-    /// BIP65 CLTV active?
     #[inline]
     pub fn bip65_active_at(&self, height: u32) -> bool {
         height >= self.btc.bip65_height

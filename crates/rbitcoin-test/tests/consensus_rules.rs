@@ -149,8 +149,6 @@ fn empty_through_100_copy_keeps_the_other_tip() {
     assert_eq!(q99.tip_height(), Some(Height(99)));
 }
 
-// ─── Header rules ───────────────────────────────────────────────────────────
-
 fn pin_h6_pow_limit(q: &Query, params: &ChainParams, genesis: &bitcoin::Block) {
     let near = mine_regtest_block(genesis.block_hash(), genesis.header.time + 1, 1, vec![]);
     let mut tight = params.clone();
@@ -1349,8 +1347,6 @@ fn repeated_coinbase_archived_retry_connects_the_valid_prefix() {
         .expect("archived retry of h1..=h103");
     assert_eq!(q.tip_height(), Some(Height(103)));
 }
-
-// ─── Script flags (Core `GetBlockScriptFlags`) ──────────────────────────────
 
 /// Core sets WITNESS on every block, not from the segwit height. Below the
 /// overlaid segwit height a v0 program spend with an empty witness still

@@ -240,7 +240,6 @@ fn page_append_fill_and_next_link() {
     sh_page_set_next(&mut page, 8192).unwrap();
     assert_eq!(sh_page_next(&page).unwrap(), 8192);
 
-    // Fill until the next sequential fk does not fit.
     let mut full = [0u8; SH_PAGE_SIZE];
     sh_page_init_empty(&mut full);
     let mut i = 1u64;
@@ -305,7 +304,6 @@ fn page_fks_must_be_strictly_increasing() {
     assert!(sh_page_try_append(&mut page, Fk(5)).is_err());
     assert_eq!(sh_page_last_fk(&page).unwrap(), Some(Fk(20)));
 
-    // Pack rejects unsorted input.
     let unsorted = [3u64, 1, 2];
     assert!(sh_page_pack_fks(&mut page, &unsorted, 0).is_err());
 
@@ -339,7 +337,6 @@ fn page_slice_must_be_exactly_4k() {
 fn page_corrupt_n_fks_over_capacity() {
     let mut page = [0u8; SH_PAGE_SIZE];
     sh_page_init_empty(&mut page);
-    // Force illegal n_fks
     page[SH_PAGE_OFF_N_FKS..SH_PAGE_OFF_N_FKS + 2]
         .copy_from_slice(&((SH_PAGE_STREAM_MAX + 1) as u16).to_le_bytes());
     assert!(sh_page_n_fks(&page).is_err());

@@ -26,29 +26,23 @@ fn load_json() -> Value {
 
 #[test]
 fn assemble_edges_string_hex_push_and_errors() {
-    // Quoted string → data push.
     let b = assemble("'Az'").expect("string");
     assert_eq!(b[0], 2); // push length
     assert_eq!(&b[1..], b"Az");
     // Hex raw bytes (not a push wrapper).
     let b = assemble("0x5152").expect("hex");
     assert_eq!(b, vec![0x51, 0x52]);
-    // Numbers and opcode names.
     let b = assemble("1 2 ADD").expect("ops");
     assert!(!b.is_empty());
-    // Push length encodings for larger payloads.
     let long = "x".repeat(80);
     let quoted = format!("'{long}'");
     let b = assemble(&quoted).expect("long push");
     assert_eq!(b[0], 0x4c); // OP_PUSHDATA1
     assert_eq!(b[1], 80);
-    // Errors.
     assert!(assemble("'unterminated").is_err());
     assert!(assemble("0xabc").is_err()); // odd hex
     assert!(assemble("NOTANOPCODE").is_err());
-    // Empty / whitespace only.
     assert!(assemble("   ").unwrap().is_empty());
-    // 0X uppercase hex prefix.
     let b = assemble("0X5152").expect("hex upper");
     assert_eq!(b, vec![0x51, 0x52]);
     // Negative scriptnum encoding.
@@ -73,8 +67,6 @@ fn assemble_edges_string_hex_push_and_errors() {
     assert_eq!(b[0], 1); // direct push length
     assert_eq!(&b[1..], &[17]);
 }
-
-// ── Flag mapping ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
 struct CoreFlags {
@@ -454,8 +446,6 @@ fn outcome_matches(expect: &str, got: &Result<(), String>) -> bool {
         _ => got.is_err(),
     }
 }
-
-// ── Row runner ──────────────────────────────────────────────────────────────
 
 struct RowStats {
     total: u32,

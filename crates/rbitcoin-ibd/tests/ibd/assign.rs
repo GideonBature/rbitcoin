@@ -888,7 +888,6 @@ fn ibd_cover_tip_holes() {
         "a silent retired owner is re-asked when no other peer exists"
     );
 
-    // Peer 1 connects and joins the hole.
     st.slots[1].alive = true;
     seed_ewma(&mut st.slots[1], 2_000_000);
     race(&mut st, &[0, 1], hole, TIP_HOLE_MAX_PEERS);

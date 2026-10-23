@@ -38,8 +38,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
-// needs_sync: set on durable-payload writes; cleared after sync_data.
-
 pub const FILE_HEADER_LEN: usize = 16;
 
 /// Sibling `{filename}.tmp` next to `path` (keeps compound suffixes like `.idx`).

@@ -42,7 +42,6 @@ fn display_and_source_surface() {
     for (err, needle) in cases {
         let s = err.to_string();
         assert!(s.contains(needle), "display={s:?} needle={needle}");
-        // Only Io exposes a source.
         match &err {
             NetError::Io(_) => assert!(err.source().is_some()),
             _ => assert!(err.source().is_none()),

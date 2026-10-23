@@ -49,7 +49,6 @@ fn init_and_enabled() {
 fn timestamp_epoch() {
     let s = format_timestamp(UNIX_EPOCH);
     assert_eq!(s, "1970-01-01T00:00:00.000Z");
-    // 2024-01-01 00:00:00 UTC
     let s = format_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(1_704_067_200));
     assert_eq!(s, "2024-01-01T00:00:00.000Z");
     // February and December are the Hinnant month arms. A log line's

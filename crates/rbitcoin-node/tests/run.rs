@@ -612,7 +612,6 @@ fn shutdown_flag_and_node_handle_smoke() {
     assert!(!sd.requested());
     sd.request();
     assert!(sd.requested());
-    // Second request is idempotent.
     sd.request();
     assert!(sd.requested());
 

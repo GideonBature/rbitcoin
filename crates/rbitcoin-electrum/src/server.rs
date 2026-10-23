@@ -299,7 +299,6 @@ where
             return if buf.is_empty() {
                 Ok(None)
             } else {
-                // EOF mid-line — treat as complete if under cap.
                 if buf.len() > max_bytes {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,

@@ -168,7 +168,6 @@ fn tip_follow_locator_includes_tip_after_genesis() {
     hub.ensure_genesis().unwrap();
     let loc = tip_follow_locator(&hub);
     assert!(!loc.is_empty());
-    // Newest-first: tip hash is first.
     assert_eq!(loc[0], hub.tip_hash().unwrap());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -412,7 +411,6 @@ fn live_follow_dec_on_drop() {
         assert_eq!(c.load(Ordering::SeqCst), 2);
     }
     assert_eq!(c.load(Ordering::SeqCst), 1);
-    // None branch is a no-op drop.
     let _ = LiveFollowDec(None);
 }
 
@@ -1026,7 +1024,6 @@ fn handle_peer_frame_control_and_inv_paths() {
         .unwrap();
         assert_eq!(served_block(out_rx.try_recv().unwrap()).block_hash(), tip);
 
-        // CompactBlock getdata for tip.
         handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::CompactBlock(tip)])),
             &hub,
@@ -1041,7 +1038,6 @@ fn handle_peer_frame_control_and_inv_paths() {
             NetworkMessage::CmpctBlock(_)
         ));
 
-        // GetBlockTxn with bad index → disconnect score.
         use bitcoin::bip152::BlockTransactionsRequest;
         handle_peer_frame(
             frame_for(NetworkMessage::GetBlockTxn(GetBlockTxn {
@@ -1182,7 +1178,6 @@ fn handle_peer_frame_control_and_inv_paths() {
         .await
         .unwrap();
 
-        // SendCmpct with unsupported version is ignored.
         handle_peer_frame(
             frame_for(NetworkMessage::SendCmpct(SendCmpct {
                 send_compact: false,
@@ -1198,7 +1193,6 @@ fn handle_peer_frame_control_and_inv_paths() {
         assert!(follow.send_cmpct); // still true from earlier v2
         assert_eq!(follow.cmpct_version, 2);
 
-        // Inventory::Block (non-witness) for unknown → GetHeaders.
         let want2 = BlockHash::from_byte_array([0xcc; 32]);
         handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::Block(want2)])),
@@ -1214,7 +1208,6 @@ fn handle_peer_frame_control_and_inv_paths() {
             other => panic!("expected GetHeaders for unknown inv, got {other:?}"),
         }
 
-        // GetData for a block this node has never seen → notfound, not silence.
         handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::WitnessBlock(
                 want2,
@@ -1285,7 +1278,6 @@ fn handle_peer_frame_control_and_inv_paths() {
             other => panic!("expected NotFound for header-only getdata, got {other:?}"),
         }
 
-        // Inv for known tip → no GetData.
         handle_peer_frame(
             frame_for(NetworkMessage::Inv(vec![Inventory::WitnessBlock(tip)])),
             &hub,
@@ -1297,7 +1289,6 @@ fn handle_peer_frame_control_and_inv_paths() {
         .unwrap();
         assert!(out_rx.try_recv().is_err());
 
-        // GetData Inventory::Block for tip (non-witness arm).
         handle_peer_frame(
             frame_for(NetworkMessage::GetData(vec![Inventory::Block(tip)])),
             &hub,
@@ -1355,7 +1346,6 @@ fn handle_peer_frame_control_and_inv_paths() {
         .await
         .unwrap();
 
-        // Catch-all unknown command.
         handle_peer_frame(
             frame_for(NetworkMessage::Unknown {
                 command: bitcoin::p2p::message::CommandString::try_from("zzzzzz").unwrap(),

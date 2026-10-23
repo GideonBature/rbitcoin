@@ -144,7 +144,6 @@ fn scripthash_head_insert_many_full_without_rehash() {
     let mut key = [0u8; 32];
     key[0..8].copy_from_slice(&5u64.to_le_bytes());
     assert!(h2.get(&key).unwrap().is_some());
-    // corrupt size open
     {
         std::fs::OpenOptions::new()
             .write(true)

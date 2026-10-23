@@ -170,7 +170,6 @@ fn operator_conf_and_argv() {
         })
     ));
 
-    // No argv: mainnet with the anchored milestone and the chainwork floor.
     let omitted = ready_config(["rbitcoin-node"]);
     assert_eq!(omitted.network, Network::Mainnet);
     assert_eq!(
@@ -193,7 +192,6 @@ fn operator_conf_and_argv() {
         Some("127.0.0.1:18444".parse().unwrap())
     );
 
-    // A custom signet operator's conf file.
     let dir = tmp_datadir();
     std::fs::create_dir_all(&dir).unwrap();
     let knobs = dir.join("rbitcoin.conf");
@@ -680,7 +678,6 @@ fn cli_omit_preserves_advanced_env() {
         "--no-seeds",
         "--milestone",
         "0",
-        // no --max-inbound
     ]);
     assert_exit(code, ExitCode::SUCCESS);
     assert_eq!(

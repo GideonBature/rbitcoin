@@ -3828,7 +3828,6 @@ fn estimate_fee_percentiles_and_spent_outpoints_empty() {
     let store_dir = tmp();
     let q = Query::open_or_create_tiny(&store_dir).unwrap();
     let hub = MempoolHub::open(&dir, Arc::new(q)).unwrap();
-    // Empty → negative estimate for all targets.
     assert!(hub.estimate_fee_btc_per_kb(1) < 0.0);
     assert!(hub.estimate_fee_btc_per_kb(5) < 0.0);
     assert!(hub.estimate_fee_btc_per_kb(100) < 0.0);

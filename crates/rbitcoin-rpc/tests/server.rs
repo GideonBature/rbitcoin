@@ -177,7 +177,6 @@ async fn rpc_smoke_getblockcount_and_help() {
     assert!(chain["error"].is_null(), "{chain}");
     assert_eq!(chain["result"]["chain"], "regtest");
 
-    // 401 without auth
     let mut stream = tokio::net::TcpStream::connect(tcp_addr(&handle))
         .await
         .unwrap();

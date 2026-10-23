@@ -333,7 +333,6 @@ fn coinbase_fk_at_heights_matches_first_tx() {
     assert_eq!(map.get(&0).copied(), Some(fks[0]));
     assert!(!map.contains_key(&1)); // no confirmed height 1
     assert!(!map.contains_key(&99));
-    // Non-coinbase is not first.
     assert_ne!(map.get(&0).copied().unwrap(), fks[1]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -342,7 +341,6 @@ fn coinbase_fk_at_heights_matches_first_tx() {
 #[test]
 fn store_create_open_archive_spend_and_meta_errors() {
     let dir = tmp();
-    // Not a directory when path is a file.
     {
         let file = dir.join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
@@ -450,7 +448,6 @@ fn store_create_open_archive_spend_and_meta_errors() {
         "one decode for the returned record"
     );
 
-    // Second tx spends create vout 0.
     let spend = (
         TxRecord {
             txid: [11u8; 32],
@@ -470,9 +467,7 @@ fn store_create_open_archive_spend_and_meta_errors() {
     );
     let spend_fk = s.put_tx_full_batch_indexed(&[spend], true).unwrap()[0];
     s.put_spend_create(create_fk, 0, spend_fk, 0).unwrap();
-    // Idempotent re-annotate same sole spender.
     s.put_spend_create(create_fk, 0, spend_fk, 0).unwrap();
-    // Multi promote: second spender.
     let spend2 = (
         TxRecord {
             txid: [12u8; 32],
@@ -533,7 +528,6 @@ fn store_create_open_archive_spend_and_meta_errors() {
         Some((soff, slen)),
     )
     .unwrap();
-    // Re-annotate vout1 (already multi).
     point_table::put_spend_on_create_at(
         &s.txs,
         &s.spenders,
@@ -584,7 +578,6 @@ fn store_create_open_archive_spend_and_meta_errors() {
         "spender walks resolve the create by head probe only"
     );
 
-    // Batch helpers
     let ranges = s.tx_body_range_batch(&[create_fk, spend_fk]).unwrap();
     assert_eq!(ranges.len(), 2);
     let full_b = s.get_tx_full(create_fk).unwrap();
@@ -613,13 +606,11 @@ fn store_create_open_archive_spend_and_meta_errors() {
     assert_eq!(s2.header_count(), 1);
     drop(s2);
 
-    // open_or_create on fresh path
     let dir2 = tmp();
     let s3 = Store::open_or_create_tiny(&dir2).unwrap();
     assert_eq!(s3.header_count(), 0);
     drop(s3);
 
-    // meta errors
     assert!(matches!(
         check_meta(std::path::Path::new("/no/such")),
         Err(StoreError::Io { .. })
@@ -1038,7 +1029,6 @@ fn class_c_barrier_pre_tip_only_does_not_advance_tip() {
         s.confirmed.set(Height(1), Fk(2)).unwrap();
         // Mid-barrier: strong/height durable, confirmed still unflushed.
         s.flush_class_c_pre_tip().unwrap();
-        // Process still sees tip 1 in RAM.
         assert_eq!(s.confirmed.tip_height(), Some(Height(1)));
         // Drop without flushing confirmed (kill mid-barrier).
     }
@@ -1058,7 +1048,6 @@ fn class_c_barrier_pre_tip_only_does_not_advance_tip() {
     );
     assert!(!s.is_confirmed_strong(Fk(2)).unwrap());
     assert!(!s.is_confirmed_strong(Fk(3)).unwrap());
-    // Tip tx still strong.
     assert!(s.is_confirmed_strong(Fk(1)).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1500,17 +1489,14 @@ fn store_open_upgrade_missing_tables_and_unspent_no_range() {
         let _ = std::fs::remove_file(dir.join("tx_height.body"));
         let s = Store::open_tiny(&dir).unwrap();
         assert_eq!(s.get_tx(fk).unwrap().txid, [20u8; 32]);
-        // unspent without body_range
         let u = s.unspent_create_vouts(fk, &[0], None).unwrap();
         assert_eq!(u, vec![0]);
-        // empty vouts
         assert!(s.unspent_create_vouts(fk, &[], None).unwrap().is_empty());
         let batch = s
             .unspent_create_vouts_batch(&[(fk, vec![0u32]), (fk, vec![])])
             .unwrap();
         assert_eq!(batch[0], vec![0]);
         assert!(batch[1].is_empty());
-        // has_confirmed without range, no spender
         assert!(!s.has_confirmed_strong_spender_create(fk, 0, None).unwrap());
         assert!(!s.has_confirmed_strong_spender(&[20u8; 32], 0).unwrap());
         assert!(s.spenders_raw(&[20u8; 32], 0).unwrap().is_empty());

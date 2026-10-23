@@ -10,7 +10,6 @@ fn capacity_is_n_times_block() {
 
 #[test]
 fn zero_inflow_equals_frontier_depth() {
-    // stock_above: 2e6 WU above any rate < 1000, 0 above ≥1000
     let stock = |r: u64| if r < 1000 { 2_000_000 } else { 0 };
     let inflow = vec![0u64; bucket_count()];
     let rates = default_candidate_rates();
@@ -18,7 +17,6 @@ fn zero_inflow_equals_frontier_depth() {
     // Need stock_above(R) ≤ 0.95 * 4e6 → 2e6 always ok; minimum R on ladder that
     // still has load ≤ cap. All rates with stock 2e6 fit; min is lowest edge.
     assert_eq!(r, rates[0]);
-    // Deeper N still fits at lowest.
     let r2 = min_rate_for_capacity(stock, &inflow, 5, &rates).unwrap();
     assert!(r2 <= r);
 }
@@ -27,7 +25,6 @@ fn zero_inflow_equals_frontier_depth() {
 fn high_bucket_inflow_raises_rate() {
     let stock = |_r: u64| 0u64;
     let mut inflow = vec![0u64; bucket_count()];
-    // Massive inflow in high-rate buckets (index for 50k+).
     let hi = bucket_index(50_000);
     let floor = FEE_BUCKET_EDGES_SAT_PER_KVB[hi];
     inflow[hi] = 50_000; // WU/s → over 600s = 30e6 WU >> 4e6

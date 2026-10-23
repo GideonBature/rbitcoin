@@ -59,13 +59,9 @@ fn spend_annotate_sole_multi_and_visit() {
         Err(StoreError::InvalidFk)
     ));
 
-    // Sole first spend.
     put_spend_on_create(&txs, &spenders, create, 0, s1, 0).unwrap();
-    // Idempotent.
     put_spend_on_create(&txs, &spenders, create, 0, s1, 0).unwrap();
-    // Promote to multi.
     put_spend_on_create(&txs, &spenders, create, 0, s2, 1).unwrap();
-    // Prepend multi.
     put_spend_on_create(&txs, &spenders, create, 0, s3, 2).unwrap();
 
     let mut visited = Vec::new();
@@ -78,7 +74,6 @@ fn spend_annotate_sole_multi_and_visit() {
     assert_eq!(visited[0], (s3, 2)); // newest head
     assert_eq!(visited[1], (s2, 1));
     assert_eq!(visited[2], (s1, 0));
-    // Early stop.
     let mut n = 0;
     for_each_spender_create(&txs, &spenders, create, 0, |_, _| {
         n += 1;
@@ -86,12 +81,10 @@ fn spend_annotate_sole_multi_and_visit() {
     })
     .unwrap();
     assert_eq!(n, 1);
-    // Null create / missing / unspent.
     for_each_spender_create(&txs, &spenders, Fk::NULL, 0, |_, _| unreachable!()).unwrap();
     for_each_spender_create(&txs, &spenders, Fk(9999), 0, |_, _| unreachable!()).unwrap();
     for_each_spender_create(&txs, &spenders, create, 1, |_, _| unreachable!()).unwrap();
 
-    // spent.body range path
     let (off, len) = txs.spent_range(create).unwrap();
     put_spend_on_create_at(&txs, &spenders, create, 1, s1, 7, Some((off, len))).unwrap();
     let mut one = None;
