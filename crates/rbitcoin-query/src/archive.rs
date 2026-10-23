@@ -84,10 +84,18 @@ struct PackedBlockOuts {
 impl PackedBlockOuts {
     fn from_block(block: &bitcoin::Block) -> Self {
         let n = block.txdata.len();
+        let mut n_out = 0usize;
+        let mut script_len = 0usize;
+        for tx in &block.txdata {
+            n_out += tx.output.len();
+            for o in &tx.output {
+                script_len += o.script_pubkey.len();
+            }
+        }
         let mut tx_start = Vec::with_capacity(n.saturating_add(1));
-        let mut values = Vec::new();
-        let mut scripts = Vec::new();
-        let mut script_at = Vec::new();
+        let mut values = Vec::with_capacity(n_out);
+        let mut scripts = Vec::with_capacity(script_len);
+        let mut script_at = Vec::with_capacity(n_out);
         for tx in &block.txdata {
             tx_start.push(values.len() as u32);
             for o in &tx.output {
@@ -1848,5 +1856,63 @@ impl Query {
             return Err(StoreError::Corrupt("input missing create_fk for prev_txid"));
         }
         self.store.txs.body_txid(inp.create_fk())
+    }
+}
+
+#[cfg(test)]
+mod packed_outs_reserve {
+    use super::PackedBlockOuts;
+
+    #[test]
+    fn from_block_reserves_script_bytes() {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::block::{Header, Version};
+        use bitcoin::hashes::Hash;
+        use bitcoin::transaction::Version as TxVersion;
+        use bitcoin::{
+            Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction,
+            TxIn, TxMerkleNode, TxOut, Witness,
+        };
+        let scripts = [vec![0x51u8; 3], vec![0x52u8; 5], vec![0x53u8; 9]];
+        let tx = Transaction {
+            version: TxVersion::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: scripts
+                .iter()
+                .map(|script| TxOut {
+                    value: Amount::from_sat(1),
+                    script_pubkey: ScriptBuf::from_bytes(script.clone()),
+                })
+                .collect(),
+        };
+        let block = Block {
+            header: Header {
+                version: Version::ONE,
+                prev_blockhash: BlockHash::from_byte_array([0; 32]),
+                merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+                time: 1,
+                bits: CompactTarget::from_consensus(0x207fffff),
+                nonce: 0,
+            },
+            txdata: vec![tx],
+        };
+        let packed = PackedBlockOuts::from_block(&block);
+        assert_eq!(packed.scripts.len(), 17);
+        assert_eq!(
+            packed.scripts.capacity(),
+            packed.scripts.len(),
+            "script bytes should be reserved once"
+        );
+        assert_eq!(packed.values.capacity(), packed.values.len());
+        assert_eq!(packed.script_at.capacity(), packed.script_at.len());
+        assert_eq!(&packed.scripts[..3], &[0x51; 3]);
+        assert_eq!(&packed.scripts[3..8], &[0x52; 5]);
+        assert_eq!(&packed.scripts[8..], &[0x53; 9]);
     }
 }
