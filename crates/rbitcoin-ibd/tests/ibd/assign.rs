@@ -884,15 +884,15 @@ fn ibd_cover_tip_holes() {
     race(&mut st, &[0], hole, TIP_HOLE_MAX_PEERS);
     let r = &st.inflight[&hole];
     assert!(
-        r.peers.is_empty() && r.holds(0),
-        "a silent owner is dropped after 30 s even alone"
+        r.peers.contains(&0) && r.holds(0),
+        "a silent retired owner is re-asked when no other peer exists"
     );
 
-    // Peer 1 connects and takes the hole.
+    // Peer 1 connects and joins the hole.
     st.slots[1].alive = true;
     seed_ewma(&mut st.slots[1], 2_000_000);
     race(&mut st, &[0, 1], hole, TIP_HOLE_MAX_PEERS);
-    assert_eq!(st.inflight[&hole].peers, HashSet::from([1]));
+    assert!(st.inflight[&hole].peers.contains(&1));
 
     // Peer 1 streams but holds it 31 s while peer 2 is connected.
     rx_now(&mut st, 1);
@@ -906,8 +906,8 @@ fn ibd_cover_tip_holes() {
     race(&mut st, &three, hole, TIP_HOLE_MAX_PEERS);
     let r = &st.inflight[&hole];
     assert!(
-        !r.peers.contains(&1) && r.peers.contains(&2),
-        "an aged owner leaves when another peer exists; peers={:?}",
+        !r.peers.contains(&0) && r.peers.contains(&1) && r.peers.contains(&2),
+        "the silent owner leaves before the aged one; peers={:?}",
         r.peers
     );
 
@@ -1174,6 +1174,182 @@ fn ibd_cover_tip_holes() {
             .is_none(),
         "a dead slot is not a free replacement for an unsampled owner"
     );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A tip-hole hash whose only holders are retired has no live getdata: the
+/// retired peers keep their stale requests but cannot count as coverage, or
+/// the hash — and the in-order tip behind it — freezes while densify sits
+/// at its hole-open zero cap. (Mainnet wedge: tip frozen with idle peers.)
+#[test]
+#[allow(clippy::cognitive_complexity)] // one hub, many retire/re-ask arms
+fn ibd_cover_tip_holes_recovers_all_retired() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let (slots, mut wire) = wired_slots(4);
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let cfg = IbdConfig::for_test();
+    let tip1 = hub.tip_height().unwrap_or(0).saturating_add(1);
+    let alive = [0, 1, 2, 3];
+    restart_on(&mut st, &hub, &mut wire, &alive);
+    let hole = h(0x61);
+    plant_tip_hole(&mut st, hole, tip1);
+    for pid in alive {
+        seed_ewma(&mut st.slots[pid], 2_000_000);
+    }
+
+    // Rest-of-hole cover keeps one owner. It stalls to retirement over the
+    // churn and keeps the request it was sent: nobody is pulling now.
+    assert_eq!(cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], 1), 1);
+    retire_hash_owner(&mut st, hole, 0);
+    let r = &st.inflight[&hole];
+    assert!(
+        r.peers.is_empty() && r.holds(0),
+        "the stall-retired owner keeps its request; peers={:?}",
+        r.peers
+    );
+
+    // Retired holders are not coverage: a fresh peer is asked, the retired
+    // owner is not.
+    let issued = cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], 1);
+    assert!(issued >= 1, "an all-retired hole must be re-covered");
+    let r = &st.inflight[&hole];
+    assert_eq!(r.len(), 1, "exactly one fresh racer; peers={:?}", r.peers);
+    assert!(!r.peers.contains(&0), "the retired owner is not re-asked");
+    let asks = getdata_asks(&mut wire, hole);
+    assert_eq!(asks[0], 1, "the retired owner is never re-asked");
+    assert_eq!(
+        asks[1..].iter().sum::<usize>(),
+        1,
+        "one fresh peer is asked"
+    );
+
+    // Same frozen state at the pre-hole cap: two retired holders.
+    restart_on(&mut st, &hub, &mut wire, &alive);
+    let hole = h(0x62);
+    plant_tip_hole(&mut st, hole, tip1);
+    for pid in alive {
+        seed_ewma(&mut st.slots[pid], 2_000_000);
+    }
+    let mut room = 1;
+    let mut issued = 0;
+    assert!(issue_one(&mut st, 0, hole, &mut room, &mut issued));
+    let mut room = 1;
+    assert!(issue_one(&mut st, 1, hole, &mut room, &mut issued));
+    retire_hash_owner(&mut st, hole, 0);
+    retire_hash_owner(&mut st, hole, 1);
+    let r = &st.inflight[&hole];
+    assert!(r.peers.is_empty() && r.holders() == PRE_HOLE_MAX_PEERS);
+    let issued = cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], PRE_HOLE_MAX_PEERS);
+    assert!(issued >= 1, "an all-retired pre-hole must be re-covered");
+    let r = &st.inflight[&hole];
+    assert_eq!(r.len(), 1, "exactly one fresh racer; peers={:?}", r.peers);
+
+    // A live racer keeps the sleeping-holder cap: two retired holders plus
+    // one racer already close the pre-hole cap.
+    let r = &st.inflight[&hole];
+    assert_eq!(r.holders(), PRE_HOLE_MAX_PEERS + 1);
+    assert_eq!(
+        cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], PRE_HOLE_MAX_PEERS + 1),
+        0,
+        "a live racer is coverage; the retired holders still count the cap"
+    );
+
+    // Every peer that can be asked is retired again: the hash must not
+    // freeze. The longest-held aged-out retired owner is re-asked.
+    for pid in alive {
+        retire_hash_owner(&mut st, hole, pid);
+    }
+    let now = Instant::now();
+    {
+        let req = st.inflight.get_mut(&hole).unwrap();
+        for (pid, age) in [(0usize, 40u64), (1, 35), (2, 32), (3, 31)] {
+            req.asked_at.insert(pid, now - Duration::from_secs(age));
+        }
+        assert!(req.peers.is_empty());
+        assert!(req.holders() >= PRE_HOLE_MAX_PEERS);
+    }
+    assert_eq!(
+        cover_tip_holes(&mut st, &hub, &cfg, &alive[..3], &[hole], 1),
+        1
+    );
+    let r = &st.inflight[&hole];
+    assert_eq!(
+        r.peers,
+        HashSet::from([0]),
+        "the longest-held retired owner is re-asked"
+    );
+    assert!(r.retired.contains(&1));
+
+    // Below the cap a racerless hash keeps the full fill: one retired holder
+    // plus three fresh peers for the tip+1 cap, not one racer per pass.
+    restart_on(&mut st, &hub, &mut wire, &alive);
+    let hole = h(0x63);
+    plant_tip_hole(&mut st, hole, tip1);
+    for pid in alive {
+        seed_ewma(&mut st.slots[pid], 2_000_000);
+    }
+    let mut room = 1;
+    let mut issued = 0;
+    assert!(issue_one(&mut st, 0, hole, &mut room, &mut issued));
+    retire_hash_owner(&mut st, hole, 0);
+    assert_eq!(
+        cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], TIP_HOLE_MAX_PEERS),
+        (TIP_HOLE_MAX_PEERS - 1) as u64,
+        "the racerless hash fills up to the cap in one pass"
+    );
+    assert_eq!(st.inflight[&hole].holders(), TIP_HOLE_MAX_PEERS);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Four retired holders already meet the tip+1 cap. One fresh peer is asked.
+/// The next pass does not add another racer on top of that retired set.
+#[test]
+fn ibd_cover_tip_holes_retired_cap_stays_one_racer() {
+    let (dir, hub) = tmp_hub();
+    hub.ensure_genesis().unwrap();
+    let n = TIP_HOLE_MAX_PEERS + 1;
+    let (slots, mut wire) = wired_slots(n);
+    let mut st = IbdWorkState::new(slots, hub.tip_hash(), hub.tip_height());
+    let cfg = IbdConfig::for_test();
+    let tip1 = hub.tip_height().unwrap_or(0).saturating_add(1);
+    let alive: Vec<usize> = (0..n).collect();
+    restart_on(&mut st, &hub, &mut wire, &alive);
+    let hole = h(0x64);
+    plant_tip_hole(&mut st, hole, tip1);
+    for &pid in &alive {
+        seed_ewma(&mut st.slots[pid], 2_000_000);
+    }
+    for &pid in &alive[..TIP_HOLE_MAX_PEERS] {
+        let mut room = 1;
+        let mut issued = 0;
+        assert!(issue_one(&mut st, pid, hole, &mut room, &mut issued));
+        retire_hash_owner(&mut st, hole, pid);
+    }
+    let r = &st.inflight[&hole];
+    assert!(r.peers.is_empty());
+    assert_eq!(r.holders(), TIP_HOLE_MAX_PEERS);
+
+    assert_eq!(
+        cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], TIP_HOLE_MAX_PEERS),
+        1
+    );
+    let r = &st.inflight[&hole];
+    assert_eq!(
+        r.peers,
+        HashSet::from([TIP_HOLE_MAX_PEERS]),
+        "the peer who does not already hold the hash is the one racer"
+    );
+    assert_eq!(r.holders(), TIP_HOLE_MAX_PEERS + 1);
+
+    assert_eq!(
+        cover_tip_holes(&mut st, &hub, &cfg, &alive, &[hole], TIP_HOLE_MAX_PEERS),
+        0,
+        "a live racer closes the cap; retired holders still count"
+    );
+    assert_eq!(st.inflight[&hole].len(), 1);
 
     let _ = std::fs::remove_dir_all(dir);
 }

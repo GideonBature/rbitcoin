@@ -43,7 +43,10 @@ fn inflight_req_retired_peer_still_holds_the_hash() {
     assert_eq!(r.len(), 1, "retired peer no longer races");
     assert!(!r.peers.contains(&1));
     assert!(r.holds(1), "retired peer still has the getdata");
-    assert!(r.owner_asked_at(1).is_none());
+    assert!(
+        r.owner_asked_at(1).is_some(),
+        "retired peer keeps its ask time for the aged re-ask"
+    );
     assert!(r.owner_asked_at(2).is_some());
     r.retire_peer(2);
     assert_eq!(r.len(), 0);
@@ -54,6 +57,7 @@ fn inflight_req_retired_peer_still_holds_the_hash() {
     );
     assert!(r.remove_peer(2));
     assert!(!r.holds(1) && !r.holds(2));
+    assert!(r.owner_asked_at(1).is_none() && r.owner_asked_at(2).is_none());
 }
 
 #[test]
