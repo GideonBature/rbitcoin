@@ -448,7 +448,7 @@ async fn bind_unix_socket_does_not_strip_dir_search() {
             }
         })
     };
-    let dir = temp_query("esplora-umask").0;
+    let dir = rbitcoin_query::testutil::TempDir::for_socket().expect("temp dir");
     for i in 0..200 {
         let sock = dir.path().join(format!("s{i}.sock"));
         let listener = rbitcoin_esplora::server::bind_unix_mode(&sock, 0o660).expect("bind");

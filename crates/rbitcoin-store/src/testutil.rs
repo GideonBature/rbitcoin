@@ -49,6 +49,22 @@ impl TempDir {
         Ok(Self { path })
     }
 
+    /// Unique directory short enough to bind a Unix socket in. macOS
+    /// `sun_path` holds 103 bytes and its default `TMPDIR` already takes 49,
+    /// so the name has no label or timestamp. `create_dir` refusing a
+    /// leftover from an earlier process with the same PID keeps it unique.
+    pub fn for_socket() -> std::io::Result<Self> {
+        loop {
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("rbitcoin-sock-{}-{n}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                created => return created.map(|()| Self { path }),
+            }
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

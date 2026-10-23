@@ -13,7 +13,7 @@ use rbitcoin_primitives::{Height, Network};
 
 use rbitcoin_query::Query;
 use rbitcoin_query::{accept_and_connect_block, pad_empty_from};
-use rbitcoin_test::{open_mature_regtest_with_spend, TestDatadir};
+use rbitcoin_test::{open_mature_regtest_with_spend, TempDir, TestDatadir};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1545,7 +1545,8 @@ async fn esplora_broadcast_visible_in_rpc_and_electrum() {
     cfg.listen.health = Some(unbound);
     cfg.metrics = true;
     // mempool's CORE_RPC.SOCKET_PATH reaches the node from another user.
-    let rpc_sock = td.path().join("run").join("rpc.sock");
+    let sock_dir = TempDir::for_socket().unwrap();
+    let rpc_sock = sock_dir.path().join("run").join("rpc.sock");
     cfg.apply_kv("rpc_socket", rpc_sock.to_str().unwrap())
         .unwrap();
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
