@@ -3,9 +3,10 @@
 //!
 //! Clients already know their scripthashes / txids.
 //!
-//! `server.version[0]` is `rbitcoin-electrs <workspace.package.version>`.
+//! `server.version[0]` is `electrs/0.10.0-rbitcoin-<workspace.package.version>`.
 //! We are not electrs. Cake Wallet `getNodeIsElectrs()` requires the
 //! substring `electrs` before it will probe `blockchain.tweaks.subscribe`.
+//! Sparrow batches only for `electrs/` at 0.9.0 or later.
 //! Other tweaks clients (kiss-bdk) use the same stream without that probe.
 
 #![forbid(unsafe_code)]

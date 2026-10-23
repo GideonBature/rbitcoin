@@ -255,6 +255,61 @@ async fn rpc(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Va
     serde_json::from_str(&resp_line).unwrap()
 }
 
+/// Sparrow `ElectrumServer.getServerCapability`: batch only when lowercased
+/// `version[0]` starts with `electrs/` and the dotted version before the
+/// first `-` is at least 0.9.0.
+fn sparrow_batches(server: &str) -> bool {
+    let lower = server.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("electrs/") else {
+        return false;
+    };
+    let dotted = rest.split('-').next().unwrap_or("");
+    let parts: Option<Vec<u64>> = dotted.split('.').map(|p| p.parse().ok()).collect();
+    parts.is_some_and(|p| p >= vec![0, 9, 0])
+}
+
+/// The page Sparrow sends once it batches: one line, string ids, scripthash
+/// reads. Each slot carries what the same call alone returns, chain-tip stamp
+/// included, and a bad slot does not spoil its neighbours.
+async fn sparrow_batch_matches_single_calls(stream: &mut TcpStream) {
+    let sh = electrum_scripthash_hex(&[0x51]);
+    let methods = [
+        "blockchain.scripthash.get_history",
+        "blockchain.scripthash.get_balance",
+        "blockchain.scripthash.listunspent",
+    ];
+    let mut singles = Vec::new();
+    for (i, method) in methods.iter().enumerate() {
+        singles.push(rpc(stream, 60 + i as u64, method, json!([sh])).await);
+    }
+    let mut items: Vec<Value> = methods
+        .iter()
+        .map(|m| json!({"jsonrpc":"2.0","id": format!("m/0/{m}"),"method": m,"params":[sh]}))
+        .collect();
+    items.insert(
+        1,
+        json!({"jsonrpc":"2.0","id":"bad","method":"blockchain.scripthash.get_balance","params":["zz"]}),
+    );
+    let mut line = serde_json::to_string(&items).unwrap();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await.unwrap();
+    let batch = read_notify(stream, "sparrow batch").await;
+    let slots = batch.as_array().expect("batch answer is one array line");
+    assert_eq!(slots.len(), items.len(), "{batch}");
+    for (slot, item) in slots.iter().zip(&items) {
+        assert_eq!(slot["id"], item["id"], "{batch}");
+    }
+    assert!(slots[1].get("result").is_none(), "{batch}");
+    assert!(slots[1]["error"]["message"].as_str().is_some(), "{batch}");
+    let good = [&slots[0], &slots[2], &slots[3]];
+    for (slot, single) in good.into_iter().zip(&singles) {
+        assert!(single.get("error").is_none(), "{single}");
+        assert_eq!(slot["result"], single["result"], "{batch}");
+        assert_eq!(slot["chain_tip"], single["chain_tip"], "{batch}");
+        assert!(slot["chain_tip"].is_string(), "{batch}");
+    }
+}
+
 async fn read_notify(stream: &mut TcpStream, label: &str) -> Value {
     let mut reader = BufReader::new(&mut *stream);
     let mut resp_line = String::new();
@@ -511,6 +566,10 @@ async fn electrum_server_version_history_balance() {
         server.contains(env!("CARGO_PKG_VERSION")),
         "version[0] must track workspace.package.version, got {server:?}"
     );
+    assert!(
+        sparrow_batches(server),
+        "Sparrow sends one request per line unless version[0] reads as electrs >= 0.9.0, got {server:?}"
+    );
 
     // OP_TRUE scripthash
     let sh_hex = electrum_scripthash_hex(&[0x51]);
@@ -658,6 +717,8 @@ async fn electrum_server_version_history_balance() {
     mempool_status_matches_history_row_order(&mut stream, &hub, &chain).await;
 
     pin_wallet_protocol_1_6(&mut stream).await;
+
+    sparrow_batch_matches_single_calls(&mut stream).await;
 
     let sh_hex = electrum_scripthash_hex(&[0x51]);
     let v = rpc(

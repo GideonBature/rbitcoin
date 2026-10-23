@@ -419,6 +419,138 @@ pub(crate) async fn electrum_tcp_rpc(
     serde_json::from_str(&resp).unwrap()
 }
 
+/// Sparrow `ElectrumServer.getServerCapability`: batch only when lowercased
+/// `version[0]` starts with `electrs/` and the dotted version before the
+/// first `-` is at least 0.9.0.
+fn sparrow_batches(server: &str) -> bool {
+    let lower = server.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("electrs/") else {
+        return false;
+    };
+    let dotted = rest.split('-').next().unwrap_or("");
+    let parts: Option<Vec<u64>> = dotted.split('.').map(|p| p.parse().ok()).collect();
+    parts.is_some_and(|p| p >= vec![0, 9, 0])
+}
+
+async fn electrum_tcp_batch(stream: &mut TcpStream, items: &[Value]) -> Value {
+    let mut line = serde_json::to_string(items).unwrap();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await.unwrap();
+    serde_json::from_str(&read_exact_line(stream).await).unwrap()
+}
+
+#[allow(clippy::cognitive_complexity)] // one TCP client, every batch arm
+#[tokio::test]
+async fn batch_line_answers_every_item_in_one_array() {
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let (tip_tx, _) = broadcast::channel(4);
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let banner = cfg.banner.clone();
+    let max_line = cfg.max_line_bytes();
+    let handle = run_electrum(cfg, Arc::new(q), params, tip_tx, None)
+        .await
+        .expect("listen");
+    let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
+
+    let batch = electrum_tcp_batch(
+        &mut stream,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"server.version","params":["Sparrow",["1.3","1.4.2"]]}),
+            json!({"jsonrpc":"2.0","id":"two","method":"server.ping","params":[]}),
+            json!({"jsonrpc":"2.0","id":3,"method":"no.such.method","params":[]}),
+            json!({"jsonrpc":"2.0","id":4,"method":"blockchain.tweaks.subscribe","params":[0,1,false]}),
+            json!({"jsonrpc":"2.0","id":5,"method":"blockchain.silentpayments.subscribe","params":[]}),
+            json!({"jsonrpc":"2.0","id":6,"method":"server.banner","params":[]}),
+        ],
+    )
+    .await;
+    let items = batch
+        .as_array()
+        .expect("a batch line is answered by one array");
+    let ids: Vec<&Value> = items.iter().map(|v| &v["id"]).collect();
+    assert_eq!(
+        ids,
+        [
+            &json!(1),
+            &json!("two"),
+            &json!(3),
+            &json!(4),
+            &json!(5),
+            &json!(6)
+        ],
+        "{batch}"
+    );
+    assert!(items.iter().all(|v| v["jsonrpc"] == "2.0"), "{batch}");
+    assert!(sparrow_batches(items[0]["result"][0].as_str().unwrap()));
+    assert_eq!(
+        items[0]["result"][1], "1.4.2",
+        "Sparrow offers [1.3, 1.4.2]"
+    );
+    assert!(items[1]["result"].is_null() && items[1].get("error").is_none());
+    assert!(
+        items[2]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown method"),
+        "{batch}"
+    );
+    for streaming in &items[3..5] {
+        assert!(streaming.get("result").is_none(), "{streaming}");
+        assert!(
+            streaming["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("batch"),
+            "{streaming}"
+        );
+    }
+    assert_eq!(items[5]["result"].as_str(), Some(banner.as_str()));
+    let ping = electrum_tcp_rpc(&mut stream, 7, "server.ping", json!([])).await;
+    assert_eq!(
+        ping["id"], 7,
+        "a rejected stream must not write lines after the batch: {ping}"
+    );
+
+    stream.write_all(b"[]\n").await.unwrap();
+    let empty: Value = serde_json::from_str(&read_exact_line(&mut stream).await).unwrap();
+    assert_eq!(
+        empty,
+        json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"empty batch"}})
+    );
+
+    let page: Vec<Value> = (0..100u32)
+        .map(|i| {
+            json!({"jsonrpc":"2.0","id":i,"method":"blockchain.scripthash.get_balance",
+                   "params":[format!("{i:064x}")]})
+        })
+        .collect();
+    assert!(serde_json::to_string(&page).unwrap().len() < max_line);
+    let answered = electrum_tcp_batch(&mut stream, &page).await;
+    let answered = answered.as_array().expect("array");
+    assert_eq!(answered.len(), 100);
+    for (i, v) in answered.iter().enumerate() {
+        assert_eq!(v["id"], i, "{v}");
+        assert!(v.get("result").is_some() != v.get("error").is_some(), "{v}");
+    }
+
+    let mut oversize: Vec<Value> = (0..MAX_BATCH_ITEMS)
+        .map(|i| json!({"jsonrpc":"2.0","id":i,"method":"server.ping","params":[]}))
+        .collect();
+    let full = electrum_tcp_batch(&mut stream, &oversize).await;
+    assert_eq!(full.as_array().map(Vec::len), Some(MAX_BATCH_ITEMS));
+    oversize.push(json!({"jsonrpc":"2.0","id":"over","method":"server.ping","params":[]}));
+    assert_eq!(
+        electrum_tcp_batch(&mut stream, &oversize).await,
+        json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"batch too large"}})
+    );
+    let ping = electrum_tcp_rpc(&mut stream, 8, "server.ping", json!([])).await;
+    assert_eq!(ping["id"], 8);
+
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[allow(clippy::cognitive_complexity)] // one TCP client, static methods + no-hub fees
 #[tokio::test]
 async fn accept_client_ping_and_shutdown() {
@@ -459,6 +591,10 @@ async fn accept_client_ping_and_shutdown() {
     assert!(
         cake_server.contains(env!("CARGO_PKG_VERSION")),
         "version[0] must track workspace.package.version, got {cake_server:?}"
+    );
+    assert!(
+        sparrow_batches(cake_server),
+        "Sparrow sends one request per line unless version[0] reads as electrs >= 0.9.0, got {cake_server:?}"
     );
     assert_eq!(ver[1], PROTOCOL_MAX);
 
