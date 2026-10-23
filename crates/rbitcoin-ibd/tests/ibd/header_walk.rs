@@ -207,17 +207,18 @@ fn a_taller_peer_that_cannot_extend_the_candidate_leaves_the_walk() {
     log_status(&mut st, &hub, 100_000);
     assert!(st.header_walk.announced_done);
 
-    apply_peer_event(
+    blocks_inv(&mut st, &hub, 0, vec![good.block_hash()]);
+    assert!(
+        !wants_lookahead(&st),
+        "announcing a header the walk holds does not put the peer back"
+    );
+    assert!(rx.try_recv().is_err());
+
+    blocks_inv(
         &mut st,
         &hub,
-        PeerEvent::BlocksInv {
-            peer: 0,
-            hashes: vec![good.block_hash()],
-        },
-        &AtomicU32::new(0),
-        &mut AddrMan::new(),
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
-        None,
+        0,
+        vec![mine(good.block_hash(), 2).block_hash()],
     );
     assert!(
         wants_lookahead(&st),
@@ -394,6 +395,94 @@ fn a_restarted_tip_exits_once_the_false_height_fails() {
         "the stored tip is caught up once no peer can extend it"
     );
     assert_eq!(st.max_peer_height, 100_000);
+}
+
+/// Several peers advertised a height no chain has (#1157). Each fails
+/// to extend the stored tip once. Their later announcements of blocks this
+/// node already has do not put them back on the walk, so IBD stays caught
+/// up instead of waiting for each one to be asked again.
+#[test]
+fn known_block_invs_from_false_height_peers_keep_ibd_caught_up() {
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("header-walk-known-inv");
+    hub.ensure_genesis().unwrap();
+    let op_true = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    hub.generate_to_script(2, op_true.clone(), vec![]).unwrap();
+    let tip = hub.tip_height().unwrap();
+    let tip_hash = hub.tip_hash().unwrap();
+    let below_tip = hub.header_of(&tip_hash).unwrap().prev_blockhash;
+    let mut slots = Vec::new();
+    let mut rxs = Vec::new();
+    for id in 0..3 {
+        let (mut liar, rx) = slot(id);
+        liar.peer_height = 100_000;
+        slots.push(liar);
+        rxs.push(rx);
+    }
+    let mut st = IbdWorkState::new(slots, Some(tip_hash), Some(tip));
+
+    for _ in 0..3 {
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let asked = rxs
+            .iter_mut()
+            .position(|rx| drain_getheaders(rx) == 1)
+            .expect("one peer is asked");
+        apply(&mut st, &hub, asked, vec![]);
+    }
+    assert!(!wants_lookahead(&st));
+    assert!(rbitcoin_ibd::ibd::exit::ibd_caught_up(&st, tip));
+
+    for id in 0..3 {
+        blocks_inv(&mut st, &hub, id, vec![tip_hash]);
+        blocks_inv(&mut st, &hub, id, vec![below_tip, tip_hash]);
+    }
+    assert!(
+        !wants_lookahead(&st),
+        "an announced block this node holds is no evidence of a taller chain"
+    );
+    assert_eq!(st.header_walk.challenge, None);
+    assert!(
+        rbitcoin_ibd::ibd::exit::ibd_caught_up(&st, tip),
+        "catch-up still exits at the tip"
+    );
+    assert!(!send_getheaders(&mut st, &hub).unwrap());
+
+    // A new block reaches every peer at once. Each announces it before its
+    // header lands, so all three are back on the walk. Each is asked once
+    // more, fails to extend it, and catch-up exits again.
+    let time = hub.tip_header().unwrap().time + 1;
+    let next = rbitcoin_consensus::mine_regtest_paying(tip_hash, time, 3, op_true, vec![]);
+    for id in 0..3 {
+        blocks_inv(&mut st, &hub, id, vec![tip_hash, next.block_hash()]);
+    }
+    assert!(
+        wants_lookahead(&st),
+        "a block this node lacks still puts the announcer back on the walk"
+    );
+    let mut asks = 0;
+    let mut have_next = false;
+    while wants_lookahead(&st) && asks < 6 {
+        assert!(send_getheaders(&mut st, &hub).unwrap());
+        let asked = rxs
+            .iter_mut()
+            .position(|rx| drain_getheaders(rx) == 1)
+            .expect("one peer is asked");
+        let reply = if have_next { vec![] } else { vec![next.header] };
+        have_next = true;
+        apply(&mut st, &hub, asked, reply);
+        asks += 1;
+    }
+    assert_eq!(
+        asks, 4,
+        "the header, then one empty reply per re-armed peer"
+    );
+    assert_eq!(st.header_walk.tip_height(), tip + 1);
+    hub.accept_block(next).unwrap();
+    st.ordered.clear();
+    st.ordered_set.clear();
+    assert!(
+        rbitcoin_ibd::ibd::exit::ibd_caught_up(&st, tip + 1),
+        "catch-up exits at the new tip"
+    );
 }
 
 /// A block found after connect is written from the announcing peer.
