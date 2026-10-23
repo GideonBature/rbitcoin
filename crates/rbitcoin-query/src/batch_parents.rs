@@ -93,8 +93,14 @@ pub const CB_TRUE: u8 = 2;
 #[doc(hidden)]
 pub enum PinOuts {
     /// Plan / in-flight: share the CreatePin Arc.
+    ///
+    /// `block` is a clone taken while the pin still holds the decoded block.
+    /// Script jobs borrow that clone, so Class A can drop the pin's clone
+    /// without freeing the bytes under an in-flight `parts` call. After the
+    /// pin publishes its output blob, `get_parts` borrows the blob instead.
     Full {
         pin: crate::CreatePin,
+        block: Option<Arc<bitcoin::Block>>,
         checked: Vec<u32>,
     },
     /// Range-fill: owned sparse decoded outs.
@@ -115,8 +121,10 @@ impl PinOuts {
 
     #[doc(hidden)]
     pub fn full(pin: crate::CreatePin, checked: Vec<u32>) -> Self {
+        let block = pin.clone_wire_block();
         Self::Full {
             pin,
+            block,
             checked: ensure_checked_sorted(checked),
         }
     }
@@ -132,8 +140,9 @@ impl PinOuts {
     pub fn with_checked(&self, checked: Vec<u32>) -> Self {
         let checked = ensure_checked_sorted(checked);
         match self {
-            Self::Full { pin, .. } => Self::Full {
+            Self::Full { pin, block, .. } => Self::Full {
                 pin: std::sync::Arc::clone(pin),
+                block: block.clone(),
                 checked,
             },
             Self::Sparse { outs, .. } => Self::Sparse {
@@ -146,7 +155,19 @@ impl PinOuts {
     #[doc(hidden)]
     pub fn get_parts(&self, vout: u32) -> Option<(u64, &[u8])> {
         match self {
-            Self::Full { pin, .. } => pin.out_parts(vout),
+            Self::Full { pin, block, .. } => {
+                if let Some(parts) = pin.out_parts(vout) {
+                    return Some(parts);
+                }
+                let block = block.as_ref()?;
+                let tx_index = pin.wire_tx_index()?;
+                let o = block
+                    .txdata
+                    .get(tx_index as usize)?
+                    .output
+                    .get(vout as usize)?;
+                Some((o.value.to_sat(), o.script_pubkey.as_bytes()))
+            }
             Self::Sparse { outs, .. } => {
                 let i = outs.binary_search_by_key(&vout, |(v, _)| *v).ok()?;
                 Some((outs[i].1.value, outs[i].1.script.as_slice()))
@@ -191,8 +212,12 @@ impl PinOuts {
     #[doc(hidden)]
     pub fn compose(&self, live: &[(u32, OutputRecord)], checked: &[u32]) -> Self {
         match self {
-            Self::Full { pin, checked: ch } => {
-                let extra = live.iter().any(|(v, _)| pin.out_parts(*v).is_none());
+            Self::Full {
+                pin,
+                block,
+                checked: ch,
+            } => {
+                let extra = live.iter().any(|(v, _)| !pin.contains_vout(*v));
                 if extra {
                     let mut outs = self.sparse_live();
                     for (v, o) in live {
@@ -216,6 +241,7 @@ impl PinOuts {
                     next_ch.dedup();
                     Self::Full {
                         pin: std::sync::Arc::clone(pin),
+                        block: block.clone(),
                         checked: next_ch,
                     }
                 }

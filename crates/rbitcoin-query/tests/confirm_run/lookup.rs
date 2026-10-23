@@ -171,18 +171,15 @@ fn stamp_uses_caller_pres() {
         "wire plan keeps spend edges for commit"
     );
     let want = items[0].1.txdata[0].output[0].script_pubkey.as_bytes();
+    let want_ptr = want.as_ptr();
     assert_eq!(
-        plan.batch_pin[0].out_parts(0).expect("coinbase out").1,
-        want,
+        plan.batch_pin[0].with_out_parts(0, |_, script| script.to_vec()),
+        Some(want.to_vec()),
         "CreatePin outs from wire script_pubkey"
     );
     assert_eq!(
-        plan.batch_pin[0]
-            .out_parts(0)
-            .expect("coinbase out")
-            .1
-            .as_ptr(),
-        want.as_ptr(),
+        plan.batch_pin[0].with_out_parts(0, |_, script| script.as_ptr()),
+        Some(want_ptr),
         "plan must not copy scriptPubKey"
     );
     let _ = std::fs::remove_dir_all(&path);

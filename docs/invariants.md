@@ -70,8 +70,10 @@ Write encodes seqsigwit from the wire transaction and SpendEdges. A records
 row with empty ins is `Corrupt("invariant: packed ins empty at write")`.
 Prune mode materializes `InputRecord`s from the wire tx into the RAM window
 at commit only. SpendEdges + CreatePin survive freeze. Write encodes Class A
-outs from `Arc<Block>` + those edges (no plan-time `scriptPubKey` copy). In-flight keeps
-the Wire CreatePin (`Arc<Block>` + tx index). Load still does not head/idx.
+outs from `Arc<Block>` + those edges (no plan-time `scriptPubKey` copy). The wire
+pin shares that block until Class A commit publishes one packed output blob and
+clears the shared slot. A `PinOuts` taken while the slot was full keeps its own
+`Arc<Block>` until that snapshot is dropped. Load still does not head/idx.
 
 | Stage | Allowed IO | Forbidden |
 |-------|------------|-----------|

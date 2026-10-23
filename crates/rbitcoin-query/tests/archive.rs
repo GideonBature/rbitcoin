@@ -1055,26 +1055,24 @@ fn plan_batch_from_wire_skips_tx_apply() {
         "wire plan must not retain scriptSig or witness"
     );
     assert_eq!(
-        plan.batch_pin[0]
-            .out_parts(0)
-            .expect("parent out")
-            .1
-            .as_ptr(),
-        parent_ptr,
+        plan.batch_pin[0].with_out_parts(0, |_, script| script.as_ptr()),
+        Some(parent_ptr),
         "plan must not copy scriptPubKey"
     );
     assert_eq!(
-        plan.batch_pin[1]
-            .out_parts(0)
-            .expect("child out")
-            .1
-            .as_ptr(),
-        child_ptr,
+        plan.batch_pin[1].with_out_parts(0, |_, script| script.as_ptr()),
+        Some(child_ptr),
         "plan must not copy scriptPubKey"
     );
     assert_eq!(plan.batch_pin.len(), 2);
-    assert_eq!(plan.batch_pin[0].out_parts(0).unwrap().1, parent_spk);
-    assert_eq!(plan.batch_pin[1].out_parts(0).unwrap().1, child_spk);
+    assert_eq!(
+        plan.batch_pin[0].with_out_parts(0, |_, script| script.to_vec()),
+        Some(parent_spk)
+    );
+    assert_eq!(
+        plan.batch_pin[1].with_out_parts(0, |_, script| script.to_vec()),
+        Some(child_spk)
+    );
     let cb = plan.edges.get(&1).expect("coinbase edges");
     assert_eq!(cb.len(), 1);
     assert!(cb[0].create_fk.is_null());
@@ -1094,6 +1092,216 @@ fn plan_batch_from_wire_skips_tx_apply() {
     assert_eq!(ins[0].script_sig, script_sig);
     assert_eq!(ins[0].witness, vec![b"wit-item-1".to_vec(), vec![0x21; 33]]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Class A commit drops the decoded block from a wire pin. Later spends still
+/// read value and script. A reader that cloned the block before commit keeps it.
+#[test]
+fn wire_pin_drops_decoded_block_after_class_a_commit() {
+    use std::sync::Arc;
+    let (dir, q) = temp_query("pin-drop-block");
+    let (block, txids, _) = wire_parent_child_big_script_sig();
+    let block = Arc::new(block);
+    let weak = Arc::downgrade(&block);
+    let reader = Arc::clone(&block);
+    let parent_val = reader.txdata[0].output[0].value.to_sat();
+    let child_val = reader.txdata[1].output[0].value.to_sat();
+    let parent_spk = reader.txdata[0].output[0].script_pubkey.as_bytes().to_vec();
+    let child_spk = reader.txdata[1].output[0].script_pubkey.as_bytes().to_vec();
+    let plan = q
+        .archive_plan_batch_from_wire(
+            &[(Fk(1), &block, txids.as_slice())],
+            1,
+            &rbitcoin_query::InFlight::new(),
+            None,
+            None,
+        )
+        .expect("wire plan");
+    let kept = plan.batch_pin.clone();
+    commit_stamped(&q, plan).expect("commit");
+    drop(block);
+    assert_eq!(
+        Arc::strong_count(&reader),
+        1,
+        "in-flight pin clones must drop the decoded block at commit"
+    );
+    assert!(kept[0].with_wire_tx(|_| ()).is_none());
+    assert!(kept[1].with_wire_tx(|_| ()).is_none());
+    assert_eq!(kept[0].retained_outs_addr(), kept[1].retained_outs_addr());
+    assert!(kept[0].retained_outs_addr().is_some());
+    let (v, script) = kept[0].out_parts(0).expect("parent out");
+    assert_eq!(v, parent_val);
+    assert_eq!(script, parent_spk.as_slice());
+    let (v, script) = kept[1].out_parts(0).expect("child out");
+    assert_eq!(v, child_val);
+    assert_eq!(script, child_spk.as_slice());
+    assert!(kept[0].loc().is_some());
+    assert!(kept[1].loc().is_some());
+    assert_eq!(
+        reader.txdata[0].output[0].script_pubkey.as_bytes(),
+        parent_spk.as_slice()
+    );
+    drop(kept);
+    drop(reader);
+    assert!(weak.upgrade().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Publish must finish while a reader is still using the decoded block.
+/// The output copy and the encode callbacks must not hold the shared mutex.
+#[test]
+fn wire_release_finishes_while_a_reader_holds_the_block() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness,
+    };
+    use rbitcoin_query::CreatePinInner;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let tx = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_0000_0000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0xaa]),
+        }],
+    };
+    let txid = tx.compute_txid().to_byte_array();
+    let block = Arc::new(Block {
+        header: Header {
+            version: Version::ONE,
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        },
+        txdata: vec![tx],
+    });
+    let pin = CreatePinInner::wire(
+        Arc::clone(&block),
+        0,
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
+    );
+    let entered = Arc::new(Barrier::new(2));
+    let leave = Arc::new(Barrier::new(2));
+    let reader_pin = Arc::clone(&pin);
+    let entered_r = Arc::clone(&entered);
+    let leave_r = Arc::clone(&leave);
+    let reader = thread::spawn(move || {
+        reader_pin.with_out_parts(0, |value, script| {
+            assert_eq!(value, 50_0000_0000);
+            assert_eq!(script, &[0x51, 0xaa]);
+            entered_r.wait();
+            leave_r.wait();
+            true
+        })
+    });
+    entered.wait();
+    pin.release_wire_block();
+    leave.wait();
+    assert!(
+        reader.join().expect("reader").expect("vout 0"),
+        "release must return while the reader still holds the block"
+    );
+    let (value, script) = pin.out_parts(0).expect("blob");
+    assert_eq!(value, 50_0000_0000);
+    assert_eq!(script, &[0x51, 0xaa]);
+    assert!(pin.with_wire_tx(|_| ()).is_none());
+}
+
+/// Edge rows and `n_out` use the counts stored on the pin. They must not
+/// open the decoded block, including after commit has dropped it.
+#[test]
+fn wire_counts_come_from_the_tx_record() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::block::{Header, Version};
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{
+        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness,
+    };
+    use rbitcoin_query::archive::commit_input_edge_rows;
+    use rbitcoin_query::{ArchiveWritePlan, CreatePinInner, SpendEdge};
+
+    let tx = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let txid = tx.compute_txid().to_byte_array();
+    let block = Arc::new(Block {
+        header: Header {
+            version: Version::ONE,
+            prev_blockhash: BlockHash::from_byte_array([0; 32]),
+            merkle_root: TxMerkleNode::from_byte_array([0; 32]),
+            time: 1,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        },
+        txdata: vec![tx],
+    });
+    let pin = CreatePinInner::wire(
+        block,
+        0,
+        TxRecord {
+            txid,
+            version: 1,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
+    );
+    assert_eq!(pin.n_out(), 1);
+    pin.release_wire_block();
+    assert_eq!(pin.n_out(), 1);
+    assert!(pin.contains_vout(0));
+    assert!(!pin.contains_vout(1));
+    let fk = Fk(7);
+    let mut plan = ArchiveWritePlan::empty();
+    plan.packed = vec![(Arc::clone(&pin), Vec::new())];
+    plan.planned_fks = vec![fk];
+    plan.edges.insert(
+        fk.get().expect("fk"),
+        vec![SpendEdge {
+            prev_txid: [0; 32],
+            vout: u32::MAX,
+            spend_fk: fk,
+            create_fk: Fk::NULL,
+            vin: 0,
+        }],
+    );
+    let rows = commit_input_edge_rows(&plan).expect("edges from the stored input count");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 1);
+    assert!(rows[0][0].parent.is_null());
 }
 
 /// Prune mode serves confirmed script bytes from the append cache.
@@ -1274,7 +1482,9 @@ fn plan_packed_commits_coinbase_prevout() {
     let plan = plan_applies(&q, &need, 1, &rbitcoin_query::InFlight::new(), None).unwrap();
     assert_eq!(plan.packed.len(), 1);
     assert_eq!(plan.batch_pin.len(), 1);
-    let (value, script) = plan.batch_pin[0].out_parts(0).expect("vout 0");
+    let (value, script) = plan.batch_pin[0]
+        .with_out_parts(0, |value, script| (value, script.to_vec()))
+        .expect("vout 0");
     assert_eq!(value, 50 * 100_000_000);
     assert_eq!(script, &[0x51]);
     commit_stamped(&q, plan).unwrap();
