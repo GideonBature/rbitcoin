@@ -286,13 +286,7 @@ pub fn ensure_accepted_prefix(
     hub: &ChainHub,
     headers: &[bitcoin::block::Header],
 ) -> Vec<(bitcoin::block::Header, rbitcoin_primitives::Fk)> {
-    if headers.is_empty() {
-        return Vec::new();
-    }
-    if let Ok(fks) = hub.ensure_headers_batch(headers) {
-        return headers.iter().copied().zip(fks).collect();
-    }
-    if headers.len() == 1 {
+    if headers.is_empty() || headers.len() == 1 {
         return Vec::new();
     }
     let (lo, lo_fks) = accepted_prefix_after_failure(headers.len(), |mid| {
@@ -1354,8 +1348,6 @@ pub fn apply_soft_wire_reject(
             BadPrevParent::OffPath => st.cascade_at = None,
         }
         st.body.mark_missing(hash);
-        st.reopen_for_densify(&[hash]);
-        st.body.demote_known(hash);
         st.reopen_for_densify(&[hash]);
         match parent {
             BadPrevParent::Tip => warn!(

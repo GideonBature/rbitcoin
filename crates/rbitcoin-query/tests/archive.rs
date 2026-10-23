@@ -1701,3 +1701,96 @@ fn retain_headers_missing_first_fk_is_corrupt() {
         "unexpected err: {msg}"
     );
 }
+
+/// `wire_edges_match` is the release tripwire for a prevout the edge
+/// builder did not copy from the wire tx. A coinbase input is skipped.
+#[test]
+fn wire_edges_match_rejects_a_disagreeing_prevout() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::hashes::Hash;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use rbitcoin_query::archive::{plan_in_from_txin, wire_edges_match};
+    use rbitcoin_query::SpendEdge;
+    use rbitcoin_store::StoreError;
+
+    let prev = bitcoin::Txid::from_byte_array([0x11; 32]);
+    let tx = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![
+            TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(vec![0x01, 0x01]),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+            TxIn {
+                previous_output: OutPoint {
+                    txid: prev,
+                    vout: 1,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            },
+        ],
+        output: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let spend = Fk(7);
+    let edges = [
+        SpendEdge {
+            prev_txid: [0x22; 32],
+            vout: 9,
+            spend_fk: spend,
+            create_fk: Fk::NULL,
+            vin: 0,
+        },
+        SpendEdge {
+            prev_txid: [0x33; 32],
+            vout: 4,
+            spend_fk: spend,
+            create_fk: Fk(3),
+            vin: 1,
+        },
+    ];
+    let err = wire_edges_match(&tx, spend, &edges).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            StoreError::Corrupt("invariant: write encode edge/wire prevout mismatch")
+        ),
+        "coinbase must be skipped; the disagreeing spend is the prevout tripwire: {err:?}"
+    );
+
+    let short = wire_edges_match(&tx, spend, &edges[..1]).unwrap_err();
+    assert!(matches!(
+        short,
+        StoreError::Corrupt("invariant: write encode spends/tx input mismatch")
+    ));
+    let mut bad_fk = edges;
+    bad_fk[1].spend_fk = Fk(8);
+    let fk_err = wire_edges_match(&tx, spend, &bad_fk).unwrap_err();
+    assert!(matches!(
+        fk_err,
+        StoreError::Corrupt("invariant: write encode spend_fk mismatch")
+    ));
+
+    // A non-coinbase vout of u32::MAX still takes the null-edge arm.
+    // Deleting that arm would stop failing closed on this input.
+    let max_vout = TxIn {
+        previous_output: OutPoint {
+            txid: prev,
+            vout: u32::MAX,
+        },
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::new(),
+    };
+    let planned = plan_in_from_txin(&max_vout);
+    assert!(!planned.is_coinbase);
+    assert_eq!(planned.prev_index, u32::MAX);
+}

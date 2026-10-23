@@ -55,6 +55,17 @@ fn rejected_header_batch_does_not_grow_path_or_explore() {
     assert!(st.reorg.explore_tips().is_empty());
 
     let good = mine(gen, 1_500_010_000, 1);
+    let (good_fks, _) = rbitcoin_ibd::ibd::events::prepare_header_store(&hub, &[good.header]);
+    assert_eq!(
+        good_fks.len(),
+        1,
+        "a full good batch is stored as that batch"
+    );
+    assert!(hub
+        .query
+        .get_header_by_hash(&good.block_hash().to_byte_array())
+        .unwrap()
+        .is_some());
     stored_batch(&mut st, &hub, 0, vec![good.header]);
     assert!(
         st.hash_height.contains_key(&good.block_hash()),
@@ -88,6 +99,23 @@ fn rejected_header_batch_does_not_grow_path_or_explore() {
     bad_tail.header.time = 0;
     let fresh_hash = fresh.block_hash();
     let tail_hash = bad_tail.header.block_hash();
+    let (prefix_fks, _) =
+        rbitcoin_ibd::ibd::events::prepare_header_store(&hub, &[fresh.header, bad_tail.header]);
+    assert_eq!(
+        prefix_fks.len(),
+        1,
+        "a rejected tail is absent from the stored prefix"
+    );
+    let stored_fresh = hub
+        .query
+        .get_header_by_hash(&fresh_hash.to_byte_array())
+        .unwrap();
+    assert_eq!(stored_fresh.map(|(fk, _)| fk), Some(prefix_fks[0]));
+    assert!(hub
+        .query
+        .get_header_by_hash(&tail_hash.to_byte_array())
+        .unwrap()
+        .is_none());
     let added = stored_batch(&mut st, &hub, 0, vec![fresh.header, bad_tail.header]);
     assert!(
         st.hash_height.contains_key(&fresh_hash),

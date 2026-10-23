@@ -393,6 +393,7 @@ fn bad_prev_on_the_tip_child_is_fetched_again() {
     st.note_path_prev(hash, tip);
     st.densify_scan_lo = t + 5;
     st.densify_ready_through = t + 5;
+    st.body.mark_archived(hash);
     apply_confirm_reject(
         &mut st,
         t + 1,
@@ -403,6 +404,10 @@ fn bad_prev_on_the_tip_child_is_fetched_again() {
     );
     assert_eq!(st.height_to_hash.get(&(t + 1)), Some(&hash));
     assert!(st.body.is_missing(&hash));
+    assert!(
+        !st.body.is_known_archived(&hash),
+        "a soft reject drops the hash from known"
+    );
     assert!(
         st.densify_scan_lo <= t + 1,
         "scan_lo={}",

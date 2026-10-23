@@ -80,6 +80,10 @@ fn block_summary_bits_u32_and_witness_size_weight() {
         summary["size"].as_u64().unwrap().saturating_mul(4),
         "witness block weight is not 4×stripped size"
     );
+    let mtp = rbitcoin_query::median_time_past(&q, Height(0)).unwrap();
+    assert_eq!(summary["mediantime"], json!(mtp));
+    let missing = rbitcoin_esplora::server::store_err(rbitcoin_store::StoreError::NotFound);
+    assert_eq!(missing.status(), axum::http::StatusCode::NOT_FOUND);
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -1334,17 +1334,8 @@ impl Store {
             // `body_range` here is the create's **spent.body** span (schema 15).
             Some((off, len)) => self.txs.get_output_spender_metas_at(off, len, vouts)?,
             None => {
-                if let Ok((off, len)) = self.txs.spent_range(create_tx_fk) {
-                    self.txs.get_output_spender_metas_at(off, len, vouts)?
-                } else {
-                    let mut out = Vec::with_capacity(vouts.len());
-                    for &v in vouts {
-                        let (multi, field, vin) =
-                            self.txs.get_output_spender_meta(create_tx_fk, v)?;
-                        out.push((v, multi, field, vin));
-                    }
-                    out
-                }
+                let (off, len) = self.txs.spent_range(create_tx_fk)?;
+                self.txs.get_output_spender_metas_at(off, len, vouts)?
             }
         };
         let mut unspent = Vec::with_capacity(metas.len());

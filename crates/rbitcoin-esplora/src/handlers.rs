@@ -19,7 +19,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::pow::{CompactTarget, Target};
 use bitcoin::{MerkleBlock, Network, OutPoint, Txid};
 use rbitcoin_net::MempoolHub;
-use rbitcoin_primitives::{median_time_past_times, Fk, Height};
+use rbitcoin_primitives::{Fk, Height};
 
 use rbitcoin_query::{
     ChainView, ChainViewKind, HistoryFilter, Query, ScriptHashChainStats, ScriptHashTxSummary,
@@ -86,7 +86,7 @@ pub fn block_summary_json(
         .ok_or(rbitcoin_store::StoreError::NotFound)?;
     let difficulty =
         Target::from_compact(CompactTarget::from_consensus(rec.bits)).difficulty_float();
-    let mediantime = median_time_past(query, height)?;
+    let mediantime = block_median_time(query, height)?;
     Ok(json!({
         "id": block_hash_hex(hash),
         "height": height.0,
@@ -108,20 +108,42 @@ pub fn block_summary_json(
     }))
 }
 
-/// Median timestamp of the last up to 11 best-chain headers ending at `height` (BIP113 MTP).
+/// Block-summary median time.
+///
+/// [`rbitcoin_query::median_time_past`] owns the window, including an MTP-cache
+/// hit. A missing best-chain header in that window stays [`StoreError::NotFound`]:
+/// a confirm-parent plan or a warm cache must not fill a hole the old walk
+/// reported missing. `BadPrev` on that gap is the same 404, not HTTP 500.
 #[doc(hidden)]
-pub fn median_time_past(query: &Query, height: Height) -> Result<u32, rbitcoin_query::QueryError> {
-    let n = 11u32.min(height.0.saturating_add(1));
-    let start = height.0.saturating_sub(n.saturating_sub(1));
-    let mut times = Vec::with_capacity(n as usize);
-    for h in start..=height.0 {
-        let (_fk, rec) = query
-            .header_at_height(Height(h))?
-            .ok_or(rbitcoin_store::StoreError::NotFound)?;
-        times.push(rec.timestamp);
+pub fn block_median_time(query: &Query, height: Height) -> Result<u32, StoreError> {
+    if best_chain_window_has_a_hole(query, height)? {
+        return Err(StoreError::NotFound);
     }
-    median_time_past_times(&times)
-        .map_err(|_| rbitcoin_store::StoreError::Corrupt("invariant: empty median time"))
+    match rbitcoin_query::median_time_past(query, height) {
+        Ok(t) => Ok(t),
+        Err(rbitcoin_query::ConfirmError::Store(StoreError::Corrupt(
+            "confirm: load incomplete (parent header plan missing above tip)",
+        ))) => Err(StoreError::NotFound),
+        Err(rbitcoin_query::ConfirmError::Store(e)) => Err(e),
+        Err(rbitcoin_query::ConfirmError::Rules(rbitcoin_consensus::ConsensusError::BadPrev)) => {
+            Err(StoreError::NotFound)
+        }
+        Err(rbitcoin_query::ConfirmError::Rules(_)) => {
+            Err(StoreError::Corrupt("invariant: empty median time"))
+        }
+    }
+}
+
+/// Any missing header in the 11-block window is a hole. The query median
+/// would otherwise read a confirm-parent plan or the MTP ring.
+fn best_chain_window_has_a_hole(query: &Query, height: Height) -> Result<bool, StoreError> {
+    let start = height.0.saturating_sub(10);
+    for h in start..=height.0 {
+        if query.header_at_height(Height(h))?.is_none() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub async fn block_json(State(st): State<AppState>, Path(hash_hex): Path<String>) -> Response {
