@@ -474,9 +474,9 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         let now = seed.peers.now_secs();
         seed.peers.set_mock_now(now + 40 * 60);
         // The disconnect is requested on this call. Under llvm-cov the session
-        // task can take longer than a couple of seconds to leave the table.
+        // task can take longer than fifteen seconds to leave the table.
         wait_ms_until(
-            15_000,
+            llvm_cov_wall(15, 45).as_millis() as u64,
             || {
                 !seed
                     .peers
@@ -737,7 +737,7 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         peer.peers
             .addconnection(seed.local_addr, PeerConnType::AddrFetch)
             .expect("second addrfetch dial");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + llvm_cov_wall(3, 9);
         let mut saw_fetch = false;
         loop {
             let fetching = peer
@@ -759,9 +759,10 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
         peer.shutdown().await;
         dummy.shutdown().await;
     };
-    tokio::time::timeout(Duration::from_secs(20), fut)
-        .await
-        .expect("p2p_timeout_getaddr_and_keepalive_ping wall timeout (20s)");
+    let wall = llvm_cov_wall(20, 60);
+    tokio::time::timeout(wall, fut).await.unwrap_or_else(|_| {
+        panic!("p2p_timeout_getaddr_and_keepalive_ping wall timeout ({wall:?})")
+    });
 }
 
 /// Heights 0 and 1 are sealed; the tip is not. A seeder whose filters have
