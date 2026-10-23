@@ -67,10 +67,9 @@ pub fn meter_dispatch_wall(us: u64) {
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 /// Max request payload bytes (Electrum: one JSON-RPC line incl. `\n`; Esplora: body).
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1_048_576;
-/// Max requests in one JSON-RPC batch line. A batch reply is built whole
-/// before it is written, so this bounds reply RAM per connection where a
-/// pipelined client is held back by the socket instead. Fulcrum's default
-/// `max_batch`; Sparrow pages at 100.
+/// Max requests in one JSON-RPC batch line: the work one line can queue on
+/// a connection. Reply RAM is bounded separately, by writing the reply one
+/// slot at a time. Fulcrum's default `max_batch`; Sparrow pages at 100.
 #[doc(hidden)]
 pub const MAX_BATCH_ITEMS: usize = 345;
 /// Alias for shared docs / Esplora body cap ([`DEFAULT_MAX_LINE_BYTES`]).
@@ -614,7 +613,16 @@ where
                 };
                 let resp = match req {
                     Value::Array(items) => {
-                        answer_batch(&ctx, &mut conn, &mut last_sent_status, items).await?
+                        answer_batch(
+                            &ctx,
+                            &mut conn,
+                            &mut last_sent_status,
+                            &mut writer,
+                            idle,
+                            items,
+                        )
+                        .await?;
+                        continue;
                     }
                     req => match request_stream(&req) {
                         Some(stream) => {
@@ -692,32 +700,71 @@ fn invalid_request(id: Value, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id": id, "error": {"code": -32600, "message": message}})
 }
 
-/// JSON-RPC 2.0 batch: every item answered in order, in one array line.
-/// Items run one after another because each moves `conn` in and out of the
-/// blocking pool.
-async fn answer_batch(
+/// JSON-RPC 2.0 batch, one array line on the wire. Each slot is written as
+/// soon as it is answered, so socket backpressure holds the connection to
+/// about one reply instead of the whole array. Items run in order because
+/// each moves `conn` in and out of the blocking pool. A batch of only
+/// notifications writes nothing.
+async fn answer_batch<W: AsyncWrite + Unpin>(
     ctx: &RequestCtx<'_>,
     conn: &mut ElectrumConn,
     last_sent: &mut HashMap<[u8; 32], String>,
+    writer: &mut W,
+    idle: Duration,
     items: Vec<Value>,
-) -> Result<Value, std::io::Error> {
+) -> Result<(), std::io::Error> {
     if items.is_empty() {
-        return Ok(invalid_request(Value::Null, "empty batch"));
+        return write_line(writer, &invalid_request(Value::Null, "empty batch"), idle).await;
     }
     if items.len() > MAX_BATCH_ITEMS {
-        return Ok(invalid_request(Value::Null, "batch too large"));
+        return write_line(
+            writer,
+            &invalid_request(Value::Null, "batch too large"),
+            idle,
+        )
+        .await;
     }
-    let mut answers = Vec::with_capacity(items.len());
+    let mut opened = false;
     for item in &items {
-        let answer = if request_stream(item).is_some() {
-            let id = item.get("id").cloned().unwrap_or(Value::Null);
-            invalid_request(id, "streaming method cannot be sent in a batch")
-        } else {
-            answer_one(ctx, conn, last_sent, item).await?
+        let Some(answer) = answer_batch_item(ctx, conn, last_sent, item).await? else {
+            continue;
         };
-        answers.push(answer);
+        let mut slot = vec![if opened { b',' } else { b'[' }];
+        slot.extend(serde_json::to_vec(&answer).unwrap_or_else(|_| b"{}".to_vec()));
+        opened = true;
+        write_bytes_within(writer, &slot, idle).await?;
     }
-    Ok(Value::Array(answers))
+    if opened {
+        write_bytes_within(writer, b"]\n", idle).await?;
+    }
+    Ok(())
+}
+
+/// `None` for a notification (no `id` member, unlike `"id": null`): it
+/// runs, but JSON-RPC 2.0 gives it no slot in the reply.
+async fn answer_batch_item(
+    ctx: &RequestCtx<'_>,
+    conn: &mut ElectrumConn,
+    last_sent: &mut HashMap<[u8; 32], String>,
+    item: &Value,
+) -> Result<Option<Value>, std::io::Error> {
+    let Some(obj) = item.as_object() else {
+        return Ok(Some(invalid_request(Value::Null, "Invalid Request")));
+    };
+    let streams = request_stream(item).is_some();
+    let Some(id) = obj.get("id") else {
+        if !streams {
+            answer_one(ctx, conn, last_sent, item).await?;
+        }
+        return Ok(None);
+    };
+    if streams {
+        return Ok(Some(invalid_request(
+            id.clone(),
+            "streaming method cannot be sent in a batch",
+        )));
+    }
+    answer_one(ctx, conn, last_sent, item).await.map(Some)
 }
 
 /// One request/response method. `Err` is a dispatch task that died, which

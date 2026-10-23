@@ -107,6 +107,7 @@ and idle clients fail closed.
 | Idle timeout | 120 s | No complete request → disconnect |
 | Max scripthash subs / conn | 10000 (`--electrum-max-subs`) | Notify fan-out cap. A wallet subscribes every address up to its gap limit; each sub is ~170 B (≈0.45 GB worst case at 256 connections) plus one posting check per block against that block's shared touch set; a reorg restatuses every sub |
 | Max broadcast hex | ~8 MiB | `transaction.broadcast` hex length |
+| Max batch items | 345 | Requests in one JSON-RPC batch line; more is one `-32600`. The reply is written one slot at a time, so a slow reader holds back the server, not RAM |
 
 Edge rate-limits, auth, and TLS cipher policy stay on the proxy. See
 [`SECURITY.md`](../../SECURITY.md).

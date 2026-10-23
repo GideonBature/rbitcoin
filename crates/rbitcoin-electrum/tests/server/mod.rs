@@ -547,7 +547,165 @@ async fn batch_line_answers_every_item_in_one_array() {
     let ping = electrum_tcp_rpc(&mut stream, 8, "server.ping", json!([])).await;
     assert_eq!(ping["id"], 8);
 
+    let mixed = electrum_tcp_batch(
+        &mut stream,
+        &[
+            json!({"jsonrpc":"2.0","method":"server.ping","params":[]}),
+            json!({"jsonrpc":"2.0","id":null,"method":"server.ping","params":[]}),
+            json!(1),
+            json!("x"),
+        ],
+    )
+    .await;
+    let invalid = json!({"code":-32600,"message":"Invalid Request"});
+    assert_eq!(
+        mixed,
+        json!([
+            {"jsonrpc":"2.0","id":null,"result":null},
+            {"jsonrpc":"2.0","id":null,"error":invalid},
+            {"jsonrpc":"2.0","id":null,"error":invalid},
+        ]),
+        "a notification gets no slot; an explicit null id does"
+    );
+
+    let notes = [
+        json!({"jsonrpc":"2.0","method":"server.ping","params":[]}),
+        json!({"jsonrpc":"2.0","method":"blockchain.tweaks.subscribe","params":[0,1,false]}),
+    ];
+    let mut line = serde_json::to_string(&notes).unwrap();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await.unwrap();
+    let ping = electrum_tcp_rpc(&mut stream, 9, "server.ping", json!([])).await;
+    assert_eq!(
+        ping,
+        json!({"jsonrpc":"2.0","id":9,"result":null}),
+        "a batch of notifications writes nothing"
+    );
+
     handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A batch reply goes to the socket one slot per write, so a client that
+/// reads slowly holds the server to about one reply, not the whole array.
+#[tokio::test]
+async fn batch_reply_is_written_one_slot_at_a_time() {
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    struct OnceRead(Vec<u8>);
+    impl AsyncRead for OnceRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if this.0.is_empty() {
+                return Poll::Pending;
+            }
+            let n = this.0.len().min(buf.remaining());
+            buf.put_slice(&this.0[..n]);
+            this.0.drain(..n);
+            Poll::Ready(Ok(()))
+        }
+    }
+    #[derive(Default)]
+    struct Seen {
+        bytes: Vec<u8>,
+        largest_write: usize,
+    }
+    struct Recorder(Arc<Mutex<Seen>>);
+    impl AsyncWrite for Recorder {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut seen = self.0.lock().unwrap();
+            seen.largest_write = seen.largest_write.max(buf.len());
+            seen.bytes.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    struct Duplex(OnceRead, Recorder);
+    impl AsyncRead for Duplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for Duplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.get_mut().1).poll_write(cx, buf)
+        }
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().1).poll_flush(cx)
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().1).poll_shutdown(cx)
+        }
+    }
+
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.banner = "b".repeat(64 * 1024);
+    let slots = 40;
+    let batch: Vec<Value> = (0..slots)
+        .map(|i| json!({"jsonrpc":"2.0","id":i,"method":"server.banner","params":[]}))
+        .collect();
+    let mut line = serde_json::to_vec(&batch).unwrap();
+    line.push(b'\n');
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (_tip_tx, tip_rx) = broadcast::channel(1);
+    let task = tokio::spawn(handle_client(
+        Duplex(OnceRead(line), Recorder(Arc::clone(&seen))),
+        "127.0.0.1:9".parse().unwrap(),
+        Arc::new(q),
+        Arc::new(cfg),
+        Arc::new(params),
+        tip_rx,
+        None,
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !seen.lock().unwrap().bytes.ends_with(b"]\n") {
+        assert!(Instant::now() < deadline, "batch reply never finished");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    task.abort();
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.bytes.iter().filter(|b| **b == b'\n').count(),
+        1,
+        "still one line"
+    );
+    let reply: Value = serde_json::from_slice(&seen.bytes).unwrap();
+    let reply = reply.as_array().unwrap();
+    assert_eq!(reply.len(), slots);
+    assert!(reply.iter().enumerate().all(|(i, v)| v["id"] == i));
+    assert!(
+        seen.largest_write < 2 * 64 * 1024,
+        "largest write {} bytes for a {} byte reply",
+        seen.largest_write,
+        seen.bytes.len()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
