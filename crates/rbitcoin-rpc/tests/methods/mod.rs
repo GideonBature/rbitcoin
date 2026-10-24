@@ -412,6 +412,7 @@ fn decodescript_multisig_type_matches_core() {
         ("5101ab51ae".into(), "nonstandard"),
         (format!("51{push_key}aeae"), "nonstandard"),
         (format!("51{push_key}0101ae"), "nonstandard"),
+        (format!("514c{push_key}51ae"), "multisig"),
         (format!("51{}0111ae", keys(17)), "multisig"),
         (format!("51{}0114ae", keys(20)), "multisig"),
         (format!("51{}0115ae", keys(21)), "nonstandard"),
