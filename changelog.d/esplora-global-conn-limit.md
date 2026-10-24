@@ -5,7 +5,8 @@ Fixed
   `ConcurrencyLimitLayer` gave each of the listener's routes its own 256
   permits: in practice no limit. The limit is now one semaphore shared by
   every route and the fallback. Requests over it wait for a slot; they are
-  not refused.
+  not refused. The request timeout now covers that wait too, so a queue of
+  slow requests ahead cannot hold a later one past one timeout (**408**).
 
 Added
 

@@ -97,8 +97,9 @@ Re-measure fat keys on the operator host (`rbitcoin-bench --suite casa
 ### App DoS floor (always on)
 
 Shared [`ServeLimits`](../../crates/rbitcoin-electrum) defaults (also the future Esplora
-floor). Excess connections are **rejected immediately** (no hang); oversize lines
-and idle clients fail closed.
+floor). Excess Electrum connections are **rejected immediately** (no hang);
+oversize lines and idle clients fail closed. Excess Esplora requests wait for a
+slot, and the wait counts against the request timeout (**408** when it runs out).
 
 | Limit | Default | Role |
 |-------|---------|------|
