@@ -182,15 +182,21 @@ pub fn thin_rows(
         max_eligible: usize::MAX,
         cut_through,
     };
-    let rows = match query.load_thin_tweaks_range(Height(block.height), limits) {
+    // The plan reads `confirmed[h]` and the tweak row together under the
+    // `sp_tweaks` lock, so its header fk names the block the rows belong to.
+    // Checking `confirmed[h]` again afterwards would pass an A -> B -> A move.
+    match query.load_thin_tweaks_range_with_header(Height(block.height), limits) {
         Ok(mut batch) => match batch.pop() {
-            Some((_, rows)) => rows,
-            None => return Err(not_indexed()),
+            Some((_, fk, rows)) if fk == block.header_fk => Ok(rows),
+            Some(_) => Err(store_error(StoreError::Stale(CHAIN_MOVED))),
+            None => {
+                // The replacement block may not be indexed yet.
+                still_confirmed(query, block).map_err(store_error)?;
+                Err(not_indexed())
+            }
         },
-        Err(e) => return Err(store_error(e)),
-    };
-    still_confirmed(query, block).map_err(store_error)?;
-    Ok(rows)
+        Err(e) => Err(store_error(e)),
+    }
 }
 
 pub async fn info(State(st): State<AppState>) -> Response {

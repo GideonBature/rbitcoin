@@ -113,6 +113,8 @@ pub fn thin_join_txids_and_loc(
 #[doc(hidden)]
 pub struct HeightPlan {
     pub height: Height,
+    /// `confirmed[height]` as read with `elig`, under the `sp_tweaks` lock.
+    pub header_fk: Fk,
     pub first_id: u64,
     pub elig: Vec<(u32, [u8; 33])>,
 }
@@ -124,7 +126,7 @@ pub fn thin_tweak_height_plans(
     start: Height,
     limits: ThinTweakRangeLimits,
 ) -> Result<Vec<HeightPlan>, QueryError> {
-    let mut meta: Vec<(Height, u64, u32)> = Vec::new();
+    let mut meta: Vec<(Height, u64, u32, Fk)> = Vec::new();
     for step in 0..limits.max_heights {
         let h = Height(start.0.saturating_add(step));
         let Some(header_fk) = store.confirmed.get(h)? else {
@@ -136,7 +138,7 @@ pub fn thin_tweak_height_plans(
         let Some(first_id) = first_fk.get() else {
             return Err(StoreError::InvalidFk);
         };
-        meta.push((h, first_id, n_tx));
+        meta.push((h, first_id, n_tx, header_fk));
     }
     if meta.is_empty() {
         return Ok(Vec::new());
@@ -158,6 +160,7 @@ pub fn thin_tweak_height_plans(
         elig_total = elig_total.saturating_add(add);
         plans.push(HeightPlan {
             height: meta[i].0,
+            header_fk: meta[i].3,
             first_id: meta[i].1,
             elig,
         });
@@ -412,6 +415,20 @@ impl Query {
         start: Height,
         limits: ThinTweakRangeLimits,
     ) -> Result<Vec<(Height, Vec<ThinTweakRow>)>, QueryError> {
+        Ok(self
+            .load_thin_tweaks_range_with_header(start, limits)?
+            .into_iter()
+            .map(|(h, _, rows)| (h, rows))
+            .collect())
+    }
+
+    /// [`Self::load_thin_tweaks_range`], with the header fk each height's rows
+    /// were planned under, so a caller can tell which block they belong to.
+    pub fn load_thin_tweaks_range_with_header(
+        &self,
+        start: Height,
+        limits: ThinTweakRangeLimits,
+    ) -> Result<Vec<(Height, Fk, Vec<ThinTweakRow>)>, QueryError> {
         self.require_sp_tweaks_unpruned()?;
         if limits.max_heights == 0 {
             return Ok(Vec::new());
@@ -530,7 +547,7 @@ impl Query {
         Ok(plans
             .into_iter()
             .zip(out_rows)
-            .map(|(p, rows)| (p.height, rows))
+            .map(|(p, rows)| (p.height, p.header_fk, rows))
             .collect())
     }
 }

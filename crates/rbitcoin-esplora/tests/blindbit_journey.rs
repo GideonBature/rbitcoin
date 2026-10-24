@@ -253,6 +253,12 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
         matches!(block_sp_elements(&q, &served), Err(rbitcoin_store::StoreError::Stale(m)) if m == CHAIN_MOVED),
         "a disconnected height is a moved view, not a 500"
     );
+    let status = thin_rows(&q, &served, false).err().map(|r| r.status());
+    assert_eq!(
+        status,
+        Some(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+        "an unindexed height whose block left is a moved view, not 404"
+    );
     let (mut other, cb) = coinbase(2, fk1, Some(h1.hash));
     other.nonce = other.nonce.wrapping_add(1);
     other.hash = rbitcoin_store::block_header_hash(
