@@ -162,7 +162,6 @@ pub fn addnode(
     hub: &rbitcoin_net::PeerHub,
     params: &RpcParams,
 ) -> Result<Value, Value> {
-    params.reject_unknown(&["node", "command", "v2transport"])?;
     let node = params.req_str(0, "node")?;
     let cmd = params.req_str(1, "command")?;
     let _v2 = params.opt_bool(2, "v2transport")?;

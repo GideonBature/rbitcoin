@@ -554,6 +554,7 @@ pub fn dispatch_inner(ctx: &RpcContext, method: &str, params: RpcParams) -> Resu
             ping(ctx)
         }
         "addnode" => {
+            params.reject_unknown(&["node", "command", "v2transport"])?;
             let hub = require_peers(ctx)?;
             addnode(ctx, hub, &params)
         }
