@@ -421,14 +421,16 @@ pub struct NodeConfig {
     pub trust_peer: Option<rbitcoin_net::NetAddr>,
     /// `--trust-peer` clearnet DNS name. Mutually exclusive with [`Self::trust_peer`].
     pub trust_peer_host: Option<String>,
-    /// Set by [`Self::seal_trust_peer`] after listen, seeds, and inbound are frozen.
+    /// Set by [`Self::seal_trust_peer`]. Private so another crate cannot copy it
+    /// with `..NodeConfig::default()`. Listen fields stay public; [`Self::validate`]
+    /// re-checks them.
     trust_seal: Option<TrustPeerSeal>,
 }
 
-/// Marker that [`TrustPeerSeal::try_new`] accepted listen, seeds, and inbound.
+/// Passed listen, seeds, and inbound at [`TrustPeerSeal::try_new`].
 ///
-/// There is no field to flip after that check. A config that names a trust
-/// peer and never sealed still runs `try_new` from [`NodeConfig::validate`].
+/// Not a snapshot of [`ListenOpts`]. Those fields stay public, so
+/// [`NodeConfig::validate`] runs this check on the live values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrustPeerSeal;
 
@@ -737,6 +739,15 @@ impl NodeConfig {
         self.trust_peer.is_some() || self.trust_peer_host.is_some()
     }
 
+    /// True after [`Self::seal_trust_peer`] stored a seal.
+    ///
+    /// The seal is not a copy of listen, seeds, or inbound. [`Self::validate`]
+    /// re-checks those public fields.
+    #[doc(hidden)]
+    pub fn trust_peer_sealed(&self) -> bool {
+        self.trust_seal.is_some()
+    }
+
     /// Pin `--trust-peer` as the only dial target and refuse clashing flags.
     ///
     /// Runs from CLI assembly, before [`Self::ensure_datadir`] opens a store.
@@ -833,15 +844,14 @@ impl NodeConfig {
 
     /// Sealed `--trust-peer` state: one dial target, no listen, no seeds.
     ///
-    /// A seal from [`Self::seal_trust_peer`] already passed [`TrustPeerSeal::try_new`].
-    /// A config that names a trust peer and never sealed still fails here.
+    /// [`ListenOpts`] stays public, so a later write can undo the seal.
+    /// This always re-runs [`TrustPeerSeal::try_new`] on the live fields.
+    /// A config that names a trust peer and never sealed fails the same check.
     fn validate_trust_peer(&self) -> Result<(), NodeError> {
         if !self.trust_peer_set() {
             return Ok(());
         }
-        if self.trust_seal.is_none() {
-            TrustPeerSeal::try_new(&self.listen)?;
-        }
+        TrustPeerSeal::try_new(&self.listen)?;
         self.connect_matches_trust_peer()?;
         if self.listen.connect.is_empty() && self.listen.connect_dns.is_empty() {
             return Err(NodeError::Config("trust-peer requires an address".into()));

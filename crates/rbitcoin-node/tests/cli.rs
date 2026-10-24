@@ -853,5 +853,33 @@ fn trust_peer_clashing_flags() {
     let mut sealed = rbitcoin_node::config::NodeConfig::default();
     sealed.apply_kv("trust_peer", addr).unwrap();
     sealed.seal_trust_peer().unwrap();
+    assert!(sealed.trust_peer_sealed());
     sealed.validate().unwrap();
+
+    // Listen fields stay writable. Validate still rejects the three clashes.
+    sealed.listen.p2p = rbitcoin_node::config::P2pListen::Auto;
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--listen"), "{err}");
+
+    sealed.listen.p2p = rbitcoin_node::config::P2pListen::Off;
+    sealed.listen.listen_onion = true;
+    sealed.listen.max_inbound = 1;
+    sealed.tor.control = Some("127.0.0.1:9051".parse().unwrap());
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--listen"), "{err}");
+
+    sealed.listen.listen_onion = false;
+    sealed.tor.control = None;
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--max-inbound"), "{err}");
+
+    sealed.listen.max_inbound = 0;
+    sealed.listen.use_seeds = true;
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--seed-node"), "{err}");
+
+    sealed.listen.use_seeds = false;
+    sealed.listen.seednodes.push("seed.example".into());
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--seed-node"), "{err}");
 }
