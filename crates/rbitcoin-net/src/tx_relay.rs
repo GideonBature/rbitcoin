@@ -4453,7 +4453,9 @@ impl MempoolHub {
     /// is a no-op while relay is off) then cannot double-count once confirmed
     /// history includes that block. A tx the chain already has, but that view
     /// does not, stays here. Its inputs are already spent in the chain UTXO
-    /// set, so those values come from the parent output instead.
+    /// set, so those values come from the parent output instead. A parent
+    /// that is still in the pool is the same case once the view covers the
+    /// parent and not this spend.
     ///
     /// Uses [`MempoolShIndex`] (same as `scripthash_mempool`). A full-graph walk
     /// plus chain `get_txout` per input is ~1.5 s per empty Cake key on a live
@@ -4500,9 +4502,20 @@ impl MempoolHub {
             }
             for inp in &tx.input {
                 let op = inp.previous_output;
-                // Only count spending of **chain** UTXOs (not pure mempool-parent).
+                // A parent still in the graph is this delta's own mempool
+                // entry, so its output is not confirmed value. The exception
+                // is a parent the view already covers: confirmed balance has
+                // that output, and an awaiting spend must subtract it. A
+                // same-block package is awaiting together and stays skipped.
                 if g.graph.creator(&op).is_some() {
-                    continue;
+                    let parent_covered = awaiting
+                        && self
+                            .query
+                            .sh_visible_confirm(&op.txid.to_byte_array(), visible)?
+                            == rbitcoin_query::ShVisibleConfirm::Covered;
+                    if !parent_covered {
+                        continue;
+                    }
                 }
                 self.meter_delta_prevouts.fetch_add(1, Ordering::Relaxed);
                 if let Some(txout) = provider.get_txout(&op) {
