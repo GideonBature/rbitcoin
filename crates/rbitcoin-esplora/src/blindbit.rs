@@ -511,7 +511,7 @@ pub struct ForwardTx {
 pub async fn forward_tx(
     State(st): State<AppState>,
     // Extracted before the body, which drops the request's extensions.
-    Extension(_permit): Extension<BlindbitPermit>,
+    Extension(permit): Extension<BlindbitPermit>,
     body: axum::body::Bytes,
 ) -> Response {
     let Some(mp) = st.mempool.clone() else {
@@ -529,11 +529,14 @@ pub async fn forward_tx(
         Ok(t) => t,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid tx"),
     };
-    match mp.accept_tx_async(tx).await {
+    // The admit runs inside `held`, so a timeout or disconnect that drops
+    // this handler does not free the permit while it is still running.
+    held(permit, move || match mp.accept_tx_from(&tx, None) {
         Ok(r) => {
             mp.mark_local_origin(r.txid);
             Json(block_hash_hex(&r.txid.to_byte_array())).into_response()
         }
         Err(e) => error(StatusCode::BAD_REQUEST, &e.to_string()),
-    }
+    })
+    .await
 }

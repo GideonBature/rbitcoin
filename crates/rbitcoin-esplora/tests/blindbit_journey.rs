@@ -472,3 +472,78 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
     drop(held);
     handle.shutdown().await;
 }
+
+/// A forward-tx keeps its permit until the admit returns, not until the
+/// request ends: one that times out mid-admit still fills the limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blindbit_forward_tx_holds_its_permit_through_the_admit() {
+    use bitcoin::hashes::Hash;
+
+    let (dir, q) = temp_query("blindbit-v1-forward-permit");
+    q.set_sptweaks_enabled(true, Height(0)).unwrap();
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let fk0 = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
+    let q = Arc::new(q);
+    let mp_dir = dir.join("mp");
+    std::fs::create_dir_all(&mp_dir).unwrap();
+    let hub = rbitcoin_net::MempoolHub::open(&mp_dir, Arc::clone(&q)).unwrap();
+    let mut cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    cfg.blindbit_max_inflight = 1;
+    cfg.limits.idle_timeout = Duration::from_secs(1);
+    let handle = run_esplora(cfg, Arc::clone(&q), Some(Arc::clone(&hub)))
+        .await
+        .expect("listen");
+    let addr = handle.local_addr;
+
+    // Hold the pool's write lock so the admit blocks on its read.
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let locker = {
+        let hub = Arc::clone(&hub);
+        std::thread::spawn(move || {
+            let _g = hub.lock_write();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        })
+    };
+    locked_rx.recv().unwrap();
+
+    let tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array([7; 32]),
+                vout: 0,
+            },
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1_000),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let body = json!({ "data": bitcoin::consensus::encode::serialize_hex(&tx) }).to_string();
+    let (st, _) = http_post(addr, "/blindbit/v1/forward-tx", body.as_bytes()).await;
+    assert_eq!(st, 408, "the admit is stalled on the pool lock");
+
+    // The admit is still running, so the one permit is still taken.
+    let (st, _) = http_get(addr, "/blindbit/v1/tweak-index/0").await;
+    assert_eq!(st, 408, "a timed-out forward-tx still holds its permit");
+
+    release_tx.send(()).unwrap();
+    locker.join().unwrap();
+    let mut st = 0;
+    for _ in 0..20 {
+        st = http_get(addr, "/blindbit/v1/tweak-index/0").await.0;
+        if st == 200 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(st, 200, "the permit frees once the admit returns");
+    handle.shutdown().await;
+}
