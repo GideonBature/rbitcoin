@@ -155,6 +155,12 @@ before Class A expand: Esplora **503** / Electrum JSON-RPC error
 A history request that names a page (Esplora's 25, or any caller that sets a
 limit) is still served: the join stops once that page is full.
 
+`--heavy-sh-creates N` (conf `heavy_sh_creates=`, default **10000**, **0** off)
+lets one unpaged join with more than N creates run at a time across the
+node. One join near a raised cap of 100000 was measured at 2.1 GiB peak RSS,
+so several at once can push a small box into swap. A waiting join holds a
+blocking-pool thread; lighter joins and paged history do not wait.
+
 Order-of-magnitude costs (mainnet-class SSD; not a warranty):
 
 - **During IBD with sh_index=1:** modest extra work (run stream); after IBD, bulk materialize is typically **tens of minutes to a few hours**.

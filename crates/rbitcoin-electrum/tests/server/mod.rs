@@ -460,7 +460,7 @@ fn assert_wallets_read(server: &str) {
     );
 }
 
-async fn electrum_tcp_batch(stream: &mut TcpStream, items: &[Value]) -> Value {
+pub(crate) async fn electrum_tcp_batch(stream: &mut TcpStream, items: &[Value]) -> Value {
     let mut line = serde_json::to_string(items).unwrap();
     line.push('\n');
     stream.write_all(line.as_bytes()).await.unwrap();

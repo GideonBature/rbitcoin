@@ -143,6 +143,11 @@ pub const SCRIPTHASH_INDEX_DISABLED: &str = "scripthash index disabled";
 /// Default unpaged scripthash join cap. `0` stays unlimited.
 pub const DEFAULT_MAX_SH_CREATES: u32 = 10_000;
 
+/// Default create count above which an unpaged scripthash join waits for
+/// every other such join. It matters once `--max-sh-creates` is raised past
+/// it. `0` turns the wait off.
+pub const DEFAULT_HEAVY_SH_CREATES: u32 = 10_000;
+
 /// Result of [`Query::uring_recover`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UringRecover {
@@ -448,6 +453,15 @@ pub struct Query {
     pub reconstruct_archived: AtomicU64,
     /// 0 = unlimited. Electrum + Esplora SH joins refuse above this create count.
     pub max_sh_creates: AtomicU32,
+    /// 0 = off. An unpaged SH join above this create count holds
+    /// [`Self::heavy_sh_join`] for its whole walk.
+    pub heavy_sh_creates: AtomicU32,
+    /// One heavy unpaged SH join at a time across every Electrum and Esplora
+    /// client: one near the cap can peak above 2 GiB.
+    pub heavy_sh_join: Mutex<()>,
+    /// Unpaged SH join overlap by kind. Tests only.
+    #[cfg(debug_assertions)]
+    pub sh_join_probe: crate::scripthash::ShJoinProbe,
     /// Packed `tx.body` bytes read by [`Self::load_thin_tweaks`].
     pub thin_tweak_body_bytes: AtomicU64,
     /// Max fk `head_insert_many` has published (0 = never). Load polls this
@@ -621,6 +635,10 @@ impl Query {
             height_by_hash: Mutex::new(HeightByHashIndex::default()),
             reconstruct_archived: AtomicU64::new(0),
             max_sh_creates: AtomicU32::new(DEFAULT_MAX_SH_CREATES),
+            heavy_sh_creates: AtomicU32::new(DEFAULT_HEAVY_SH_CREATES),
+            heavy_sh_join: Mutex::new(()),
+            #[cfg(debug_assertions)]
+            sh_join_probe: crate::scripthash::ShJoinProbe::default(),
             thin_tweak_body_bytes: AtomicU64::new(0),
             head_drain_fk: AtomicU64::new(head_drained),
             disconnect_height: AtomicU32::new(0),
@@ -1432,6 +1450,14 @@ impl Query {
 
     pub fn max_sh_creates(&self) -> u32 {
         self.max_sh_creates.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn set_heavy_sh_creates(&self, n: u32) {
+        self.heavy_sh_creates.store(n, AtomicOrdering::Relaxed);
+    }
+
+    pub fn heavy_sh_creates(&self) -> u32 {
+        self.heavy_sh_creates.load(AtomicOrdering::Relaxed)
     }
 
     pub fn note_reconstruct_archived(&self) {

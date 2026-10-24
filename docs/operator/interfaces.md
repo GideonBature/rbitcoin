@@ -108,7 +108,8 @@ and idle clients fail closed.
 | Max scripthash subs / conn | 10000 (`--electrum-max-subs`) | Notify fan-out cap. A wallet subscribes every address up to its gap limit; each sub is ~170 B (≈0.45 GB worst case at 256 connections) plus one posting check per block against that block's shared touch set; a reorg restatuses every sub |
 | Max broadcast hex | ~8 MiB | `transaction.broadcast` hex length |
 | Max batch items | 345 | Requests in one JSON-RPC batch line; more is one `-32600`. The reply is written one slot at a time, so a slow reader holds back the server, not RAM |
-| Batch reads at once | 4 | Read-only batch items in flight per connection (blocking threads and unwritten replies). The blocking pool, `max(cores, 4)` threads, bounds all connections together. Four scripthash joins at once can each reach `--max-sh-creates` |
+| Batch reads at once | 4 | Read-only batch items in flight per connection (blocking threads and unwritten replies). The blocking pool, `max(cores, 4)` threads, bounds all connections together |
+| Heavy SH joins at once | 1 (`--heavy-sh-creates`, default 10000) | Node-wide: an unpaged Electrum/Esplora join above N creates waits for any other such join, from any connection or batch. Lighter joins stay parallel. **0** turns it off |
 
 Edge rate-limits, auth, and TLS cipher policy stay on the proxy. See
 [`SECURITY.md`](../../SECURITY.md).

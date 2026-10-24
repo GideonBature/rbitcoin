@@ -1952,6 +1952,7 @@ pub fn apply_startup_index_mode(
     query.set_sh_index_enabled(config.shindex);
     query.set_block_filter_index(config.block_filter_index)?;
     query.set_max_sh_creates(config.max_sh_creates);
+    query.set_heavy_sh_creates(config.heavy_sh_creates);
     query.set_seqsigwit_ram_threshold_bytes(config.prune_seqsigwit_ram_threshold_bytes)?;
     if !config.prune_seqsigwit && query.prune_seqsigwit() {
         return Err(NodeError::Config(

@@ -48,6 +48,8 @@ electrs-shaped explorers can verify and sync.
 `--max-sh-creates N` (default **10000**; **0** = unlimited) refuses an unpaged Electrum/Esplora SH
 joins with more than N creates: Esplora HTTP **503**, Electrum JSON-RPC error
 `scripthash join exceeds --max-sh-creates`. Stats stay full when under the cap.
+`--heavy-sh-creates N` (default **10000**; **0** = off) runs unpaged joins with
+more than N creates one at a time across the node; lighter joins stay parallel.
 
 `GET …/txs/summary` is a **dialect** route (not Blockstream Esplora `API.md`).
 Shape and owner row: [Esplora REST surface](#esplora-rest-surface).

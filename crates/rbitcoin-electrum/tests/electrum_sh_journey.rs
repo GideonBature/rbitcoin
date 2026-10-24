@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 
-use crate::server::electrum_tcp_rpc;
+use crate::server::{electrum_tcp_batch, electrum_tcp_rpc};
 
 fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
     rbitcoin_query::testutil::tiny_query_labeled("electrum-sh")
@@ -209,6 +209,105 @@ pub fn casa_cap_then_balance_history_unspent(q: &Query) {
     )
     .unwrap();
     assert!(!unspent.as_array().unwrap().is_empty());
+}
+
+/// Unpaged joins above `--heavy-sh-creates` run one at a time across every
+/// connection, from separate connections and from one batch, while lighter
+/// joins overlap. The armed probe makes each join wait inside for a second
+/// of its kind, so the peaks only stay at 1 because of the lock. A refused
+/// join takes no turn, and a turn is given back after every join.
+pub async fn heavy_joins_take_turns(q: Arc<Query>) {
+    let params = ChainParams::regtest();
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let (tip_tx, _) = broadcast::channel(4);
+    let handle = run_electrum(cfg, Arc::clone(&q), params, tip_tx, None)
+        .await
+        .expect("listen");
+    let heavy = electrum_scripthash_hex(&[0x51]);
+    let balance = |id: u32, sh: &str| json!({"jsonrpc":"2.0","id":id,"method":"blockchain.scripthash.get_balance","params":[sh]});
+    q.set_heavy_sh_creates(1);
+    q.set_max_sh_creates(2);
+    let mut refused = TcpStream::connect(handle.local_addr).await.unwrap();
+    let err = electrum_tcp_rpc(
+        &mut refused,
+        1,
+        "blockchain.scripthash.get_balance",
+        json!([heavy]),
+    )
+    .await;
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("--max-sh-creates"),
+        "{err}"
+    );
+    q.set_max_sh_creates(0);
+    q.sh_join_probe.arm();
+
+    let mut a = TcpStream::connect(handle.local_addr).await.unwrap();
+    let mut b = TcpStream::connect(handle.local_addr).await.unwrap();
+    let one = |sh: &str| {
+        let mut line = serde_json::to_string(&balance(1, sh)).unwrap();
+        line.push('\n');
+        line
+    };
+    use tokio::io::AsyncWriteExt;
+    a.write_all(one(&heavy).as_bytes()).await.unwrap();
+    b.write_all(one(&heavy).as_bytes()).await.unwrap();
+    let mut answers = Vec::new();
+    for s in [&mut a, &mut b] {
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).await.unwrap();
+        answers.push(serde_json::from_str::<Value>(&line).unwrap());
+    }
+    assert_eq!(answers[0]["result"], answers[1]["result"], "{answers:?}");
+    assert!(answers[0]["result"]["confirmed"].as_u64().unwrap() > 0);
+
+    let light_a = format!("{:064x}", 0x11);
+    let light_b = format!("{:064x}", 0x22);
+    let mut c = TcpStream::connect(handle.local_addr).await.unwrap();
+    let batch = electrum_tcp_batch(
+        &mut c,
+        &[
+            balance(1, &heavy),
+            balance(2, &heavy),
+            balance(3, &light_a),
+            balance(4, &light_b),
+        ],
+    )
+    .await;
+    let slots = batch.as_array().expect("array");
+    assert_eq!(slots.len(), 4, "{batch}");
+    assert_eq!(slots[0]["result"], answers[0]["result"], "{batch}");
+    assert_eq!(slots[1]["result"], answers[0]["result"], "{batch}");
+    assert_eq!(q.sh_join_probe.entered(), (2, 4), "two light, four heavy");
+    assert_eq!(
+        q.sh_join_probe.peaks(),
+        (2, 1),
+        "light joins overlap, heavy joins take turns"
+    );
+
+    let creates = q
+        .scripthash_create_count(&rbitcoin_primitives::parse_display_hash32(&heavy).unwrap())
+        .unwrap();
+    q.set_heavy_sh_creates(creates);
+    q.sh_join_probe.arm();
+    let mut d = TcpStream::connect(handle.local_addr).await.unwrap();
+    electrum_tcp_rpc(
+        &mut d,
+        1,
+        "blockchain.scripthash.get_balance",
+        json!([heavy]),
+    )
+    .await;
+    assert_eq!(
+        q.sh_join_probe.entered(),
+        (1, 0),
+        "a join at exactly --heavy-sh-creates is light"
+    );
+    q.set_heavy_sh_creates(rbitcoin_query::DEFAULT_HEAVY_SH_CREATES);
+    handle.shutdown().await;
 }
 
 #[doc(hidden)]
@@ -562,6 +661,7 @@ pub async fn electrum_sh_join() {
     casa_cap_then_balance_history_unspent(&q);
 
     let q = Arc::new(q);
+    heavy_joins_take_turns(Arc::clone(&q)).await;
     let hub = MempoolHub::open(dir.join("mempool"), Arc::clone(&q)).unwrap();
     hub.set_relay_enabled(true);
     for (i, cbtxid) in coinbase_txids.iter().enumerate() {

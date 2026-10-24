@@ -542,6 +542,12 @@ fn max_sh_creates_and_esplora_block_template_cli_hyphens() {
     assert_eq!(n.max_sh_creates, 42);
     let eq = ready_config(["rbitcoin-node", "--max-sh-creates=9"]);
     assert_eq!(eq.max_sh_creates, 9);
+    assert_eq!(
+        omitted.heavy_sh_creates,
+        rbitcoin_query::DEFAULT_HEAVY_SH_CREATES
+    );
+    let heavy = ready_config(["rbitcoin-node", "--heavy-sh-creates", "500"]);
+    assert_eq!(heavy.heavy_sh_creates, 500);
     let gbt = ready_config(["rbitcoin-node", "--esplora-block-template"]);
     assert!(gbt.esplora_block_template);
     let gbt_eq = ready_config(["rbitcoin-node", "--esplora-block-template=1"]);
