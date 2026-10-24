@@ -91,7 +91,9 @@ pub fn script_core_type(script: &bitcoin::Script) -> &'static str {
         } else {
             "witness_unknown"
         }
-    } else if script.is_op_return() {
+    } else if script.is_op_return()
+        && bitcoin::Script::from_bytes(&script.as_bytes()[1..]).is_push_only()
+    {
         "nulldata"
     } else if p2pk_key(script).is_some() {
         "pubkey"
