@@ -421,6 +421,55 @@ pub struct NodeConfig {
     pub trust_peer: Option<rbitcoin_net::NetAddr>,
     /// `--trust-peer` clearnet DNS name. Mutually exclusive with [`Self::trust_peer`].
     pub trust_peer_host: Option<String>,
+    /// Set by [`Self::seal_trust_peer`] after listen, seeds, and inbound are frozen.
+    trust_seal: Option<TrustPeerSeal>,
+}
+
+/// Listen, seeds, and inbound after [`NodeConfig::seal_trust_peer`].
+///
+/// The fields stay private so a caller cannot rebuild a broken seal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrustPeerSeal {
+    p2p: P2pListen,
+    listen_onion: bool,
+    max_inbound: u32,
+    use_seeds: bool,
+    seednodes: Vec<String>,
+}
+
+impl TrustPeerSeal {
+    fn try_new(listen: &ListenOpts) -> Result<Self, NodeError> {
+        if !matches!(listen.p2p, P2pListen::Off) || listen.listen_onion {
+            return Err(NodeError::Config(
+                "trust-peer cannot be combined with --listen".into(),
+            ));
+        }
+        if listen.max_inbound > 0 {
+            return Err(NodeError::Config(
+                "trust-peer cannot be combined with --max-inbound greater than 0".into(),
+            ));
+        }
+        if listen.use_seeds || !listen.seednodes.is_empty() {
+            return Err(NodeError::Config(
+                "trust-peer cannot be combined with --seed-node".into(),
+            ));
+        }
+        Ok(Self {
+            p2p: listen.p2p,
+            listen_onion: listen.listen_onion,
+            max_inbound: listen.max_inbound,
+            use_seeds: listen.use_seeds,
+            seednodes: listen.seednodes.clone(),
+        })
+    }
+
+    fn frozen_off(&self) -> bool {
+        matches!(self.p2p, P2pListen::Off)
+            && !self.listen_onion
+            && self.max_inbound == 0
+            && !self.use_seeds
+            && self.seednodes.is_empty()
+    }
 }
 
 impl Default for NodeConfig {
@@ -487,6 +536,7 @@ impl Default for NodeConfig {
             connect_redial: rbitcoin_net::REDIAL_INTERVAL,
             trust_peer: None,
             trust_peer_host: None,
+            trust_seal: None,
         }
     }
 }
@@ -737,6 +787,7 @@ impl NodeConfig {
         self.listen.use_seeds = false;
         self.listen.max_inbound = 0;
         self.listen.seednodes.clear();
+        self.trust_seal = Some(TrustPeerSeal::try_new(&self.listen)?);
         Ok(())
     }
 
@@ -800,38 +851,28 @@ impl NodeConfig {
     }
 
     /// Sealed `--trust-peer` state: one dial target, no listen, no seeds.
+    ///
+    /// Listen, seeds, and inbound were rejected by [`Self::seal_trust_peer`].
+    /// A config that names a trust peer and never sealed still fails here,
+    /// because tests can assign `trust_peer` without that constructor.
     fn validate_trust_peer(&self) -> Result<(), NodeError> {
         if !self.trust_peer_set() {
             return Ok(());
         }
-        self.reject_trust_listen()?;
-        self.reject_trust_seeds()?;
+        match &self.trust_seal {
+            Some(seal) if seal.frozen_off() => {}
+            Some(_) => {
+                return Err(NodeError::Config(
+                    "trust-peer cannot be combined with --listen".into(),
+                ));
+            }
+            None => {
+                TrustPeerSeal::try_new(&self.listen)?;
+            }
+        }
         self.connect_matches_trust_peer()?;
         if self.listen.connect.is_empty() && self.listen.connect_dns.is_empty() {
             return Err(NodeError::Config("trust-peer requires an address".into()));
-        }
-        Ok(())
-    }
-
-    fn reject_trust_listen(&self) -> Result<(), NodeError> {
-        if !matches!(self.listen.p2p, P2pListen::Off) || self.listen.listen_onion {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --listen".into(),
-            ));
-        }
-        if self.listen.max_inbound > 0 {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --max-inbound greater than 0".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn reject_trust_seeds(&self) -> Result<(), NodeError> {
-        if self.listen.use_seeds || !self.listen.seednodes.is_empty() {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --seed-node".into(),
-            ));
         }
         Ok(())
     }
