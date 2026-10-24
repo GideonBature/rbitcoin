@@ -328,7 +328,7 @@ pub fn block_has_witness(block: &Block) -> bool {
         .any(|tx| tx.input.iter().any(|i| !i.witness.is_empty()))
 }
 
-/// Same as [`block_has_witness`] from [`TxPrecompute::has_witness`] (no second walk).
+/// Same as [`block_has_witness`] from each row's `has_witness` flag (no second walk).
 #[inline]
 pub fn block_has_witness_from_pres(pres: &[TxPrecompute]) -> bool {
     pres.iter().any(|p| p.has_witness)

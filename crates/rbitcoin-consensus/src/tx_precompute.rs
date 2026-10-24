@@ -2,7 +2,7 @@
 //! `PrecomputedTransactionData` shape).
 //!
 //! Structure and scripts share this. Spent amounts/scripts are filled later
-//! via [`TxPrecompute::finish_spent`] or [`TxPrecompute::finish_spent_parts`]
+//! via [`TxScriptPrecompute::finish_spent`] or [`TxScriptPrecompute::finish_spent_parts`]
 //! when prevouts exist.
 
 use bitcoin::consensus::encode::{Encodable, VarInt};
