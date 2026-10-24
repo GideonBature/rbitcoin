@@ -85,8 +85,12 @@ pub fn script_core_type(script: &bitcoin::Script) -> &'static str {
         "witness_v1_taproot"
     } else if is_p2anchor(script) {
         "anchor"
-    } else if script.is_witness_program() {
-        "witness_unknown"
+    } else if let Some(version) = script.witness_version() {
+        if version == bitcoin::WitnessVersion::V0 {
+            "nonstandard"
+        } else {
+            "witness_unknown"
+        }
     } else if script.is_op_return() {
         "nulldata"
     } else if script.is_p2pk() {

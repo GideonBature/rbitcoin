@@ -431,6 +431,28 @@ fn decodescript_multisig_type_matches_core() {
 }
 
 #[test]
+fn decodescript_witness_program_type_matches_core() {
+    let program = |version: &str, len: usize| format!("{version}{len:02x}{}", "ab".repeat(len));
+    let rows = [
+        (program("00", 2), "nonstandard"),
+        (program("00", 21), "nonstandard"),
+        (program("00", 40), "nonstandard"),
+        (program("00", 20), "witness_v0_keyhash"),
+        (program("00", 32), "witness_v0_scripthash"),
+        (program("51", 2), "witness_unknown"),
+        ("51024e73".into(), "anchor"),
+        (program("60", 40), "witness_unknown"),
+        (program("51", 41), "nonstandard"),
+    ];
+    let (ctx, dir) = ctx_empty();
+    for (hex, ty) in &rows {
+        let script = dispatch(&ctx, "decodescript", vec![json!(hex)]).unwrap();
+        assert_eq!(script["type"], json!(ty), "{hex}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn help_and_getrpcinfo_list_methods() {
     let (ctx, dir) = ctx_empty();
     let help_all = dispatch(&ctx, "help", vec![]).unwrap();
