@@ -363,6 +363,10 @@ fn decodescript_desc_matches_core() {
             format!("raw(41{hybrid}ac)#qhj9gd8d"),
         ),
         (
+            format!("4107{G_X}{G_Y}ac"),
+            format!("raw(4107{G_X}{G_Y}ac)#z2cdvzds"),
+        ),
+        (
             format!("52{push_key}2103{G_X}52ae"),
             format!("multi(2,{key},03{G_X})#lex50jse"),
         ),
@@ -443,6 +447,29 @@ fn decodescript_witness_program_type_matches_core() {
         ("51024e73".into(), "anchor"),
         (program("60", 40), "witness_unknown"),
         (program("51", 41), "nonstandard"),
+    ];
+    let (ctx, dir) = ctx_empty();
+    for (hex, ty) in &rows {
+        let script = dispatch(&ctx, "decodescript", vec![json!(hex)]).unwrap();
+        assert_eq!(script["type"], json!(ty), "{hex}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn decodescript_pubkey_type_matches_core() {
+    let ff = "ff".repeat(32);
+    let rows: Vec<(String, &str)> = vec![
+        (format!("2102{G_X}ac"), "pubkey"),
+        (format!("2103{ff}ac"), "pubkey"),
+        (format!("4104{G_X}{G_Y}ac"), "pubkey"),
+        (format!("4106{G_X}{G_Y}ac"), "pubkey"),
+        (format!("4107{G_X}{G_Y}ac"), "pubkey"),
+        (format!("2100{G_X}ac"), "nonstandard"),
+        (format!("2105{G_X}ac"), "nonstandard"),
+        (format!("2104{G_X}ac"), "nonstandard"),
+        (format!("4102{G_X}{G_Y}ac"), "nonstandard"),
+        (format!("4c2102{G_X}ac"), "nonstandard"),
     ];
     let (ctx, dir) = ctx_empty();
     for (hex, ty) in &rows {
