@@ -315,6 +315,42 @@ IO; they do not package zips. GitHub Releases:
 - Do **not** commit live `datadir-*/`, operator `*.log` dumps, secrets, or keys
   (see `.gitignore`).
 
+## Issues and reviews
+
+Read the issue or the review thread before writing. Post a fact that is not
+already there. When a person or a bot already reported the finding, skip it,
+or agree with a short reply on that comment.
+
+A finding names the wrong result and the reason in a few plain sentences,
+including the function and the line. Stop when a reader can check it. A
+heading is fine when the text under it is new.
+
+Leave these out of a finding:
+
+- A recap of the diff, the pull request, or the code around the line.
+- The same finding in the review body and again on the line. The inline
+  comment is the finding. The review body is the count line
+  (`0 bugs, 1 suggestion, 0 nits`) plus a finding that has no line.
+- Padding around the point: praise, a tour of the author's intent, "this is
+  important because", "it is worth noting", and a sentence that restates
+  the one above it.
+
+A finding to rewrite:
+
+> Looking at `reject_refill_miss`, this function currently returns false when
+> the refill is short and only continues the stored tip. This is significant
+> because it means the batch occupies the gap, and a later batch from the
+> proved anchor will not replace it. It would be worth considering whether
+> the next locator should start at the anchor instead of the walk tip, since
+> that would avoid the stall described above.
+
+The comment to post:
+
+> `reject_refill_miss` returns false for a short refill that only continues
+> the stored tip, so that batch occupies the gap. A later batch from the
+> proved anchor never replaces it, and the next locator starts at the walk
+> tip.
+
 ## Code review checklist
 
 - [ ] Behavior covered by a true journey (or a justified unit whose result

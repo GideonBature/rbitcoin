@@ -10,7 +10,7 @@ update that file — do not paste a parallel spec.
 |----------|-------|------|
 | Operator / new human | [`README.md`](../README.md) → [`OPERATOR.md`](../OPERATOR.md) | Task routes into setup, operations, storage/indexes, client interfaces, and field notes |
 | Product / interop | [`COMPAT.md`](../COMPAT.md) | Intentional differences, Electrum/RPC surface |
-| Contributor (human) | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Getting started (any OS, no Nix), principles, review checklist, comments-as-smell, CI commands |
+| Contributor (human) | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Getting started (any OS, no Nix), principles, issue and review text, review checklist, comments-as-smell, CI commands |
 | Agent | [`AGENTS.md`](../AGENTS.md) | Short hard rules + pointers (not a second design book) |
 | On-disk | [`SCHEMA.md`](../SCHEMA.md) | Current bytes; soft migrate / bump / refuse; history in [`SCHEMA_HISTORY.md`](../SCHEMA_HISTORY.md) |
 | Confirm / store implementer | [`invariants.md`](./invariants.md) + [`concurrency.md`](./concurrency.md) | Stage IO, leftover union, roles, tip commit |
@@ -70,7 +70,7 @@ into `AGENTS.md`.
 |-----|------|
 | [`README.md`](../README.md) | Product pitch + short pointer table (this map is the rest). |
 | [`OPERATOR.md`](../OPERATOR.md) | Day-to-day ops, flags. |
-| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Getting started (rustup; Linux / macOS / Windows) + human+agent principles + checklist. |
+| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Getting started (rustup; Linux / macOS / Windows) + human+agent principles + issue and review text + checklist. |
 | [`AGENTS.md`](../AGENTS.md) | Harness-injected agent contract (hard rules + pointers; not a second design book). |
 | [`rearden-vm-HOST.md`](../rearden-vm-HOST.md) | `rearden-grok[bot]` operator VM (per-session worktree and cargo target, bot push). Other identities ignore it. |
 | `crates/*/AGENTS.md` | Crate index: neighbors, read-first owners, verify command. Owns no facts. |
