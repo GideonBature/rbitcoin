@@ -7,6 +7,8 @@ Fixed
   every route and the fallback. Requests over it wait for a slot; they are
   not refused. The request timeout now covers that wait too, so a queue of
   slow requests ahead cannot hold a later one past one timeout (**408**).
+  The `/blindbit/v1/` routes share this limit too. A BlindBit request waits
+  for its own permit first, so one queued there holds no listener slot.
 
 Added
 
