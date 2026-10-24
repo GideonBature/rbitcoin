@@ -576,6 +576,7 @@ pub async fn electrum_sh_join() {
 /// A spend stays unconfirmed for wallets until the visible scripthash height
 /// covers its block. A spend whose block that view already covers stays out.
 #[test]
+#[allow(clippy::cognitive_complexity)] // one chain, three wallet answers
 fn unconfirmed_until_sh_visible() {
     const FEE_A: u64 = 1_000;
     const FEE_B: u64 = 2_000;
@@ -783,7 +784,8 @@ fn unconfirmed_until_sh_visible() {
     assert_eq!(stats.funded_txo_sum, 0, "{stats:?}");
     assert_eq!(hist_n(id_a), 1, "confirmed history includes the spend once");
     assert_eq!(hist_n(id_b), 1);
-    assert_eq!(confirmed, confirmed_b - FEE_A as i64);
+    // The block also pays a new coinbase to this script. The spend's own net is the fee.
+    assert_eq!(confirmed, confirmed_b + SUBSIDY as i64 - FEE_A as i64);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

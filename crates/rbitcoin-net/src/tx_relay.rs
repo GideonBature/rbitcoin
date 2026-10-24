@@ -4447,9 +4447,13 @@ impl MempoolHub {
 
     /// Unconfirmed delta for Electrum balance (sats): +mempool outputs − spent confirmed.
     ///
-    /// Skips txs already connected on the tip (`tx_fk_by_txid_tip`) so a leftover
-    /// live entry after IBD / `-blocksonly` (`remove_for_block` is a no-op while
-    /// relay is off) cannot double-count confirmed value.
+    /// Hides a live entry only when it is confirmed-strong on the tip at a
+    /// height [`Query::sh_visible_through_height`](rbitcoin_query::Query::sh_visible_through_height)
+    /// already covers. A leftover after IBD or `-blocksonly` (`remove_for_block`
+    /// is a no-op while relay is off) then cannot double-count once confirmed
+    /// history includes that block. A tx the chain already has, but that view
+    /// does not, stays here. Its inputs are already spent in the chain UTXO
+    /// set, so those values come from the parent output instead.
     ///
     /// Uses [`MempoolShIndex`] (same as `scripthash_mempool`). A full-graph walk
     /// plus chain `get_txout` per input is ~1.5 s per empty Cake key on a live
@@ -4463,16 +4467,16 @@ impl MempoolHub {
         if want.is_empty() {
             return Ok(0);
         }
+        let visible = self.query.sh_visible_through_height();
         let mut kept = Vec::with_capacity(want.len());
         for txid in want {
-            if self
+            let view = self
                 .query
-                .tx_fk_by_txid_tip(&txid.to_byte_array())?
-                .is_some()
-            {
+                .sh_visible_confirm(&txid.to_byte_array(), visible)?;
+            if view == rbitcoin_query::ShVisibleConfirm::Covered {
                 continue;
             }
-            kept.push(txid);
+            kept.push((txid, view == rbitcoin_query::ShVisibleConfirm::Awaiting));
         }
         if kept.is_empty() {
             return Ok(0);
@@ -4480,7 +4484,7 @@ impl MempoolHub {
         let g = self.lock_read();
         let mut delta = 0i64;
         let provider = self.utxo_provider();
-        for txid in kept {
+        for (txid, awaiting) in kept {
             let Some(tx) = g.get_tx(&txid) else { continue };
             for (vout, o) in tx.output.iter().enumerate() {
                 if script_hash(o.script_pubkey.as_bytes()) != *scripthash {
@@ -4505,6 +4509,22 @@ impl MempoolHub {
                     if script_hash(txout.script_pubkey.as_bytes()) == *scripthash {
                         delta = delta.saturating_sub(txout.value.to_sat() as i64);
                     }
+                    continue;
+                }
+                if !awaiting {
+                    continue;
+                }
+                let parent = op.txid.to_byte_array();
+                let Some(fk) = self.query.tx_fk_by_txid_tip(&parent)? else {
+                    continue;
+                };
+                let out = match self.query.tx_output_at_fk(fk, op.vout) {
+                    Ok(out) => out,
+                    Err(rbitcoin_store::StoreError::NotFound) => continue,
+                    Err(e) => return Err(e),
+                };
+                if script_hash(&out.script) == *scripthash {
+                    delta = delta.saturating_sub(out.value as i64);
                 }
             }
         }

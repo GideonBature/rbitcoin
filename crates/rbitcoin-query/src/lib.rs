@@ -128,6 +128,21 @@ pub use confirm_stats::{
 
 pub type QueryError = StoreError;
 
+/// A mempool tx against the visible scripthash height.
+///
+/// Wallet unconfirmed reads hide [`Covered`](Self::Covered) and keep the
+/// other two. [`Awaiting`](Self::Awaiting) is on the tip, but confirmed
+/// history does not include that height yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShVisibleConfirm {
+    /// Not confirmed-strong on the tip, or there is no address view.
+    NotCovered,
+    /// Confirmed-strong at a height the visible view already includes.
+    Covered,
+    /// Confirmed-strong above the visible view.
+    Awaiting,
+}
+
 /// Best-chain tip published with the `confirmed[]` update that made it the tip.
 ///
 /// One `Arc` swap, so a reader sees a height and hash from the same commit.
@@ -1406,6 +1421,34 @@ impl Query {
             return self.store.get_fk_by_txid_tip(txid);
         }
         Ok(None)
+    }
+
+    /// Where a live mempool tx sits against the visible scripthash height.
+    ///
+    /// `visible` is [`Self::sh_visible_through_height`], read once per wallet
+    /// request. `None` (no address view) is [`ShVisibleConfirm::NotCovered`]:
+    /// there is no confirmed side to hide against. The chain lookup runs only
+    /// after that, and the block height is read only when the lookup hits.
+    pub fn sh_visible_confirm(
+        &self,
+        txid: &[u8; 32],
+        visible: Option<u32>,
+    ) -> Result<ShVisibleConfirm, QueryError> {
+        let Some(visible) = visible else {
+            return Ok(ShVisibleConfirm::NotCovered);
+        };
+        let Some(fk) = self.tx_fk_by_txid_tip(txid)? else {
+            return Ok(ShVisibleConfirm::NotCovered);
+        };
+        let tip = self.tip_height().map(|h| h.0);
+        if !self.store().is_confirmed_strong_at(fk, tip)? {
+            return Ok(ShVisibleConfirm::NotCovered);
+        }
+        match self.store().fence().height_of(fk) {
+            Some(h) if h <= visible => Ok(ShVisibleConfirm::Covered),
+            Some(_) => Ok(ShVisibleConfirm::Awaiting),
+            None => Ok(ShVisibleConfirm::NotCovered),
+        }
     }
 
     pub fn store(&self) -> &Store {
