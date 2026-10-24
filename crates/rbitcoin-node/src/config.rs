@@ -425,17 +425,12 @@ pub struct NodeConfig {
     trust_seal: Option<TrustPeerSeal>,
 }
 
-/// Listen, seeds, and inbound after [`NodeConfig::seal_trust_peer`].
+/// Marker that [`TrustPeerSeal::try_new`] accepted listen, seeds, and inbound.
 ///
-/// The fields stay private so a caller cannot rebuild a broken seal.
+/// There is no field to flip after that check. A config that names a trust
+/// peer and never sealed still runs `try_new` from [`NodeConfig::validate`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct TrustPeerSeal {
-    p2p: P2pListen,
-    listen_onion: bool,
-    max_inbound: u32,
-    use_seeds: bool,
-    seednodes: Vec<String>,
-}
+struct TrustPeerSeal;
 
 impl TrustPeerSeal {
     fn try_new(listen: &ListenOpts) -> Result<Self, NodeError> {
@@ -454,21 +449,7 @@ impl TrustPeerSeal {
                 "trust-peer cannot be combined with --seed-node".into(),
             ));
         }
-        Ok(Self {
-            p2p: listen.p2p,
-            listen_onion: listen.listen_onion,
-            max_inbound: listen.max_inbound,
-            use_seeds: listen.use_seeds,
-            seednodes: listen.seednodes.clone(),
-        })
-    }
-
-    fn frozen_off(&self) -> bool {
-        matches!(self.p2p, P2pListen::Off)
-            && !self.listen_onion
-            && self.max_inbound == 0
-            && !self.use_seeds
-            && self.seednodes.is_empty()
+        Ok(Self)
     }
 }
 
@@ -852,23 +833,14 @@ impl NodeConfig {
 
     /// Sealed `--trust-peer` state: one dial target, no listen, no seeds.
     ///
-    /// Listen, seeds, and inbound were rejected by [`Self::seal_trust_peer`].
-    /// A config that names a trust peer and never sealed still fails here,
-    /// because tests can assign `trust_peer` without that constructor.
+    /// A seal from [`Self::seal_trust_peer`] already passed [`TrustPeerSeal::try_new`].
+    /// A config that names a trust peer and never sealed still fails here.
     fn validate_trust_peer(&self) -> Result<(), NodeError> {
         if !self.trust_peer_set() {
             return Ok(());
         }
-        match &self.trust_seal {
-            Some(seal) if seal.frozen_off() => {}
-            Some(_) => {
-                return Err(NodeError::Config(
-                    "trust-peer cannot be combined with --listen".into(),
-                ));
-            }
-            None => {
-                TrustPeerSeal::try_new(&self.listen)?;
-            }
+        if self.trust_seal.is_none() {
+            TrustPeerSeal::try_new(&self.listen)?;
         }
         self.connect_matches_trust_peer()?;
         if self.listen.connect.is_empty() && self.listen.connect_dns.is_empty() {

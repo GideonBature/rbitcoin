@@ -844,4 +844,14 @@ fn trust_peer_clashing_flags() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("exactly one"), "{err}");
+
+    let mut bare = rbitcoin_node::config::NodeConfig::default();
+    bare.apply_kv("trust_peer", addr).unwrap();
+    let err = bare.validate().unwrap_err().to_string();
+    assert!(err.contains("--listen"), "{err}");
+
+    let mut sealed = rbitcoin_node::config::NodeConfig::default();
+    sealed.apply_kv("trust_peer", addr).unwrap();
+    sealed.seal_trust_peer().unwrap();
+    sealed.validate().unwrap();
 }
