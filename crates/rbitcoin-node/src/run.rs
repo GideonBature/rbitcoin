@@ -2309,6 +2309,7 @@ pub async fn start_electrum_if_ready(
     ecfg.max_scripthash_subs = electrum_max_subs;
     ecfg.tweaks_min_dust = tweaks_min_dust;
     ecfg.onion_tcp = Arc::clone(&onion_tcp);
+    ecfg.batch_window = rbitcoin_electrum::batch_window(crate::cli::blocking_pool_size());
     let max_conn = ecfg.limits.max_connections;
     let max_line = ecfg.limits.max_request_bytes;
     let idle_secs = ecfg.limits.idle_timeout.as_secs();

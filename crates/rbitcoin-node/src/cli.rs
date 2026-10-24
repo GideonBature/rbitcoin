@@ -572,8 +572,8 @@ pub fn cli_apply_err(e: crate::error::NodeError) -> ExitCode {
 pub fn blocking_pool_size() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
-        .unwrap_or(4)
-        .max(4)
+        .unwrap_or(rbitcoin_electrum::MIN_BLOCKING_POOL)
+        .max(rbitcoin_electrum::MIN_BLOCKING_POOL)
 }
 
 #[doc(hidden)]

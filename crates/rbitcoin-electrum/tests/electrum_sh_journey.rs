@@ -18,7 +18,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 
-use crate::server::{electrum_tcp_batch, electrum_tcp_rpc};
+#[cfg(debug_assertions)]
+use crate::server::electrum_tcp_batch;
+use crate::server::electrum_tcp_rpc;
 
 fn tmp_store() -> (rbitcoin_query::testutil::TempDir, Query) {
     rbitcoin_query::testutil::tiny_query_labeled("electrum-sh")
@@ -216,9 +218,11 @@ pub fn casa_cap_then_balance_history_unspent(q: &Query) {
 /// joins overlap. The armed probe makes each join wait inside for a second
 /// of its kind, so the peaks only stay at 1 because of the lock. A refused
 /// join takes no turn, and a turn is given back after every join.
+#[cfg(debug_assertions)]
 pub async fn heavy_joins_take_turns(q: Arc<Query>) {
     let params = ChainParams::regtest();
-    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.batch_window = 4;
     let (tip_tx, _) = broadcast::channel(4);
     let handle = run_electrum(cfg, Arc::clone(&q), params, tip_tx, None)
         .await
@@ -307,6 +311,78 @@ pub async fn heavy_joins_take_turns(q: Arc<Query>) {
         "a join at exactly --heavy-sh-creates is light"
     );
     q.set_heavy_sh_creates(rbitcoin_query::DEFAULT_HEAVY_SH_CREATES);
+    handle.shutdown().await;
+}
+
+/// A batch read reports its own dispatch time, not the wait behind a slow
+/// neighbour, and a read that never used the join cache leaves the one an
+/// earlier `get_history` built. The probe holds a lone heavy join for
+/// `SH_JOIN_PROBE_WAIT`, which makes the slow neighbour.
+#[cfg(debug_assertions)]
+pub async fn batch_reads_time_themselves_and_keep_the_join(q: Arc<Query>) {
+    use rbitcoin_query::scripthash::SH_JOIN_PROBE_WAIT;
+    let params = ChainParams::regtest();
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.batch_window = 2;
+    let (tip_tx, _) = broadcast::channel(4);
+    let handle = run_electrum(cfg, Arc::clone(&q), params, tip_tx, None)
+        .await
+        .expect("listen");
+    let sh = electrum_scripthash_hex(&[0x51]);
+    let call = |id: u32, method: &str, params: Value| json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+
+    q.set_heavy_sh_creates(1);
+    q.sh_join_probe.arm();
+    let mut a = TcpStream::connect(handle.local_addr).await.unwrap();
+    batch_trace_arm();
+    electrum_tcp_batch(
+        &mut a,
+        &[
+            call(1, "blockchain.scripthash.get_balance", json!([sh])),
+            call(2, "blockchain.block.header", json!([0])),
+        ],
+    )
+    .await;
+    let trace = batch_trace_snapshot();
+    batch_trace_clear();
+    let took = |i: usize| {
+        trace
+            .iter()
+            .find_map(|s| match s {
+                BatchStep::Timed(j, d) if *j == i => Some(*d),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no time for {i}: {trace:?}"))
+    };
+    assert!(took(0) >= SH_JOIN_PROBE_WAIT, "{trace:?}");
+    assert!(
+        took(1) < SH_JOIN_PROBE_WAIT / 2,
+        "the header read reports its own time, not the join ahead of it: {trace:?}"
+    );
+
+    q.set_heavy_sh_creates(rbitcoin_query::DEFAULT_HEAVY_SH_CREATES);
+    q.sh_join_probe.arm();
+    let mut b = TcpStream::connect(handle.local_addr).await.unwrap();
+    let missing = format!("{:064x}", 0x77);
+    electrum_tcp_batch(
+        &mut b,
+        &[
+            call(1, "blockchain.scripthash.get_history", json!([sh])),
+            call(2, "blockchain.transaction.get", json!([missing])),
+            call(3, "blockchain.block.header", json!([0])),
+        ],
+    )
+    .await;
+    let again = electrum_tcp_rpc(&mut b, 4, "blockchain.scripthash.get_history", json!([sh])).await;
+    assert!(
+        again["result"].as_array().is_some_and(|r| !r.is_empty()),
+        "{again}"
+    );
+    assert_eq!(
+        q.sh_join_probe.entered(),
+        (1, 0),
+        "the later get_history reuses the batch's join"
+    );
     handle.shutdown().await;
 }
 
@@ -661,7 +737,11 @@ pub async fn electrum_sh_join() {
     casa_cap_then_balance_history_unspent(&q);
 
     let q = Arc::new(q);
-    heavy_joins_take_turns(Arc::clone(&q)).await;
+    #[cfg(debug_assertions)]
+    {
+        heavy_joins_take_turns(Arc::clone(&q)).await;
+        batch_reads_time_themselves_and_keep_the_join(Arc::clone(&q)).await;
+    }
     let hub = MempoolHub::open(dir.join("mempool"), Arc::clone(&q)).unwrap();
     hub.set_relay_enabled(true);
     for (i, cbtxid) in coinbase_txids.iter().enumerate() {

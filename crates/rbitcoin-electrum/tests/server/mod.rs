@@ -633,11 +633,13 @@ async fn batch_line_answers_every_item_in_one_array() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(debug_assertions)]
 fn get_balance(id: usize) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":"blockchain.scripthash.get_balance",
            "params":[format!("{id:064x}")]})
 }
 
+#[cfg(debug_assertions)]
 fn spawned(trace: &[BatchStep]) -> Vec<usize> {
     trace
         .iter()
@@ -648,6 +650,7 @@ fn spawned(trace: &[BatchStep]) -> Vec<usize> {
         .collect()
 }
 
+#[cfg(debug_assertions)]
 fn written(trace: &[BatchStep]) -> Vec<usize> {
     trace
         .iter()
@@ -658,6 +661,7 @@ fn written(trace: &[BatchStep]) -> Vec<usize> {
         .collect()
 }
 
+#[cfg(debug_assertions)]
 fn at(trace: &[BatchStep], step: BatchStep) -> usize {
     trace
         .iter()
@@ -665,17 +669,36 @@ fn at(trace: &[BatchStep], step: BatchStep) -> usize {
         .unwrap_or_else(|| panic!("{step:?} missing from {trace:?}"))
 }
 
-/// Read-only batch items run up to `BATCH_CONCURRENCY` at a time and land in
-/// request order. A subscribe waits for every earlier read to be written,
+#[test]
+fn batch_window_is_half_the_blocking_pool() {
+    assert_eq!(batch_window(1), 1);
+    assert_eq!(batch_window(MIN_BLOCKING_POOL), 2);
+    assert_eq!(batch_window(12), 6);
+    let params = ChainParams::regtest();
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    assert_eq!(cfg.batch_window, 2, "the smallest pool the node builds");
+}
+
+/// Read-only batch items run up to the configured window at a time and land
+/// in request order. A subscribe waits for every earlier read to be written,
 /// runs alone, and later items see what it did. The connection task runs on
 /// this thread (current-thread runtime), so the armed trace sees its steps.
-#[allow(clippy::cognitive_complexity)] // one batch, every scheduling rule
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn batch_reads_overlap_and_land_in_request_order() {
+    for window in [1, 2, 4] {
+        reads_overlap_in_window(window).await;
+    }
+}
+
+#[cfg(debug_assertions)]
+#[allow(clippy::cognitive_complexity)] // one batch, every scheduling rule
+async fn reads_overlap_in_window(window: usize) {
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
     let (tip_tx, _) = broadcast::channel(4);
-    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.batch_window = window;
     let handle = run_electrum(cfg, Arc::new(q), params, tip_tx, None)
         .await
         .expect("listen");
@@ -723,10 +746,11 @@ async fn batch_reads_overlap_and_land_in_request_order() {
         }
         peak = peak.max(open);
     }
-    assert_eq!(peak, BATCH_CONCURRENCY, "{trace:?}");
-    assert!(
+    assert_eq!(peak, window, "{trace:?}");
+    assert_eq!(
         at(&trace, BatchStep::Spawn(1)) < at(&trace, BatchStep::Write(0)),
-        "reads overlap: {trace:?}"
+        window > 1,
+        "reads overlap only in a window above one: {trace:?}"
     );
     for barrier in [6, 10] {
         assert!(
@@ -744,9 +768,17 @@ async fn batch_reads_overlap_and_land_in_request_order() {
 }
 
 /// A client that stops reading stops the batch: the server writes slot i
-/// before it starts read i + `BATCH_CONCURRENCY`.
+/// before it starts read i + window.
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn stalled_batch_reader_holds_reads_to_the_window() {
+    for window in [1, 3] {
+        stalled_reader_in_window(window).await;
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn stalled_reader_in_window(window: usize) {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -822,7 +854,8 @@ async fn stalled_batch_reader_holds_reads_to_the_window() {
 
     let (dir, q) = tmp_store();
     let params = ChainParams::regtest();
-    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.batch_window = window;
     let items: Vec<Value> = (0..20).map(get_balance).collect();
     let mut line = serde_json::to_vec(&items).unwrap();
     line.push(b'\n');
@@ -859,8 +892,8 @@ async fn stalled_batch_reader_holds_reads_to_the_window() {
     assert_eq!(written(&trace), [0, 1], "{trace:?}");
     assert_eq!(
         spawned(&trace),
-        (0..=BATCH_CONCURRENCY).collect::<Vec<_>>(),
-        "slot 0 is written before read {BATCH_CONCURRENCY} starts, and slot 1 blocks the rest: {trace:?}"
+        (0..=window).collect::<Vec<_>>(),
+        "slot 0 is written before read {window} starts, and slot 1 blocks the rest: {trace:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
