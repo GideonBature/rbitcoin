@@ -1183,7 +1183,9 @@ async fn work_fork_journey() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_of_ibd_invalid_heavier_fork() {
-    let wall = llvm_cov_wall(60, 180);
+    // Five serial syncs. Under llvm-cov each may use 60s, so the wall has to
+    // cover 300s plus startup.
+    let wall = llvm_cov_wall(60, 360);
     tokio::time::timeout(wall, invalid_heavier_fork_journey())
         .await
         .expect("end_of_ibd_invalid_heavier_fork wall");
@@ -1221,7 +1223,7 @@ async fn sync_to(dir: &Path, peers: &[SocketAddr], tip: &bitcoin::Block, height:
     let node = start_node(dir, split_params()).await;
     let addrs: Vec<NetAddr> = peers.iter().copied().map(NetAddr::Ip).collect();
     tokio::time::timeout(
-        Duration::from_secs(20),
+        llvm_cov_wall(20, 60),
         rbitcoin_ibd::sync(&node, &addrs, IbdConfig::for_test()),
     )
     .await
