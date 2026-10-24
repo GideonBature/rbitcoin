@@ -723,20 +723,30 @@ async fn resume_until_history(
     let node = spawn_run_p2p(syncer_cfg_sh(dir, miner, true));
     let electrum = published_listener(dir, "electrum", Duration::from_secs(60)).await;
     let rpc = published_listener(dir, "rpc", Duration::from_secs(30)).await;
-    let hist_a = history_txids(electrum, &[0x51]).await;
-    let hist_b = history_txids(electrum, &[0x52]).await;
-    assert_eq!(
-        &hist_a, script_a,
-        "Electrum opened before script A history was complete"
-    );
-    assert_eq!(
-        &hist_b, script_b,
-        "Electrum opened before script B history was complete"
-    );
-    let count = jsonrpc(rpc, "getblockcount", json!([])).await;
-    let best = jsonrpc(rpc, "getbestblockhash", json!([])).await;
-    assert_eq!(count["result"].as_u64(), Some(u64::from(height)), "{count}");
-    assert_eq!(best["result"].as_str(), Some(hash), "{best}");
+    // The port opens on the indexed tip. A block mined while the index was
+    // built shows up after the follow headers round. Wait for that history.
+    let deadline = Instant::now() + llvm_cov_wall(30, 60);
+    loop {
+        let hist_a = history_txids(electrum, &[0x51]).await;
+        let hist_b = history_txids(electrum, &[0x52]).await;
+        let count = try_jsonrpc(rpc, "getblockcount", json!([])).await.ok();
+        let best = try_jsonrpc(rpc, "getbestblockhash", json!([])).await.ok();
+        let tip_ok = count.as_ref().and_then(|v| v["result"].as_u64()) == Some(u64::from(height))
+            && best.as_ref().and_then(|v| v["result"].as_str()) == Some(hash);
+        if &hist_a == script_a && &hist_b == script_b && tip_ok {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "scripthash history did not catch height {height}: A {}/{} B {}/{} tip={tip_ok}",
+                hist_a.len(),
+                script_a.len(),
+                hist_b.len(),
+                script_b.len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_tip_view(rpc, height, hash).await;
     Resume {
         node,
