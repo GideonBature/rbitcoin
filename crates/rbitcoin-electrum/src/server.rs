@@ -2173,12 +2173,17 @@ pub fn dispatch_pinned(
             let items = mempool
                 .map(|m| m.scripthash_mempool(&sh))
                 .unwrap_or_default();
+            let visible = if items.is_empty() {
+                None
+            } else {
+                query.sh_visible_through_height()
+            };
             let mut arr = Vec::with_capacity(items.len());
             for i in items {
                 if query
-                    .tx_fk_by_txid_tip(&i.txid)
+                    .sh_visible_confirm(&i.txid, visible)
                     .map_err(|e| e.to_string())?
-                    .is_some()
+                    == rbitcoin_query::ShVisibleConfirm::Covered
                 {
                     continue;
                 }

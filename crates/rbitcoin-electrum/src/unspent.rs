@@ -107,8 +107,15 @@ pub fn scripthash_mempool_stats_slot(
             stats.spent_txo_sum = stats.spent_txo_sum.saturating_add(u.value);
         }
     }
+    let visible = if items.is_empty() {
+        None
+    } else {
+        query.sh_visible_through_height()
+    };
     for item in items {
-        if query.tx_fk_by_txid_tip(&item.txid)?.is_some() {
+        if query.sh_visible_confirm(&item.txid, visible)?
+            == rbitcoin_query::ShVisibleConfirm::Covered
+        {
             continue;
         }
         stats.tx_count = stats.tx_count.saturating_add(1);
