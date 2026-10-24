@@ -1683,14 +1683,12 @@ impl Query {
     /// not advance past it.
     pub fn set_lookup_taken_hi(&self, hi: Option<u32>) {
         let lo = u64::from(hi.unwrap_or(u32::MAX));
-        let _ = self.lookup_taken.fetch_update(
-            AtomicOrdering::AcqRel,
-            AtomicOrdering::Acquire,
-            |cur| {
-                let gen = ((cur >> 32) as u32).wrapping_add(1);
-                Some((u64::from(gen) << 32) | lo)
-            },
-        );
+        let _ =
+            self.lookup_taken
+                .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |cur| {
+                    let gen = ((cur >> 32) as u32).wrapping_add(1);
+                    Some((u64::from(gen) << 32) | lo)
+                });
     }
 
     /// Lookup took `hi` off the BQ in a wave selected at generation `gen`.
@@ -1698,7 +1696,7 @@ impl Query {
     pub fn advance_lookup_taken_hi(&self, gen: u32, hi: u32) -> bool {
         let next = (u64::from(gen) << 32) | u64::from(hi);
         self.lookup_taken
-            .fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |cur| {
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |cur| {
                 ((cur >> 32) as u32 == gen).then_some(next)
             })
             .is_ok()
