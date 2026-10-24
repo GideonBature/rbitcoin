@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
-use tower::limit::ConcurrencyLimitLayer;
+use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
@@ -937,6 +937,7 @@ pub async fn run_esplora(
         rest
     };
     // Outer → inner: concurrency → body → timeout → meter → chain-view stamp.
+    let conn_limit = GlobalConcurrencyLimitLayer::new(max_conn);
     let listener_layers = |r: Router<AppState>| {
         r.layer(middleware::from_fn_with_state(
             state.clone(),
@@ -948,7 +949,9 @@ pub async fn run_esplora(
             timeout,
         ))
         .layer(RequestBodyLimitLayer::new(max_body))
-        .layer(ConcurrencyLimitLayer::new(max_conn))
+        // `Router::layer` wraps each route on its own; one global limit, cloned,
+        // shares its semaphore, so `max_conn` bounds the listener.
+        .layer(conn_limit.clone())
     };
     let rest = listener_layers(rest.fallback(fallback_404));
     // BlindBit takes its own permit first, under its own timeout, so a scan

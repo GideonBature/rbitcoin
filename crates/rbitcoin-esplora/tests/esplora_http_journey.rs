@@ -809,3 +809,50 @@ async fn esplora_tcp_wallet_mempool_and_replace() {
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `max_connections` bounds the listener, not each route. Requests held on
+/// one route fill it; a request on another route waits, and runs once a
+/// slot frees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn esplora_max_connections_spans_every_route() {
+    const MAX: usize = 4;
+    let (_dir, q) = temp_query("esplora-max-conn");
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let mut cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    cfg.limits.max_connections = MAX;
+    let handle = run_esplora(cfg, Arc::new(q), None)
+        .await
+        .expect("listen");
+    let addr = handle.local_addr;
+
+    // A POST /tx whose body never arrives holds its slot in the extractor.
+    let mut held = Vec::new();
+    for _ in 0..MAX {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let req = "POST /tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 64\r\n\r\n";
+        stream.write_all(req.as_bytes()).await.unwrap();
+        held.push(stream);
+    }
+    let quick = Duration::from_millis(300);
+    let mut waited = false;
+    for _ in 0..50 {
+        if tokio::time::timeout(quick, http_get(addr, "/blocks/tip/height"))
+            .await
+            .is_err()
+        {
+            waited = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(waited, "a full listener makes a request on another route wait");
+    let tip = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
+    drop(held.pop());
+    let (st, body) = tokio::time::timeout(Duration::from_secs(10), tip)
+        .await
+        .expect("a freed slot serves the waiting request")
+        .unwrap();
+    assert_eq!((st, body.as_str()), (200, "0"));
+    handle.shutdown().await;
+}
