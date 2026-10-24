@@ -319,10 +319,11 @@ fn decode_rpc_subset() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const G_X: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const G_Y: &str = "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
+
 #[test]
 fn decodescript_desc_matches_core() {
-    const G_X: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-    const G_Y: &str = "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
     let ff = "ff".repeat(32);
     let key = format!("02{G_X}");
     let push_key = format!("21{key}");
@@ -374,6 +375,10 @@ fn decodescript_desc_matches_core() {
             format!("raw(5141{hybrid}51ae)#q4j8lzl0"),
         ),
         (
+            format!("514107{G_X}{G_Y}51ae"),
+            format!("raw(514107{G_X}{G_Y}51ae)#tlfhm7k4"),
+        ),
+        (
             format!("53{push_key}{push_key}52ae"),
             format!("raw(53{push_key}{push_key}52ae)#lgpsxqz8"),
         ),
@@ -399,6 +404,29 @@ fn decodescript_desc_matches_core() {
         mainnet["desc"],
         json!("addr(bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4)#uyjndxcw")
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn decodescript_multisig_type_matches_core() {
+    let push_key = format!("2102{G_X}");
+    let keys = |n: usize| push_key.repeat(n);
+    let rows: Vec<(String, &str)> = vec![
+        ("5101ab51ae".into(), "nonstandard"),
+        (format!("51{push_key}aeae"), "nonstandard"),
+        (format!("51{push_key}0101ae"), "nonstandard"),
+        (format!("514c{push_key}51ae"), "multisig"),
+        (format!("51{}0111ae", keys(17)), "multisig"),
+        (format!("51{}0114ae", keys(20)), "multisig"),
+        (format!("51{}0115ae", keys(21)), "nonstandard"),
+        (format!("0111{}0111ae", keys(17)), "multisig"),
+        (format!("514106{G_X}{G_Y}51ae"), "multisig"),
+    ];
+    let (ctx, dir) = ctx_empty();
+    for (hex, ty) in &rows {
+        let script = dispatch(&ctx, "decodescript", vec![json!(hex)]).unwrap();
+        assert_eq!(script["type"], json!(ty), "{hex}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

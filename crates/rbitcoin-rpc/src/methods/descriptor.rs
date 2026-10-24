@@ -17,7 +17,9 @@ fn infer_body(script: &Script, network: Network) -> String {
     if let Some(key) = p2pk_key(script) {
         return format!("pk({})", hex_encode(key));
     }
-    if let Some((required, keys)) = bare_multisig(script) {
+    if let Some((required, keys)) =
+        bare_multisig(script).filter(|(_, keys)| !keys.iter().any(|k| is_hybrid(k)))
+    {
         let keys: Vec<String> = keys.into_iter().map(hex_encode).collect();
         return format!("multi({required},{})", keys.join(","));
     }
@@ -51,7 +53,7 @@ fn p2pk_key(script: &Script) -> Option<&[u8]> {
     (sized && last == 0xac && has_key_size(key) && !is_hybrid(key)).then_some(key)
 }
 
-fn bare_multisig(script: &Script) -> Option<(usize, Vec<&[u8]>)> {
+pub(super) fn bare_multisig(script: &Script) -> Option<(usize, Vec<&[u8]>)> {
     let b = script.as_bytes();
     let mut ops = script.instruction_indices();
     let (at, first) = ops.next()?.ok()?;
@@ -69,9 +71,6 @@ fn bare_multisig(script: &Script) -> Option<(usize, Vec<&[u8]>)> {
     }
     let (_, last) = ops.next()?.ok()?;
     if last != Instruction::Op(OP_CHECKMULTISIG) || ops.next().is_some() {
-        return None;
-    }
-    if keys.iter().any(|k| is_hybrid(k)) {
         return None;
     }
     Some((required, keys))
