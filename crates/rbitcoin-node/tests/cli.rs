@@ -523,6 +523,15 @@ fn esplora_max_inflight_cli_conf_and_bounds() {
     assert!(format!("{zero}").contains(">= 1"), "{zero}");
     let bad = c.apply_kv("esplora_max_inflight", "nope").unwrap_err();
     assert!(format!("{bad}").contains("esplora_max_inflight"), "{bad}");
+    let max = tokio::sync::Semaphore::MAX_PERMITS;
+    let over = c
+        .apply_kv("esplora_max_inflight", &(max + 1).to_string())
+        .unwrap_err();
+    assert!(format!("{over}").contains("<="), "{over}");
+    let huge = c
+        .apply_kv("esplora_max_inflight", "9999999999999999999")
+        .unwrap_err();
+    assert!(format!("{huge}").contains("esplora_max_inflight"), "{huge}");
     assert_eq!(
         c.esplora_max_inflight,
         rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS,

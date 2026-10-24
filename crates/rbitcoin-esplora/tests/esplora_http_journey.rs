@@ -834,20 +834,19 @@ async fn esplora_max_connections_spans_every_route() {
         stream.write_all(req.as_bytes()).await.unwrap();
         held.push(stream);
     }
-    let quick = Duration::from_millis(300);
-    let mut waited = false;
-    for _ in 0..50 {
-        if tokio::time::timeout(quick, http_get(addr, "/blocks/tip/height"))
-            .await
-            .is_err()
-        {
-            waited = true;
+    // One GET on another route must stay unanswered while the slots are
+    // full. Retry while the held requests may not all be admitted yet.
+    let mut tip = None;
+    for _ in 0..20 {
+        let get = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if !get.is_finished() {
+            tip = Some(get);
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(waited, "a full listener makes a request on another route wait");
-    let tip = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
+    let tip = tip.expect("a full listener makes a request on another route wait");
+    // Freeing one slot serves that same request.
     drop(held.pop());
     let (st, body) = tokio::time::timeout(Duration::from_secs(10), tip)
         .await
@@ -883,14 +882,19 @@ async fn esplora_request_timeout_covers_the_wait_for_a_slot() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let sent = Instant::now();
-    let answered = tokio::time::timeout(
+    let (st, _) = tokio::time::timeout(
         Duration::from_secs(10),
         http_get(addr, "/blocks/tip/height"),
     )
     .await
-    .is_ok();
+    .expect("no answer within 10s");
     let took = sent.elapsed();
-    assert!(answered, "no answer within 10s");
+    // The held requests' deadlines started before this one's, so their 408s
+    // can free the slot just in time: either answer is within one timeout.
+    assert!(
+        st == 200 || st == 408,
+        "the wait ends in an answer or the request timeout, got {st}"
+    );
     assert!(
         took < Duration::from_millis(2500),
         "a request waited {took:?} behind the queue, past one 1s timeout"

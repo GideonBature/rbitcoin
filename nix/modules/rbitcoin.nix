@@ -556,12 +556,14 @@ in
       };
 
       maxInflight = mkOption {
-        type = types.nullOr types.ints.positive;
+        # Upper bound is tokio's `Semaphore::MAX_PERMITS` on 64-bit (2^61 - 1).
+        type = types.nullOr (types.ints.between 1 2305843009213693951);
         default = null;
         example = 1024;
         description = ''
           Esplora requests in flight across the whole listener (--esplora-max-inflight).
-          Null keeps the node default (256). Further requests wait for a slot.
+          Null keeps the node default (256). Further requests wait for a slot; the
+          wait counts against the request timeout (408).
         '';
       };
     };

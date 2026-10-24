@@ -1336,10 +1336,12 @@ impl NodeConfig {
                 let n: usize = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf esplora_max_inflight: {e}")))?;
-                if n == 0 {
-                    return Err(NodeError::Config(
-                        "conf esplora_max_inflight must be >= 1".into(),
-                    ));
+                // `Semaphore::new` panics above `MAX_PERMITS`.
+                if n == 0 || n > tokio::sync::Semaphore::MAX_PERMITS {
+                    return Err(NodeError::Config(format!(
+                        "conf esplora_max_inflight must be >= 1 and <= {}",
+                        tokio::sync::Semaphore::MAX_PERMITS
+                    )));
                 }
                 self.esplora_max_inflight = n;
             }

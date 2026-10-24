@@ -104,7 +104,7 @@ slot, and the wait counts against the request timeout (**408** when it runs out)
 | Limit | Default | Role |
 |-------|---------|------|
 | Max connections | 256 | Concurrent Electrum TCP clients |
-| Max Esplora in flight | 256 (`--esplora-max-inflight`) | Esplora requests in flight across the listener, every route together. Further requests wait for a slot |
+| Max Esplora in flight | 256 (`--esplora-max-inflight`) | Esplora requests in flight across the listener, every route together. Further requests wait for a slot, within the request timeout (408) |
 | Max request line | 1 MiB | One JSON-RPC line including `\n` |
 | Idle timeout | 120 s | No complete request → disconnect |
 | Max scripthash subs / conn | 10000 (`--electrum-max-subs`) | Notify fan-out cap. A wallet subscribes every address up to its gap limit; each sub is ~170 B (≈0.45 GB worst case at 256 connections) plus one posting check per block against that block's shared touch set; a reorg restatuses every sub |
