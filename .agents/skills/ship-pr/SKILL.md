@@ -99,6 +99,10 @@ check.
 
 Bot fetch and push: [`rearden-vm-HOST.md`](../../../rearden-vm-HOST.md).
 
+Pull-request and review text follows
+[`CONTRIBUTING.md`](../../../CONTRIBUTING.md#issues-and-reviews).
+Read the thread before a review or a reply. Do not copy that section here.
+
 ```bash
 gh pr create --repo reardencode/rbitcoin --head <area>/<short-name> --title "…" --body "…"
 gh pr view --repo reardencode/rbitcoin --json mergeable,mergeStateStatus
