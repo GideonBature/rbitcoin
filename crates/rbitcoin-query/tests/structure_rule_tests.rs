@@ -2407,7 +2407,6 @@ fn resolve_prevout_rejects_an_unspendable_script() {
         witness: Witness::new(),
     };
     let block = block_with(vec![coinbase(1)]);
-    let txid_index = rbitcoin_consensus::block::TxidMap::<usize>::default();
     let try_spend = |script: Vec<u8>, need_script_buf: bool| {
         let mut parents = BatchParents::new();
         parents.put_resolved(
@@ -2422,8 +2421,7 @@ fn resolve_prevout_rejects_an_unspendable_script() {
             op,
             &dummy_in,
             Some(fk),
-            &txid_index,
-            1,
+            None,
             &parents,
             false,
             true,
@@ -2537,7 +2535,6 @@ fn n1_assemble_cold_why_reasons() {
         witness: Witness::new(),
     };
     let empty_block = block_with(vec![coinbase(4)]);
-    let txid_index = rbitcoin_consensus::block::TxidMap::<usize>::default();
 
     // Thread-local N1 counters (process-global atomics race under parallel cargo test).
     let _ = confirm_phase_stats::sample_tl_assemble_cold_why_and_reset();
@@ -2559,8 +2556,7 @@ fn n1_assemble_cold_why_reasons() {
             op,
             &dummy_in,
             None,
-            &txid_index,
-            0,
+            None,
             &parents,
             false,
             false,
@@ -2581,8 +2577,7 @@ fn n1_assemble_cold_why_reasons() {
             op,
             &dummy_in,
             Some(last_cb_fk),
-            &txid_index,
-            0,
+            None,
             &parents,
             false,
             false,
@@ -2613,8 +2608,7 @@ fn n1_assemble_cold_why_reasons() {
             op,
             &dummy_in,
             Some(last_cb_fk),
-            &txid_index,
-            0,
+            None,
             &parents,
             false,
             false,
@@ -2642,8 +2636,7 @@ fn n1_assemble_cold_why_reasons() {
             op,
             &dummy_in,
             Some(last_cb_fk),
-            &txid_index,
-            0,
+            None,
             &parents,
             false,
             false,
@@ -2679,8 +2672,7 @@ fn n1_assemble_cold_why_reasons() {
             op,
             &dummy_in,
             Some(last_cb_fk),
-            &txid_index,
-            0,
+            None,
             &parents,
             false,
             false,

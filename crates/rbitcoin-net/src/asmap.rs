@@ -32,9 +32,12 @@ pub const MATCH: u32 = 2;
 pub const DEFAULT: u32 = 3;
 
 /// Validated asmap bytecode.
+///
+/// `bytes` is private. The only constructor is [`AsMap::from_bytes`], so a
+/// caller cannot replace a sane map with a buffer that failed sanity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AsMap {
-    pub bytes: Vec<u8>,
+    bytes: Vec<u8>,
 }
 
 impl AsMap {
