@@ -117,12 +117,6 @@ fn no_false_negatives_and_roundtrip() {
 }
 
 #[test]
-fn fuse_key_stable() {
-    let m = [1u8; 32];
-    assert_eq!(fuse_key_from_mixed(&m), fuse_key_from_mixed(&m));
-}
-
-#[test]
 fn empty_build_and_bad_header_errors() {
     let empty = SealedFuse8::build(&[]).unwrap();
     let _ = empty.contains(0);

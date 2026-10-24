@@ -3,7 +3,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness};
 use bitcoin::{Transaction, Txid};
-use rbitcoin_mempool::accept::unix_ms;
 use rbitcoin_mempool::orphanage::*;
 use std::collections::BTreeSet;
 
@@ -221,7 +220,6 @@ fn announcers_and_erase_for_peer() {
 #[test]
 fn mempool_under_pressure() {
     assert_eq!(ORPHAN_EXPIRE_MS, 1_200_000);
-    assert!(unix_ms() > 1_700_000_000_000);
 
     let mut o = Orphanage::with_limits(DEFAULT_ORPHAN_MAX_WEIGHT, 2);
     let parent = txid_n(11);

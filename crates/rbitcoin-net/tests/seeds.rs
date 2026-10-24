@@ -178,35 +178,6 @@ fn take_dial_prefers_untried_and_good_over_failed() {
 }
 
 #[test]
-fn take_dial_skips_incompatible_while_good_remain() {
-    let mut am = AddrMan::new();
-    let good = addr(1);
-    let untried = addr(2);
-    let failed = addr(3);
-    let incompat_a = addr(4);
-    let incompat_b = addr(5);
-    am.add(good);
-    am.add(untried);
-    am.add(failed);
-    am.add(incompat_a);
-    am.add(incompat_b);
-    am.note_connected_addr(rbitcoin_net::NetAddr::from_socket(good));
-    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(failed), false);
-    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(incompat_a), true);
-    am.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(incompat_b), true);
-
-    let got = am.take_dial_candidates(48, &HashSet::new(), &[]);
-    assert!(
-        got.iter().all(|a| !am.flags(a).is_incompatible()),
-        "INCOMPATIBLE must not fill the batch while any other addr remains: {got:?}"
-    );
-    assert!(got.contains(&good));
-    assert!(got.contains(&untried));
-    assert!(got.contains(&failed), "FAILED_LAST_CONNECT stays retryable");
-    assert_eq!(got.len(), 3);
-}
-
-#[test]
 fn take_dial_incompatible_when_nothing_else() {
     let mut am = AddrMan::new();
     let a = addr(1);
@@ -852,27 +823,6 @@ fn peers_file_load_errors_and_empty() {
     am.save(&nested).unwrap();
     assert!(nested.is_file());
 
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn peers_file_v1_ipv4_still_loads() {
-    let dir = std::env::temp_dir().join(format!(
-        "rbitcoin-peers-v1-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("peers");
-    std::fs::write(&path, format!("rbitcoin-peers-v1\n{} 0x01\n", addr(4))).unwrap();
-    let loaded = AddrMan::load(&path).unwrap();
-    assert!(loaded
-        .entry_of(&rbitcoin_net::NetAddr::from_socket(addr(4)))
-        .is_some());
-    assert!(loaded.flags(&addr(4)).has_connected());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

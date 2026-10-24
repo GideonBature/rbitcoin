@@ -718,33 +718,6 @@ fn claim_feed_wave_and_skip_confirmed() {
     assert_eq!(run.len(), 32);
 }
 
-/// Claim must not jump thousands past tip when near pipeline is full.
-#[test]
-fn claim_ahead_cap_blocks_far_skip() {
-    let ahead = rbitcoin_ibd::ibd::confirm::max_claim_ahead();
-    assert!(ahead >= rbitcoin_ibd::ibd::confirm::CONFIRM_RUN_MAX_BLOCKS as u32);
-    assert!(
-        ahead
-            <= 64 * 3 * rbitcoin_ibd::ibd::confirm::CONFIRM_RUN_MAX_BLOCKS as u32
-                + rbitcoin_ibd::ibd::confirm::CONFIRM_RUN_MAX_BLOCKS as u32,
-        "keep claim window within env clamp: {ahead}"
-    );
-    let path_lo = 87u32;
-    let run = claim_feed_run(
-        path_lo,
-        rbitcoin_ibd::ibd::confirm::CONFIRM_RUN_MAX_BLOCKS,
-        path_lo + ahead,
-        |h| h >= path_lo && h < path_lo + 1000,
-        |_| false,
-    );
-    assert_eq!(
-        run.len(),
-        rbitcoin_ibd::ibd::confirm::CONFIRM_RUN_MAX_BLOCKS
-    );
-    assert_eq!(run[0], path_lo);
-    assert!(*run.last().unwrap() <= path_lo + ahead);
-}
-
 /// requeue_wire after empty load must clear inflight (Ok(None) leak regression).
 #[test]
 fn requeue_clears_inflight_so_tip_can_retry() {

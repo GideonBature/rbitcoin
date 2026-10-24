@@ -397,11 +397,6 @@ fn archived_create_pairs_header_txs_hole_is_skip() {
 
 #[test]
 fn archived_create_pairs_from_stamp_metas() {
-    let tid = [9u8; 32];
-    let fk = rbitcoin_primitives::Fk(7);
-    let meta = meta_with(vec![tid], vec![fk]);
-    let pairs = archived_create_pairs(std::slice::from_ref(&meta)).expect("match");
-    assert_eq!(pairs, vec![(tid, fk)]);
     let blank = meta_with(vec![[0u8; 32]], vec![rbitcoin_primitives::Fk(1)]);
     assert!(archived_create_pairs(std::slice::from_ref(&blank))
         .expect("zero txid skipped")

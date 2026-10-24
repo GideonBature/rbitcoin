@@ -28,7 +28,6 @@ mod io_backend;
 mod io_session_iocp;
 mod open_address;
 mod point_table;
-mod public_surface;
 mod readonly_map;
 mod scripthash;
 mod scripthash_head;

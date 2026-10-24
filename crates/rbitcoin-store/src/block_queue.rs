@@ -241,11 +241,6 @@ impl BlockQueue {
         }))
     }
 
-    /// Peek oldest id (FIFO by id).
-    pub fn peek_oldest_id(&self) -> Option<u64> {
-        self.index.keys().next().copied()
-    }
-
     /// List all ids ascending.
     pub fn ids(&self) -> Vec<u64> {
         self.index.keys().copied().collect()

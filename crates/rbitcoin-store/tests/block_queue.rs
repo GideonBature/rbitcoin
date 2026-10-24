@@ -93,15 +93,13 @@ fn max_height_span() {
 fn fifo_oldest_and_heights() {
     let dir = temp();
     let mut q = BlockQueue::open_or_create(&dir).unwrap();
-    let id1 = q.enqueue(1, [1u8; 32], 1, b"a").unwrap();
+    q.enqueue(1, [1u8; 32], 1, b"a").unwrap();
     let id2 = q.enqueue(2, [2u8; 32], 2, b"bb").unwrap();
-    assert_eq!(q.peek_oldest_id(), Some(id1));
     let mut hs = q.heights();
     hs.sort_unstable();
     assert_eq!(hs, vec![1, 2]);
     assert_eq!(q.id_for_height(2), Some(id2));
     assert_eq!(q.dequeue_height(1).unwrap(), 1);
-    assert_eq!(q.peek_oldest_id(), Some(id2));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

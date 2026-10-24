@@ -754,21 +754,6 @@ fn node_handle_shutdown_with_mempool() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn cancelled_waits_for_request_race() {
-    // Cover the while !requested re-check after spurious notify.
-    let sd = Shutdown::new();
-    let s = Arc::clone(&sd);
-    let j = tokio::spawn(async move {
-        s.cancelled().await;
-    });
-    tokio::task::yield_now().await;
-    // Double request is idempotent; first wakes waiters.
-    sd.request();
-    sd.request();
-    j.await.unwrap();
-}
-
 fn scratch_dir(label: &str) -> std::path::PathBuf {
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)

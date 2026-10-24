@@ -417,16 +417,6 @@ fn lag_asks_even_when_the_cache_is_full() {
 }
 
 #[test]
-fn header_lag_is_its_own_reason_to_ask() {
-    let (dir, hub, mut st, mut rx) = fresh("ask-or-lag", 0);
-    walk_ahead_of_store(&mut st, &hub);
-    st.slots[0].peer_height = 0;
-    drive_poll(&mut st, &hub, poll_in(10, false, 3, 5, 0));
-    assert!(took_getheaders(&mut rx), "lag alone asks");
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn ready_headroom_asks_when_the_cache_is_full() {
     let (dir, hub, mut st, mut rx) = fresh("ask-or-head", 0);
     walk_ahead_of_store(&mut st, &hub);

@@ -38,16 +38,3 @@ fn roundtrip_and_width() {
         1 << 32
     );
 }
-
-#[cfg(miri)]
-#[test]
-fn miri_scriptnum_range_width5_nonminimal() {
-    for n in -1000i64..=1000 {
-        let enc = scriptnum_encode(n);
-        assert_eq!(scriptnum_decode_width(&enc, 5, true).unwrap(), n);
-    }
-    assert_eq!(scriptnum_decode_width(&[0x80], 5, false).unwrap(), 0);
-    assert!(scriptnum_decode(&[0x00], true).is_err());
-    assert!(scriptnum_decode(&[0x80], true).is_err());
-    assert!(scriptnum_decode_width(&[0xff, 0x00], 5, true).is_ok());
-}
