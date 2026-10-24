@@ -104,7 +104,7 @@ pub struct AssembleMeters {
 /// `pending_spent`: pack-local double-spend (early reject before scripts).
 /// `pending_creates`: pack-local `txid → create_fk` (not per-vout).
 /// Same-block outs use `txid_index` when the create index is earlier than
-/// the spender ([`EarlierIndex`]); meters flush
+/// the spender; meters flush
 /// once per block (no per-input Instant / atomics).
 ///
 /// Prevouts resolve from per-batch [`crate::BatchParents`] +
