@@ -918,3 +918,4 @@ async fn block_txs_past_end_is_not_found() {
 
 include!("esplora_sh_journey.rs");
 include!("esplora_http_journey.rs");
+include!("blindbit_journey.rs");

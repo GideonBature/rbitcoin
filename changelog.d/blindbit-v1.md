@@ -1,0 +1,3 @@
+Added
+
+- **BlindBit oracle v1 over HTTP.** With `--sp-tweaks`, the Esplora listener serves `/blindbit/v1/` for silent-payment wallets on spdk's BlindBit v1 backend (Dana): `info`, `block-height`, `block-hash`, `tweaks` and `tweak-index` with `dustLimit`, `utxos`, both BIP158 filters, `spent-index`, and `forward-tx`. Filters and the spent index are built per request from the block's own outputs and input edges, without reading the parents it spends; nothing new is stored. The routes share one limit of requests in flight (half the blocking pool), taken before a listener slot, so a wallet rescan does not fill the listener (#1119).

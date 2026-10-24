@@ -98,7 +98,7 @@ pub use soft_densify::{
     BQ_SOFT_FREE_BYTES, TIP_HOLE_MIN_AHEAD_BLOCKS,
 };
 pub use sp_read::{tweaks_at_height, tweaks_for_height, tweaks_from_thin_and_body};
-pub use sp_tweaks::{ThinTweakRangeLimits, ThinTweakRow};
+pub use sp_tweaks::{BlockSpOutpoints, ThinTweakRangeLimits, ThinTweakRow};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header as BlockHeader, Version as BlockVersion};

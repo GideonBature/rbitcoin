@@ -113,6 +113,8 @@ pub fn thin_join_txids_and_loc(
 #[doc(hidden)]
 pub struct HeightPlan {
     pub height: Height,
+    /// `confirmed[height]` as read with `elig`, under the `sp_tweaks` lock.
+    pub header_fk: Fk,
     pub first_id: u64,
     pub elig: Vec<(u32, [u8; 33])>,
 }
@@ -124,7 +126,7 @@ pub fn thin_tweak_height_plans(
     start: Height,
     limits: ThinTweakRangeLimits,
 ) -> Result<Vec<HeightPlan>, QueryError> {
-    let mut meta: Vec<(Height, u64, u32)> = Vec::new();
+    let mut meta: Vec<(Height, u64, u32, Fk)> = Vec::new();
     for step in 0..limits.max_heights {
         let h = Height(start.0.saturating_add(step));
         let Some(header_fk) = store.confirmed.get(h)? else {
@@ -136,7 +138,7 @@ pub fn thin_tweak_height_plans(
         let Some(first_id) = first_fk.get() else {
             return Err(StoreError::InvalidFk);
         };
-        meta.push((h, first_id, n_tx));
+        meta.push((h, first_id, n_tx, header_fk));
     }
     if meta.is_empty() {
         return Ok(Vec::new());
@@ -158,6 +160,7 @@ pub fn thin_tweak_height_plans(
         elig_total = elig_total.saturating_add(add);
         plans.push(HeightPlan {
             height: meta[i].0,
+            header_fk: meta[i].3,
             first_id: meta[i].1,
             elig,
         });
@@ -412,6 +415,20 @@ impl Query {
         start: Height,
         limits: ThinTweakRangeLimits,
     ) -> Result<Vec<(Height, Vec<ThinTweakRow>)>, QueryError> {
+        Ok(self
+            .load_thin_tweaks_range_with_header(start, limits)?
+            .into_iter()
+            .map(|(h, _, rows)| (h, rows))
+            .collect())
+    }
+
+    /// [`Self::load_thin_tweaks_range`], with the header fk each height's rows
+    /// were planned under, so a caller can tell which block they belong to.
+    pub fn load_thin_tweaks_range_with_header(
+        &self,
+        start: Height,
+        limits: ThinTweakRangeLimits,
+    ) -> Result<Vec<(Height, Fk, Vec<ThinTweakRow>)>, QueryError> {
         self.require_sp_tweaks_unpruned()?;
         if limits.max_heights == 0 {
             return Ok(Vec::new());
@@ -530,7 +547,100 @@ impl Query {
         Ok(plans
             .into_iter()
             .zip(out_rows)
-            .map(|(p, rows)| (p.height, rows))
+            .map(|(p, rows)| (p.height, p.header_fk, rows))
             .collect())
+    }
+}
+
+/// One block's P2TR output keys and spent outpoints, read without any parent
+/// tx. See [`Query::block_sp_outpoints`].
+#[derive(Clone, Debug, Default)]
+pub struct BlockSpOutpoints {
+    /// X-only key of every P2TR output, eligible or not, in tx order.
+    pub p2tr_keys: Vec<[u8; 32]>,
+    /// `(parent txid, vout)` of every non-coinbase input, P2TR or not: the
+    /// edge does not carry the parent's script.
+    pub spent: Vec<([u8; 32], u32)>,
+}
+
+impl Query {
+    /// What the BlindBit v1 filters and spent index need from the block
+    /// `header_fk`: one `txout` span of its own txs for the keys, and the
+    /// input edges plus one page-grouped `txid.body` read for the spends.
+    /// No parent txout, no `seqsigwit` (except for an unstamped create, whose
+    /// prevouts are only there). `header_txs` keeps a disconnected header's
+    /// range, so the result belongs to `header_fk` whatever `confirmed` says.
+    pub fn block_sp_outpoints(
+        &self,
+        header_fk: Fk,
+        keys: bool,
+        spent: bool,
+    ) -> Result<BlockSpOutpoints, QueryError> {
+        let mut out = BlockSpOutpoints::default();
+        let Some((first_fk, n_tx)) = self.store.header_txs.get_range(header_fk)? else {
+            return Err(StoreError::NotFound);
+        };
+        let Some(first) = first_fk.get() else {
+            return Err(StoreError::InvalidFk);
+        };
+        if n_tx == 0 {
+            return Ok(out);
+        }
+        let last = first + u64::from(n_tx) - 1;
+        let fks: Vec<Fk> = (first..=last).map(Fk).collect();
+
+        if keys {
+            let loc = self.store.tx_create_loc_range_batch(&fks)?;
+            let mut span_off = u64::MAX;
+            let mut span_end = 0u64;
+            for p in &loc {
+                let (off, len) = require_thin_body_range(p.as_ref().map(|x| x.txout))?;
+                span_off = span_off.min(off);
+                span_end = span_end.max(off.saturating_add(len));
+            }
+            let span_len = span_end - span_off;
+            self.store.txs.with_body_span(span_off, span_len, |raw| {
+                for p in loc.iter().flatten() {
+                    let (off, len) = p.txout;
+                    let rel = (off - span_off) as usize;
+                    let sl = raw.get(rel..rel.saturating_add(len as usize)).ok_or(
+                        StoreError::Corrupt("invariant: block sp body span truncated"),
+                    )?;
+                    for (_, key, _) in self.store.txs.packed_p2tr_from_raw(sl, p.n_out)? {
+                        out.p2tr_keys.push(key);
+                    }
+                }
+                Ok(())
+            })?;
+        }
+
+        if spent {
+            let edges = self.store.input_edges_span(first, last)?;
+            let mut prevs: Vec<(Fk, u32)> = Vec::new();
+            for (fk, e) in fks.iter().zip(edges) {
+                match e {
+                    Some(edges) => prevs.extend(
+                        edges
+                            .iter()
+                            .filter(|e| !e.parent.is_null())
+                            .map(|e| (e.parent, e.vout)),
+                    ),
+                    None => {
+                        let (_, p) = self.store.get_tx_meta_and_prevouts(*fk)?;
+                        prevs.extend(p.into_iter().filter(|(f, _)| !f.is_null()));
+                    }
+                }
+            }
+            let parents: Vec<Fk> = prevs.iter().map(|&(f, _)| f).collect();
+            let txids = self.store.txids_get_many(&parents)?;
+            out.spent.reserve(prevs.len());
+            for ((_, vout), txid) in prevs.into_iter().zip(txids) {
+                let txid = txid.ok_or(StoreError::Corrupt(
+                    "invariant: block sp parent txid missing",
+                ))?;
+                out.spent.push((txid, vout));
+            }
+        }
+        Ok(out)
     }
 }
