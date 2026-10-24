@@ -453,6 +453,31 @@ fn decodescript_witness_program_type_matches_core() {
 }
 
 #[test]
+fn decodescript_pubkey_type_matches_core() {
+    const G_X: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const G_Y: &str = "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
+    let ff = "ff".repeat(32);
+    let rows: Vec<(String, &str)> = vec![
+        (format!("2102{G_X}ac"), "pubkey"),
+        (format!("2103{ff}ac"), "pubkey"),
+        (format!("4104{G_X}{G_Y}ac"), "pubkey"),
+        (format!("4106{G_X}{G_Y}ac"), "pubkey"),
+        (format!("4107{G_X}{G_Y}ac"), "pubkey"),
+        (format!("2100{G_X}ac"), "nonstandard"),
+        (format!("2105{G_X}ac"), "nonstandard"),
+        (format!("2104{G_X}ac"), "nonstandard"),
+        (format!("4102{G_X}{G_Y}ac"), "nonstandard"),
+        (format!("4c2102{G_X}ac"), "nonstandard"),
+    ];
+    let (ctx, dir) = ctx_empty();
+    for (hex, ty) in &rows {
+        let script = dispatch(&ctx, "decodescript", vec![json!(hex)]).unwrap();
+        assert_eq!(script["type"], json!(ty), "{hex}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn help_and_getrpcinfo_list_methods() {
     let (ctx, dir) = ctx_empty();
     let help_all = dispatch(&ctx, "help", vec![]).unwrap();

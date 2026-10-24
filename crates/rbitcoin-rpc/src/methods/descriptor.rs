@@ -14,7 +14,7 @@ pub fn infer_descriptor(script: &Script, network: Network) -> String {
 }
 
 fn infer_body(script: &Script, network: Network) -> String {
-    if let Some(key) = p2pk_key(script) {
+    if let Some(key) = p2pk_key(script).filter(|key| !is_hybrid(key)) {
         return format!("pk({})", hex_encode(key));
     }
     if let Some((required, keys)) =
@@ -45,12 +45,12 @@ fn is_hybrid(key: &[u8]) -> bool {
     matches!(key.first(), Some(6 | 7))
 }
 
-fn p2pk_key(script: &Script) -> Option<&[u8]> {
+pub(super) fn p2pk_key(script: &Script) -> Option<&[u8]> {
     let b = script.as_bytes();
     let (&len, rest) = b.split_first()?;
     let (&last, key) = rest.split_last()?;
     let sized = (len == 33 || len == 65) && key.len() == usize::from(len);
-    (sized && last == 0xac && has_key_size(key) && !is_hybrid(key)).then_some(key)
+    (sized && last == 0xac && has_key_size(key)).then_some(key)
 }
 
 pub(super) fn bare_multisig(script: &Script) -> Option<(usize, Vec<&[u8]>)> {

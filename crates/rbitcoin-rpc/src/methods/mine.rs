@@ -1,4 +1,4 @@
-use super::descriptor::{bare_multisig, infer_descriptor};
+use super::descriptor::{bare_multisig, infer_descriptor, p2pk_key};
 use super::*;
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
 use bitcoin::hashes::Hash;
@@ -93,7 +93,7 @@ pub fn script_core_type(script: &bitcoin::Script) -> &'static str {
         }
     } else if script.is_op_return() {
         "nulldata"
-    } else if script.is_p2pk() {
+    } else if p2pk_key(script).is_some() {
         "pubkey"
     } else if bare_multisig(script).is_some() {
         "multisig"
