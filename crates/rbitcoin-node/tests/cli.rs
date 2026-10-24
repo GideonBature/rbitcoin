@@ -505,6 +505,32 @@ fn operator_conf_and_argv() {
 }
 
 #[test]
+fn esplora_max_inflight_cli_conf_and_bounds() {
+    assert_eq!(
+        ready_config(["rbitcoin-node"]).esplora_max_inflight,
+        rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS
+    );
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--esplora-max-inflight", "1024"]).esplora_max_inflight,
+        1024
+    );
+    assert_eq!(
+        ready_config(["rbitcoin-node", "--esplora-max-inflight=8"]).esplora_max_inflight,
+        8
+    );
+    let mut c = NodeConfig::default();
+    let zero = c.apply_kv("esplora_max_inflight", "0").unwrap_err();
+    assert!(format!("{zero}").contains(">= 1"), "{zero}");
+    let bad = c.apply_kv("esplora_max_inflight", "nope").unwrap_err();
+    assert!(format!("{bad}").contains("esplora_max_inflight"), "{bad}");
+    assert_eq!(
+        c.esplora_max_inflight,
+        rbitcoin_electrum::DEFAULT_MAX_CONNECTIONS,
+        "a refused value leaves the default"
+    );
+}
+
+#[test]
 fn electrum_max_subs_cli_conf_and_bounds() {
     assert_eq!(
         ready_config(["rbitcoin-node"]).electrum_max_subs,
