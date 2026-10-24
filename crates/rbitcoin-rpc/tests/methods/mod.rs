@@ -480,6 +480,28 @@ fn decodescript_pubkey_type_matches_core() {
 }
 
 #[test]
+fn decodescript_nulldata_type_matches_core() {
+    let rows: Vec<(String, &str)> = vec![
+        ("6a".into(), "nulldata"),
+        ("6a0051504f60".into(), "nulldata"),
+        ("6a4c01cd".into(), "nulldata"),
+        (format!("6a4c64{}", "ab".repeat(100)), "nulldata"),
+        ("6a61".into(), "nonstandard"),
+        ("6aac".into(), "nonstandard"),
+        ("6a6a".into(), "nonstandard"),
+        ("6a01abac".into(), "nonstandard"),
+        ("6a01".into(), "nonstandard"),
+        ("6a4c".into(), "nonstandard"),
+    ];
+    let (ctx, dir) = ctx_empty();
+    for (hex, ty) in &rows {
+        let script = dispatch(&ctx, "decodescript", vec![json!(hex)]).unwrap();
+        assert_eq!(script["type"], json!(ty), "{hex}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn help_and_getrpcinfo_list_methods() {
     let (ctx, dir) = ctx_empty();
     let help_all = dispatch(&ctx, "help", vec![]).unwrap();
