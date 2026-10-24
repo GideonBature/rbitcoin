@@ -259,8 +259,10 @@ v1 HTTP API under `/blindbit/v1/`. BlindBit v2 moved to gRPC. The v1 HTTP
 clients are Dana's [`spdk`](https://github.com/cygnet3/spdk)
 (`backends/blindbit-v1`), Bull Bitcoin mobile, and blindbitd. Point the client
 at `http://host:port/blindbit/v1`. Without `--sp-tweaks` the prefix is **404**.
-Heights run from Taproot activation (the tweak index origin) to the lower of
-the tip and the tweak index's last height.
+The served height is the lower of the tip and the tweak index's last height.
+`tweaks`, `tweak-index` and `utxos` start at Taproot activation (the tweak
+index origin) and are **404** below it; `block-hash`, `filter/*` and `spent-index`
+answer any height up to the served height.
 
 | Route | Notes |
 |-------|-------|
