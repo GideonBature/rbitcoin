@@ -258,7 +258,6 @@ fn decode_rpc_subset() {
     assert_eq!(script["hex"], json!(spk_hex));
     assert!(script.get("p2sh").is_none());
     assert!(script.get("segwit").is_none());
-    assert!(script.get("desc").is_none());
 
     let op_true = dispatch(&ctx, "decodescript", vec![json!("51")]).unwrap();
     assert_eq!(op_true["type"], json!("nonstandard"));
@@ -317,6 +316,89 @@ fn decode_rpc_subset() {
 
     let still_never = dispatch(&ctx, "createrawtransaction", vec![]).unwrap_err();
     assert_eq!(still_never["code"], ERR_METHOD_NOT_FOUND);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn decodescript_desc_matches_core() {
+    const G_X: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const G_Y: &str = "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
+    let ff = "ff".repeat(32);
+    let key = format!("02{G_X}");
+    let push_key = format!("21{key}");
+    let hybrid = format!("06{G_X}{G_Y}");
+    let rows: Vec<(String, String)> = vec![
+        (
+            "0014751e76e8199196d454941c45d1b3a323f1433bd6".into(),
+            "addr(bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080)#8pk5s7ya".into(),
+        ),
+        (
+            "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac".into(),
+            "addr(mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r)#wdmryvnu".into(),
+        ),
+        (
+            "a914751e76e8199196d454941c45d1b3a323f1433bd687".into(),
+            "addr(2N3vVYSK5XRgVSGWy21PnsRmBUywSQNdCsf)#zknva3nk".into(),
+        ),
+        (
+            format!("0020{G_X}"),
+            "addr(bcrt1q0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqjsgj9x)#7tlcs788"
+                .into(),
+        ),
+        (format!("5120{G_X}"), format!("rawtr({G_X})#xsjqcczm")),
+        (
+            format!("5120{ff}"),
+            "addr(bcrt1plllllllllllllllllllllllllllllllllllllllllllllllllllse0lp4e)#f6jd6wfe"
+                .into(),
+        ),
+        (format!("{push_key}ac"), format!("pk({key})#gn28ywm7")),
+        (
+            format!("4104{G_X}{G_Y}ac"),
+            format!("pk(04{G_X}{G_Y})#fsjyjr2x"),
+        ),
+        (format!("2103{ff}ac"), format!("pk(03{ff})#3se6jdc6")),
+        (
+            format!("41{hybrid}ac"),
+            format!("raw(41{hybrid}ac)#qhj9gd8d"),
+        ),
+        (
+            format!("52{push_key}2103{G_X}52ae"),
+            format!("multi(2,{key},03{G_X})#lex50jse"),
+        ),
+        (
+            format!("51{}0111ae", push_key.repeat(17)),
+            format!("multi(1,{})#58a7llg3", vec![key.as_str(); 17].join(",")),
+        ),
+        (
+            format!("5141{hybrid}51ae"),
+            format!("raw(5141{hybrid}51ae)#q4j8lzl0"),
+        ),
+        (
+            format!("53{push_key}{push_key}52ae"),
+            format!("raw(53{push_key}{push_key}52ae)#lgpsxqz8"),
+        ),
+        ("51024e73".into(), "addr(bcrt1pfeesnyr2tx)#swxgse0y".into()),
+        ("5202abcd".into(), "addr(bcrt1z40xsz44l6p)#pj7n4prx".into()),
+        ("51".into(), "raw(51)#8lvh9jxk".into()),
+        ("6a04deadbeef".into(), "raw(6a04deadbeef)#uxzjket7".into()),
+    ];
+    let (mut ctx, dir) = ctx_empty();
+    for (hex, desc) in &rows {
+        let script = dispatch(&ctx, "decodescript", vec![json!(hex)]).unwrap();
+        assert_eq!(script["desc"], json!(desc), "{hex}");
+    }
+
+    ctx.network = Network::Mainnet;
+    let mainnet = dispatch(
+        &ctx,
+        "decodescript",
+        vec![json!("0014751e76e8199196d454941c45d1b3a323f1433bd6")],
+    )
+    .unwrap();
+    assert_eq!(
+        mainnet["desc"],
+        json!("addr(bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4)#uyjndxcw")
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -60,6 +60,7 @@ pub fn genesis_coinbase_txid(ctx: &RpcContext) -> [u8; 32] {
 pub mod chain;
 #[doc(hidden)]
 pub mod decode;
+mod descriptor;
 #[doc(hidden)]
 pub mod mempool;
 #[doc(hidden)]
@@ -832,8 +833,8 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
     (
         "decodescript",
         "decodescript hexstring\n\
-         asm, type, hex, and address when standard. No p2sh wrap, segwit wrap, \
-         or descriptor inference.",
+         asm, type, hex, address when standard, and desc. No p2sh wrap, \
+         segwit wrap, or miniscript.",
     ),
     (
         "validateaddress",
