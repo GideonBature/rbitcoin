@@ -1277,19 +1277,6 @@ pub fn write_drain_max_parts(writeq_cap: usize) -> usize {
     writeq_cap.max(1)
 }
 
-/// Max heights claimable ahead of tip+1 (pipeline depth).
-///
-/// Lookup may start the next run while load/scripts/write hold earlier ones,
-/// but must **not** skip a stuck tip+1 and claim thousands of far heights.
-/// Depth units = sum of stage caps (write is usually largest).
-#[cfg(debug_assertions)]
-#[doc(hidden)]
-pub fn max_claim_ahead() -> u32 {
-    let c = confirm_queue_caps();
-    let q = c.load.saturating_add(c.script).saturating_add(c.write);
-    (q.saturating_mul(3).saturating_add(1) as u32).saturating_mul(CONFIRM_RUN_MAX_BLOCKS as u32)
-}
-
 /// BQ heights ≥ `path_lo` with resolve-complete and not load-inflight.
 pub fn confirm_ready_count(
     query: &rbitcoin_query::Query,

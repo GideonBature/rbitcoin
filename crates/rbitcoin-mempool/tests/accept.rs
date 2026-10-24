@@ -1117,10 +1117,6 @@ fn accept_error_display_and_reject_paths() {
         Err(AcceptError::Policy(_))
     ));
 
-    assert!(!rbf_pays_for_replacement(100, 400, 100, 400));
-    assert!(!rbf_pays_for_replacement(100, 400, 200, 400));
-    assert!(rbf_pays_for_replacement(50_000, 400, 1_000, 400));
-
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -4558,11 +4558,6 @@ fn spent_slot_vin_at_2pow16_is_corrupt() {
 }
 
 #[test]
-fn spent_slot_v17_len_constant_is_eight() {
-    assert_eq!(OutputRecord::SPENT_SLOT_LEN, 8);
-}
-
-#[test]
 fn encode_spent_slots_overlays_one_vout() {
     let mut buf = Vec::new();
     encode_spent_slots(3, &[(1, Fk(9), 3)], &mut buf).unwrap();

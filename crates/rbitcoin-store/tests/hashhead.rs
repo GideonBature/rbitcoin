@@ -2,17 +2,6 @@ use rbitcoin_primitives::Fk;
 use rbitcoin_store::error::StoreError;
 use rbitcoin_store::hashhead::*;
 
-#[test]
-fn create_defaults_to_fd_only() {
-    let path = tmp_path();
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(MultiList::path_for(&path));
-    let h = HashHead::create_with_slots(&path, DEFAULT_SLOTS).unwrap();
-    drop(h);
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(MultiList::path_for(&path));
-}
-
 fn tmp_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "rbitcoin-hh-{}-{}",

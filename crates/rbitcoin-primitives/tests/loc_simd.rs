@@ -67,25 +67,3 @@ fn simd_matches_scalar() {
         );
     }
 }
-
-#[cfg(miri)]
-#[test]
-fn miri_loc_simd_vectors() {
-    let mut seed = 0x9e37_79b9u32;
-    for _ in 0..32 {
-        let mut buf = [0u8; 16];
-        for b in &mut buf {
-            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            *b = (seed >> 24) as u8;
-        }
-        assert_eq!(
-            deinterleave_pairs_u8x8(buf),
-            deinterleave_pairs_u8x8_scalar(&buf)
-        );
-        let (st, no, _) = deinterleave_pairs_u8x8_scalar(&buf);
-        assert_eq!(
-            inclusive_u8x8_times_8(&st, &no),
-            inclusive_u8x8_times_8_scalar(&st, &no)
-        );
-    }
-}

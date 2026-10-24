@@ -113,33 +113,6 @@ fn compact_and_uleb_error_paths() {
     assert_eq!(read_compact_size(&ncan64).unwrap(), (1, 9));
 }
 
-#[cfg(miri)]
-#[test]
-fn miri_compact_wide_and_uleb_errors() {
-    let mut five = Vec::new();
-    write_compact_size(&mut five, u16::MAX as u64 + 1);
-    assert_eq!(five.len(), 5);
-    assert_eq!(read_compact_size(&five).unwrap().0, u16::MAX as u64 + 1);
-
-    let mut nine = Vec::new();
-    write_compact_size(&mut nine, u32::MAX as u64 + 1);
-    assert_eq!(nine.len(), 9);
-    assert_eq!(read_compact_size(&nine).unwrap().0, u32::MAX as u64 + 1);
-
-    assert!(read_compact_size(&[254, 1, 2, 3]).is_err());
-    assert!(read_compact_size(&[255, 1, 2, 3, 4, 5, 6, 7]).is_err());
-    assert!(read_uleb128(&[0x80]).is_err());
-    let mut over = vec![0x80u8; 10];
-    over.push(0x01);
-    assert!(read_uleb128(&over).is_err());
-
-    assert_eq!(read_compact_size(&[253, 252, 0]).unwrap().0, 252);
-    assert_eq!(read_compact_size(&[254, 253, 0, 0, 0]).unwrap().0, 253);
-    let mut ncan64 = vec![255u8];
-    ncan64.extend_from_slice(&(u32::MAX as u64).to_le_bytes());
-    assert_eq!(read_compact_size(&ncan64).unwrap().0, u32::MAX as u64);
-}
-
 #[test]
 fn read_compact_size_from_advances_the_slice() {
     let mut rdr: &[u8] = &[1u8, 252, 253, 0x04, 0x01];

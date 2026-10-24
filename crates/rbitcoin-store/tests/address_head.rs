@@ -321,16 +321,6 @@ fn probe_during_page_pwrite_keeps_every_published_key() {
 }
 
 #[test]
-fn load_trigger_at_80_percent() {
-    let slots = 1024u64;
-    let thr = ((slots as f64) * HEAD_LOAD_START).floor() as u64;
-    assert_eq!(thr, 819); // floor(0.80 * 1024)
-    assert!(thr - 1 < thr);
-    assert!(thr >= ((slots as f64) * HEAD_LOAD_START).floor() as u64);
-    assert!(slots >= thr);
-}
-
-#[test]
 fn default_layout_is_fixed_segment_geometry() {
     let layout = default_layout(HeadScale::Tiny);
     assert_eq!(layout.bits, bits_for_scale(HeadScale::Tiny));

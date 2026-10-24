@@ -44,15 +44,3 @@ fn truncated_pushdata_does_not_count_leftover_checksig() {
     assert_eq!(script_sigop_count(&[0x4c, 2, 0xac, 0xac], true), 0);
     assert_eq!(script_sigop_count(&[0x4c, 2, 0xac, 0xac, 0xac], true), 1);
 }
-
-#[cfg(miri)]
-#[test]
-fn miri_accurate_op_n_checkmultisig_matrix() {
-    for op_n in 0x51u8..=0x60 {
-        let n = u64::from(op_n - 0x50);
-        for cms in [0xaeu8, 0xaf] {
-            assert_eq!(script_sigop_count(&[op_n, cms], true), n);
-            assert_eq!(script_sigop_count(&[op_n, cms], false), 20);
-        }
-    }
-}

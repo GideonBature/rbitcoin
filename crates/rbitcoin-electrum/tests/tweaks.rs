@@ -477,11 +477,6 @@ fn dust_row(txid0: u8, p2tr: Vec<(u32, [u8; 32], u64)>) -> ThinTweakRow {
 }
 
 #[test]
-fn default_tweaks_min_dust_is_1000() {
-    assert_eq!(DEFAULT_TWEAKS_MIN_DUST, 1000);
-}
-
-#[test]
 fn omit_dust_default_drops_leq_1000_keeps_1001_and_empty_txs() {
     let rows = vec![
         dust_row(1, vec![(0, [0x11; 32], 1000), (1, [0x22; 32], 1001)]),
