@@ -118,6 +118,8 @@ let
   ++ optional cfg.datadirHdd "--datadir-hdd"
   ++ optional (cfg.milestone != null) "--milestone"
   ++ optional (cfg.milestone != null) (toString cfg.milestone)
+  ++ optional (cfg.heavyShCreates != null) "--heavy-sh-creates"
+  ++ optional (cfg.heavyShCreates != null) (toString cfg.heavyShCreates)
   ++ optional (cfg.trustPeer != null) "--trust-peer"
   ++ optional (cfg.trustPeer != null) cfg.trustPeer
   ++ lib.optionals cfg.sv2.tp.enable [
@@ -228,6 +230,18 @@ in
       type = types.bool;
       default = false;
       description = "Build the Class B scripthash index. Electrum and Esplora enable it automatically.";
+    };
+
+    heavyShCreates = mkOption {
+      type = types.nullOr (types.ints.between 0 4294967295);
+      default = null;
+      example = 100000;
+      description = ''
+        Pass `--heavy-sh-creates N`. An unpaged Electrum or Esplora scripthash
+        join with more than N creates waits until no other such join is running
+        on the node. Null omits the flag and leaves the node default (10000).
+        0 turns the wait off. It matters once `--max-sh-creates` is raised past it.
+      '';
     };
 
     silentPaymentIndex = mkOption {

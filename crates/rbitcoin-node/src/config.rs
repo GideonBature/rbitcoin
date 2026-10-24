@@ -334,6 +334,9 @@ pub struct NodeConfig {
     pub sptweaks_dust: u64,
     /// 0 = unlimited. Electrum + Esplora refuse SH joins above this create count.
     pub max_sh_creates: u32,
+    /// 0 = off. Unpaged SH joins above this create count run one at a time
+    /// across the node.
+    pub heavy_sh_creates: u32,
     /// Max `blockchain.scripthash.subscribe` entries per Electrum connection
     /// (>= 1). Default [`rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS`].
     pub electrum_max_subs: usize,
@@ -445,6 +448,7 @@ impl Default for NodeConfig {
             sptweaks: false,
             sptweaks_dust: rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST,
             max_sh_creates: rbitcoin_query::DEFAULT_MAX_SH_CREATES,
+            heavy_sh_creates: rbitcoin_query::DEFAULT_HEAVY_SH_CREATES,
             electrum_max_subs: rbitcoin_electrum::DEFAULT_MAX_SCRIPTHASH_SUBS,
             esplora_block_template: false,
             metrics: false,
@@ -1307,6 +1311,11 @@ impl NodeConfig {
                 self.max_sh_creates = val
                     .parse()
                     .map_err(|e| NodeError::Config(format!("conf max_sh_creates: {e}")))?;
+            }
+            "heavy_sh_creates" => {
+                self.heavy_sh_creates = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf heavy_sh_creates: {e}")))?;
             }
             "electrum_max_subs" => {
                 let n: usize = val

@@ -639,13 +639,13 @@ impl Query {
         page: Option<&HistoryFilter>,
     ) -> Result<Vec<ShJoinedOut>, QueryError> {
         let paging = page.is_some_and(|f| f.limit.is_some());
-        let cap = self.max_sh_creates();
-        if cap > 0 && !paging {
-            let n = self.scripthash_create_count(scripthash)?;
-            if n > cap {
-                return Err(StoreError::ShCreatesCap { creates: n, cap });
-            }
-        }
+        let admit = if paging {
+            None
+        } else {
+            Some(self.unpaged_join_admit(scripthash)?)
+        };
+        #[cfg(debug_assertions)]
+        let _probe = admit.as_ref().map(|a| self.sh_join_probe.enter(a.heavy));
         let t_pages = std::time::Instant::now();
         let entries = self.store.scripthash.create_fks(scripthash)?;
         let pages_us = t_pages.elapsed().as_micros();
@@ -714,7 +714,41 @@ impl Query {
                 spends_us
             );
         }
+        drop(admit);
         Ok(out)
+    }
+
+    /// Refuse an unpaged join above `--max-sh-creates`, then hand back the
+    /// heavy-join guard when the create count is above `--heavy-sh-creates`.
+    /// The guard is a blocking lock taken on the blocking pool. Its holder
+    /// only reads the store and never waits on a client, so a waiter (even
+    /// one in the same connection's batch window) always gets it once that
+    /// join returns, on success or error.
+    fn unpaged_join_admit(&self, scripthash: &[u8; 32]) -> Result<JoinAdmit<'_>, QueryError> {
+        let light = JoinAdmit {
+            heavy: false,
+            _turn: None,
+        };
+        let cap = self.max_sh_creates();
+        let heavy = self.heavy_sh_creates();
+        if cap == 0 && heavy == 0 {
+            return Ok(light);
+        }
+        let n = self.scripthash_create_count(scripthash)?;
+        if cap > 0 && n > cap {
+            return Err(StoreError::ShCreatesCap { creates: n, cap });
+        }
+        if heavy == 0 || n <= heavy {
+            return Ok(light);
+        }
+        Ok(JoinAdmit {
+            heavy: true,
+            _turn: Some(
+                self.heavy_sh_join
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+        })
     }
 
     /// A `from_height` above 0 scans that window and never fills the join.
@@ -2182,5 +2216,84 @@ impl Query {
             return Ok(ScriptHashChainStats::default());
         };
         self.chain_stats_from_joined(&recs.joined)
+    }
+}
+
+/// An admitted unpaged join. A heavy one holds the node's single heavy turn
+/// until this drops.
+pub struct JoinAdmit<'a> {
+    pub heavy: bool,
+    _turn: Option<std::sync::MutexGuard<'a, ()>>,
+}
+
+/// Unpaged scripthash joins running now and their peak, light and heavy
+/// apart. Off until [`ShJoinProbe::arm`]. Armed, a join waits inside (up to
+/// [`SH_JOIN_PROBE_WAIT`]) for a second join of its kind, so two joins that
+/// are allowed to overlap do.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub struct ShJoinProbe {
+    armed: std::sync::atomic::AtomicBool,
+    running: [AtomicU32; 2],
+    peak: [AtomicU32; 2],
+    entered: [AtomicU32; 2],
+}
+
+#[cfg(debug_assertions)]
+pub const SH_JOIN_PROBE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[cfg(debug_assertions)]
+pub struct ShJoinProbeGuard<'a> {
+    probe: &'a ShJoinProbe,
+    kind: usize,
+}
+
+#[cfg(debug_assertions)]
+impl ShJoinProbe {
+    pub fn arm(&self) {
+        for k in 0..2 {
+            self.peak[k].store(0, AtomicOrdering::SeqCst);
+            self.entered[k].store(0, AtomicOrdering::SeqCst);
+        }
+        self.armed.store(true, AtomicOrdering::SeqCst);
+    }
+
+    /// `(light, heavy)` joins started since [`Self::arm`].
+    pub fn entered(&self) -> (u32, u32) {
+        (
+            self.entered[0].load(AtomicOrdering::SeqCst),
+            self.entered[1].load(AtomicOrdering::SeqCst),
+        )
+    }
+
+    /// `(light, heavy)` peak overlap since [`Self::arm`].
+    pub fn peaks(&self) -> (u32, u32) {
+        (
+            self.peak[0].load(AtomicOrdering::SeqCst),
+            self.peak[1].load(AtomicOrdering::SeqCst),
+        )
+    }
+
+    pub fn enter(&self, heavy: bool) -> Option<ShJoinProbeGuard<'_>> {
+        if !self.armed.load(AtomicOrdering::SeqCst) {
+            return None;
+        }
+        let kind = usize::from(heavy);
+        self.entered[kind].fetch_add(1, AtomicOrdering::SeqCst);
+        let now = self.running[kind].fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        self.peak[kind].fetch_max(now, AtomicOrdering::SeqCst);
+        let until = std::time::Instant::now() + SH_JOIN_PROBE_WAIT;
+        while self.peak[kind].load(AtomicOrdering::SeqCst) < 2 && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Some(ShJoinProbeGuard { probe: self, kind })
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for ShJoinProbeGuard<'_> {
+    fn drop(&mut self) {
+        self.probe.running[self.kind].fetch_sub(1, AtomicOrdering::SeqCst);
     }
 }

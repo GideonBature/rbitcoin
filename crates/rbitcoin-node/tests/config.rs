@@ -319,6 +319,13 @@ fn max_sh_creates_and_esplora_block_template_apply_kv() {
     );
     assert_eq!(c.sptweaks_dust, 546);
     assert_eq!(c.max_sh_creates, 100);
+    assert_eq!(
+        c.apply_kv("heavy_sh_creates", "250").unwrap(),
+        ConfApply::Applied
+    );
+    assert_eq!(c.heavy_sh_creates, 250);
+    let bad = c.apply_kv("heavy_sh_creates", "nope").unwrap_err();
+    assert!(format!("{bad}").contains("heavy_sh_creates"), "{bad}");
     let bad = c.apply_kv("max_sh_creates", "nope").unwrap_err();
     assert!(
         format!("{bad}").contains("max_sh_creates"),

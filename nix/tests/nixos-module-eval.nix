@@ -70,6 +70,7 @@ let
           };
           health.enable = true;
           metrics = true;
+          heavyShCreates = 20000;
           sv2.tp = {
             enable = true;
             port = 18447;
@@ -104,6 +105,7 @@ let
           enable = true;
           package = fakePackage;
           electrum.maxSubs = 25000;
+          heavyShCreates = 0;
           p2p = {
             listen = false;
             maxInbound = 0;
@@ -267,6 +269,7 @@ assert defaultCfg.tor.control == null;
 assert defaultCfg.tor.controlCookie == null;
 assert defaultCfg.electrum.hiddenService == false;
 assert defaultCfg.electrum.maxSubs == null;
+assert defaultCfg.heavyShCreates == null;
 assert defaultCfg.esplora.hiddenService == false;
 assert defaultCfg.i2p.sam == null;
 assert defaultCfg.i2p.acceptIncoming == false;
@@ -371,6 +374,11 @@ assert cfg.systemd.tmpfiles.settings."10-rbitcoin"."/run/rbitcoin".d.mode == "07
 assert builtins.match ".*--electrum-listen 127.0.0.1:50001.*" execStart != null;
 assert builtins.match ".*--electrum-max-subs 25000.*" execStart != null;
 assert builtins.match ".*--electrum-max-subs.*" listenOffExec == null;
+assert builtins.match ".*--heavy-sh-creates 20000.*" execStart != null;
+assert builtins.match ".*--heavy-sh-creates 0.*" listenOffExec != null;
+assert builtins.match ".*--heavy-sh-creates.*" (
+  defaultSystem.config.systemd.services.rbitcoin.serviceConfig.ExecStart
+) == null;
 assert builtins.match ".*--esplora-listen 127.0.0.1:3000.*" execStart != null;
 assert builtins.match ".*--esplora-onion.*" execStart != null;
 assert builtins.match ".*--sh-index.*" execStart != null;

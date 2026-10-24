@@ -460,7 +460,7 @@ fn assert_wallets_read(server: &str) {
     );
 }
 
-async fn electrum_tcp_batch(stream: &mut TcpStream, items: &[Value]) -> Value {
+pub(crate) async fn electrum_tcp_batch(stream: &mut TcpStream, items: &[Value]) -> Value {
     let mut line = serde_json::to_string(items).unwrap();
     line.push('\n');
     stream.write_all(line.as_bytes()).await.unwrap();
@@ -630,6 +630,271 @@ async fn batch_line_answers_every_item_in_one_array() {
     );
 
     handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(debug_assertions)]
+fn get_balance(id: usize) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":"blockchain.scripthash.get_balance",
+           "params":[format!("{id:064x}")]})
+}
+
+#[cfg(debug_assertions)]
+fn spawned(trace: &[BatchStep]) -> Vec<usize> {
+    trace
+        .iter()
+        .filter_map(|s| match s {
+            BatchStep::Spawn(i) => Some(*i),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(debug_assertions)]
+fn written(trace: &[BatchStep]) -> Vec<usize> {
+    trace
+        .iter()
+        .filter_map(|s| match s {
+            BatchStep::Write(i) => Some(*i),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(debug_assertions)]
+fn at(trace: &[BatchStep], step: BatchStep) -> usize {
+    trace
+        .iter()
+        .position(|s| *s == step)
+        .unwrap_or_else(|| panic!("{step:?} missing from {trace:?}"))
+}
+
+#[test]
+fn batch_window_is_half_the_blocking_pool() {
+    assert_eq!(batch_window(1), 1);
+    assert_eq!(batch_window(MIN_BLOCKING_POOL), 2);
+    assert_eq!(batch_window(12), 6);
+    let params = ChainParams::regtest();
+    let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    assert_eq!(cfg.batch_window, 2, "the smallest pool the node builds");
+}
+
+/// Read-only batch items run up to the configured window at a time and land
+/// in request order. A subscribe waits for every earlier read to be written,
+/// runs alone, and later items see what it did. The connection task runs on
+/// this thread (current-thread runtime), so the armed trace sees its steps.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn batch_reads_overlap_and_land_in_request_order() {
+    for window in [1, 2, 4] {
+        reads_overlap_in_window(window).await;
+    }
+}
+
+#[cfg(debug_assertions)]
+#[allow(clippy::cognitive_complexity)] // one batch, every scheduling rule
+async fn reads_overlap_in_window(window: usize) {
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let (tip_tx, _) = broadcast::channel(4);
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.batch_window = window;
+    let handle = run_electrum(cfg, Arc::new(q), params, tip_tx, None)
+        .await
+        .expect("listen");
+    let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
+
+    let watched = format!("{:064x}", 0xabc);
+    let mut items: Vec<Value> = (0..6).map(get_balance).collect();
+    items.push(json!({"jsonrpc":"2.0","id":6,"method":"blockchain.scripthash.subscribe","params":[watched]}));
+    items.extend((7..10).map(get_balance));
+    items.push(json!({"jsonrpc":"2.0","id":10,"method":"blockchain.scripthash.unsubscribe","params":[watched]}));
+    items.push(
+        json!({"jsonrpc":"2.0","method":"blockchain.scripthash.get_balance","params":[watched]}),
+    );
+    items.push(json!(12));
+
+    batch_trace_arm();
+    let reply = electrum_tcp_batch(&mut stream, &items).await;
+    let trace = batch_trace_snapshot();
+    batch_trace_clear();
+
+    let ids: Vec<Value> = reply
+        .as_array()
+        .expect("one array line")
+        .iter()
+        .map(|v| v["id"].clone())
+        .collect();
+    let mut want: Vec<Value> = (0..=10).map(|i| json!(i)).collect();
+    want.push(Value::Null);
+    assert_eq!(ids, want, "{reply}");
+    assert_eq!(
+        reply[10]["result"],
+        json!(true),
+        "the subscribe ran before the unsubscribe: {reply}"
+    );
+
+    assert_eq!(written(&trace), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]);
+    assert_eq!(spawned(&trace), [0, 1, 2, 3, 4, 5, 7, 8, 9], "{trace:?}");
+    let mut open = 0usize;
+    let mut peak = 0usize;
+    for step in &trace {
+        match step {
+            BatchStep::Spawn(_) => open += 1,
+            BatchStep::Write(i) if spawned(&trace).contains(i) => open -= 1,
+            _ => {}
+        }
+        peak = peak.max(open);
+    }
+    assert_eq!(peak, window, "{trace:?}");
+    assert_eq!(
+        at(&trace, BatchStep::Spawn(1)) < at(&trace, BatchStep::Write(0)),
+        window > 1,
+        "reads overlap only in a window above one: {trace:?}"
+    );
+    for barrier in [6, 10] {
+        assert!(
+            at(&trace, BatchStep::Write(barrier - 1)) < at(&trace, BatchStep::Serial(barrier)),
+            "{barrier} waits for earlier reads: {trace:?}"
+        );
+    }
+    assert!(
+        at(&trace, BatchStep::Write(6)) < at(&trace, BatchStep::Spawn(7)),
+        "reads after a subscribe start after it: {trace:?}"
+    );
+
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A client that stops reading stops the batch: the server writes slot i
+/// before it starts read i + window.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn stalled_batch_reader_holds_reads_to_the_window() {
+    for window in [1, 3] {
+        stalled_reader_in_window(window).await;
+    }
+}
+
+#[cfg(debug_assertions)]
+async fn stalled_reader_in_window(window: usize) {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    struct OnceRead(Vec<u8>);
+    impl AsyncRead for OnceRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if this.0.is_empty() {
+                return Poll::Pending;
+            }
+            let n = this.0.len().min(buf.remaining());
+            buf.put_slice(&this.0[..n]);
+            this.0.drain(..n);
+            Poll::Ready(Ok(()))
+        }
+    }
+    /// Takes the first write, then never another.
+    struct OneWrite {
+        took: bool,
+        stalled: Arc<AtomicBool>,
+    }
+    impl AsyncWrite for OneWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let this = self.get_mut();
+            if this.took {
+                this.stalled.store(true, Ordering::SeqCst);
+                return Poll::Pending;
+            }
+            this.took = true;
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    struct Duplex(OnceRead, OneWrite);
+    impl AsyncRead for Duplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for Duplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.get_mut().1).poll_write(cx, buf)
+        }
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().1).poll_flush(cx)
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().1).poll_shutdown(cx)
+        }
+    }
+
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let mut cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+    cfg.batch_window = window;
+    let items: Vec<Value> = (0..20).map(get_balance).collect();
+    let mut line = serde_json::to_vec(&items).unwrap();
+    line.push(b'\n');
+    let stalled = Arc::new(AtomicBool::new(false));
+    let (_tip_tx, tip_rx) = broadcast::channel(1);
+    batch_trace_arm();
+    let task = tokio::spawn(handle_client(
+        Duplex(
+            OnceRead(line),
+            OneWrite {
+                took: false,
+                stalled: Arc::clone(&stalled),
+            },
+        ),
+        "127.0.0.1:9".parse().unwrap(),
+        Arc::new(q),
+        Arc::new(cfg),
+        Arc::new(params),
+        tip_rx,
+        None,
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !stalled.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "the second slot was never written"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let trace = batch_trace_snapshot();
+    batch_trace_clear();
+    task.abort();
+    assert_eq!(written(&trace), [0, 1], "{trace:?}");
+    assert_eq!(
+        spawned(&trace),
+        (0..=window).collect::<Vec<_>>(),
+        "slot 0 is written before read {window} starts, and slot 1 blocks the rest: {trace:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

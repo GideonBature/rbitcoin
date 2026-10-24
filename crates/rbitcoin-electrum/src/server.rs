@@ -13,7 +13,7 @@ use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::{ChainView, ChainViewKind, HistoryFilter, Query, ShJoinSlot};
 use rbitcoin_store::StoreError;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -144,6 +144,9 @@ pub struct ElectrumConfig {
     pub tweaks_min_dust: u64,
     /// Tor v3 hostname + TCP port for `server.features.hosts` (empty until set).
     pub onion_tcp: Arc<OnceLock<(String, u16)>>,
+    /// Read-only batch items one connection may have in flight
+    /// ([`batch_window`]). The node sets it from its blocking pool.
+    pub batch_window: usize,
 }
 
 impl ElectrumConfig {
@@ -160,6 +163,7 @@ impl ElectrumConfig {
             max_broadcast_hex: DEFAULT_MAX_BROADCAST_HEX,
             tweaks_min_dust: crate::tweaks::DEFAULT_TWEAKS_MIN_DUST,
             onion_tcp: Arc::new(OnceLock::new()),
+            batch_window: batch_window(MIN_BLOCKING_POOL),
         }
     }
 
@@ -677,6 +681,64 @@ where
     Ok(())
 }
 
+/// Smallest blocking pool the node builds (`max(cores, 4)` threads).
+pub const MIN_BLOCKING_POOL: usize = 4;
+
+/// Read-only batch items one connection may have in flight for a blocking
+/// pool of `blocking_pool` threads: half of it, at least one. Each item holds
+/// a thread while it runs and its reply until written. Block decode, compact
+/// reconstruct, header jobs and mempool accept share that pool
+/// (`docs/concurrency.md`), so one batch leaves them the other half.
+pub fn batch_window(blocking_pool: usize) -> usize {
+    (blocking_pool / 2).max(1)
+}
+
+/// One scheduling step of a batch, by item index. Recorded only for tests.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchStep {
+    Spawn(usize),
+    Serial(usize),
+    Write(usize),
+    /// Item and the wall time it reports to the API log and the meter.
+    Timed(usize, Duration),
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static BATCH_TRACE_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BATCH_TRACE: std::cell::RefCell<Vec<BatchStep>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn batch_mark(_step: BatchStep) {
+    #[cfg(debug_assertions)]
+    if BATCH_TRACE_ON.with(|on| on.get()) {
+        BATCH_TRACE.with(|trace| trace.borrow_mut().push(_step));
+    }
+}
+
+/// Start recording batch steps run on this thread, from an empty trace. A
+/// debug node schedules every batch through `batch_mark` and nothing reads
+/// the trace, so it records only after this call.
+#[cfg(debug_assertions)]
+pub fn batch_trace_arm() {
+    BATCH_TRACE.with(|trace| trace.borrow_mut().clear());
+    BATCH_TRACE_ON.with(|on| on.set(true));
+}
+
+/// Stop recording on this thread and drop what was recorded.
+#[cfg(debug_assertions)]
+pub fn batch_trace_clear() {
+    BATCH_TRACE_ON.with(|on| on.set(false));
+    BATCH_TRACE.with(|trace| trace.borrow_mut().clear());
+}
+
+#[cfg(debug_assertions)]
+pub fn batch_trace_snapshot() -> Vec<BatchStep> {
+    BATCH_TRACE.with(|trace| trace.borrow().clone())
+}
+
 /// The connection's fixed inputs to one request.
 struct RequestCtx<'a> {
     peer: SocketAddr,
@@ -705,11 +767,133 @@ fn invalid_request(id: Value, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id": id, "error": {"code": -32600, "message": message}})
 }
 
-/// JSON-RPC 2.0 batch, one array line on the wire. Each slot is written as
-/// soon as it is answered, so socket backpressure holds the connection to
-/// about one reply instead of the whole array. Items run in order because
-/// each moves `conn` in and out of the blocking pool. A batch of only
-/// notifications writes nothing.
+/// Methods a batch may answer out of turn. They read the store, the
+/// mempool, or the negotiated protocol and never change connection state.
+/// `sh_join` is only a cache of the last scripthash join, so an item that
+/// starts from an older copy recomputes; it does not answer differently.
+#[doc(hidden)]
+pub fn method_reads_only(method: &str) -> bool {
+    matches!(
+        method,
+        "blockchain.scripthash.get_history"
+            | "blockchain.scripthash.get_balance"
+            | "blockchain.scripthash.listunspent"
+            | "blockchain.scripthash.get_mempool"
+            | "blockchain.transaction.get"
+            | "blockchain.transaction.get_merkle"
+            | "blockchain.transaction.id_from_pos"
+            | "blockchain.block.header"
+            | "blockchain.block.headers"
+            | "blockchain.estimatefee"
+            | "blockchain.outpoint.get_status"
+            | "mempool.get_fee_histogram"
+            | "mempool.get_info"
+    )
+}
+
+/// One request as asked.
+struct Asked {
+    id: Value,
+    method: String,
+    params: Value,
+}
+
+impl Asked {
+    fn of(req: &Value) -> Self {
+        Self {
+            id: req.get("id").cloned().unwrap_or(Value::Null),
+            method: req
+                .get("method")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string(),
+            params: req.get("params").cloned().unwrap_or(json!([])),
+        }
+    }
+}
+
+/// How a batch takes up one item.
+enum BatchItem {
+    /// A notification (no `id` member, unlike `"id": null`). It is not run:
+    /// no reply means no slot write to hold back a client that stops
+    /// reading, and Electrum clients never send notifications.
+    Skip,
+    /// Answered without running anything.
+    Reply(Value),
+    /// [`method_reads_only`]: may run beside other reads.
+    Read(Asked),
+    /// Touches connection state: runs alone, after every earlier slot.
+    Serial,
+}
+
+fn batch_item(item: &Value) -> BatchItem {
+    let Some(obj) = item.as_object() else {
+        return BatchItem::Reply(invalid_request(Value::Null, "Invalid Request"));
+    };
+    let Some(id) = obj.get("id") else {
+        return BatchItem::Skip;
+    };
+    if request_stream(item).is_some() {
+        return BatchItem::Reply(invalid_request(
+            id.clone(),
+            "streaming method cannot be sent in a batch",
+        ));
+    }
+    let asked = Asked::of(item);
+    if method_reads_only(&asked.method) {
+        BatchItem::Read(asked)
+    } else {
+        BatchItem::Serial
+    }
+}
+
+/// The reply array, written slot by slot as one line.
+struct BatchOut<'w, W> {
+    writer: &'w mut W,
+    idle: Duration,
+    opened: bool,
+}
+
+impl<W: AsyncWrite + Unpin> BatchOut<'_, W> {
+    async fn slot(&mut self, index: usize, answer: &Value) -> Result<(), std::io::Error> {
+        batch_mark(BatchStep::Write(index));
+        let mut slot = vec![if self.opened { b',' } else { b'[' }];
+        slot.extend(serde_json::to_vec(answer).unwrap_or_else(|_| b"{}".to_vec()));
+        self.opened = true;
+        write_bytes_within(self.writer, &slot, self.idle).await
+    }
+
+    async fn close(self) -> Result<(), std::io::Error> {
+        if !self.opened {
+            return Ok(());
+        }
+        write_bytes_within(self.writer, b"]\n", self.idle).await
+    }
+}
+
+/// A dispatch result, the worker state it ran with, its chain view, and how
+/// long the dispatch itself took on the blocking thread.
+type Dispatched = (
+    Result<Value, String>,
+    ElectrumConn,
+    Option<ChainView>,
+    Duration,
+);
+
+/// A read running on the blocking pool, not yet written.
+struct InFlight {
+    index: usize,
+    asked: Asked,
+    task: JoinHandle<Dispatched>,
+}
+
+/// JSON-RPC 2.0 batch, one array line on the wire, slots in request order.
+/// Read-only items run up to [`ElectrumConfig::batch_window`] at once; slot
+/// `i` is written before read `i + window` starts, so a client that
+/// stops reading stops the work and the connection holds at most that many
+/// unwritten replies. Any other item waits until every earlier slot is
+/// written, then runs alone, so later items see what it did. A batch of
+/// only notifications writes nothing.
 async fn answer_batch<W: AsyncWrite + Unpin>(
     ctx: &RequestCtx<'_>,
     conn: &mut ElectrumConn,
@@ -729,44 +913,167 @@ async fn answer_batch<W: AsyncWrite + Unpin>(
         )
         .await;
     }
-    let mut opened = false;
-    for item in &items {
-        let Some(answer) = answer_batch_item(ctx, conn, last_sent, item).await? else {
-            continue;
+    let mut out = BatchOut {
+        writer,
+        idle,
+        opened: false,
+    };
+    let limit = ctx.config.batch_window.max(1);
+    let mut window: VecDeque<InFlight> = VecDeque::with_capacity(limit);
+    for (index, item) in items.iter().enumerate() {
+        let answer = match batch_item(item) {
+            BatchItem::Skip => continue,
+            BatchItem::Read(asked) => {
+                if window.len() >= limit {
+                    if let Some(oldest) = window.pop_front() {
+                        land(ctx, conn, last_sent, &mut out, oldest).await?;
+                    }
+                }
+                batch_mark(BatchStep::Spawn(index));
+                let task = spawn_dispatch(ctx, read_conn(conn, &asked.method), &asked);
+                window.push_back(InFlight { index, asked, task });
+                continue;
+            }
+            BatchItem::Reply(answer) => answer,
+            BatchItem::Serial => {
+                while let Some(oldest) = window.pop_front() {
+                    land(ctx, conn, last_sent, &mut out, oldest).await?;
+                }
+                batch_mark(BatchStep::Serial(index));
+                answer_one(ctx, conn, last_sent, item).await?
+            }
         };
-        let mut slot = vec![if opened { b',' } else { b'[' }];
-        slot.extend(serde_json::to_vec(&answer).unwrap_or_else(|_| b"{}".to_vec()));
-        opened = true;
-        write_bytes_within(writer, &slot, idle).await?;
+        while let Some(oldest) = window.pop_front() {
+            land(ctx, conn, last_sent, &mut out, oldest).await?;
+        }
+        out.slot(index, &answer).await?;
     }
-    if opened {
-        write_bytes_within(writer, b"]\n", idle).await?;
+    while let Some(oldest) = window.pop_front() {
+        land(ctx, conn, last_sent, &mut out, oldest).await?;
     }
-    Ok(())
+    out.close().await
 }
 
-/// `None` for a notification (no `id` member, unlike `"id": null`). It is
-/// not run: no reply means no slot write to hold back a client that stops
-/// reading, and Electrum clients never send notifications.
-async fn answer_batch_item(
+/// Methods that read and fill the connection's scripthash join cache.
+fn method_uses_sh_join(method: &str) -> bool {
+    matches!(
+        method,
+        "blockchain.scripthash.get_history"
+            | "blockchain.scripthash.get_balance"
+            | "blockchain.scripthash.listunspent"
+    )
+}
+
+/// The connection state a read needs: the negotiated protocol, and for a
+/// scripthash read the join cache itself, moved out so the read can fill
+/// it in place. A scripthash read that starts while another holds the
+/// cache gets none and joins afresh. Subscription sets stay with the
+/// connection.
+fn read_conn(conn: &mut ElectrumConn, method: &str) -> ElectrumConn {
+    ElectrumConn {
+        protocol: conn.protocol.clone(),
+        header_sub: conn.header_sub,
+        sh_subs: HashSet::new(),
+        sh_join: if method_uses_sh_join(method) {
+            conn.sh_join.take()
+        } else {
+            None
+        },
+        outpoint_subs: HashSet::new(),
+        sp_sub: None,
+        sp_scan_busy: conn.sp_scan_busy,
+    }
+}
+
+/// Wait for the oldest read and write its slot. A join cache the read hands
+/// back (the one it took, or one it built) becomes the connection's, so in
+/// request order the last scripthash read's join is kept, as when reads run
+/// one after another. A read that never held one leaves the cache alone.
+async fn land<W: AsyncWrite + Unpin>(
     ctx: &RequestCtx<'_>,
     conn: &mut ElectrumConn,
     last_sent: &mut HashMap<[u8; 32], String>,
-    item: &Value,
-) -> Result<Option<Value>, std::io::Error> {
-    let Some(obj) = item.as_object() else {
-        return Ok(Some(invalid_request(Value::Null, "Invalid Request")));
-    };
-    let Some(id) = obj.get("id") else {
-        return Ok(None);
-    };
-    if request_stream(item).is_some() {
-        return Ok(Some(invalid_request(
-            id.clone(),
-            "streaming method cannot be sent in a batch",
-        )));
+    out: &mut BatchOut<'_, W>,
+    flight: InFlight,
+) -> Result<(), std::io::Error> {
+    let (result, work, stamped, ran) = flight.task.await.map_err(dispatch_join_error)?;
+    if work.sh_join.is_some() {
+        conn.sh_join = work.sh_join;
     }
-    answer_one(ctx, conn, last_sent, item).await.map(Some)
+    batch_mark(BatchStep::Timed(flight.index, ran));
+    let answer = finish_reply(
+        ctx,
+        conn,
+        last_sent,
+        flight.asked,
+        result,
+        stamped,
+        Took::Ran(ran),
+    );
+    out.slot(flight.index, &answer).await
+}
+
+/// The wall time a reply reports. A single request counts from when it was
+/// taken up; a batch read counts only its own dispatch, not the window wait
+/// or the writes of earlier slots.
+enum Took {
+    Since(Instant),
+    Ran(Duration),
+}
+
+impl Took {
+    fn elapsed(&self) -> Duration {
+        match self {
+            Took::Since(t0) => t0.elapsed(),
+            Took::Ran(d) => *d,
+        }
+    }
+}
+
+fn dispatch_join_error(e: tokio::task::JoinError) -> std::io::Error {
+    std::io::Error::other(format!("electrum dispatch join: {e}"))
+}
+
+fn spawn_dispatch(
+    ctx: &RequestCtx<'_>,
+    work: ElectrumConn,
+    asked: &Asked,
+) -> JoinHandle<Dispatched> {
+    let q = Arc::clone(ctx.query);
+    let cfg = Arc::clone(ctx.config);
+    let p = Arc::clone(ctx.params);
+    let mp = ctx.mempool.clone();
+    let method = asked.method.clone();
+    let params = asked.params.clone();
+    tokio::task::spawn_blocking(move || {
+        let _g = BlockingRegion::enter();
+        let t0 = Instant::now();
+        let (r, work, view) =
+            dispatch_off_worker(&q, &cfg, &p, mp.as_deref(), &method, &params, work);
+        (r, work, view, t0.elapsed())
+    })
+}
+
+/// The blocking half of a request, run with `work` moved in and handed back.
+fn dispatch_off_worker(
+    q: &Query,
+    cfg: &ElectrumConfig,
+    p: &ChainParams,
+    mp: Option<&MempoolHub>,
+    method: &str,
+    params: &Value,
+    mut work: ElectrumConn,
+) -> (Result<Value, String>, ElectrumConn, Option<ChainView>) {
+    if !method_stamps_chain_tip(method) {
+        let r = dispatch_pinned(method, params, q, cfg, p, mp, &mut work, None, false);
+        return (r, work, None);
+    }
+    let asof_ok = work.protocol.as_str() == PROTOCOL_ASOF;
+    let (r, view) =
+        electrum_at_chain_view(q, method, params, asof_ok, |q, params, view, is_asof| {
+            dispatch_pinned(method, params, q, cfg, p, mp, &mut work, view, is_asof)
+        });
+    (r, work, view)
 }
 
 /// One request/response method. `Err` is a dispatch task that died, which
@@ -777,101 +1084,77 @@ async fn answer_one(
     last_sent: &mut HashMap<[u8; 32], String>,
     req: &Value,
 ) -> Result<Value, std::io::Error> {
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-    let params_v = req.get("params").cloned().unwrap_or(json!([]));
+    let asked = Asked::of(req);
     let t0 = Instant::now();
-    let mut stamped: Option<ChainView> = None;
-    let result = if method_stays_on_worker(method) {
-        dispatch_with_join(
-            method,
-            &params_v,
+    if method_stays_on_worker(&asked.method) {
+        let result = dispatch_with_join(
+            &asked.method,
+            &asked.params,
             ctx.query,
             ctx.config,
             ctx.params,
             ctx.mempool.as_deref(),
             conn,
-        )
-    } else {
-        let q = Arc::clone(ctx.query);
-        let cfg = Arc::clone(ctx.config);
-        let p = Arc::clone(ctx.params);
-        let mp = ctx.mempool.clone();
-        let method_owned = method.to_string();
-        let params_owned = params_v.clone();
-        // Move the sub sets in and back (`*conn = work` below): a
-        // clone per request made a wallet's N-address sync O(N²).
-        // A JoinError ends the connection, so nothing reuses them.
-        let mut work = ElectrumConn {
-            protocol: conn.protocol.clone(),
-            header_sub: conn.header_sub,
-            sh_subs: std::mem::take(&mut conn.sh_subs),
-            sh_join: conn.sh_join.take(),
-            outpoint_subs: std::mem::take(&mut conn.outpoint_subs),
-            sp_sub: conn.sp_sub.clone(),
-            sp_scan_busy: conn.sp_scan_busy,
-        };
-        let stamp = method_stamps_chain_tip(&method_owned);
-        match tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            let asof_ok = work.protocol.as_str() == PROTOCOL_ASOF;
-            let (r, view) = if stamp {
-                electrum_at_chain_view(
-                    &q,
-                    &method_owned,
-                    &params_owned,
-                    asof_ok,
-                    |q, params, view, is_asof| {
-                        dispatch_pinned(
-                            &method_owned,
-                            params,
-                            q,
-                            &cfg,
-                            &p,
-                            mp.as_deref(),
-                            &mut work,
-                            view,
-                            is_asof,
-                        )
-                    },
-                )
-            } else {
-                (
-                    dispatch_pinned(
-                        &method_owned,
-                        &params_owned,
-                        &q,
-                        &cfg,
-                        &p,
-                        mp.as_deref(),
-                        &mut work,
-                        None,
-                        false,
-                    ),
-                    None,
-                )
-            };
-            (r, work, view)
-        })
-        .await
-        {
-            Ok((r, work, view)) => {
-                *conn = work;
-                stamped = view;
-                r
-            }
-            Err(e) => {
-                return Err(std::io::Error::other(format!(
-                    "electrum dispatch join: {e}"
-                )));
-            }
-        }
+        );
+        return Ok(finish_reply(
+            ctx,
+            conn,
+            last_sent,
+            asked,
+            result,
+            None,
+            Took::Since(t0),
+        ));
+    }
+    // Move the sub sets in and back (`*conn = work` below): a clone per
+    // request made a wallet's N-address sync O(N²). A JoinError ends the
+    // connection, so nothing reuses them.
+    let work = ElectrumConn {
+        protocol: conn.protocol.clone(),
+        header_sub: conn.header_sub,
+        sh_subs: std::mem::take(&mut conn.sh_subs),
+        sh_join: conn.sh_join.take(),
+        outpoint_subs: std::mem::take(&mut conn.outpoint_subs),
+        sp_sub: conn.sp_sub.clone(),
+        sp_scan_busy: conn.sp_scan_busy,
     };
+    let (result, work, stamped, _ran) = spawn_dispatch(ctx, work, &asked)
+        .await
+        .map_err(dispatch_join_error)?;
+    *conn = work;
+    Ok(finish_reply(
+        ctx,
+        conn,
+        last_sent,
+        asked,
+        result,
+        stamped,
+        Took::Since(t0),
+    ))
+}
+
+/// Status bookkeeping, metering, the API log line, and the reply object.
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
+fn finish_reply(
+    ctx: &RequestCtx<'_>,
+    conn: &ElectrumConn,
+    last_sent: &mut HashMap<[u8; 32], String>,
+    asked: Asked,
+    result: Result<Value, String>,
+    stamped: Option<ChainView>,
+    took: Took,
+) -> Value {
+    let Asked {
+        id,
+        method,
+        params: params_v,
+    } = asked;
+    let method = method.as_str();
     drop_unsubscribed_status(last_sent, &conn.sh_subs);
-    let wall_ms = t0.elapsed().as_millis() as u64;
-    meter_dispatch_wall(t0.elapsed().as_micros() as u64);
+    let wall_ms = took.elapsed().as_millis() as u64;
+    meter_dispatch_wall(took.elapsed().as_micros() as u64);
     let params_s = serde_json::to_string(&params_v).unwrap_or_else(|_| "[]".into());
-    Ok(match result {
+    match result {
         Ok(v) => {
             if method == "blockchain.scripthash.subscribe" {
                 if let Ok(sh) = param_scripthash(&params_v, 0) {
@@ -905,7 +1188,7 @@ async fn answer_one(
             );
             json!({"jsonrpc":"2.0","id": id, "error": {"code": 1, "message": e}})
         }
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
