@@ -363,6 +363,10 @@ fn decodescript_desc_matches_core() {
             format!("raw(41{hybrid}ac)#qhj9gd8d"),
         ),
         (
+            format!("4107{G_X}{G_Y}ac"),
+            format!("raw(4107{G_X}{G_Y}ac)#z2cdvzds"),
+        ),
+        (
             format!("52{push_key}2103{G_X}52ae"),
             format!("multi(2,{key},03{G_X})#lex50jse"),
         ),
@@ -454,8 +458,6 @@ fn decodescript_witness_program_type_matches_core() {
 
 #[test]
 fn decodescript_pubkey_type_matches_core() {
-    const G_X: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-    const G_Y: &str = "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8";
     let ff = "ff".repeat(32);
     let rows: Vec<(String, &str)> = vec![
         (format!("2102{G_X}ac"), "pubkey"),
