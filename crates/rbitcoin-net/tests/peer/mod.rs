@@ -3474,6 +3474,8 @@ fn outbound_write_batch_sends_getdata_before_headers() {
     assert_eq!(batch.len(), 4);
 }
 
+// `tcp_has_peer_fin` needs POLLRDHUP; off Linux it always reports no FIN.
+#[cfg(target_os = "linux")]
 #[test]
 fn snapshot_omits_peer_after_tcp_fin() {
     use bitcoin::p2p::address::Address;
