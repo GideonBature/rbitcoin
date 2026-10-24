@@ -157,13 +157,17 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
         assert_eq!(row["spent"], spent, "{row}");
     }
 
-    // Height 2 spends one P2TR output. Height 1 spends only the OP_TRUE
-    // coinbase output, which is not P2TR.
-    let mut pre = Vec::new();
-    pre.extend_from_slice(&elig_txid);
-    pre.extend_from_slice(&1u32.to_le_bytes());
-    pre.extend_from_slice(&h2.hash);
-    let short = &sha256::Hash::hash(&pre).to_byte_array()[..8];
+    // Every spent outpoint is hashed: no parent is read, so a spend's script
+    // is unknown. Height 2 spends the P2TR output; height 1 spends the OP_TRUE
+    // coinbase output.
+    let short_of = |txid: &[u8; 32], vout: u32, block: &[u8; 32]| {
+        let mut pre = Vec::new();
+        pre.extend_from_slice(txid);
+        pre.extend_from_slice(&vout.to_le_bytes());
+        pre.extend_from_slice(block);
+        sha256::Hash::hash(&pre).to_byte_array()[..8].to_vec()
+    };
+    let short = &short_of(&elig_txid, 1, &h2.hash)[..];
     assert_eq!(
         get_json("/spent-index/2").await,
         json!({
@@ -173,7 +177,14 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
     );
     assert_eq!(
         get_json("/spent-index/1").await,
-        json!({ "block_hash": block_hash_hex(&h1.hash), "data": [] }),
+        json!({
+            "block_hash": block_hash_hex(&h1.hash),
+            "data": [rbitcoin_primitives::hex_encode(short_of(&cb0_txid, 0, &h1.hash))],
+        })
+    );
+    assert_eq!(
+        get_json("/spent-index/0").await,
+        json!({ "block_hash": block_hash_hex(&h0.hash), "data": [] }),
         "an empty index is still an object"
     );
 
@@ -227,6 +238,15 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
     let txid: String = serde_json::from_str(&resp).unwrap();
     assert_eq!(txid, fwd.compute_txid().to_string());
     assert!(hub.contains(&fwd.compute_txid()));
+    // A consensus-valid conflict without the RBF fee: the mempool refuses it.
+    let mut low = fwd.clone();
+    low.output[0].value = bitcoin::Amount::from_sat(99_500);
+    let low_body = json!({ "data": bitcoin::consensus::encode::serialize_hex(&low) }).to_string();
+    let (st, resp) = http_post(addr, "/blindbit/v1/forward-tx", low_body.as_bytes()).await;
+    assert_eq!(st, 400, "{resp}");
+    assert!(serde_json::from_str::<Value>(&resp).unwrap()["error"].is_string(), "{resp}");
+    assert!(!hub.contains(&low.compute_txid()));
+    assert!(hub.contains(&fwd.compute_txid()));
     for bad in [&b"not json"[..], br#"{"data":"zz"}"#, br#"{"data":"00"}"#] {
         let (st, resp) = http_post(addr, "/blindbit/v1/forward-tx", bad).await;
         assert_eq!(st, 400, "{resp}");
@@ -246,11 +266,11 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
         hash: rec.hash,
         time: rec.timestamp,
     };
-    assert!(block_sp_elements(&q, &served).is_ok());
+    assert!(block_sp_elements(&q, &served, true, true).is_ok());
     assert!(thin_rows(&q, &served, false).is_ok());
     q.disconnect_tip().unwrap();
     assert!(
-        matches!(block_sp_elements(&q, &served), Err(rbitcoin_store::StoreError::Stale(m)) if m == CHAIN_MOVED),
+        matches!(block_sp_elements(&q, &served, true, true), Err(rbitcoin_store::StoreError::Stale(m)) if m == CHAIN_MOVED),
         "a disconnected height is a moved view, not a 500"
     );
     let status = thin_rows(&q, &served, false).err().map(|r| r.status());
@@ -273,7 +293,7 @@ async fn blindbit_v1_routes_serve_the_thin_tweak_index() {
     q.put_sp_tweaks_block(Height(2), other_fk, &[None]).unwrap();
     for moved in [
         still_confirmed(&q, &served).err(),
-        block_sp_elements(&q, &served).err(),
+        block_sp_elements(&q, &served, true, true).err(),
     ] {
         assert!(
             matches!(moved, Some(rbitcoin_store::StoreError::Stale(m)) if m == CHAIN_MOVED),
@@ -300,19 +320,114 @@ async fn blindbit_v1_routes_need_the_tweak_index() {
     assert_eq!(st, 200, "the rest of the listener is unchanged");
 }
 
-/// One semaphore bounds every `/blindbit/v1/` route. Held asks fill it; the
-/// next BlindBit ask waits while the rest of the listener still answers,
-/// and runs once a slot frees.
+/// Before the index has a height, and below its origin. Origin 2: block 1
+/// spends a coinbase output and creates a P2TR output, neither of which can
+/// be a silent payment. The index then reaches height 2 while the tip is 3.
+#[tokio::test(flavor = "current_thread")]
+async fn blindbit_v1_routes_before_and_below_the_index() {
+    use std::str::FromStr;
+
+    let (_dir, q) = temp_query("blindbit-v1-origin");
+    q.set_sptweaks_enabled(true, Height(2)).unwrap();
+    let q = Arc::new(q);
+    let (h0, cb0) = coinbase(0, Fk::NULL, None);
+    let cb0_txid = cb0.tx.txid;
+    let fk0 = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
+    let cb0_fk = q.block_tx_fks(Height(0)).unwrap()[0];
+    let key = [0x44u8; 32];
+    let mut script = vec![0x51, 0x20];
+    script.extend_from_slice(&key);
+    let (h1, cb1) = coinbase(1, fk0, Some(h0.hash));
+    let mut txid = [0u8; 32];
+    txid[0] = 0x71;
+    let tx = TxApply {
+        tx: TxRecord {
+            txid,
+            version: 2,
+            locktime: 0,
+            input_count: 1,
+            output_count: 1,
+        },
+        inputs: vec![InputRecord {
+            prev_txid: cb0_txid,
+            parent: rbitcoin_store::InputParent::Prevout {
+                create_fk: cb0_fk,
+                vout: 0,
+            },
+            sequence: u32::MAX,
+            script_sig: vec![],
+            witness: vec![vec![0u8; 64]],
+        }],
+        outputs: vec![OutputRecord::unspent(5_000, script)],
+    };
+    let fk1 = q.connect_block(Height(1), &h1, &[cb1, tx]).unwrap();
+    let (h2, cb2) = coinbase(2, fk1, Some(h1.hash));
+    let fk2 = q.connect_block(Height(2), &h2, &[cb2]).unwrap();
+    let (h3, cb3) = coinbase(3, fk2, Some(h2.hash));
+    q.connect_block(Height(3), &h3, &[cb3]).unwrap();
+
+    let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    let handle = run_esplora(cfg, Arc::clone(&q), None)
+        .await
+        .expect("listen");
+    let addr = handle.local_addr;
+    let get = |path: &str| {
+        let path = format!("/blindbit/v1{path}");
+        async move { http_get(addr, &path).await }
+    };
+
+    // Nothing indexed: no height, not genesis.
+    for path in ["/info", "/block-height"] {
+        let (st, body) = get(path).await;
+        assert_eq!(st, 503, "{path}: {body}");
+        let err: Value = serde_json::from_str(&body).unwrap();
+        assert!(err["error"].is_string(), "{body}");
+    }
+    assert_eq!(get("/block-hash/0").await.0, 404);
+
+    q.put_sp_tweaks_block(Height(2), fk2, &[None]).unwrap();
+    let (st, body) = get("/info").await;
+    assert_eq!(st, 200, "{body}");
+    let info: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(info["height"], 2, "the index, not the tip at 3");
+    assert_eq!(get("/block-hash/3").await.0, 404, "past the index");
+    assert_eq!(get("/filter/spent/3").await.0, 404);
+
+    // Below the origin: tweaks are not indexed, filters and the spent index
+    // are empty though block 1 has a spend and a P2TR output.
+    assert_eq!(get("/tweak-index/1").await.0, 404);
+    let (st, body) = get("/spent-index/1").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({ "block_hash": block_hash_hex(&h1.hash), "data": [] })
+    );
+    let (st, body) = get("/filter/new-utxos/1").await;
+    assert_eq!(st, 200, "{body}");
+    let filter: Value = serde_json::from_str(&body).unwrap();
+    let hash = bitcoin::BlockHash::from_str(filter["block_hash"].as_str().unwrap()).unwrap();
+    let data = rbitcoin_primitives::hex_decode(filter["data"].as_str().unwrap()).unwrap();
+    assert!(!bitcoin::bip158::BlockFilter::new(&data)
+        .match_any(&hash, std::iter::once(&key[..]))
+        .unwrap());
+    handle.shutdown().await;
+}
+
+/// One semaphore bounds every `/blindbit/v1/` route, and it is taken before
+/// a listener slot: asks queued on it leave the listener's slots to the
+/// rest. Held asks fill it; the next one waits, and runs once a slot frees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blindbit_v1_routes_share_one_inflight_limit() {
-    use rbitcoin_esplora::blindbit::BLINDBIT_MAX_INFLIGHT;
-
+    const MAX: usize = 4;
     let (_dir, q) = temp_query("blindbit-v1-limit");
     q.set_sptweaks_enabled(true, Height(0)).unwrap();
     let (h0, cb0) = coinbase(0, Fk::NULL, None);
     let fk0 = q.connect_block(Height(0), &h0, &[cb0]).unwrap();
     q.put_sp_tweaks_block(Height(0), fk0, &[None]).unwrap();
-    let cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    let mut cfg = EsploraConfig::with_network("127.0.0.1:0".parse().unwrap(), Network::Regtest);
+    cfg.blindbit_max_inflight = MAX;
+    // One listener slot beyond what BlindBit can hold.
+    cfg.limits.max_connections = MAX + 1;
     let handle = run_esplora(cfg, Arc::new(q), None)
         .await
         .expect("listen");
@@ -320,35 +435,40 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
 
     // A forward-tx whose body never arrives holds its slot in the extractor.
     let mut held = Vec::new();
-    for _ in 0..BLINDBIT_MAX_INFLIGHT {
+    for _ in 0..MAX {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let req = "POST /blindbit/v1/forward-tx HTTP/1.1\r\nHost: 127.0.0.1\r\n\
                    Content-Type: application/json\r\nContent-Length: 64\r\n\r\n";
         stream.write_all(req.as_bytes()).await.unwrap();
         held.push(stream);
     }
-    let quick = Duration::from_millis(300);
-    let mut waited = false;
-    for _ in 0..50 {
-        if tokio::time::timeout(quick, http_get(addr, "/blindbit/v1/info"))
-            .await
-            .is_err()
-        {
-            waited = true;
+    // Asks queued on BlindBit; one must stay unanswered.
+    let mut queued = Vec::new();
+    for _ in 0..20 {
+        let ask = tokio::spawn(async move { http_get(addr, "/blindbit/v1/tweak-index/0").await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if ask.is_finished() {
+            continue;
+        }
+        queued.push(ask);
+        if queued.len() == 3 {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(waited, "a full BlindBit limit makes the next ask wait");
-    let (st, _) = tokio::time::timeout(quick, http_get(addr, "/blocks/tip/height"))
-        .await
-        .expect("the rest of the listener is not behind the BlindBit limit");
+    assert_eq!(queued.len(), 3, "a full BlindBit limit makes the next asks wait");
+    let (st, _) = tokio::time::timeout(
+        Duration::from_millis(1000),
+        http_get(addr, "/blocks/tip/height"),
+    )
+    .await
+    .expect("asks queued on BlindBit hold no listener slot");
     assert_eq!(st, 200);
-    let tweaks = tokio::spawn(async move { http_get(addr, "/blindbit/v1/tweak-index/0").await });
     drop(held.pop());
-    let (st, body) = tokio::time::timeout(Duration::from_secs(10), tweaks)
+    let (st, body) = tokio::time::timeout(Duration::from_secs(10), queued.remove(0))
         .await
-        .expect("a freed slot serves the waiting ask")
+        .expect("a freed slot serves the first waiting ask")
         .unwrap();
     assert_eq!(st, 200, "{body}");
+    drop(held);
+    handle.shutdown().await;
 }

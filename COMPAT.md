@@ -260,29 +260,37 @@ clients are Dana's [`spdk`](https://github.com/cygnet3/spdk)
 (`backends/blindbit-v1`), Bull Bitcoin mobile, and blindbitd. Point the client
 at `http://host:port/blindbit/v1`. Without `--sp-tweaks` the prefix is **404**.
 The served height is the lower of the tip and the tweak index's last height.
+Until the index passes its origin there is no served height: `info` and
+`block-height` are **503** `no height indexed`, and every height route is **404**.
 `tweaks`, `tweak-index` and `utxos` start at Taproot activation (the tweak
-index origin) and are **404** below it; `block-hash`, `filter/*` and `spent-index`
-answer any height up to the served height.
+index origin) and are **404** below it. `block-hash`, `filter/*` and `spent-index`
+answer any height up to the served height; below the origin both filters and
+the spent index are empty and read nothing, since no output there can be a
+silent payment.
 
 | Route | Notes |
 |-------|-------|
-| `GET /info` | `network` is the Core `-chain` name (`main`, `test`, `signet`, `regtest`); spdk rejects BlindBit's `testnet`. `height` is the served height. All three tweak modes are `true`; `tweaks_only` is `false`. |
+| `GET /info` | `network` is the Core `-chain` name (`main`, `test`, `signet`, `regtest`); spdk rejects BlindBit's `testnet`. `height` is the served height (**503** while there is none, never `0`). All three tweak modes are `true`; `tweaks_only` is `false`. |
 | `GET /block-height`, `GET /block-hash/:h` | `{"block_height"}`, `{"block_hash"}` (display hex). |
 | `GET /tweaks/:h?dustLimit=` | Cut-through: tweaks of eligible txs with a P2TR output not yet spent. `dustLimit` keeps a tx whose largest remaining P2TR output is `>= dustLimit` (BlindBit's edge; **not** `--sp-tweaks-dust`). |
 | `GET /tweak-index/:h?dustLimit=` | Every eligible tx; `dustLimit` over all its P2TR outputs. |
 | `GET /utxos/:h` | Every P2TR output of every eligible tx, with `spent`. BlindBit drops spent rows over time; spent rows stay here. |
-| `GET /filter/new-utxos/:h`, `GET /filter/spent/:h` | BIP158 GCS (P=19, M=784931, keyed by the block hash), `filter_type: 4`. New-utxos holds the x-only key of every P2TR output in the block. Spent holds the spent-index hashes. Built per request from the block and the parents it spends (no witnesses; txids only for P2TR-spent parents); nothing extra is stored. A key repeated in one block is written once (BlindBit writes it twice); membership is the same. |
-| `GET /spent-index/:h` | First 8 bytes of `sha256(txid ‖ vout_le ‖ block_hash)` (internal byte order) for every input whose prevout is P2TR. Always `{"block_hash","data"}`; BlindBit returns a bare `[]` when empty, which spdk cannot parse. |
+| `GET /filter/new-utxos/:h`, `GET /filter/spent/:h` | BIP158 GCS (P=19, M=784931, keyed by the block hash), `filter_type: 4`. New-utxos holds the x-only key of every P2TR output in the block. Spent holds the spent-index hashes. Built per request from the block's own txs: one `txout` span for the keys, and the input edges plus the txid sidefile for the spends. No parent tx and no witness is read, and nothing extra is stored. A key repeated in one block is written once (BlindBit writes it twice); membership is the same. |
+| `GET /spent-index/:h` | First 8 bytes of `sha256(txid ‖ vout_le ‖ block_hash)` (internal byte order) for every non-coinbase input. BlindBit hashes only P2TR prevouts; the input edge does not carry the parent's script, so every spend is hashed here. spdk tests its own outpoints for membership, which a superset answers the same way. Always `{"block_hash","data"}`; BlindBit returns a bare `[]` when empty, which spdk cannot parse. |
 | `POST /forward-tx` | `{"data":"<hex>"}` → mempool hub. The answer is the txid as a JSON string (spdk parses it; BlindBit sends an empty 200). Errors are `{"error"}` with **400**, or **503** without a hub. |
 
 A bad height is **400** `could not parse block height`; a height above the
-served height is **404** `height not indexed`. A reorg of that height between
+served height is **404** `height not indexed`. Store errors use the
+listener's statuses (**404** not found or pruned, **503** rejected or stale)
+with an `{"error"}` body. A reorg of that height between
 the reads one answer is built from is **503** `chain view moved`; ask again.
 Eligibility is BIP-352 as for `blockchain.tweaks.subscribe`.
 
-All `/blindbit/v1/` routes share one limit of **32** requests in flight. spdk
-keeps about 200 filter asks open per scan, so a rescan queues behind that
-limit instead of filling the listener.
+All `/blindbit/v1/` routes share one limit of requests in flight: half the
+node's blocking pool (`available_parallelism`, at least 4). It is taken
+before a listener slot, so the ~200 asks spdk keeps open per scan queue there
+without holding listener slots. A request keeps its permit until its read
+returns, even after a timeout or a client disconnect.
 
 ## No Esplora WebSocket
 

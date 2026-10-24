@@ -12,8 +12,9 @@
 
 use crate::handlers::spawn_join;
 use crate::server::{block_hash_hex, AppState};
-use axum::extract::{Path, Query as UrlQuery, State};
+use axum::extract::{Extension, Path, Query as UrlQuery, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -24,19 +25,56 @@ use rbitcoin_store::StoreError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use tower::limit::GlobalConcurrencyLimitLayer;
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Mount point of the v1 surface on the Esplora listener.
 pub const BLINDBIT_V1_PREFIX: &str = "/blindbit/v1";
 
-/// Requests in flight across every `/blindbit/v1/` route. spdk keeps about
-/// 200 filter asks open per scan, and each one reads a block and its parents.
-/// One semaphore for the whole prefix (axum layers each route separately,
-/// so a per-route limit would not bound a scan), so a rescan queues behind
-/// itself and leaves the rest of the listener alone.
-pub const BLINDBIT_MAX_INFLIGHT: usize = 32;
+/// Default for requests in flight across every `/blindbit/v1/` route: half
+/// the node's blocking pool (`available_parallelism`, at least 4), since each
+/// read runs there and keeps its permit until it returns. spdk keeps about
+/// 200 asks open per scan; they queue here, before they take a listener slot.
+pub fn default_max_inflight() -> usize {
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .max(4)
+        / 2
+}
 
-/// The v1 routes, nested under [`BLINDBIT_V1_PREFIX`].
+/// One permit of the `/blindbit/v1/` semaphore, carried by the request.
+/// Handlers move it into the blocking read, so a request that times out or
+/// whose client goes away still holds it until the read returns.
+#[derive(Clone)]
+pub struct BlindbitPermit(#[allow(dead_code)] Arc<OwnedSemaphorePermit>);
+
+/// Wait for a `/blindbit/v1/` permit. Mounted outside the listener's own
+/// limit, so a queued request does not hold a listener slot.
+pub async fn blindbit_permit_mw(
+    State(sem): State<Arc<Semaphore>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let Ok(permit) = sem.acquire_owned().await else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "shutting down");
+    };
+    req.extensions_mut()
+        .insert(BlindbitPermit(Arc::new(permit)));
+    next.run(req).await
+}
+
+/// [`spawn_join`] that holds `permit` until `f` returns.
+async fn held(permit: BlindbitPermit, f: impl FnOnce() -> Response + Send + 'static) -> Response {
+    spawn_join(move || {
+        let _permit = permit;
+        f()
+    })
+    .await
+}
+
+/// The v1 routes, nested under [`BLINDBIT_V1_PREFIX`]. Each needs a
+/// [`BlindbitPermit`] from [`blindbit_permit_mw`].
 pub fn blindbit_routes() -> Router<AppState> {
     Router::new().nest(
         BLINDBIT_V1_PREFIX,
@@ -50,8 +88,7 @@ pub fn blindbit_routes() -> Router<AppState> {
             .route("/spent-index/{height}", get(spent_index))
             .route("/filter/new-utxos/{height}", get(filter_new_utxos))
             .route("/filter/spent/{height}", get(filter_spent))
-            .route("/forward-tx", post(forward_tx))
-            .layer(GlobalConcurrencyLimitLayer::new(BLINDBIT_MAX_INFLIGHT)),
+            .route("/forward-tx", post(forward_tx)),
     )
 }
 
@@ -102,9 +139,15 @@ fn error(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+/// The listener's `store_err` statuses, with this surface's `{"error"}` body.
 fn store_error(e: QueryError) -> Response {
     match e {
-        StoreError::Stale(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
+        StoreError::NotFound => error(StatusCode::NOT_FOUND, "not found"),
+        StoreError::Pruned { .. } => error(StatusCode::NOT_FOUND, "pruned"),
+        StoreError::Stale(m) | StoreError::Rejected(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
+        e @ StoreError::ShCreatesCap { .. } => {
+            error(StatusCode::SERVICE_UNAVAILABLE, &e.to_string())
+        }
         e => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -183,11 +226,15 @@ pub fn thin_rows(
         cut_through,
     };
     // The plan reads `confirmed[h]` and the tweak row together under the
-    // `sp_tweaks` lock, so its header fk names the block the rows belong to.
-    // Checking `confirmed[h]` again afterwards would pass an A -> B -> A move.
+    // `sp_tweaks` lock, so its header fk names the block the rows belong to,
+    // and the txout join reads that header's own txs. A reorg that commits
+    // during the join is a moved view, not a 200 for a replaced height.
     match query.load_thin_tweaks_range_with_header(Height(block.height), limits) {
         Ok(mut batch) => match batch.pop() {
-            Some((_, fk, rows)) if fk == block.header_fk => Ok(rows),
+            Some((_, fk, rows)) if fk == block.header_fk => {
+                still_confirmed(query, block).map_err(store_error)?;
+                Ok(rows)
+            }
             Some(_) => Err(store_error(StoreError::Stale(CHAIN_MOVED))),
             None => {
                 // The replacement block may not be indexed yet.
@@ -199,12 +246,16 @@ pub fn thin_rows(
     }
 }
 
-pub async fn info(State(st): State<AppState>) -> Response {
-    spawn_join(move || {
+pub async fn info(State(st): State<AppState>, Extension(p): Extension<BlindbitPermit>) -> Response {
+    held(p, move || {
+        // spdk reads `height` as a block height, so 0 would be genesis.
+        let Some(height) = served_height(&st.query) else {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "no height indexed");
+        };
         Json(json!({
             // `spdk` parses this with `Network::from_core_arg`.
             "network": st.network.to_core_arg(),
-            "height": served_height(&st.query).unwrap_or(0),
+            "height": height,
             "tweaks_only": false,
             "tweaks_full_basic": true,
             "tweaks_full_with_dust_filter": true,
@@ -215,16 +266,23 @@ pub async fn info(State(st): State<AppState>) -> Response {
     .await
 }
 
-pub async fn block_height(State(st): State<AppState>) -> Response {
-    spawn_join(move || match served_height(&st.query) {
+pub async fn block_height(
+    State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
+) -> Response {
+    held(p, move || match served_height(&st.query) {
         Some(h) => Json(json!({ "block_height": h })).into_response(),
         None => error(StatusCode::SERVICE_UNAVAILABLE, "no height indexed"),
     })
     .await
 }
 
-pub async fn block_hash(State(st): State<AppState>, Path(raw): Path<String>) -> Response {
-    spawn_join(move || match served_block(&st.query, &raw) {
+pub async fn block_hash(
+    State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
+    Path(raw): Path<String>,
+) -> Response {
+    held(p, move || match served_block(&st.query, &raw) {
         Ok(b) => Json(json!({ "block_hash": block_hash_hex(&b.hash) })).into_response(),
         Err(r) => r,
     })
@@ -255,18 +313,20 @@ fn tweak_list(st: &AppState, raw: &str, dust: &DustParam, cut_through: bool) -> 
 
 pub async fn tweaks(
     State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
     Path(raw): Path<String>,
     UrlQuery(dust): UrlQuery<DustParam>,
 ) -> Response {
-    spawn_join(move || tweak_list(&st, &raw, &dust, true)).await
+    held(p, move || tweak_list(&st, &raw, &dust, true)).await
 }
 
 pub async fn tweak_index(
     State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
     Path(raw): Path<String>,
     UrlQuery(dust): UrlQuery<DustParam>,
 ) -> Response {
-    spawn_join(move || tweak_list(&st, &raw, &dust, false)).await
+    held(p, move || tweak_list(&st, &raw, &dust, false)).await
 }
 
 /// Every P2TR output of every eligible tx, with `spent` from the
@@ -311,72 +371,50 @@ fn utxos_json(st: &AppState, raw: &str) -> Response {
     Json(out).into_response()
 }
 
-pub async fn utxos(State(st): State<AppState>, Path(raw): Path<String>) -> Response {
-    spawn_join(move || utxos_json(&st, &raw)).await
+pub async fn utxos(
+    State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
+    Path(raw): Path<String>,
+) -> Response {
+    held(p, move || utxos_json(&st, &raw)).await
 }
 
 /// What the spdk scan reads from one block: the x-only key of every P2TR
-/// output, and the short hash of every input whose prevout is P2TR.
+/// output, and the short hash of every spent outpoint.
+#[derive(Default)]
 pub struct BlockSpElements {
     pub new_keys: Vec<[u8; 32]>,
     pub spent: Vec<[u8; 8]>,
 }
 
-/// One index-window read of `block`: its outputs, input edges, and every
-/// parent it spends. Bounded by the block, not the chain. The window is read
-/// through `block.header_fk`, so its contents match the hash that salts them.
-/// No witnesses are read; txids are read only for parents whose spent output
-/// is P2TR, in one page-grouped `txid.body` read.
+/// The filter elements of `block`, from its own txs only: one `txout` span
+/// for the keys, input edges and the txid sidefile for the spends. No
+/// parent txout is read, so a spend's script is unknown and every spent
+/// outpoint is hashed, not only P2TR ones as BlindBit does. spdk tests its
+/// own outpoints for membership, which a superset still answers. Below the
+/// tweak index origin (Taproot activation on mainnet) no output can be a
+/// silent payment, so both sets are empty and nothing is read.
 pub fn block_sp_elements(
     query: &Query,
     block: &ServedBlock,
+    keys: bool,
+    spent: bool,
 ) -> Result<BlockSpElements, QueryError> {
-    let h = block.height;
-    let heights = match query.index_heights(h, h, None) {
-        Ok(heights) => heights,
-        // A height disconnected since `block` was read is a moved view.
-        Err(e) => {
-            still_confirmed(query, block)?;
-            return Err(e);
-        }
-    };
-    if heights.first().map(|x| x.header_fk) != Some(block.header_fk) {
-        return Err(StoreError::Stale(CHAIN_MOVED));
+    if block.height < query.sptweaks_origin().0 {
+        return Ok(BlockSpElements::default());
     }
-    let window = query.read_index_window(&heights)?;
-    let mut new_keys = Vec::new();
-    let mut spent_edges = Vec::new();
-    for b in &window.blocks {
-        for o in b.txs.iter().flat_map(|t| t.outs.iter()) {
-            if is_p2tr(&o.script) {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&o.script[2..]);
-                new_keys.push(key);
-            }
-        }
-        for e in b.edges.iter().flatten().filter(|e| !e.parent.is_null()) {
-            let prev = window
-                .prevout(e.parent, e.vout)
-                .ok_or(StoreError::Corrupt("invariant: blindbit prevout missing"))?;
-            if is_p2tr(&prev.script) {
-                spent_edges.push((e.parent, e.vout));
-            }
-        }
-    }
-    let parents: Vec<Fk> = spent_edges.iter().map(|&(fk, _)| fk).collect();
-    let txids = query.store().txids_get_many(&parents)?;
-    let mut spent = Vec::with_capacity(spent_edges.len());
-    for ((_, vout), txid) in spent_edges.into_iter().zip(txids) {
-        let txid = txid.ok_or(StoreError::Corrupt(
-            "invariant: blindbit parent txid missing",
-        ))?;
-        spent.push(spent_short_hash(&txid, vout, &block.hash));
-    }
-    Ok(BlockSpElements { new_keys, spent })
-}
-
-fn is_p2tr(script: &[u8]) -> bool {
-    rbitcoin_store::scripthash::is_p2tr(script)
+    // Read through the header, so the elements belong to the hash that salts
+    // them; then a moved view is 503, never the other block's data.
+    let read = query.block_sp_outpoints(block.header_fk, keys, spent)?;
+    still_confirmed(query, block)?;
+    Ok(BlockSpElements {
+        new_keys: read.p2tr_keys,
+        spent: read
+            .spent
+            .iter()
+            .map(|(txid, vout)| spent_short_hash(txid, *vout, &block.hash))
+            .collect(),
+    })
 }
 
 /// BIP158 GCS (P=19, M=784931) keyed by the block hash, as BlindBit v1
@@ -390,14 +428,19 @@ pub fn sp_filter_bytes<'a>(
 }
 
 #[allow(clippy::result_large_err)] // axum Response, as in handlers
-fn sp_elements_at(st: &AppState, raw: &str) -> Result<(u32, [u8; 32], BlockSpElements), Response> {
+fn sp_elements_at(
+    st: &AppState,
+    raw: &str,
+    keys: bool,
+    spent: bool,
+) -> Result<(u32, [u8; 32], BlockSpElements), Response> {
     let block = served_block(&st.query, raw)?;
-    let elements = block_sp_elements(&st.query, &block).map_err(store_error)?;
+    let elements = block_sp_elements(&st.query, &block, keys, spent).map_err(store_error)?;
     Ok((block.height, block.hash, elements))
 }
 
 fn spent_index_json(st: &AppState, raw: &str) -> Response {
-    let (_, hash, elements) = match sp_elements_at(st, raw) {
+    let (_, hash, elements) = match sp_elements_at(st, raw, false, true) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -409,15 +452,19 @@ fn spent_index_json(st: &AppState, raw: &str) -> Response {
     Json(json!({ "block_hash": block_hash_hex(&hash), "data": data })).into_response()
 }
 
-pub async fn spent_index(State(st): State<AppState>, Path(raw): Path<String>) -> Response {
-    spawn_join(move || spent_index_json(&st, &raw)).await
+pub async fn spent_index(
+    State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
+    Path(raw): Path<String>,
+) -> Response {
+    held(p, move || spent_index_json(&st, &raw)).await
 }
 
 /// BlindBit v1 `filter_type` for both filters.
 pub const SP_FILTER_TYPE: u8 = 4;
 
 fn filter_json(st: &AppState, raw: &str, spent: bool) -> Response {
-    let (h, hash, elements) = match sp_elements_at(st, raw) {
+    let (h, hash, elements) = match sp_elements_at(st, raw, !spent, spent) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -438,12 +485,20 @@ fn filter_json(st: &AppState, raw: &str, spent: bool) -> Response {
     }
 }
 
-pub async fn filter_new_utxos(State(st): State<AppState>, Path(raw): Path<String>) -> Response {
-    spawn_join(move || filter_json(&st, &raw, false)).await
+pub async fn filter_new_utxos(
+    State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
+    Path(raw): Path<String>,
+) -> Response {
+    held(p, move || filter_json(&st, &raw, false)).await
 }
 
-pub async fn filter_spent(State(st): State<AppState>, Path(raw): Path<String>) -> Response {
-    spawn_join(move || filter_json(&st, &raw, true)).await
+pub async fn filter_spent(
+    State(st): State<AppState>,
+    Extension(p): Extension<BlindbitPermit>,
+    Path(raw): Path<String>,
+) -> Response {
+    held(p, move || filter_json(&st, &raw, true)).await
 }
 
 #[derive(Deserialize)]
@@ -453,7 +508,12 @@ pub struct ForwardTx {
 
 /// Broadcast `{"data": "<hex>"}`. The answer is the txid as a JSON string:
 /// spdk parses the body as a `Txid`, so BlindBit's empty 200 reads as an error.
-pub async fn forward_tx(State(st): State<AppState>, body: axum::body::Bytes) -> Response {
+pub async fn forward_tx(
+    State(st): State<AppState>,
+    // Extracted before the body, which drops the request's extensions.
+    Extension(_permit): Extension<BlindbitPermit>,
+    body: axum::body::Bytes,
+) -> Response {
     let Some(mp) = st.mempool.clone() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "mempool not available");
     };

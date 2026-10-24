@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -357,6 +358,8 @@ pub struct EsploraConfig {
     pub network: Network,
     /// `None` → `GET /block-template` is 404 (default).
     pub block_template: Option<BlockTemplateFn>,
+    /// Requests in flight across `/blindbit/v1/` (>= 1), when mounted.
+    pub blindbit_max_inflight: usize,
 }
 
 impl EsploraConfig {
@@ -374,6 +377,7 @@ impl EsploraConfig {
             limits: ServeLimits::for_public_proxy(),
             network,
             block_template: None,
+            blindbit_max_inflight: crate::blindbit::default_max_inflight(),
         }
     }
 }
@@ -926,21 +930,15 @@ pub async fn run_esplora(
         .route("/mempool/txids", get(handlers::mempool_txids))
         .route("/mempool/recent", get(handlers::mempool_recent))
         .route("/fee-estimates", get(handlers::fee_estimates));
-    let rest = if state.query.sptweaks_enabled() {
-        rest.merge(crate::blindbit::blindbit_routes())
-    } else {
-        rest
-    };
     #[cfg(unix)]
     let rest = if matches!(config.listen, EsploraListen::Unix(_)) {
         rest.merge(internal_routes())
     } else {
         rest
     };
-    let rest = rest
-        .fallback(fallback_404)
-        // Outer → inner: concurrency → body → timeout → meter → chain-view stamp.
-        .layer(middleware::from_fn_with_state(
+    // Outer → inner: concurrency → body → timeout → meter → chain-view stamp.
+    let listener_layers = |r: Router<AppState>| {
+        r.layer(middleware::from_fn_with_state(
             state.clone(),
             stamp_chain_view_mw,
         ))
@@ -950,7 +948,27 @@ pub async fn run_esplora(
             timeout,
         ))
         .layer(RequestBodyLimitLayer::new(max_body))
-        .layer(ConcurrencyLimitLayer::new(max_conn));
+        .layer(ConcurrencyLimitLayer::new(max_conn))
+    };
+    let rest = listener_layers(rest.fallback(fallback_404));
+    // BlindBit takes its own permit first, under its own timeout, so a scan
+    // queued on it holds no listener slot. Merged after the listener layers,
+    // so they wrap these routes once.
+    let rest = if state.query.sptweaks_enabled() {
+        let sem = Arc::new(Semaphore::new(config.blindbit_max_inflight.max(1)));
+        let blindbit = listener_layers(crate::blindbit::blindbit_routes())
+            .layer(middleware::from_fn_with_state(
+                sem,
+                crate::blindbit::blindbit_permit_mw,
+            ))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                timeout,
+            ));
+        rest.merge(blindbit)
+    } else {
+        rest
+    };
 
     let app = rest
         .layer(middleware::from_fn(stamp_powered_by_mw))
