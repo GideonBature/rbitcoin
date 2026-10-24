@@ -35,6 +35,18 @@ from rpc_wallet import register_wallet
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
+def publish_cookie_file(path: Path, line: str) -> None:
+    """Publish `DIR/regtest/.cookie` so a reader never sees a torn line.
+
+    Core `get_auth_cookie` splits the file on `:` and indexes the password
+    with no retry. `Path.write_text` truncates first, so a concurrent read
+    is an empty string and the harness dies with IndexError.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(line)
+    tmp.chmod(0o600)
+    os.replace(tmp, path)
+
 
 def parse_kv(arg: str) -> tuple[str, str | None]:
     a = arg[1:] if arg.startswith("-") else arg
@@ -870,11 +882,11 @@ def main(argv: list[str] | None = None) -> int:
             if tok and tok != last:
                 line = f"__cookie__:{tok}\n"
                 try:
-                    cookie_path.write_text(line)
-                    cookie_path.chmod(0o600)
+                    publish_cookie_file(cookie_path, line)
                 except OSError:
                     pass
-                last = tok
+                else:
+                    last = tok
             time.sleep(0.05)
 
     mirror = threading.Thread(target=_mirror_cookie, daemon=True)

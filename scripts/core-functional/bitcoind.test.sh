@@ -714,6 +714,60 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# Concurrent readers must never observe a cookie line without ':'.
+# Path.write_text truncates first; Core get_auth_cookie then IndexErrors.
+COOKIE_RACE="$WORKDIR/cookie-race"
+mkdir -p "$COOKIE_RACE"
+if python3 - "$SHIM" "$COOKIE_RACE/.cookie" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+import threading
+from pathlib import Path
+
+shim, dest = sys.argv[1], Path(sys.argv[2])
+sys.path.insert(0, str(Path(shim).resolve().parent))
+loader = importlib.machinery.SourceFileLoader("cf_bitcoind", shim)
+spec = importlib.util.spec_from_loader("cf_bitcoind", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+bad = []
+stop = False
+
+def reader():
+    while not stop:
+        try:
+            text = dest.read_text()
+        except OSError:
+            continue
+        if ":" not in text:
+            bad.append(repr(text))
+            return
+
+threads = [threading.Thread(target=reader) for _ in range(4)]
+for t in threads:
+    t.start()
+for i in range(2000):
+    mod.publish_cookie_file(dest, f"__cookie__:tok{i}\n")
+stop = True
+for t in threads:
+    t.join()
+if bad:
+    print("torn", bad[:3])
+    sys.exit(1)
+text = dest.read_text()
+if text != "__cookie__:tok1999\n":
+    print("final", repr(text))
+    sys.exit(1)
+PY
+then
+  echo "ok - cookie publish is never a torn line"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - cookie publish is never a torn line"
+  FAIL=$((FAIL + 1))
+fi
+
 # Live smoke when a real node binary is on disk (optional in this script).
 REAL=""
 if [[ -n "${RBITCOIN_NODE_REAL:-}" && -x "${RBITCOIN_NODE_REAL}" ]]; then
