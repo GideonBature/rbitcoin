@@ -1,3 +1,4 @@
+use super::descriptor::infer_descriptor;
 use super::*;
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
 use bitcoin::hashes::Hash;
@@ -60,6 +61,7 @@ pub fn script_pubkey_json(script: &ScriptBuf, network: BtcNetwork) -> Value {
         "hex": rbitcoin_primitives::hex_encode(script.as_bytes() ),
         "asm": script.to_asm_string(),
         "type": script_core_type(script),
+        "desc": infer_descriptor(script, network),
     });
     if let Ok(addr) = Address::from_script(script, network) {
         if let Some(m) = obj.as_object_mut() {
