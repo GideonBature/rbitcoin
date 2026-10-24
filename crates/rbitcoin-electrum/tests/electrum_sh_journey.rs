@@ -572,3 +572,218 @@ pub async fn electrum_sh_join() {
     tip_push_two_clients_and_late(Arc::clone(&q), Some(hub)).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A spend stays unconfirmed for wallets until the visible scripthash height
+/// covers its block. A spend whose block that view already covers stays out.
+#[test]
+fn unconfirmed_until_sh_visible() {
+    const FEE_A: u64 = 1_000;
+    const FEE_B: u64 = 2_000;
+    const SUBSIDY: u64 = 50_0000_0000;
+
+    let (dir, q) = tmp_store();
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    accept_and_connect_block(&q, &params, Height::GENESIS, &genesis, Milestone::NONE).unwrap();
+    let maturity = params.coinbase_maturity();
+    let (mut tip, mut tip_time, cbs) = rbitcoin_query::pad_empty_from(
+        &q,
+        &params,
+        genesis.block_hash(),
+        genesis.header.time,
+        1,
+        maturity + 1,
+        2,
+    );
+    assert_eq!(q.tip_height(), Some(Height(maturity + 1)));
+    assert_eq!(q.sh_visible_through_height(), Some(maturity + 1));
+    assert!(q.enqueues_sh_writebehind());
+
+    let q = Arc::new(q);
+    let hub = MempoolHub::open(dir.join("mempool"), Arc::clone(&q)).unwrap();
+    hub.set_relay_enabled(true);
+    let spend_a = spend_coinbase(cbs[0], FEE_A);
+    let spend_b = spend_coinbase(cbs[1], FEE_B);
+    let id_a = spend_a.compute_txid().to_byte_array();
+    let id_b = spend_b.compute_txid().to_byte_array();
+    hub.accept_tx(&spend_a).expect("accept blink spend");
+    hub.accept_tx(&spend_b).expect("accept covered spend");
+
+    let sh = rbitcoin_store::script_hash(&[0x51]);
+    let sh_hex = electrum_scripthash_hex(&[0x51]);
+    let hex_a = rbitcoin_primitives::display_hash_hex(id_a);
+    let hex_b = rbitcoin_primitives::display_hash_hex(id_b);
+    let hist_n = |txid: [u8; 32]| {
+        q.scripthash_history(&sh)
+            .unwrap()
+            .iter()
+            .filter(|row| row.txid == txid)
+            .count()
+    };
+    let wallet = |hub: &MempoolHub| -> (i64, i64, Vec<String>, rbitcoin_electrum::MempoolShStats) {
+        let cfg = ElectrumConfig::for_params("127.0.0.1:0".parse().unwrap(), &params);
+        let mut header_sub = false;
+        let mut sh_subs = HashSet::new();
+        let bal = dispatch(
+            "blockchain.scripthash.get_balance",
+            &json!([sh_hex]),
+            &q,
+            &cfg,
+            &params,
+            Some(hub),
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        let rows = dispatch(
+            "blockchain.scripthash.get_mempool",
+            &json!([sh_hex]),
+            &q,
+            &cfg,
+            &params,
+            Some(hub),
+            &mut header_sub,
+            &mut sh_subs,
+        )
+        .unwrap();
+        let ids = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["tx_hash"].as_str().map(str::to_owned))
+            .collect();
+        let stats =
+            rbitcoin_electrum::scripthash_mempool_stats_slot(&q, hub, &sh, &mut None).unwrap();
+        (
+            bal["confirmed"].as_i64().unwrap(),
+            bal["unconfirmed"].as_i64().unwrap(),
+            ids,
+            stats,
+        )
+    };
+    let connect_spend =
+        |tip: bitcoin::BlockHash, tip_time: u32, height: u32, tx: Transaction, enqueue: bool| {
+            if !enqueue {
+                q.set_sh_index_enabled(false);
+            }
+            let block = rbitcoin_consensus::mine_regtest_paying(
+                tip,
+                tip_time + 600,
+                height,
+                ScriptBuf::from_bytes(vec![0x51]),
+                vec![tx],
+            );
+            accept_and_connect_block(&q, &params, Height(height), &block, Milestone::NONE).unwrap();
+            q.set_sh_index_enabled(true);
+            block
+        };
+
+    assert_eq!(
+        hub.scripthash_unconfirmed_delta(&sh).unwrap(),
+        -((FEE_A + FEE_B) as i64),
+        "both spends are still only in the mempool"
+    );
+
+    let height_b = maturity + 2;
+    let block_b = connect_spend(tip, tip_time, height_b, spend_b, true);
+    tip = block_b.block_hash();
+    tip_time = block_b.header.time;
+    assert_eq!(q.sh_visible_through_height(), Some(height_b));
+    assert_eq!(hist_n(id_b), 1, "covered spend is confirmed history once");
+    assert_eq!(hist_n(id_a), 0);
+    assert!(
+        hub.scripthash_mempool(&sh)
+            .iter()
+            .any(|row| row.txid == id_b),
+        "covered spend stays in the pool when connect does not strip"
+    );
+    let (confirmed_b, unconfirmed, mempool_ids, stats) = wallet(&hub);
+    assert_eq!(unconfirmed, -(FEE_A as i64), "{mempool_ids:?} {stats:?}");
+    assert!(mempool_ids.iter().any(|id| id == &hex_a), "{mempool_ids:?}");
+    assert!(
+        !mempool_ids.iter().any(|id| id == &hex_b),
+        "{mempool_ids:?}"
+    );
+    assert_eq!(stats.tx_count, 1);
+    assert_eq!(stats.funded_txo_sum, (SUBSIDY - FEE_A) as i64);
+
+    let height_a = maturity + 3;
+    let block_a = connect_spend(tip, tip_time, height_a, spend_a, false);
+    assert_eq!(q.tip_height(), Some(Height(height_a)));
+    assert!(q.tx_fk_by_txid_tip(&id_a).unwrap().is_some());
+    assert!(
+        q.sh_visible_through_height().unwrap() < height_a,
+        "address view has not reached the blink block"
+    );
+    assert!(
+        hub.scripthash_mempool(&sh)
+            .iter()
+            .any(|row| row.txid == id_a),
+        "blink spend stays in the pool"
+    );
+    assert_eq!(
+        hist_n(id_a),
+        0,
+        "confirmed history cannot see the blink yet"
+    );
+    let unused = rbitcoin_store::script_hash(&[0x00]);
+    hub.sample_reset_perf();
+    assert_eq!(hub.scripthash_unconfirmed_delta(&unused).unwrap(), 0);
+    assert_eq!(
+        hub.sample_reset_perf().delta_prevouts,
+        0,
+        "an address with nothing pooled does no prevout lookups"
+    );
+
+    let (confirmed, unconfirmed, mempool_ids, stats) = wallet(&hub);
+    assert_eq!(
+        confirmed, confirmed_b,
+        "confirmed balance must not include the blink spend yet"
+    );
+    assert_eq!(
+        unconfirmed,
+        -(FEE_A as i64),
+        "unconfirmed balance must keep the spend until the address view covers its height"
+    );
+    assert!(
+        mempool_ids.iter().any(|id| id == &hex_a),
+        "get_mempool must keep the spend until the address view covers it: {mempool_ids:?}"
+    );
+    assert!(
+        !mempool_ids.iter().any(|id| id == &hex_b),
+        "a spend the address view already covers stays out of get_mempool"
+    );
+    assert_eq!(stats.tx_count, 1, "{stats:?}");
+    assert_eq!(stats.funded_txo_sum, (SUBSIDY - FEE_A) as i64, "{stats:?}");
+
+    let hash = block_a.block_hash().to_byte_array();
+    let (header_fk, _) = q.get_header_by_hash(&hash).unwrap().unwrap();
+    q.enqueue_sh_pending(
+        &[rbitcoin_query::ConfirmPrepared {
+            height: Height(height_a),
+            header_fk,
+            tx_fks: q.block_tx_fks(Height(height_a)).unwrap(),
+            hash,
+        }],
+        None,
+    )
+    .unwrap();
+    assert_eq!(q.sh_visible_through_height(), Some(height_a));
+    let (confirmed, unconfirmed, mempool_ids, stats) = wallet(&hub);
+    assert_eq!(unconfirmed, 0, "{mempool_ids:?}");
+    assert!(
+        !mempool_ids.iter().any(|id| id == &hex_a),
+        "{mempool_ids:?}"
+    );
+    assert!(
+        !mempool_ids.iter().any(|id| id == &hex_b),
+        "{mempool_ids:?}"
+    );
+    assert_eq!(stats.tx_count, 0, "{stats:?}");
+    assert_eq!(stats.funded_txo_sum, 0, "{stats:?}");
+    assert_eq!(hist_n(id_a), 1, "confirmed history includes the spend once");
+    assert_eq!(hist_n(id_b), 1);
+    assert_eq!(confirmed, confirmed_b - FEE_A as i64);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
