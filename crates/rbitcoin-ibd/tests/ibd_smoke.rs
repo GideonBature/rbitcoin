@@ -380,6 +380,9 @@ async fn coord_shared_lock_skips_header_and_store_io() {
     seed_chain(&seed, 2);
     let peer = start_node(&peer_dir).await;
     peer.hub.ensure_genesis().unwrap();
+    let unrelated = mine(peer.hub.tip_hash().unwrap(), 1_300_123_456, 1).header;
+    peer.hub.ensure_header(&unrelated).unwrap();
+    peer.hub.note_invalid_block(unrelated.block_hash());
     let mut cfg = IbdConfig::for_test();
     cfg.target_peers = 1;
     let finished = tokio::time::timeout(
@@ -396,6 +399,7 @@ async fn coord_shared_lock_skips_header_and_store_io() {
     let synced = finished.expect("timeout").expect("sync");
     assert!(synced >= 2, "getdata drain accepted {synced}");
     assert_eq!(peer.tip_height(), Some(2));
+    assert_eq!(peer.hub.best_header_height(), 2);
     assert_eq!(
         rbitcoin_query::header_lookups_under_coord_lock(),
         0,

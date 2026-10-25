@@ -157,6 +157,42 @@ async fn ibd_header_height_survives_resume() {
         ));
         assert!(!hub.knows_header(&parent.block_hash()));
         assert_rpc_headers(&hub, 1, 6);
+        let mut sibling = hub.tip_header().unwrap();
+        sibling.prev_blockhash = sibling.block_hash();
+        sibling.time += 1;
+        sibling.merkle_root = bitcoin::TxMerkleNode::from_byte_array([99; 32]);
+        rbitcoin_consensus::grind_regtest_pow(&mut sibling);
+        hub.ensure_header(&sibling).unwrap();
+        hub.invalidate_block(sibling.block_hash()).unwrap();
+        header_walk::publish_work(&mut st, &hub);
+        assert_rpc_headers(&hub, 1, 6);
+        let mut next = parent;
+        next.prev_blockhash = parent.block_hash();
+        next.time += 1;
+        next.merkle_root = bitcoin::TxMerkleNode::from_byte_array([7; 32]);
+        rbitcoin_consensus::grind_regtest_pow(&mut next);
+        assert!(header_walk::absorb_lookahead(
+            &mut st,
+            &hub,
+            0,
+            header_walk::HeaderAsk::InWindow,
+            &[next]
+        ));
+        assert_rpc_headers(&hub, 1, 7);
+        let checkpoint = hub.header_of(&st.header_walk.checkpoints[0].hash).unwrap();
+        let parent = hub.header_of(&checkpoint.prev_blockhash).unwrap();
+        let interior = parent.prev_blockhash;
+        assert!(!st
+            .header_walk
+            .checkpoints
+            .iter()
+            .any(|c| c.hash == interior));
+        hub.invalidate_block(interior).unwrap();
+        header_walk::publish_work(&mut st, &hub);
+        assert_rpc_headers(&hub, 1, 1);
+        hub.reconsider_block(interior).unwrap();
+        header_walk::publish_work(&mut st, &hub);
+        assert_rpc_headers(&hub, 1, 7);
         let mut late_origin = IbdWorkState::new(vec![], hub.tip_hash(), hub.tip_height());
         let input = header_walk::origin_input(&late_origin, &hub);
         let loaded = header_walk::load_origin(&hub, &input);
@@ -181,10 +217,14 @@ async fn ibd_header_height_survives_resume() {
         let _blocking = rbitcoin_net::reactor::BlockingRegion::enter();
         hub.reconsider_block(connected).unwrap();
         assert!(header_walk::restore_adopt(&mut st, &hub));
-        assert_rpc_headers(&hub, 1, 6);
+        assert_rpc_headers(&hub, 1, 7);
         header_walk::rewind_above(&mut st, &hub, 1);
-        assert_eq!(hub.best_header_height(), 1);
-        assert_rpc_headers(&hub, 1, 1);
+        assert_eq!(
+            hub.best_header_height(),
+            2,
+            "reconsider also restores the sibling header"
+        );
+        assert_rpc_headers(&hub, 1, 2);
     })
     .await
     .unwrap();

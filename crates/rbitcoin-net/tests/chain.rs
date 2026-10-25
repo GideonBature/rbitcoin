@@ -2489,6 +2489,32 @@ fn submit_header_child_is_headers_only_tip() {
         1,
         "an invalidated taller header does not count"
     );
+    // Cross the old ancestry cap with headers only, not a tall block fixture.
+    let mut header = b1.header;
+    let mut headers = Vec::new();
+    for height in 2u32..=10_003 {
+        header.prev_blockhash = if height == 2 {
+            b1.block_hash()
+        } else {
+            header.block_hash()
+        };
+        header.time = b1.header.time + height;
+        header.merkle_root = bitcoin::TxMerkleNode::from_byte_array(
+            bitcoin::hashes::sha256d::Hash::hash(&height.to_le_bytes()).to_byte_array(),
+        );
+        rbitcoin_consensus::grind_regtest_pow(&mut header);
+        headers.push(header);
+    }
+    hub.ensure_headers_batch(&headers).unwrap();
+    assert_eq!(hub.best_header_height(), 10_003);
+    hub.invalidate_block(b1.block_hash()).unwrap();
+    assert_eq!(
+        hub.best_header_height(),
+        1,
+        "only the shorter valid sibling remains"
+    );
+    hub.reconsider_block(b1.block_hash()).unwrap();
+    assert_eq!(hub.best_header_height(), 10_003);
     let _ = std::fs::remove_dir_all(dir);
 }
 

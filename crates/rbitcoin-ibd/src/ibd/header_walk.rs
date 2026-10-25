@@ -2355,14 +2355,38 @@ pub fn publish_work(st: &mut IbdWorkState, hub: &ChainHub) {
     );
 }
 
-fn publish_header_tip(st: &IbdWorkState, hub: &ChainHub) {
-    if let Some(epoch) = st.header_walk.report_epoch {
-        hub.publish_ibd_header_tip(
-            epoch,
-            st.header_walk
-                .tip_hash()
-                .map(|_| st.header_walk.tip_height()),
-        );
+fn publish_header_tip(st: &mut IbdWorkState, hub: &ChainHub) {
+    let Some(epoch) = st.header_walk.report_epoch else {
+        return;
+    };
+    let mut anchors = Vec::new();
+    if let Some(hash) = st.header_walk.base_hash {
+        anchors.push((hash, st.header_walk.base_height));
+    }
+    anchors.extend(
+        st.header_walk
+            .checkpoints
+            .iter()
+            .filter(|c| c.height <= st.header_walk.tip_height())
+            .map(|c| (c.hash, c.height)),
+    );
+    if let Some(hash) = st.header_walk.tip_hash() {
+        anchors.push((hash, st.header_walk.tip_height()));
+    }
+    anchors.sort_by_key(|a| a.1);
+    anchors.dedup();
+    if let Some(epoch) = hub.publish_ibd_header_tip(epoch, anchors) {
+        st.header_walk.report_epoch = Some(epoch);
+    } else {
+        request_report_refresh(st, hub);
+    }
+}
+
+pub(super) fn request_report_refresh(st: &mut IbdWorkState, hub: &ChainHub) {
+    if st.header_cmd.is_some() {
+        super::state::enqueue_header_cmd(st, super::state::HeaderCmd::Report);
+    } else {
+        hub.refresh_header_report();
     }
 }
 
@@ -3218,7 +3242,7 @@ pub fn base_conflicts(st: &IbdWorkState, hub: &ChainHub, walk: &HeaderWalk) -> b
 pub fn on_confirmed_rewind(st: &mut IbdWorkState, hub: &ChainHub, lca_h: u32) {
     let report_epoch = hub.ibd_header_epoch();
     if st.header_walk.base_hash.is_some() && lca_h < st.header_walk.base_height {
-        hub.publish_ibd_header_tip(report_epoch, None);
+        let _ = hub.publish_ibd_header_tip(report_epoch, Vec::new());
         st.header_walk = HeaderWalk::default();
         forget_adopt(hub);
         return;
