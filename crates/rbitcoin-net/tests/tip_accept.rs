@@ -136,15 +136,17 @@ fn wait_current_job_returns_while_second_job_queued() {
     second.join().expect("job2");
 }
 
+/// `ChainHub::set_rpc_wait_tip_idle` is off until the node turns it on. On an
+/// idle lane the RPC tip wait returns in either mode.
 #[test]
-fn wait_tip_idle_from_env_only_one_and_true() {
-    assert!(!wait_tip_idle_from_env(None));
-    assert!(!wait_tip_idle_from_env(Some("")));
-    assert!(!wait_tip_idle_from_env(Some("0")));
-    assert!(!wait_tip_idle_from_env(Some("false")));
-    assert!(wait_tip_idle_from_env(Some("1")));
-    assert!(wait_tip_idle_from_env(Some("true")));
-    assert!(wait_tip_idle_from_env(Some("TRUE")));
+fn rpc_wait_tip_idle_is_off_until_set() {
+    let _lane = LanePermit::take();
+    let (_dir, hub) = rbitcoin_net::chain::tiny_regtest_hub_labeled("wait-tip-idle");
+    assert!(!hub.rpc_wait_tip_idle());
+    hub.wait_tip_stable_for_rpc();
+    hub.set_rpc_wait_tip_idle(true);
+    assert!(hub.rpc_wait_tip_idle());
+    hub.wait_tip_stable_for_rpc();
 }
 
 #[tokio::test]

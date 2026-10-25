@@ -12,9 +12,10 @@ below. Do not grow env surface without a damn-good reason.
 | **`RBITCOIN_IO`** | Field escape hatch: `uring` \| `pool` \| `iocp` \| `pread`. **Single** bulk switch. `pread` disables the completion session. Unknown tokens (including deleted `mmap`) fall through to the default |
 
 `main` reads `RBITCOIN_P2P_MAX_INBOUND`, `RBITCOIN_BLOCK_QUEUE_BYTES`,
-`RBITCOIN_BLOCK_QUEUE_GB`, `RBITCOIN_SH_FORCE_REBUILD`, and
-`RBITCOIN_RPC_PACKAGE_DIALECT` once into `NodeEnv` (`NodeEnv::from_env`)
-and passes that to `cli_main`. Nothing below the process shell reads them.
+`RBITCOIN_BLOCK_QUEUE_GB`, `RBITCOIN_SH_FORCE_REBUILD`,
+`RBITCOIN_RPC_PACKAGE_DIALECT`, and `RBITCOIN_RPC_WAIT_TIP_IDLE` once into
+`NodeEnv` (`NodeEnv::from_env`) and passes that to `cli_main`. Nothing
+below the process shell reads them.
 `RBITCOIN_P2P_MAX_INBOUND` is an **input** only when CLI/conf omit
 `--max-inbound` (`NodeConfig::absorb_inbound_env`).
 

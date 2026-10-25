@@ -199,6 +199,7 @@ pub fn finish_operator_config(
     }
     config.sh_force_rebuild |= env.sh_force_rebuild;
     config.rpc.package_dialect |= env.rpc_package_dialect;
+    config.rpc.wait_tip_idle |= env.rpc_wait_tip_idle;
     config.resolve_listen_defaults();
     if let Err(e) = config.seal_trust_peer() {
         eprintln!("error: {e}");

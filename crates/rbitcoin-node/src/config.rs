@@ -277,6 +277,9 @@ pub struct RpcOpts {
     /// `submitpackage` uses Core `IsChildWithParents`. Set only from
     /// [`NodeEnv::rpc_package_dialect`].
     pub package_dialect: bool,
+    /// RPC tip waits drain the tip-accept lane. Set only from
+    /// [`NodeEnv::rpc_wait_tip_idle`].
+    pub wait_tip_idle: bool,
 }
 
 impl Default for RpcOpts {
@@ -292,6 +295,7 @@ impl Default for RpcOpts {
             work_queue: Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE),
             rest: false,
             package_dialect: false,
+            wait_tip_idle: false,
         }
     }
 }
@@ -316,6 +320,9 @@ pub struct NodeEnv {
     /// `RBITCOIN_RPC_PACKAGE_DIALECT` is on: `submitpackage` uses Core
     /// `IsChildWithParents`.
     pub rpc_package_dialect: bool,
+    /// `RBITCOIN_RPC_WAIT_TIP_IDLE` is on: `getblockcount`, `getbestblockhash`,
+    /// and `wait_height` wait until the tip-accept lane is empty.
+    pub rpc_wait_tip_idle: bool,
 }
 
 impl NodeEnv {
@@ -348,6 +355,7 @@ impl NodeEnv {
                 Some("RBITCOIN_TEST_DROP_STORE") => env.test_drop_store = flag_on(val),
                 Some("RBITCOIN_SH_FORCE_REBUILD") => env.sh_force_rebuild = flag_on(val),
                 Some("RBITCOIN_RPC_PACKAGE_DIALECT") => env.rpc_package_dialect = flag_on(val),
+                Some("RBITCOIN_RPC_WAIT_TIP_IDLE") => env.rpc_wait_tip_idle = flag_on(val),
                 _ => {}
             }
         }

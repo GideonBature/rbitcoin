@@ -89,11 +89,6 @@ pub fn wait_idle() {
     }
 }
 
-#[doc(hidden)]
-pub fn wait_tip_idle_from_env(v: Option<&str>) -> bool {
-    matches!(v, Some(s) if s == "1" || s.eq_ignore_ascii_case("true"))
-}
-
 /// Wait until the tip-accept job that was running when this call started
 /// finishes. A queued follow-on accept may still be in flight.
 pub fn wait_current_job() {
@@ -105,16 +100,6 @@ pub fn wait_current_job() {
     let snapshot = i.gen.load(Ordering::SeqCst);
     while i.n.load(Ordering::SeqCst) > 0 && i.gen.load(Ordering::SeqCst) == snapshot {
         g = i.cv.wait(g).unwrap_or_else(|e| e.into_inner());
-    }
-}
-
-/// RPC / `wait_height` tip latch. Default is [`wait_current_job`].
-/// `RBITCOIN_RPC_WAIT_TIP_IDLE=1` restores [`wait_idle`] (Core `sync_blocks`).
-pub fn wait_for_rpc() {
-    if wait_tip_idle_from_env(std::env::var("RBITCOIN_RPC_WAIT_TIP_IDLE").ok().as_deref()) {
-        wait_idle();
-    } else {
-        wait_current_job();
     }
 }
 

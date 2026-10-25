@@ -707,15 +707,16 @@ fn block_queue_env_sets_the_assign_stop() {
     assert_eq!(stop(&[(GB, "lots")]), BQ_ASSIGN_STOP_BYTES);
 }
 
-/// `RBITCOIN_TEST_DROP_STORE`, `RBITCOIN_SH_FORCE_REBUILD`, and
-/// `RBITCOIN_RPC_PACKAGE_DIALECT` are on only for `1` or `true` (any case).
-/// The last two reach `NodeConfig`.
+/// `RBITCOIN_TEST_DROP_STORE`, `RBITCOIN_SH_FORCE_REBUILD`,
+/// `RBITCOIN_RPC_PACKAGE_DIALECT`, and `RBITCOIN_RPC_WAIT_TIP_IDLE` are on only
+/// for `1` or `true` (any case). All but the first reach `NodeConfig`.
 #[test]
 fn env_flags_are_on_only_when_true() {
-    const KEYS: [&str; 3] = [
+    const KEYS: [&str; 4] = [
         "RBITCOIN_TEST_DROP_STORE",
         "RBITCOIN_SH_FORCE_REBUILD",
         "RBITCOIN_RPC_PACKAGE_DIALECT",
+        "RBITCOIN_RPC_WAIT_TIP_IDLE",
     ];
     let flags = |key: &str, val: &str| {
         let env = NodeEnv::from_vars([(key, val)]);
@@ -723,18 +724,19 @@ fn env_flags_are_on_only_when_true() {
             env.test_drop_store,
             env.sh_force_rebuild,
             env.rpc_package_dialect,
+            env.rpc_wait_tip_idle,
         ]
     };
     for on in ["1", "true", "TRUE", "True"] {
         for (i, key) in KEYS.iter().enumerate() {
-            let mut want = [false; 3];
+            let mut want = [false; 4];
             want[i] = true;
             assert_eq!(flags(key, on), want, "{key}={on:?}");
         }
     }
     for off in ["", "0", "false", "yes", " 1"] {
         for key in KEYS {
-            assert_eq!(flags(key, off), [false; 3], "{key}={off:?}");
+            assert_eq!(flags(key, off), [false; 4], "{key}={off:?}");
         }
     }
     assert_eq!(
@@ -745,11 +747,13 @@ fn env_flags_are_on_only_when_true() {
     let env = NodeEnv::from_vars([
         ("RBITCOIN_SH_FORCE_REBUILD", "1"),
         ("RBITCOIN_RPC_PACKAGE_DIALECT", "1"),
+        ("RBITCOIN_RPC_WAIT_TIP_IDLE", "1"),
     ]);
     match operator_config_from_args(["rbitcoin-node"], &env) {
         Ok(OperatorArgs::Ready { config, .. }) => {
             assert!(config.sh_force_rebuild);
             assert!(config.rpc.package_dialect);
+            assert!(config.rpc.wait_tip_idle);
         }
         other => panic!("expected assembled config, got {other:?}"),
     }
