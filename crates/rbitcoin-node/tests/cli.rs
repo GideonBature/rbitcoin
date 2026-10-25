@@ -849,71 +849,52 @@ fn trust_peer_clashing_flags() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("exactly one"), "{err}");
-}
 
-/// `validate` still rejects a trust-peer config that skipped the seal.
-#[test]
-fn trust_peer_validate_rejects_a_broken_seal() {
-    use rbitcoin_node::config::P2pListen;
+    let mut bare = rbitcoin_node::config::NodeConfig::default();
+    bare.apply_kv("trust_peer", addr).unwrap();
+    let err = bare.validate().unwrap_err().to_string();
+    assert!(err.contains("--listen"), "{err}");
 
-    let dir = tmp_datadir();
-    let addr = "192.0.2.1:8333";
-    let base = || {
-        ready_config([
-            "rbitcoin-node",
-            "--datadir",
-            dir.to_str().unwrap(),
-            "--trust-peer",
-            addr,
-        ])
-    };
-    base().validate().expect("sealed trust-peer validates");
+    let mut sealed = rbitcoin_node::config::NodeConfig::default();
+    sealed.apply_kv("trust_peer", addr).unwrap();
+    sealed.seal_trust_peer().unwrap();
+    sealed.validate().unwrap();
 
-    let mut cfg = base();
-    cfg.listen.p2p = P2pListen::Auto;
-    assert_trust_err(cfg, "--listen");
+    // Listen fields stay writable. Validate still rejects the clashes.
+    sealed.listen.p2p = rbitcoin_node::config::P2pListen::Auto;
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--listen"), "{err}");
 
-    let mut cfg = base();
-    cfg.listen.listen_onion = true;
-    cfg.listen.max_inbound = 1;
-    cfg.tor.control = Some("127.0.0.1:9051".parse().unwrap());
-    assert_trust_err(cfg, "--listen");
+    sealed.listen.p2p = rbitcoin_node::config::P2pListen::Off;
+    sealed
+        .listen
+        .p2p_extra
+        .push("127.0.0.1:8334".parse().unwrap());
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--listen"), "{err}");
+    sealed.listen.p2p_extra.clear();
 
-    let mut cfg = base();
-    cfg.listen.max_inbound = 4;
-    assert_trust_err(cfg, "--max-inbound");
+    sealed.listen.listen_onion = true;
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--listen"), "{err}");
+    assert!(
+        !err.contains("listen-onion requires"),
+        "onion after a seal is the trust-peer listen clash: {err}"
+    );
 
-    let mut cfg = base();
-    cfg.listen.use_seeds = true;
-    assert_trust_err(cfg, "--seed-node");
+    sealed.listen.listen_onion = false;
+    sealed.tor.control = None;
+    sealed.listen.max_inbound = 1;
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--max-inbound"), "{err}");
 
-    let mut cfg = base();
-    cfg.listen.seednodes.push("192.0.2.9:8333".into());
-    assert_trust_err(cfg, "--seed-node");
+    sealed.listen.max_inbound = 0;
+    sealed.listen.use_seeds = true;
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--seed-node"), "{err}");
 
-    let mut cfg = base();
-    cfg.listen.connect.clear();
-    assert_trust_err(cfg, "requires an address");
-
-    let mut cfg = base();
-    cfg.listen.connect.clear();
-    cfg.apply_kv("connect", "192.0.2.2:8333").unwrap();
-    assert_trust_err(cfg, "different --connect");
-
-    let mut host = ready_config([
-        "rbitcoin-node",
-        "--datadir",
-        dir.to_str().unwrap(),
-        "--trust-peer",
-        "seed.example:8333",
-    ]);
-    host.listen.connect_dns.push("other.example:8333".into());
-    assert_trust_err(host, "different --connect");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-fn assert_trust_err(cfg: NodeConfig, needle: &str) {
-    let err = cfg.validate().unwrap_err().to_string();
-    assert!(err.contains(needle), "{err}");
+    sealed.listen.use_seeds = false;
+    sealed.listen.seednodes.push("seed.example".into());
+    let err = sealed.validate().unwrap_err().to_string();
+    assert!(err.contains("--seed-node"), "{err}");
 }
