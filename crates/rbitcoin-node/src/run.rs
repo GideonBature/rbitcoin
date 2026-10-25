@@ -935,10 +935,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                 }
             });
         }
-        let header_mark = (
-            node.hub.initial_getheaders_sent(),
-            node.hub.headers_reply_count(),
-        );
         if catch_up.dial_failed_all() {
             for peer in targets.iter().take(follow_n) {
                 if let Err(e) = node.peers.dial_net(*peer, follow_type) {
@@ -982,11 +978,9 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         // without a live session, including ones past `follow_n`. Hostnames
         // were registered before catch-up (`set_connect_hosts`).
         node.peers.set_connect_addrs(config.listen.connect.clone());
-        // Materialize can outlast the miner. Do not publish Electrum until
-        // the follow `getheaders` round is connected and indexed. Tx relay
-        // still flips inside that wait. High-bandwidth selection and compact
-        // getdata follow that bit. A tip announcement stays a compact block.
-        wait_wallet_history(&node, &config, &shutdown, header_mark, &mempool).await?;
+        // Dial can leave IBD before the tip-follow loop. Relay has to match
+        // that edge before Electrum binds.
+        sync_tx_relay(&node, &config, &mempool).await?;
     }
 
     let (mut electrum_handles, mut electrum_bridge, electrum_onion) = start_electrum_if_ready(
@@ -2252,7 +2246,7 @@ pub async fn finish_tip_follow_wake(
 }
 
 /// Turn peer tx relay on or off to match IBD. One place for indexing
-/// finished, [`wait_wallet_history`], and the tip-follow loop.
+/// finished, the bind before Electrum, and the tip-follow loop.
 pub async fn sync_tx_relay(
     node: &P2PNode,
     config: &NodeConfig,
@@ -2287,48 +2281,6 @@ pub async fn sync_tx_relay(
         spawn_fee_history_backfill(mempool);
     }
     Ok(())
-}
-
-/// Wallet bind waits out one follow `getheaders` round.
-///
-/// Scripthash materialize holds the process before dial. The miner can add
-/// a block in that window. Opening Electrum on the pre-dial tip serves a
-/// history that does not include it. Relay follows IBD on each tick of this
-/// wait, so peer announcements and the fee filter start before the
-/// tip-follow loop. High-bandwidth selection follows that same bit.
-pub async fn wait_wallet_history(
-    node: &P2PNode,
-    config: &NodeConfig,
-    shutdown: &Shutdown,
-    mark: (u64, u64),
-    mempool: &Arc<MempoolHub>,
-) -> Result<(), NodeError> {
-    sync_tx_relay(node, config, mempool).await?;
-    if node.follow_live_count() == 0 {
-        return Ok(());
-    }
-    let (sent0, reply0) = mark;
-    let started = Instant::now();
-    let deadline = Duration::from_secs(20);
-    let unsent_limit = Duration::from_secs(2);
-    loop {
-        if shutdown.requested() || started.elapsed() >= deadline {
-            return Ok(());
-        }
-        sync_tx_relay(node, config, mempool).await?;
-        let sent = node.hub.initial_getheaders_sent().saturating_sub(sent0);
-        let replies = node.hub.headers_reply_count().saturating_sub(reply0);
-        let tip = node.tip_height().unwrap_or(0);
-        let best = node.hub.best_header_height();
-        let sh_ok = !config.shindex || node.hub.query.sh_is_tip_ready();
-        if sent > 0 && replies >= sent && best <= tip && sh_ok {
-            return Ok(());
-        }
-        if sent == 0 && started.elapsed() >= unsent_limit {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
 }
 
 #[allow(clippy::too_many_arguments)] // call-site args stay unbundled

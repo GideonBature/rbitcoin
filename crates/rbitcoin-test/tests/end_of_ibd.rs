@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
@@ -200,10 +200,13 @@ async fn try_jsonrpc(addr: SocketAddr, method: &str, params: Value) -> std::io::
     rbitcoin_test::jsonrpc::try_jsonrpc(addr, method, params).await
 }
 
-async fn history_txids(electrum: SocketAddr, script: &[u8]) -> BTreeSet<String> {
+async fn read_history_txids(
+    electrum: SocketAddr,
+    script: &[u8],
+) -> Result<BTreeSet<String>, String> {
     let mut stream = TcpStream::connect(electrum)
         .await
-        .expect("electrum connect");
+        .map_err(|e| format!("electrum connect: {e}"))?;
     let req = json!({
         "id": 1,
         "jsonrpc": "2.0",
@@ -212,22 +215,30 @@ async fn history_txids(electrum: SocketAddr, script: &[u8]) -> BTreeSet<String> 
     })
     .to_string()
         + "\n";
-    stream.write_all(req.as_bytes()).await.unwrap();
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| format!("electrum write: {e}"))?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).await.unwrap();
-    let hist: Value = serde_json::from_str(line.trim())
-        .unwrap_or_else(|e| panic!("history json: {e} body={line}"));
-    hist["result"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{hist}"))
-        .iter()
-        .map(|row| {
-            row["tx_hash"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{row}"))
-                .to_string()
-        })
-        .collect()
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .await
+        .map_err(|e| format!("electrum read: {e}"))?;
+    let hist: Value =
+        serde_json::from_str(line.trim()).map_err(|e| format!("history json: {e} body={line}"))?;
+    let rows = hist["result"].as_array().ok_or_else(|| format!("{hist}"))?;
+    let mut out = BTreeSet::new();
+    for row in rows {
+        let hash = row["tx_hash"].as_str().ok_or_else(|| format!("{row}"))?;
+        out.insert(hash.to_string());
+    }
+    Ok(out)
+}
+
+async fn history_txids(electrum: SocketAddr, script: &[u8]) -> BTreeSet<String> {
+    read_history_txids(electrum, script)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 async fn stop_run_p2p(
@@ -257,9 +268,13 @@ async fn wait_caught_up(
         let best = jsonrpc(rpc, "getbestblockhash", json!([])).await;
         let height_ok = count["result"].as_u64() == Some(u64::from(height));
         let hash_ok = best["result"].as_str() == Some(hash);
-        let hist_a = history_txids(electrum, &[0x51]).await;
-        let hist_b = history_txids(electrum, &[0x52]).await;
-        if height_ok && hash_ok && &hist_a == script_a && &hist_b == script_b {
+        let hist_a = read_history_txids(electrum, &[0x51]).await.ok();
+        let hist_b = read_history_txids(electrum, &[0x52]).await.ok();
+        if height_ok
+            && hash_ok
+            && hist_a.as_ref() == Some(script_a)
+            && hist_b.as_ref() == Some(script_b)
+        {
             return;
         }
         if Instant::now() >= deadline {
@@ -637,6 +652,104 @@ async fn crash_with_class_a_above_tip(miner: &P2PNode, synced: &mut Synced) {
     finish_partial(dir.path().as_path(), miner.local_addr, synced).await;
 }
 
+fn indexed_cfg(dir: &Path, follow: Option<SocketAddr>) -> NodeConfig {
+    let dummy = "127.0.0.1:1".parse().unwrap();
+    let mut cfg = syncer_cfg_sh(dir, follow.unwrap_or(dummy), true);
+    if follow.is_none() {
+        cfg.listen.connect.clear();
+    }
+    cfg
+}
+
+/// Accepts one follow dial, completes the handshake, and never sends `headers`.
+async fn silent_headers_peer() -> SocketAddr {
+    use bitcoin::p2p::Magic;
+    use rbitcoin_net::peer::{connect_and_handshake_timed, HandshakePolicy};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let Ok((stream, from)) = listener.accept().await else {
+            return;
+        };
+        let Ok((_ver, mut reader, _writer, _wire, _tcp)) = connect_and_handshake_timed(
+            Duration::from_secs(5),
+            stream,
+            Magic::REGTEST,
+            addr,
+            from,
+            0,
+            true,
+            "/rbitcoin:silent-headers/",
+            HandshakePolicy::plain(),
+        )
+        .await
+        else {
+            return;
+        };
+        while rbitcoin_net::v2::read_v2_contents(&mut reader)
+            .await
+            .is_ok()
+        {}
+    });
+    addr
+}
+
+/// The port opens on the tip this node already indexed. The only follow
+/// peer finishes the handshake and then sends no `headers`.
+async fn electrum_binds_on_indexed_tip() {
+    let dir = TestDatadir::new().unwrap();
+    let miner = start_miner(dir.path().as_path()).await;
+    let genesis = regtest_genesis();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+    let b1 = mine_regtest_block(genesis.block_hash(), now.saturating_sub(2), 1, vec![]);
+    let b2 = mine_regtest_block(b1.block_hash(), now.saturating_sub(1), 2, vec![]);
+    load_chain(&miner, &[genesis, b1, b2]);
+    let height = miner.tip_height().unwrap();
+    assert!(height > 0, "a height of 0 stays in catch-up");
+    miner.shutdown().await;
+
+    let packed = spawn_run_p2p(indexed_cfg(dir.path().as_path(), None));
+    let rpc = published_listener(dir.path().as_path(), "rpc", Duration::from_secs(30)).await;
+    let _electrum =
+        published_listener(dir.path().as_path(), "electrum", Duration::from_secs(60)).await;
+    stop_run_p2p(rpc, packed).await;
+
+    let peer = silent_headers_peer().await;
+    let started = Instant::now();
+    let node = spawn_run_p2p(indexed_cfg(dir.path().as_path(), Some(peer)));
+    let budget = llvm_cov_wall(8, 16);
+    let electrum = published_listener(dir.path().as_path(), "electrum", budget).await;
+    assert!(
+        started.elapsed() < budget,
+        "electrum took {:?}, past {budget:?}, while the follow peer sent no headers",
+        started.elapsed()
+    );
+    let rpc = published_listener(dir.path().as_path(), "rpc", Duration::from_secs(10)).await;
+    let count = jsonrpc(rpc, "getblockcount", json!([])).await;
+    assert_eq!(count["result"].as_u64(), Some(u64::from(height)));
+    assert!(
+        !history_txids(electrum, &[0x51]).await.is_empty(),
+        "indexed coinbases are visible when the port opens"
+    );
+    stop_run_p2p(rpc, node).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn electrum_binds_while_follow_sends_no_headers() {
+    // Prebuild may spend 30s on RPC, 60s on Electrum, and 20s stopping.
+    // The bind check then has 8s (16s under coverage), plus 10s for RPC
+    // and 20s to stop. Those caps are 148s, and 156s under coverage.
+    let wall = llvm_cov_wall(160, 180);
+    tokio::time::timeout(wall, electrum_binds_on_indexed_tip())
+        .await
+        .expect("electrum_binds_while_follow_sends_no_headers wall");
+}
+
 async fn follow_journey() {
     let (blocks, script_a, script_b) = fixture_chain();
     let miner_dir = TestDatadir::new().unwrap();
@@ -657,7 +770,11 @@ async fn follow_journey() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_of_ibd_sh_interrupt() {
-    let wall = llvm_cov_wall(120, 240);
+    // Catch-up may spend 40s on the RPC port, 40s on the tip, and 20s
+    // stopping. Each of the five history polls may spend 60s on Electrum,
+    // 30s on RPC, 30s on history (60s under coverage), and 20s stopping.
+    // Those caps are 800s, and 950s under coverage.
+    let wall = llvm_cov_wall(800, 950);
     tokio::time::timeout(wall, sh_interrupt_journey())
         .await
         .expect("end_of_ibd_sh_interrupt wall");
@@ -727,21 +844,21 @@ async fn resume_until_history(
     // built shows up after the follow headers round. Wait for that history.
     let deadline = Instant::now() + llvm_cov_wall(30, 60);
     loop {
-        let hist_a = history_txids(electrum, &[0x51]).await;
-        let hist_b = history_txids(electrum, &[0x52]).await;
+        let hist_a = read_history_txids(electrum, &[0x51]).await.ok();
+        let hist_b = read_history_txids(electrum, &[0x52]).await.ok();
         let count = try_jsonrpc(rpc, "getblockcount", json!([])).await.ok();
         let best = try_jsonrpc(rpc, "getbestblockhash", json!([])).await.ok();
         let tip_ok = count.as_ref().and_then(|v| v["result"].as_u64()) == Some(u64::from(height))
             && best.as_ref().and_then(|v| v["result"].as_str()) == Some(hash);
-        if &hist_a == script_a && &hist_b == script_b && tip_ok {
+        if hist_a.as_ref() == Some(script_a) && hist_b.as_ref() == Some(script_b) && tip_ok {
             break;
         }
         if Instant::now() >= deadline {
             panic!(
                 "scripthash history did not catch height {height}: A {}/{} B {}/{} tip={tip_ok}",
-                hist_a.len(),
+                hist_a.as_ref().map(|s| s.len()).unwrap_or(0),
                 script_a.len(),
-                hist_b.len(),
+                hist_b.as_ref().map(|s| s.len()).unwrap_or(0),
                 script_b.len()
             );
         }
@@ -1193,9 +1310,9 @@ async fn work_fork_journey() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_of_ibd_invalid_heavier_fork() {
-    // Five serial syncs. Under llvm-cov each may use 60s, so the wall has to
-    // cover 300s plus startup.
-    let wall = llvm_cov_wall(60, 360);
+    // Five serial syncs. Each may use 20s (60s under llvm-cov), so the wall
+    // covers 100s (300s) plus startup.
+    let wall = llvm_cov_wall(120, 360);
     tokio::time::timeout(wall, invalid_heavier_fork_journey())
         .await
         .expect("end_of_ibd_invalid_heavier_fork wall");

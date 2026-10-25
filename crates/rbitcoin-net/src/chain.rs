@@ -651,10 +651,6 @@ pub struct ChainHub {
     pub finished_ibd: AtomicBool,
     /// `-blocksonly`. A fresh tip must not enable tx relay.
     pub blocks_only: AtomicBool,
-    /// Initial `getheaders` queued by follow sessions since process start.
-    pub initial_getheaders_sent: AtomicU64,
-    /// `headers` messages applied since process start (including empty).
-    pub headers_replies: AtomicU64,
     /// A follow-session block inv during IBD. The walk asks its header peer.
     pub header_inv_challenge: AtomicBool,
     #[cfg(debug_assertions)]
@@ -776,8 +772,6 @@ impl ChainHub {
             chain_work_prefix: RwLock::new(Vec::new()),
             finished_ibd: AtomicBool::new(false),
             blocks_only: AtomicBool::new(false),
-            initial_getheaders_sent: AtomicU64::new(0),
-            headers_replies: AtomicU64::new(0),
             header_inv_challenge: AtomicBool::new(false),
             #[cfg(debug_assertions)]
             block_at_height_calls: AtomicU64::new(0),
@@ -1491,22 +1485,6 @@ impl ChainHub {
             }
         }
         best
-    }
-
-    pub fn note_initial_getheaders_sent(&self) {
-        self.initial_getheaders_sent.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn initial_getheaders_sent(&self) -> u64 {
-        self.initial_getheaders_sent.load(Ordering::Relaxed)
-    }
-
-    pub fn note_headers_reply(&self) {
-        self.headers_replies.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn headers_reply_count(&self) -> u64 {
-        self.headers_replies.load(Ordering::Relaxed)
     }
 
     #[doc(hidden)]
