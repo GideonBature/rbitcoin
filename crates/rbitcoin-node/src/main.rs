@@ -1,4 +1,4 @@
-use rbitcoin_node::{cli_main, NodeEnv};
+use rbitcoin_node::process_main;
 use std::process::ExitCode;
 
 #[global_allocator]
@@ -7,5 +7,5 @@ pub static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[doc(hidden)]
 pub fn main() -> ExitCode {
-    cli_main(std::env::args_os(), NodeEnv::from_env())
+    process_main()
 }

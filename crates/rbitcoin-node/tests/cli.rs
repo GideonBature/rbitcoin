@@ -658,12 +658,12 @@ fn cli_rejects_bad_rpc_cookie_at_launch() {
 }
 
 /// `RBITCOIN_P2P_MAX_INBOUND` sets the inbound cap only when CLI and conf
-/// omit it. Zero and garbage keep the default.
+/// omit it. `0` is no inbound slots, as `--max-inbound 0` is. Empty is unset.
 #[test]
 fn inbound_env_is_below_cli_and_conf() {
     use rbitcoin_node::config::DEFAULT_MAX_INBOUND;
     let inbound = |args: &[&str], val: &str| {
-        let env = NodeEnv::from_vars([("RBITCOIN_P2P_MAX_INBOUND", val)]);
+        let env = NodeEnv::from_vars([("RBITCOIN_P2P_MAX_INBOUND", val)]).unwrap();
         let args = std::iter::once("rbitcoin-node").chain(args.iter().copied());
         match operator_config_from_args(args, &env) {
             Ok(OperatorArgs::Ready { config, .. }) => config.listen.max_inbound,
@@ -672,8 +672,8 @@ fn inbound_env_is_below_cli_and_conf() {
     };
     assert_eq!(inbound(&[], "91"), 91);
     assert_eq!(inbound(&["--max-inbound", "12"], "91"), 12);
-    assert_eq!(inbound(&[], "0"), DEFAULT_MAX_INBOUND);
-    assert_eq!(inbound(&[], "many"), DEFAULT_MAX_INBOUND);
+    assert_eq!(inbound(&[], "0"), 0);
+    assert_eq!(inbound(&[], ""), DEFAULT_MAX_INBOUND);
 
     let conf_dir = tmp_datadir();
     std::fs::create_dir_all(&conf_dir).unwrap();
@@ -684,14 +684,14 @@ fn inbound_env_is_below_cli_and_conf() {
 }
 
 /// `RBITCOIN_BLOCK_QUEUE_BYTES` wins over `RBITCOIN_BLOCK_QUEUE_GB`. `0` is
-/// unlimited. An unparsable value falls through to the next source.
+/// unlimited. Empty is unset.
 #[test]
 fn block_queue_env_sets_the_assign_stop() {
     use rbitcoin_query::BQ_ASSIGN_STOP_BYTES;
     const BYTES: &str = "RBITCOIN_BLOCK_QUEUE_BYTES";
     const GB: &str = "RBITCOIN_BLOCK_QUEUE_GB";
     let stop = |vars: &[(&str, &str)]| {
-        let env = NodeEnv::from_vars(vars.iter().copied());
+        let env = NodeEnv::from_vars(vars.iter().copied()).unwrap();
         match operator_config_from_args(["rbitcoin-node"], &env) {
             Ok(OperatorArgs::Ready { config, .. }) => config.bq_assign_stop_bytes,
             other => panic!("expected assembled config, got {other:?}"),
@@ -703,15 +703,16 @@ fn block_queue_env_sets_the_assign_stop() {
     assert_eq!(stop(&[(BYTES, "4096"), (GB, "2")]), 4096);
     assert_eq!(stop(&[(GB, "0")]), u64::MAX);
     assert_eq!(stop(&[(BYTES, "0"), (GB, "2")]), u64::MAX);
-    assert_eq!(stop(&[(BYTES, "lots"), (GB, "2")]), 2 << 30);
-    assert_eq!(stop(&[(GB, "lots")]), BQ_ASSIGN_STOP_BYTES);
+    assert_eq!(stop(&[(BYTES, ""), (GB, "2")]), 2 << 30);
+    assert_eq!(stop(&[(GB, "")]), BQ_ASSIGN_STOP_BYTES);
 }
 
 /// `RBITCOIN_TEST_DROP_STORE`, `RBITCOIN_SH_FORCE_REBUILD`,
-/// `RBITCOIN_RPC_PACKAGE_DIALECT`, and `RBITCOIN_RPC_WAIT_TIP_IDLE` are on only
-/// for `1` or `true` (any case). All but the first reach `NodeConfig`.
+/// `RBITCOIN_RPC_PACKAGE_DIALECT`, and `RBITCOIN_RPC_WAIT_TIP_IDLE` are on for
+/// `1` or `true` and off for `0`, `false`, or empty (`true`/`false` in any
+/// case). All but the first reach `NodeConfig`.
 #[test]
-fn env_flags_are_on_only_when_true() {
+fn env_flags_take_one_true_zero_or_false() {
     const KEYS: [&str; 4] = [
         "RBITCOIN_TEST_DROP_STORE",
         "RBITCOIN_SH_FORCE_REBUILD",
@@ -719,7 +720,7 @@ fn env_flags_are_on_only_when_true() {
         "RBITCOIN_RPC_WAIT_TIP_IDLE",
     ];
     let flags = |key: &str, val: &str| {
-        let env = NodeEnv::from_vars([(key, val)]);
+        let env = NodeEnv::from_vars([(key, val)]).unwrap();
         [
             env.test_drop_store,
             env.sh_force_rebuild,
@@ -734,13 +735,13 @@ fn env_flags_are_on_only_when_true() {
             assert_eq!(flags(key, on), want, "{key}={on:?}");
         }
     }
-    for off in ["", "0", "false", "yes", " 1"] {
+    for off in ["", "0", "false", "FALSE"] {
         for key in KEYS {
             assert_eq!(flags(key, off), [false; 4], "{key}={off:?}");
         }
     }
     assert_eq!(
-        NodeEnv::from_vars(std::iter::empty::<(&str, &str)>()),
+        NodeEnv::from_vars(std::iter::empty::<(&str, &str)>()).unwrap(),
         NodeEnv::default()
     );
 
@@ -748,7 +749,8 @@ fn env_flags_are_on_only_when_true() {
         ("RBITCOIN_SH_FORCE_REBUILD", "1"),
         ("RBITCOIN_RPC_PACKAGE_DIALECT", "1"),
         ("RBITCOIN_RPC_WAIT_TIP_IDLE", "1"),
-    ]);
+    ])
+    .unwrap();
     match operator_config_from_args(["rbitcoin-node"], &env) {
         Ok(OperatorArgs::Ready { config, .. }) => {
             assert!(config.sh_force_rebuild);
@@ -756,6 +758,47 @@ fn env_flags_are_on_only_when_true() {
             assert!(config.rpc.wait_tip_idle);
         }
         other => panic!("expected assembled config, got {other:?}"),
+    }
+}
+
+/// A set `RBITCOIN_*` value that does not parse is an error naming the var,
+/// not a silent default. Other env is not read.
+#[test]
+fn malformed_env_names_the_var() {
+    for (key, val) in [
+        ("RBITCOIN_P2P_MAX_INBOUND", "many"),
+        ("RBITCOIN_P2P_MAX_INBOUND", "-1"),
+        ("RBITCOIN_BLOCK_QUEUE_BYTES", "4k"),
+        ("RBITCOIN_BLOCK_QUEUE_GB", "1.5"),
+        ("RBITCOIN_TEST_DROP_STORE", "yes"),
+        ("RBITCOIN_SH_FORCE_REBUILD", "on"),
+        ("RBITCOIN_RPC_PACKAGE_DIALECT", " 1"),
+        ("RBITCOIN_RPC_WAIT_TIP_IDLE", "ture"),
+    ] {
+        let err = NodeEnv::from_vars([(key, val)]).unwrap_err().to_string();
+        assert!(
+            err.contains(key) && err.contains(val),
+            "{key}={val:?}: {err}"
+        );
+    }
+    let err = NodeEnv::from_vars([
+        ("RBITCOIN_BLOCK_QUEUE_BYTES", "4096"),
+        ("RBITCOIN_BLOCK_QUEUE_GB", "lots"),
+    ])
+    .unwrap_err();
+    assert!(err.to_string().contains("RBITCOIN_BLOCK_QUEUE_GB"), "{err}");
+    assert!(NodeEnv::from_vars([("PATH", "not a number"), ("RBITCOIN_NOT_A_KNOB", "x")]).is_ok());
+
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let bad = OsStr::from_bytes(&[0xff, 0x31]);
+        let err = NodeEnv::from_vars([(OsStr::new("RBITCOIN_SH_FORCE_REBUILD"), bad)]).unwrap_err();
+        assert!(
+            err.to_string().contains("RBITCOIN_SH_FORCE_REBUILD"),
+            "{err}"
+        );
     }
 }
 

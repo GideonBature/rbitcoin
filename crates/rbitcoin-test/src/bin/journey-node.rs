@@ -4,5 +4,5 @@
 //! the `rbitcoin-node` main and nothing else.
 
 fn main() -> std::process::ExitCode {
-    rbitcoin_node::cli_main(std::env::args_os(), rbitcoin_node::NodeEnv::from_env())
+    rbitcoin_node::process_main()
 }

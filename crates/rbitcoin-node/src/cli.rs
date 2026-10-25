@@ -211,7 +211,19 @@ pub fn finish_operator_config(
     })
 }
 
-/// Process entry used by `main` and high-level scenarios.
+/// The process shell: argv and env from the OS, then [`cli_main`]. A malformed
+/// `RBITCOIN_*` value exits 2 before anything starts.
+pub fn process_main() -> ExitCode {
+    match NodeEnv::from_env() {
+        Ok(env) => cli_main(std::env::args_os(), env),
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Process entry used by [`process_main`] and high-level scenarios.
 pub fn cli_main<I, T>(args: I, env: NodeEnv) -> ExitCode
 where
     I: IntoIterator<Item = T>,

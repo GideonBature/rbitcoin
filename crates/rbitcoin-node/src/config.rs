@@ -301,12 +301,13 @@ impl Default for RpcOpts {
 }
 
 /// `RBITCOIN_*` node process env, read once by the process shell
-/// ([`Self::from_env`]) and passed to [`crate::cli_main`].
-/// A valued knob that is unset, non-UTF-8, or unparsable is `None`. A flag is
-/// on only for `1` or `true` (any case).
+/// ([`crate::process_main`]) and passed to [`crate::cli_main`].
+/// An unset or empty knob keeps its default. A set value that is not UTF-8 or
+/// does not parse is an error. A flag takes `1` or `true` (on) and `0` or
+/// `false` (off), `true`/`false` in any case.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeEnv {
-    /// `RBITCOIN_P2P_MAX_INBOUND`, when positive.
+    /// `RBITCOIN_P2P_MAX_INBOUND`.
     pub p2p_max_inbound: Option<u32>,
     /// `RBITCOIN_BLOCK_QUEUE_BYTES`, else `RBITCOIN_BLOCK_QUEUE_GB` in GiB.
     /// `0` is unlimited (`u64::MAX`).
@@ -327,11 +328,11 @@ pub struct NodeEnv {
 
 impl NodeEnv {
     /// Snapshot the process env. Only a process shell calls this.
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, NodeError> {
         Self::from_vars(std::env::vars_os())
     }
 
-    pub fn from_vars<I, K, V>(vars: I) -> Self
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, NodeError>
     where
         I: IntoIterator<Item = (K, V)>,
         K: AsRef<OsStr>,
@@ -340,35 +341,56 @@ impl NodeEnv {
         let mut env = Self::default();
         let (mut bq_bytes, mut bq_gib) = (None, None);
         for (key, val) in vars {
-            let val = val.as_ref().to_str();
-            match key.as_ref().to_str() {
-                Some("RBITCOIN_P2P_MAX_INBOUND") => {
-                    env.p2p_max_inbound =
-                        val.and_then(|v| u32::from_str(v).ok()).filter(|&n| n > 0);
-                }
-                Some("RBITCOIN_BLOCK_QUEUE_BYTES") => {
-                    bq_bytes = val.and_then(|v| u64::from_str(v).ok());
-                }
-                Some("RBITCOIN_BLOCK_QUEUE_GB") => {
-                    bq_gib = val.and_then(|v| u64::from_str(v).ok());
-                }
-                Some("RBITCOIN_TEST_DROP_STORE") => env.test_drop_store = flag_on(val),
-                Some("RBITCOIN_SH_FORCE_REBUILD") => env.sh_force_rebuild = flag_on(val),
-                Some("RBITCOIN_RPC_PACKAGE_DIALECT") => env.rpc_package_dialect = flag_on(val),
-                Some("RBITCOIN_RPC_WAIT_TIP_IDLE") => env.rpc_wait_tip_idle = flag_on(val),
+            let Some(key) = key.as_ref().to_str() else {
+                continue;
+            };
+            let val = val.as_ref();
+            match key {
+                "RBITCOIN_P2P_MAX_INBOUND" => env.p2p_max_inbound = env_num(key, val)?,
+                "RBITCOIN_BLOCK_QUEUE_BYTES" => bq_bytes = env_num::<u64>(key, val)?,
+                "RBITCOIN_BLOCK_QUEUE_GB" => bq_gib = env_num::<u64>(key, val)?,
+                "RBITCOIN_TEST_DROP_STORE" => env.test_drop_store = env_flag(key, val)?,
+                "RBITCOIN_SH_FORCE_REBUILD" => env.sh_force_rebuild = env_flag(key, val)?,
+                "RBITCOIN_RPC_PACKAGE_DIALECT" => env.rpc_package_dialect = env_flag(key, val)?,
+                "RBITCOIN_RPC_WAIT_TIP_IDLE" => env.rpc_wait_tip_idle = env_flag(key, val)?,
                 _ => {}
             }
         }
         env.bq_assign_stop_bytes = bq_bytes
             .or(bq_gib.map(|g| g.saturating_mul(1 << 30)))
             .map(|n| if n == 0 { u64::MAX } else { n });
-        env
+        Ok(env)
     }
 }
 
-/// An env flag is on only for `1` or `true` (any case).
-fn flag_on(val: Option<&str>) -> bool {
-    val.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+/// The value of a set env knob, `None` when empty.
+fn env_value<'a>(key: &str, val: &'a OsStr) -> Result<Option<&'a str>, NodeError> {
+    match val.to_str() {
+        Some("") => Ok(None),
+        Some(v) => Ok(Some(v)),
+        None => Err(NodeError::Config(format!("{key}={val:?}: not UTF-8"))),
+    }
+}
+
+fn env_num<T>(key: &str, val: &OsStr) -> Result<Option<T>, NodeError>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    env_value(key, val)?
+        .map(|v| T::from_str(v).map_err(|e| NodeError::Config(format!("{key}={v:?}: {e}"))))
+        .transpose()
+}
+
+fn env_flag(key: &str, val: &OsStr) -> Result<bool, NodeError> {
+    match env_value(key, val)? {
+        None => Ok(false),
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => Ok(true),
+        Some(v) if v == "0" || v.eq_ignore_ascii_case("false") => Ok(false),
+        Some(v) => Err(NodeError::Config(format!(
+            "{key}={v:?}: expected 1, true, 0, or false"
+        ))),
+    }
 }
 
 /// Node process configuration (CLI + optional conf file).
