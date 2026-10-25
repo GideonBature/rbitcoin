@@ -1091,10 +1091,7 @@ pub fn apply_peer_dead(
             );
         }
         let lat = s.first_data_ms.saturating_sub(s.connected_ms);
-        let cooled = s
-            .net
-            .socket_addr()
-            .is_some_and(|sock| st.addr_cooldown.contains_key(&sock));
+        let cooled = st.addr_cooldown.contains_key(&s.net);
         peer_book.apply_ibd_dead_speed_addr(s.net, lat, s.rate.bps(), cooled);
     }
     let freed = release_peer_block_work(&mut st.slots, &mut st.inflight, &mut st.body, peer);

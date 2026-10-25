@@ -1711,7 +1711,9 @@ fn two_peers_reserve_the_header_walk() {
         st.slots.iter().any(|s| s.id == 2 && !s.alive),
         "a second missed header ask disconnects that peer"
     );
-    assert!(st.addr_cooldown.contains_key(&quiet_addr));
+    assert!(st
+        .addr_cooldown
+        .contains_key(&rbitcoin_net::NetAddr::from_socket(quiet_addr)));
     assert!(matches!(quiet_rx.try_recv(), Ok(PeerCmd::Shutdown)));
     assert_eq!(drain_getheaders(&mut busy_rx), 1);
 
@@ -1733,7 +1735,9 @@ fn two_peers_reserve_the_header_walk() {
     age_header_ask(&mut st);
     assert!(!send_getheaders(&mut st, &hub).unwrap());
     assert!(!st.slots[0].alive);
-    assert!(st.addr_cooldown.contains_key(&addr));
+    assert!(st
+        .addr_cooldown
+        .contains_key(&rbitcoin_net::NetAddr::from_socket(addr)));
     assert!(matches!(rx.try_recv(), Ok(PeerCmd::Shutdown)));
 
     // A fourth, because the header peer must hold the path: a block peer
@@ -2891,7 +2895,9 @@ fn off_path_headers_disconnect_the_peer_and_path_headers_do_not() {
     rbitcoin_ibd::ibd::assign::inflight_add_peer(&mut st.inflight, owed, 1);
     apply(&mut st, &hub, 0, vec![h1, h2]);
     assert!(st.slots.iter().any(|s| s.id == 0 && s.alive));
-    assert!(!st.addr_cooldown.contains_key(&path_addr));
+    assert!(!st
+        .addr_cooldown
+        .contains_key(&rbitcoin_net::NetAddr::from_socket(path_addr)));
     assert!(
         st.inflight.contains_key(&owed),
         "the side peer still owes the block while it is connected"
@@ -2909,7 +2915,9 @@ fn off_path_headers_disconnect_the_peer_and_path_headers_do_not() {
         st.slots.iter().any(|s| s.id == 1 && !s.alive),
         "a peer over the off-path budget is disconnected"
     );
-    assert!(st.addr_cooldown.contains_key(&side_addr));
+    assert!(st
+        .addr_cooldown
+        .contains_key(&rbitcoin_net::NetAddr::from_socket(side_addr)));
     assert!(st.slots.iter().any(|s| s.id == 0 && s.alive));
     assert!(
         !st.inflight.contains_key(&owed),
@@ -3001,7 +3009,9 @@ fn easy_bits_lookahead_does_not_capture_the_walk() {
         !st.slots[0].alive,
         "the peer that sent the easy header is down"
     );
-    assert!(st.addr_cooldown.contains_key(&bad_addr));
+    assert!(st
+        .addr_cooldown
+        .contains_key(&rbitcoin_net::NetAddr::from_socket(bad_addr)));
     assert!(st.slots[1].alive);
 
     assert!(send_getheaders(&mut st, &hub).unwrap());
@@ -3442,7 +3452,9 @@ fn min_difficulty_walk_back_rejects_a_limit_header() {
     apply(&mut st, &hub, 0, vec![next]);
     assert_eq!(st.header_walk.tip_hash(), Some(tip.block_hash()));
     assert!(!st.slots[0].alive);
-    assert!(st.addr_cooldown.contains_key(&addr));
+    assert!(st
+        .addr_cooldown
+        .contains_key(&rbitcoin_net::NetAddr::from_socket(addr)));
 }
 
 /// Core `GetNextWorkRequired`: a header within 20 minutes of a
