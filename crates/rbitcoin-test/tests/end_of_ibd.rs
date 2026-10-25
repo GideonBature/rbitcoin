@@ -767,10 +767,11 @@ async fn follow_journey() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_of_ibd_sh_interrupt() {
-    // Five history polls. Each may spend 60s waiting for the port and then
-    // 30s (60s under llvm-cov) for the history. The first catch-up may
-    // spend 40s. Those caps are 490s, and 640s under coverage.
-    let wall = llvm_cov_wall(500, 660);
+    // Catch-up may spend 40s on the RPC port, 40s on the tip, and 20s
+    // stopping. Each of the five history polls may spend 60s on Electrum,
+    // 30s on RPC, 30s on history (60s under coverage), and 20s stopping.
+    // Those caps are 800s, and 950s under coverage.
+    let wall = llvm_cov_wall(800, 950);
     tokio::time::timeout(wall, sh_interrupt_journey())
         .await
         .expect("end_of_ibd_sh_interrupt wall");
