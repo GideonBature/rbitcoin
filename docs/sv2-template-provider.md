@@ -290,7 +290,7 @@ Ships the listener, bootstrap, tip push, transaction data, and
   §7.4 sends nBits once per prev hash, so a solution on any template on it
   is assembled with the bits the client hashed. On min-difficulty networks
   the build's bits follow the clock past prev + 2 × spacing; recomputing
-  them would make every such solution `bad-diffbits`. While `ChainHub::in_ibd()` or relay is off, the session holds the constraints. A tip event publishes, and so does the template interval, because relay turns on after the catch-up tip. `getblocktemplate` uses the same relay gate.
+  them would make every such solution `bad-diffbits`. While `ChainHub::in_ibd()` or the pool is not maintained, the session holds the constraints. `-blocksonly` never starts maintenance. A tip event publishes, and so does the template interval, once the pool is maintained. `getblocktemplate` and `getrawmempool` follow that signal: a maintained pool is served while peer relay is off, and a nonempty pool before maintenance returns `-10`.
 - **Red:** `cargo test -p rbitcoin-sv2 --test suite` — the B3 template test gains
   the `SetNewPrevHash` pair and the `future_template: false` rebuilds;
   `sync_gate_` holds on a stale padded chain and serves after a fresh block
