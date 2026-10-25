@@ -302,12 +302,27 @@ async fn onion_seednode_reaches_socks_from_operator_config() {
         cfg.max_run_secs = Some(if populated { 12 } else { 2 });
         cfg.validate().unwrap();
         if populated {
+            use rbitcoin_rpc::RpcRegtest;
+
+            let hub = Arc::new(rbitcoin_net::ChainHub::new(
+                Query::open_or_create_layout(cfg.store_layout()).unwrap(),
+                rbitcoin_consensus::ChainParams::regtest(),
+                rbitcoin_consensus::Milestone::NONE,
+            ));
+            rbitcoin_rpc::HubRegtest(Arc::clone(&hub))
+                .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+                .unwrap();
+            hub.query.flush().unwrap();
+            drop(hub);
             let mut book = AddrMan::new();
+            book.set_onion_reachable(true);
             book.add_addr(format!("{onion}:18444").parse().unwrap());
+            assert!(!book.is_empty(), "fallback needs a populated address book");
             book.save(&dir.path().join("peers")).unwrap();
         }
 
         let capture = tokio::spawn(async move {
+            let mut last_book_dial = None;
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut greeting = [0; 2];
@@ -335,16 +350,30 @@ async fn onion_seednode_reaches_socks_from_operator_config() {
                 let mut host = vec![0; header[4] as usize];
                 socket.read_exact(&mut host).await.unwrap();
                 let port = socket.read_u16().await.unwrap();
+                let connected_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
                 socket
                     .write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0])
                     .await
                     .unwrap();
                 if port == 8333 {
+                    if populated {
+                        let book_dial =
+                            last_book_dial.expect("addrman must be tried before seednode");
+                        assert!(
+                            connected_at - book_dial >= ADD_NEXT_SEEDNODE_SECS,
+                            "seednode must wait for the delayed fallback window"
+                        );
+                    }
                     break (String::from_utf8(host).unwrap(), port);
                 }
+                assert_eq!(port, 18444);
+                last_book_dial = Some(connected_at);
             }
         });
-        tokio::time::timeout(Duration::from_secs(15), run_p2p(cfg))
+        tokio::time::timeout(Duration::from_secs(45), run_p2p(cfg))
             .await
             .expect("seednode run must stop")
             .unwrap();
