@@ -2,7 +2,6 @@ use rbitcoin_consensus::default_milestone_height;
 use rbitcoin_node::cli::*;
 use rbitcoin_node::config::NodeConfig;
 use rbitcoin_node::config::NodeEnv;
-use rbitcoin_node::config::OPERATOR_ENV_TEST_LOCK;
 use rbitcoin_primitives::Network;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -52,10 +51,6 @@ where
 fn operator_conf_and_argv() {
     use rbitcoin_consensus::Milestone;
     use rbitcoin_node::config::P2pListen;
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     let h = operator_usage();
     for flag in [
         "--prefill-compact",
@@ -570,9 +565,6 @@ include!("overlay_config_journey.rs");
 #[test]
 fn testnet3_default_milestone_is_anchored() {
     use bitcoin::hashes::Hash;
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let cfg = ready_config(["rbitcoin-node", "--network", "testnet"]);
     assert_eq!(cfg.network, Network::Testnet);
     let m = cfg.milestone();
@@ -617,9 +609,6 @@ fn testnet3_default_milestone_is_anchored() {
 /// the launch rather than surface as a warning after IBD.
 #[test]
 fn cli_rejects_bad_rpc_cookie_at_launch() {
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let dir = tmp_datadir();
     std::fs::create_dir_all(&dir).unwrap();
     let cookie = dir.join("rpc.cookie");
@@ -700,11 +689,6 @@ fn inbound_env_is_below_cli_and_conf() {
 fn trust_peer_addr() {
     use rbitcoin_node::config::P2pListen;
     use rbitcoin_node::config::DEFAULT_MAX_INBOUND;
-    // `plain` pins the default inbound cap, which `RBITCOIN_P2P_MAX_INBOUND`
-    // overrides; `cli_omit_preserves_advanced_env` sets it under this lock.
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
 
     let h = operator_usage();
     assert!(

@@ -1872,7 +1872,3 @@ impl NodeConfig {
         }
     }
 }
-
-/// Serialize tests that mutate process `RBITCOIN_*` env (CLI + config unit tests).
-#[doc(hidden)]
-pub static OPERATOR_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
