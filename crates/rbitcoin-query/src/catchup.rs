@@ -365,8 +365,7 @@ impl Query {
             } else {
                 floor.saturating_add(1)
             };
-            // Test seam: a create that lands after this sample must not be left
-            // behind the inclusion watermark. Production leaves the cell empty.
+            #[cfg(debug_assertions)]
             if let Some(hook) = sh_backfill_after_sample_hook() {
                 hook(self);
             }
@@ -425,6 +424,7 @@ impl Query {
     }
 }
 
+#[cfg(debug_assertions)]
 thread_local! {
     static SH_BACKFILL_AFTER_SAMPLE: std::cell::Cell<Option<fn(&Query)>> =
         const { std::cell::Cell::new(None) };
@@ -449,12 +449,14 @@ pub fn set_sh_backfill_on_ready_for_test(hook: Option<fn(&Query)>) {
     SH_BACKFILL_ON_READY.with(|c| c.set(hook));
 }
 
+#[cfg(debug_assertions)]
 fn sh_backfill_after_sample_hook() -> Option<fn(&Query)> {
     SH_BACKFILL_AFTER_SAMPLE.with(|c| c.take())
 }
 
 /// One-shot hook invoked after a Class A tail backfill samples `txs.count()`.
 /// Tests use it to confirm another create in that window.
+#[cfg(debug_assertions)]
 #[doc(hidden)]
 pub fn set_sh_backfill_after_sample_for_test(hook: Option<fn(&Query)>) {
     SH_BACKFILL_AFTER_SAMPLE.with(|c| c.set(hook));
