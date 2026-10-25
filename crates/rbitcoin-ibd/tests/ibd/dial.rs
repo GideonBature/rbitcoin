@@ -139,12 +139,17 @@ fn onion_stall_kicks_keep_independent_cooldowns_and_strikes() {
         }
     }
     let after_first = now + STALL_ADDR_COOLDOWN;
-    expire_addr_cooldown(&mut cooldown, after_first);
+    expire_addr_cooldown(&mut cooldown, &mut strikes, &AddrMan::new(), after_first);
     assert_eq!(
         dial_blocked_addrs(&[], &cooldown, after_first),
         HashSet::from([onions[0]])
     );
-    expire_addr_cooldown(&mut cooldown, now + STALL_ADDR_COOLDOWN_2);
+    expire_addr_cooldown(
+        &mut cooldown,
+        &mut strikes,
+        &AddrMan::new(),
+        now + STALL_ADDR_COOLDOWN_2,
+    );
     assert!(dial_blocked_addrs(&[], &cooldown, now + STALL_ADDR_COOLDOWN_2).is_empty());
 }
 
@@ -170,8 +175,105 @@ fn onion_dial_failure_is_excluded_until_cooldown_expires() {
         now,
     );
     assert!(dial_blocked_addrs(&[], &cooldown, now).contains(&onion));
-    expire_addr_cooldown(&mut cooldown, now + STALL_ADDR_COOLDOWN);
+    expire_addr_cooldown(
+        &mut cooldown,
+        &mut strikes,
+        &book,
+        now + STALL_ADDR_COOLDOWN,
+    );
     assert!(!dial_blocked_addrs(&[], &cooldown, now + STALL_ADDR_COOLDOWN).contains(&onion));
+}
+
+#[test]
+fn strike_history_is_reclaimed_after_addrman_eviction_and_cooldown_expiry() {
+    use rbitcoin_net::NetAddr;
+
+    let now = Instant::now();
+    let identities = [
+        NetAddr::Onion {
+            pk: [10; 32],
+            port: 8333,
+        },
+        NetAddr::I2p {
+            dest: [11; 32],
+            port: 8333,
+        },
+        NetAddr::from_socket(addr(12)),
+        "[2606:4700::12]:8333".parse().unwrap(),
+    ];
+    let mut book = AddrMan::new();
+    book.set_onion_reachable(true);
+    book.set_i2p_reachable(true);
+    let mut cooldown = HashMap::new();
+    let mut strikes = HashMap::new();
+    apply_dial_result(
+        &mut book,
+        &DialBatchResult {
+            slots: vec![],
+            attempted: identities.to_vec(),
+            failed: identities
+                .iter()
+                .map(|&a| (a, DialFailKind::Network))
+                .collect(),
+        },
+        &mut cooldown,
+        &mut strikes,
+        now,
+    );
+    for identity in &identities[..2] {
+        book.evict_one(*identity);
+    }
+    expire_addr_cooldown(&mut cooldown, &mut strikes, &book, now);
+    assert_eq!(
+        strikes.len(),
+        4,
+        "active cooldowns keep their strike history"
+    );
+    expire_addr_cooldown(
+        &mut cooldown,
+        &mut strikes,
+        &book,
+        now + STALL_ADDR_COOLDOWN,
+    );
+    assert!(cooldown.is_empty());
+    assert_eq!(
+        strikes.len(),
+        2,
+        "expired identities evicted from addrman are reclaimed"
+    );
+    for identity in &identities[2..] {
+        assert_eq!(
+            record_stall_kick(
+                &mut cooldown,
+                &mut strikes,
+                *identity,
+                now + STALL_ADDR_COOLDOWN
+            ),
+            STALL_ADDR_COOLDOWN_2
+        );
+    }
+    let redialed = dummy_slot(1, addr(12), true);
+    apply_dial_result(
+        &mut book,
+        &DialBatchResult {
+            slots: vec![redialed],
+            attempted: vec![identities[2]],
+            failed: vec![],
+        },
+        &mut cooldown,
+        &mut strikes,
+        now + STALL_ADDR_COOLDOWN,
+    );
+    assert_eq!(strikes.get(&identities[2]), Some(&2));
+    assert!(!cooldown.contains_key(&identities[2]));
+    book.evict_one(identities[2]);
+    expire_addr_cooldown(
+        &mut cooldown,
+        &mut strikes,
+        &book,
+        now + STALL_ADDR_COOLDOWN,
+    );
+    assert_eq!(strikes, HashMap::from([(identities[3], 2)]));
 }
 
 #[test]
@@ -246,7 +348,12 @@ fn cooldown_selection_and_successful_redial_preserve_network_identity() {
             record_stall_kick(&mut cooldown, &mut strikes, b, now),
             STALL_ADDR_COOLDOWN_2
         );
-        expire_addr_cooldown(&mut cooldown, now + STALL_ADDR_COOLDOWN);
+        expire_addr_cooldown(
+            &mut cooldown,
+            &mut strikes,
+            &book,
+            now + STALL_ADDR_COOLDOWN,
+        );
         assert!(replacement_available(
             &book,
             &[],
@@ -315,7 +422,7 @@ fn onion_relative_slow_eviction_requires_an_uncooled_replacement() {
     assert!(slots[0].alive);
     assert_eq!(suspect, None);
     let later = now + STALL_ADDR_COOLDOWN;
-    expire_addr_cooldown(&mut cooldown, later);
+    expire_addr_cooldown(&mut cooldown, &mut strikes, &book, later);
     for mono in [warm, warm + RELATIVE_SLOW_HYSTERESIS_MS] {
         disconnect_relative_slow_block_peers_at(
             &mut slots,
@@ -477,7 +584,7 @@ fn dial_blocked_and_cooldown_expiry() {
     assert!(blocked.contains(&rbitcoin_net::NetAddr::Ip(addr(2))));
     assert!(!blocked.contains(&rbitcoin_net::NetAddr::Ip(addr(3))));
 
-    expire_addr_cooldown(&mut cooldown, now);
+    expire_addr_cooldown(&mut cooldown, &mut HashMap::new(), &AddrMan::new(), now);
     assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(addr(2))));
     assert!(!cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(addr(3))));
 }
@@ -1659,6 +1766,8 @@ fn kick_cooldown_escalates_on_repeat_strikes() {
     assert_eq!(d3, STALL_ADDR_COOLDOWN_3);
     expire_addr_cooldown(
         &mut cooldown,
+        &mut strikes,
+        &AddrMan::new(),
         t0 + STALL_ADDR_COOLDOWN + Duration::from_secs(1),
     );
     assert!(
@@ -1667,6 +1776,8 @@ fn kick_cooldown_escalates_on_repeat_strikes() {
     );
     expire_addr_cooldown(
         &mut cooldown,
+        &mut strikes,
+        &AddrMan::new(),
         t0 + STALL_ADDR_COOLDOWN_2 + Duration::from_secs(1),
     );
     assert!(
@@ -1675,6 +1786,8 @@ fn kick_cooldown_escalates_on_repeat_strikes() {
     );
     expire_addr_cooldown(
         &mut cooldown,
+        &mut strikes,
+        &AddrMan::new(),
         t0 + STALL_ADDR_COOLDOWN_3 + Duration::from_secs(1),
     );
     assert!(!cooldown.contains_key(&a));

@@ -178,7 +178,7 @@ pub struct IbdWorkState {
     /// Per-peer addr token buckets (peer id → bucket), as on tip-follow
     /// sessions. Dropped when the peer dies.
     pub addr_buckets: HashMap<usize, rbitcoin_net::peer::AddrTokenBucket>,
-    /// Process-local stall/relative-slow kick counts (not persisted).
+    /// Process-local kick counts for addresses in addrman or still cooling.
     pub addr_strikes: HashMap<NetAddr, u8>,
     /// Relative-slow hysteresis: peer id + first Gate B fail ms.
     pub relative_slow_suspect: Option<(usize, u64)>,

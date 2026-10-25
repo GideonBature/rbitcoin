@@ -944,7 +944,12 @@ pub async fn ibd_cancellable(
                     &mut st.relative_slow_last_kick_ms,
                 ));
                 st.reopen_for_densify(&freed);
-                expire_addr_cooldown(&mut st.addr_cooldown, now);
+                expire_addr_cooldown(
+                    &mut st.addr_cooldown,
+                    &mut st.addr_strikes,
+                    peer_sess.book(),
+                    now,
+                );
                 cadence.mark_peer_slow(now);
             }
             st.slots.retain(|s| s.alive);

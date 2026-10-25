@@ -552,8 +552,14 @@ pub fn alive_dial_addrs(slots: &[PeerSlot]) -> Vec<SocketAddr> {
         .collect()
 }
 
-pub fn expire_addr_cooldown(cooldown: &mut HashMap<NetAddr, Instant>, now: Instant) {
+pub fn expire_addr_cooldown(
+    cooldown: &mut HashMap<NetAddr, Instant>,
+    strikes: &mut HashMap<NetAddr, u8>,
+    book: &AddrMan,
+    now: Instant,
+) {
     cooldown.retain(|_, until| *until > now);
+    strikes.retain(|addr, _| cooldown.contains_key(addr) || book.entry_of(addr).is_some());
 }
 
 /// Cooldown after the Nth stall/relative-slow kick of this addr this process.
