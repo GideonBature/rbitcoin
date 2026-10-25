@@ -297,20 +297,22 @@ impl Query {
         }
         if tip_max > 0 {
             let mut n = n;
-            if !self.sh_is_tip_ready() && self.store.scripthash.has_durable_index() {
+            // A create can land after the chase samples readiness and before
+            // this check. The watermark is then behind `txs.count()`, so scan
+            // again. A watermark that already covers the count is a real gap.
+            const GAP: &str =
+                "scripthash unsorted-shards create gap remain after materialize drain \
+                     (refuse tip-follow / Electrum)";
+            while !self.sh_is_tip_ready() {
+                if !self.store.scripthash.has_durable_index()
+                    || self.store.scripthash.include_hwm() >= self.store.txs.count()
+                {
+                    return Err(StoreError::Corrupt(GAP));
+                }
                 rbitcoin_log::info!(
                     "node: scripthash unsorted-shards post-materialize Class A tail backfill"
                 );
-                n = n.saturating_add(self.backfill_until_sh_tip_ready(
-                    "scripthash unsorted-shards create gap remain after materialize drain \
-                     (refuse tip-follow / Electrum)",
-                )?);
-            }
-            if !self.sh_is_tip_ready() {
-                return Err(StoreError::Corrupt(
-                    "scripthash unsorted-shards create gap remain after materialize drain \
-                     (refuse tip-follow / Electrum)",
-                ));
+                n = n.saturating_add(self.backfill_until_sh_tip_ready(GAP)?);
             }
             self.mark_sh_indexed_through_tip();
             return Ok(n);
@@ -328,6 +330,10 @@ impl Query {
         loop {
             n = n.saturating_add(self.backfill_sh_creates_from_class_a()?);
             if self.sh_is_tip_ready() {
+                #[cfg(debug_assertions)]
+                if let Some(hook) = sh_backfill_on_ready_hook() {
+                    hook(self);
+                }
                 return Ok(n);
             }
             if self.store.scripthash.include_hwm() >= self.store.txs.count() {
@@ -422,6 +428,25 @@ impl Query {
 thread_local! {
     static SH_BACKFILL_AFTER_SAMPLE: std::cell::Cell<Option<fn(&Query)>> =
         const { std::cell::Cell::new(None) };
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SH_BACKFILL_ON_READY: std::cell::Cell<Option<fn(&Query)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(debug_assertions)]
+fn sh_backfill_on_ready_hook() -> Option<fn(&Query)> {
+    SH_BACKFILL_ON_READY.with(|c| c.take())
+}
+
+/// One-shot hook after a Class A tail chase has observed a tip-ready sample.
+/// Tests confirm another create in the gap before the caller checks again.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_sh_backfill_on_ready_for_test(hook: Option<fn(&Query)>) {
+    SH_BACKFILL_ON_READY.with(|c| c.set(hook));
 }
 
 fn sh_backfill_after_sample_hook() -> Option<fn(&Query)> {
