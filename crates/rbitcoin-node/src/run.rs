@@ -2265,11 +2265,8 @@ pub async fn sync_tx_relay(
     );
     if want == mempool.relay_enabled() {
         // A tip-mode accept may have set the bit and left preload due.
-        if want {
-            let due = mempool_blocking(mempool, MempoolHub::take_fee_backfill_due).await?;
-            if due {
-                spawn_fee_history_backfill(mempool);
-            }
+        if want && mempool.take_fee_backfill_due() {
+            spawn_fee_history_backfill(mempool);
         }
         return Ok(());
     }
