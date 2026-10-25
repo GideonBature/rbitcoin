@@ -21,6 +21,7 @@ fn assert_rpc_headers(hub: &std::sync::Arc<rbitcoin_net::ChainHub>, blocks: u32,
         alert_notify: None,
         alert_fired: Default::default(),
         blocksonly: false,
+        package_dialect: false,
         active: Default::default(),
     };
     let info = dispatch(&ctx, "getblockchaininfo", vec![]).unwrap();
