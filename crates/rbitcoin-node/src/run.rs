@@ -10,7 +10,7 @@ use rbitcoin_ibd::{
 use rbitcoin_log::{debug, enabled, info, warn, Level};
 use rbitcoin_net::{
     default_port, netgroup, sample_reset_serve_perf, socks_dns_seed_dests, AddrMan, AsMap,
-    BlockingRegion, ChainHub, Dialer, MempoolHub, P2PNode, PeerConnType, TipEvent,
+    BlockingRegion, ChainHub, Dialer, MempoolHub, NetAddr, P2PNode, PeerConnType, TipEvent,
 };
 use rbitcoin_primitives::Network;
 use rbitcoin_query::{spawn_sh_writebehind, Query, SpendSync};
@@ -874,7 +874,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             };
             let host = raw.split(':').next().unwrap_or(raw);
             info!("Empty addrman, adding seednode ({host}) to addrfetch");
-            if let Err(e) = node.peers.dial(addr, PeerConnType::AddrFetch) {
+            if let Err(e) = node.peers.dial_net(addr, PeerConnType::AddrFetch) {
                 warn!("seednode dial {addr}: {e}");
             }
         }
@@ -929,7 +929,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     info!(
                         "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
                     );
-                    if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
+                    if let Err(e) = peers.dial_net(addr, PeerConnType::AddrFetch) {
                         warn!("seednode dial {addr}: {e}");
                     }
                 }
@@ -2909,12 +2909,15 @@ pub fn external_ips_with_cjdns_bind(
 
 /// Parse Core `-seednode` host or host:port using the chain default P2P port.
 #[doc(hidden)]
-pub fn resolve_seednode(raw: &str, network: Network) -> Result<SocketAddr, String> {
-    if let Ok(a) = raw.parse::<SocketAddr>() {
+pub fn resolve_seednode(raw: &str, network: Network) -> Result<NetAddr, String> {
+    if let Ok(a) = raw.parse::<NetAddr>() {
         return Ok(a);
     }
     let ip: std::net::IpAddr = raw
         .parse()
         .map_err(|e| format!("bad seednode address: {e}"))?;
-    Ok(SocketAddr::new(ip, default_port(network)))
+    Ok(NetAddr::from_socket(SocketAddr::new(
+        ip,
+        default_port(network),
+    )))
 }
