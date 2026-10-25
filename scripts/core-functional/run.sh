@@ -121,6 +121,10 @@ SHIM="${HERE}/bitcoind"
 # delete our store. Real blocks live in RBITCOIN_CACHE (our store/).
 # --keepcache: test_runner would otherwise rmtree BUILDDIR/test/cache.
 # --jobs 1: Core create_cache.py only runs when jobs>1; we still skip it.
+# --timeout-factor=4: one argv. test_runner treats a bare "4" as a test
+# name and forwards --timeout-factor with no value. Core's slow-host
+# multiplier. The direct-fetch check is 0.05s, one sample. Successful
+# waits return as soon as they match.
 export RBITCOIN_CACHE="${RBITCOIN_CACHE:-$HERE/cache}"
 if [[ -f "${TESTS_DIR}/test_runner.py" ]]; then
   python3 "$HERE/create_cache.py" --preseed-core "$CORE_SRC"
@@ -130,6 +134,7 @@ CMD=(
   --v2transport
   --jobs
   1
+  --timeout-factor=4
   --keepcache
   "${NORM[@]}"
 )

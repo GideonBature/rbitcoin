@@ -14,6 +14,7 @@ import hmac
 import json
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from decimal import Decimal
@@ -328,6 +329,33 @@ def _sat_btc(sats: int) -> float:
     return float(Decimal(sats) / Decimal(100_000_000))
 
 
+# Esplora binds after the scripthash collect. The old 4s retry gave up
+# while the listener was still down and the wallet reported a zero balance.
+ESPLORA_READY_S = 60.0
+_ESPLORA_POLL_S = 0.1
+# How long one RPC may sit after IBD, waiting for tx relay, before -28.
+# Core retries -28 only inside wait_for_rpc_connection. Later calls do not.
+RPC_WARMUP_S = 60.0
+_WARMUP_POLL_S = 0.05
+
+
+def wait_esplora_tip(esplora: Callable[[str], Any], tip_height: int) -> None:
+    """Return once `GET /blocks/tip/height` matches the node tip."""
+    deadline = time.monotonic() + ESPLORA_READY_S
+    last: BaseException | None = None
+    while True:
+        try:
+            height = esplora("/blocks/tip/height")
+            if int(height) == int(tip_height):
+                return
+            last = None
+        except (RpcError, TypeError, ValueError) as exc:
+            last = exc
+        if time.monotonic() >= deadline:
+            raise RpcError(-1, f"esplora unreachable: {last}")
+        time.sleep(_ESPLORA_POLL_S)
+
+
 def shim_miniwallet_scantxoutset(
     params: Any, *, esplora: Callable[[str], Any], tip_height: int
 ) -> dict[str, Any]:
@@ -345,8 +373,12 @@ def shim_miniwallet_scantxoutset(
     unspents: list[dict[str, Any]] = []
     total = 0
     tx_cache: dict[str, Any] = {}
+    ready = False
     for obj in objects:
         script = _raw_script(obj)
+        if not ready:
+            wait_esplora_tip(esplora, tip_height)
+            ready = True
         sh = hashlib.sha256(script).digest()[::-1].hex()
         rows = esplora(f"/scripthash/{sh}/utxo")
         if not isinstance(rows, list):
@@ -477,12 +509,17 @@ class RpcProxy:
         rpcauth_lines: list[str] | None = None,
         whitelist_lines: list[str] | None = None,
         whitelist_default: str | None = None,
+        blocks_only: bool = False,
     ) -> None:
         self.node_url = node_url.rstrip("/") + "/"
         self.cookie_line = cookie_line
         self.rpcauth_lines = list(rpcauth_lines or [])
         self.whitelist_lines = list(whitelist_lines or [])
         self.whitelist_default = whitelist_default
+        self.blocks_only = blocks_only
+        # Latched once tx relay is on (or this node will never turn it on).
+        # IBD stays unlatched: the collect can leave IBD before relay starts.
+        self._test_started = False
         self._handlers: dict[str, Callable[[Any], dict[str, Any]]] = {}
         proxy = self
 
@@ -538,6 +575,16 @@ class RpcProxy:
             return 403, b'{"error":"forbidden"}\n'
         if not parsed:
             return self.forward_raw(raw)
+        if not self.test_may_start():
+            req_id = payload.get("id") if isinstance(payload, dict) else None
+            body = json.dumps(
+                {
+                    "result": None,
+                    "error": {"code": -28, "message": "Loading..."},
+                    "id": req_id,
+                }
+            ).encode()
+            return 200, body
         try:
             if isinstance(payload, list):
                 for item in payload:
@@ -564,6 +611,85 @@ class RpcProxy:
             ).encode()
             return 200, body
         return self.forward_raw(raw)
+
+    def _node_rpc(self, method: str) -> tuple[str, dict[str, Any] | None]:
+        """One call to the node. 'dict', 'bare' (test echo), or 'down'."""
+        raw = json.dumps(
+            {"jsonrpc": "1.0", "id": "probe", "method": method, "params": []}
+        ).encode()
+        cookie = self.cookie_line() or ""
+        req = urllib.request.Request(
+            self.node_url,
+            data=raw,
+            headers={
+                "Authorization": node_authorization(cookie),
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                parsed = json.loads(resp.read().decode())
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+        ):
+            return "down", None
+        if not isinstance(parsed, dict) or parsed.get("error"):
+            return "down", None
+        result = parsed.get("result")
+        if isinstance(result, dict):
+            return "dict", result
+        return "bare", None
+
+    def _warmup_state(self) -> str:
+        """'open' forwards, 'hold' waits for tx relay, 'down' is -28 now.
+
+        Still in IBD: answer now, and keep checking. The index pack can
+        leave IBD with relay still off. `-blocksonly` never sends a filter.
+        A fake that echoes the method name has no relay bit; let it through.
+        A node whose RPC port is not up yet is 'down' so Core's startup
+        poll can retry, instead of sitting here for the whole warmup.
+        """
+        if self._test_started:
+            return "open"
+        if self.blocks_only:
+            self._test_started = True
+            return "open"
+        chain_kind, chain = self._node_rpc("getblockchaininfo")
+        net_kind, net = self._node_rpc("getnetworkinfo")
+        if chain_kind == "down" or net_kind == "down":
+            return "down"
+        if chain_kind == "bare" or net_kind == "bare":
+            self._test_started = True
+            return "open"
+        if chain is None or net is None:
+            return "down"
+        if chain.get("initialblockdownload"):
+            return "open"
+        if net.get("localrelay"):
+            self._test_started = True
+            return "open"
+        return "hold"
+
+    def test_may_start(self) -> bool:
+        """Block this RPC until the node will send a fee filter.
+
+        Core does not retry -28 once wait_for_rpc_connection has returned.
+        setup_nodes mines the block that leaves IBD and then keeps calling.
+        Holding the response lets that call finish after relay is on.
+        """
+        deadline = time.monotonic() + RPC_WARMUP_S
+        while True:
+            state = self._warmup_state()
+            if state == "open":
+                return True
+            if state == "down" or time.monotonic() >= deadline:
+                return False
+            time.sleep(_WARMUP_POLL_S)
 
     def forward_raw(self, raw: bytes) -> tuple[int, bytes]:
         cookie = self.cookie_line() or ""
