@@ -125,6 +125,27 @@ impl Dialer {
         self
     }
 
+    pub fn proxy_for(&self, net: crate::OnlyNet) -> Option<SocketAddr> {
+        let Dialer::Socks { proxy, onion, .. } = self else {
+            return None;
+        };
+        match net {
+            crate::OnlyNet::Ipv4 | crate::OnlyNet::Ipv6 => *proxy,
+            crate::OnlyNet::Onion => onion.or(*proxy),
+            crate::OnlyNet::I2p | crate::OnlyNet::Cjdns => None,
+        }
+    }
+
+    pub fn randomizes_credentials(&self) -> bool {
+        matches!(
+            self,
+            Dialer::Socks {
+                randomize: true,
+                ..
+            }
+        )
+    }
+
     pub fn socks(proxy: SocketAddr, randomize: bool) -> Self {
         Self::with_proxies(Some(proxy), None, randomize)
     }
@@ -224,17 +245,12 @@ impl Dialer {
     pub async fn connect_isolated_net(&self, addr: crate::NetAddr) -> Result<TcpStream, NetError> {
         match addr {
             crate::NetAddr::Ip(s) => self.connect_isolated(s).await,
-            crate::NetAddr::Onion { port, .. } => match self {
-                Dialer::Direct => Err(NetError::Encode(
-                    "onion dial requires SOCKS (--proxy or --onion)".into(),
-                )),
-                Dialer::Socks { proxy, onion, .. } => {
-                    let socks = onion.or(*proxy).ok_or_else(|| {
-                        NetError::Encode("onion dial requires SOCKS (--proxy or --onion)".into())
-                    })?;
-                    dial_isolated_domain(socks, &addr.host_str(), port).await
-                }
-            },
+            crate::NetAddr::Onion { port, .. } => {
+                let socks = self.proxy_for(crate::OnlyNet::Onion).ok_or_else(|| {
+                    NetError::Encode("onion dial requires SOCKS (--proxy or --onion)".into())
+                })?;
+                dial_isolated_domain(socks, &addr.host_str(), port).await
+            }
             crate::NetAddr::I2p { .. } => {
                 Err(NetError::Encode("i2p dial requires SAM (--i2p-sam)".into()))
             }
@@ -248,11 +264,7 @@ impl Dialer {
         match addr {
             crate::NetAddr::Ip(s) => self.connect(s).await,
             crate::NetAddr::Onion { port, .. } => {
-                let socks = match self {
-                    Dialer::Direct => None,
-                    Dialer::Socks { proxy, onion, .. } => onion.or(*proxy),
-                };
-                let Some(socks) = socks else {
+                let Some(socks) = self.proxy_for(crate::OnlyNet::Onion) else {
                     return Err(NetError::Encode(
                         "onion dial requires SOCKS (--proxy or --onion)".into(),
                     ));

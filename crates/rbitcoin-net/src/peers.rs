@@ -1527,6 +1527,7 @@ pub struct PeerHub {
     /// Clearnet P2P bind (not onion-only loopback). Needed to gossip `--external-ip`.
     pub clearnet_listen: AtomicBool,
     pub cjdns_reachable: AtomicBool,
+    proxies: Mutex<crate::socks::Dialer>,
     /// Core `-i2psam`: I2P rows may enter addrman. Off, they are still relayed.
     i2p_reachable: AtomicBool,
     pruned: AtomicBool,
@@ -1636,6 +1637,7 @@ impl PeerHub {
             discover: AtomicBool::new(true),
             clearnet_listen: AtomicBool::new(true),
             cjdns_reachable: AtomicBool::new(false),
+            proxies: Mutex::new(crate::socks::Dialer::Direct),
             i2p_reachable: AtomicBool::new(false),
             pruned: AtomicBool::new(false),
             asmap: Mutex::new(None),
@@ -1733,6 +1735,17 @@ impl PeerHub {
 
     pub fn set_cjdns_reachable(&self, on: bool) {
         self.cjdns_reachable.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_proxies(&self, dialer: crate::socks::Dialer) {
+        *self.proxies.lock().unwrap_or_else(|e| e.into_inner()) = dialer;
+    }
+
+    pub fn proxies(&self) -> crate::socks::Dialer {
+        self.proxies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Core sets `NET_I2P` reachable only when `-i2psam` is configured.

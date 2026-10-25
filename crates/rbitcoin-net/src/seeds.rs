@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::asmap::AsMap;
-use crate::netaddr::{addr_allowed, NetAddr, OnlyNet};
+use crate::netaddr::{NetAddr, OnlyNet};
 use crate::netgroup::{netgroup, select_diverse};
 
 #[doc(hidden)]
@@ -364,17 +364,21 @@ impl AddrMan {
         self.retain_dialable();
     }
 
-    #[doc(hidden)]
-    pub fn dialable(&self, addr: NetAddr) -> bool {
-        if !addr_allowed(addr, &self.only_net) {
+    pub fn reachable(&self, net: OnlyNet) -> bool {
+        if !self.only_net.is_empty() && !self.only_net.contains(&net) {
             return false;
         }
-        match addr {
-            NetAddr::Ip(_) => true,
-            NetAddr::Onion { .. } => self.onion_reachable,
-            NetAddr::I2p { .. } => self.i2p_reachable,
-            NetAddr::Cjdns { .. } => self.cjdns_reachable,
+        match net {
+            OnlyNet::Ipv4 | OnlyNet::Ipv6 => true,
+            OnlyNet::Onion => self.onion_reachable,
+            OnlyNet::I2p => self.i2p_reachable,
+            OnlyNet::Cjdns => self.cjdns_reachable,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn dialable(&self, addr: NetAddr) -> bool {
+        self.reachable(OnlyNet::of(addr))
     }
 
     #[doc(hidden)]

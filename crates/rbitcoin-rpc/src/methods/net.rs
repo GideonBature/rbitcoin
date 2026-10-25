@@ -338,6 +338,33 @@ pub fn localaddresses_json(ctx: &RpcContext) -> Value {
 /// `subversion`.
 pub const RPC_COMPAT_VERSION: u64 = 190_000;
 
+fn networks_json(ctx: &RpcContext) -> Value {
+    let nets = rbitcoin_net::OnlyNet::ALL;
+    let reach = match ctx.addrman.as_ref() {
+        Some(am) => {
+            let book = am.lock().unwrap_or_else(|e| e.into_inner());
+            nets.map(|net| book.reachable(net))
+        }
+        None => nets.map(|net| rbitcoin_net::AddrMan::default().reachable(net)),
+    };
+    let dialer = ctx.peers.as_ref().map(|p| p.proxies()).unwrap_or_default();
+    let rows: Vec<Value> = nets
+        .into_iter()
+        .zip(reach)
+        .map(|(net, reachable)| {
+            let proxy = dialer.proxy_for(net);
+            json!({
+                "name": net.label(),
+                "limited": !reachable,
+                "reachable": reachable,
+                "proxy": proxy.map(|p| p.to_string()).unwrap_or_default(),
+                "proxy_randomize_credentials": proxy.is_some() && dialer.randomizes_credentials(),
+            })
+        })
+        .collect();
+    json!(rows)
+}
+
 pub fn getnetworkinfo(ctx: &RpcContext) -> Value {
     let (cin, cout, timeoffset) = if let Some(hub) = ctx.peers.as_ref() {
         let rows = hub.snapshot();
@@ -361,7 +388,7 @@ pub fn getnetworkinfo(ctx: &RpcContext) -> Value {
         "connections": cin + cout,
         "connections_in": cin,
         "connections_out": cout,
-        "networks": [],
+        "networks": networks_json(ctx),
         "relayfee": MempoolHub::relay_fee_btc_per_kb(),
         "incrementalfee": MempoolHub::relay_fee_btc_per_kb(),
         "localaddresses": localaddresses_json(ctx),

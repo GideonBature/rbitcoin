@@ -652,6 +652,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
     let reachability_removed_rows = addrman.len() < len_before_reach;
     node.peers
         .set_cjdns_reachable(config.listen.cjdns_reachable);
+    node.peers.set_proxies(config.listen.dialer());
     node.peers.set_pruned(config.prune_seqsigwit);
     node.peers.set_asmap(asmap);
     node.peers.set_connect_hosts(

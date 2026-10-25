@@ -120,8 +120,7 @@ fn netaddr_cjdns_addrv2_roundtrip() {
     assert_eq!(a.socket_addr(), Some(SocketAddr::from((ip, 8333))));
     let parsed: NetAddr = a.to_string().parse().unwrap();
     assert_eq!(parsed, a);
-    assert!(OnlyNet::Cjdns.matches_addr(a));
-    assert!(!OnlyNet::Ipv6.matches_addr(a));
+    assert_eq!(OnlyNet::of(a), OnlyNet::Cjdns);
 }
 
 #[test]

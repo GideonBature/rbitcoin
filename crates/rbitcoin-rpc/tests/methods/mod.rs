@@ -876,6 +876,57 @@ fn trust_peer_warning_does_not_spend_alertnotify() {
 }
 
 #[test]
+fn getnetworkinfo_networks_report_reach_and_proxy() {
+    use rbitcoin_net::{AddrMan, Dialer, OnlyNet, PeerHub};
+    let row = |name: &str, reachable: bool, proxy: &str| {
+        json!({
+            "name": name,
+            "limited": !reachable,
+            "reachable": reachable,
+            "proxy": proxy,
+            "proxy_randomize_credentials": !proxy.is_empty(),
+        })
+    };
+    let (mut ctx, dir) = ctx_empty();
+    let info = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(
+        info["networks"],
+        json!([
+            row("ipv4", true, ""),
+            row("ipv6", true, ""),
+            row("onion", false, ""),
+            row("i2p", false, ""),
+            row("cjdns", false, ""),
+        ])
+    );
+
+    let proxy = "127.0.0.1:9050";
+    let mut book = AddrMan::new();
+    book.set_onion_reachable(true);
+    book.set_only_net(vec![OnlyNet::Ipv4, OnlyNet::Onion]);
+    ctx.addrman = Some(Arc::new(std::sync::Mutex::new(book)));
+    let peers = PeerHub::new();
+    peers.set_proxies(Dialer::with_proxies(
+        Some(proxy.parse().unwrap()),
+        None,
+        true,
+    ));
+    ctx.peers = Some(peers);
+    let info = dispatch(&ctx, "getnetworkinfo", vec![]).unwrap();
+    assert_eq!(
+        info["networks"],
+        json!([
+            row("ipv4", true, proxy),
+            row("ipv6", false, proxy),
+            row("onion", true, proxy),
+            row("i2p", false, ""),
+            row("cjdns", false, ""),
+        ])
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn getnetworkinfo_localrelay_follows_mempool_relay() {
     // `p2p_blocksonly.py`: `-blocksonly` leaves relay off → localrelay false.
     let (ctx, dir) = ctx_empty();
