@@ -601,6 +601,21 @@ fn put_create_batch_skips_leq_max_appends_higher() {
 }
 
 #[test]
+fn append_does_not_retain_head_values() {
+    let dir = tmp();
+    let t = ScriptHashTable::create_tiny(&dir).unwrap();
+    let sh = script_hash(&[0x51]);
+    let mut heads = HashMap::new();
+    t.put_create_batch_append(&[rec(sh, 1, 0)], &mut heads)
+        .unwrap();
+    assert!(
+        heads.is_empty(),
+        "append must locate the next batch from disk, not a retained head map"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn put_create_batch_append_uses_heads() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
