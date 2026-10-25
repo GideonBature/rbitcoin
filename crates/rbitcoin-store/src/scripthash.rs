@@ -1338,7 +1338,7 @@ impl ScriptHashTable {
         n
     }
 
-    /// Head value for a key (process-cache seed / disconnect refresh).
+    /// Durable head value for a key.
     pub fn head_value(&self, scripthash: &[u8; 32]) -> Result<Option<ShHeadValue>, StoreError> {
         Ok(self.locate_head(scripthash)?.map(|(v, _)| v))
     }
@@ -1590,19 +1590,19 @@ impl ScriptHashTable {
         let t_seed = std::time::Instant::now();
         // Cold body (no prior creates): skip N head gets — empty table probes.
         if self.entry_count() > 0 || !self.head_is_empty() {
-            let mut missing: Vec<[u8; 32]> = Vec::new();
-            let mut seen_miss = std::collections::HashSet::new();
+            let mut keys: Vec<[u8; 32]> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
             for &i in &order {
                 let rec = &recs[i];
                 if rec.create_tx_fk.is_null() {
                     continue;
                 }
-                if seen_miss.insert(rec.scripthash) {
-                    missing.push(rec.scripthash);
+                if seen.insert(rec.scripthash) {
+                    keys.push(rec.scripthash);
                 }
             }
-            missing.sort_unstable();
-            for key in missing {
+            keys.sort_unstable();
+            for key in keys {
                 if let Some((v, kh)) = self.locate_head(&key)? {
                     heads.insert(key, v);
                     home.insert(key, KeyHome::from(kh));
