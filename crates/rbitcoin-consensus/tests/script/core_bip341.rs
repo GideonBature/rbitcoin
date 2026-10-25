@@ -190,12 +190,13 @@ fn core_bip341_wallet_vectors_all_rows() {
                     tx.input[idx].witness = wit;
                     let job = taproot_job(tx, prevouts.clone());
                     let tx_ref: &Transaction = &job.tx;
+                    let vin = job.inputs().nth(idx).expect("vin");
                     match script::verify_input(
                         &job,
-                        idx,
+                        vin,
                         tx_ref,
                         &mut None,
-                        job.pre(),
+                        job.pre().expect("script precompute"),
                         &Default::default(),
                     ) {
                         Ok(()) => pass += 1,

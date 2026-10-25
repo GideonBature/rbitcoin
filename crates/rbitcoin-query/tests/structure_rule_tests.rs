@@ -182,26 +182,41 @@ fn script_jobs_from_same_pres_slice_share_pre() {
     let spend = non_coinbase_spend(1);
     let pres: std::sync::Arc<[TxPrecompute]> =
         std::sync::Arc::from([TxPrecompute::from_tx(&spend)]);
+    let prevouts = vec![
+        bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        };
+        spend.input.len()
+    ];
     let job_a = ScriptCheckJob::with_txid(
         pres[0].txid,
-        vec![],
+        prevouts.clone(),
         spend.clone(),
         ScriptVerifyFlags::buried(true, true, true, true, true),
     )
-    .with_pre_slice(std::sync::Arc::clone(&pres), 0);
+    .with_pre_slice(std::sync::Arc::clone(&pres), 0)
+    .expect("script precompute");
     let job_b = ScriptCheckJob::with_txid(
         pres[0].txid,
-        vec![],
+        prevouts,
         spend,
         ScriptVerifyFlags::buried(true, true, true, true, true),
     )
-    .with_pre_slice(std::sync::Arc::clone(&pres), 0);
+    .with_pre_slice(std::sync::Arc::clone(&pres), 0)
+    .expect("script precompute");
     assert!(
-        std::ptr::eq(job_a.pre(), &pres[0]),
+        std::ptr::eq(
+            job_a.pre().expect("script precompute"),
+            pres[0].as_script().expect("script precompute")
+        ),
         "job pre must be the slice element, not a cloned TxPrecompute"
     );
     assert!(
-        std::ptr::eq(job_a.pre(), job_b.pre()),
+        std::ptr::eq(
+            job_a.pre().expect("script precompute"),
+            job_b.pre().expect("script precompute")
+        ),
         "two jobs from the same Arc<[TxPrecompute]> share the element"
     );
 }
@@ -1242,6 +1257,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("empty");
@@ -1271,6 +1287,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("fk mismatch");
@@ -1299,6 +1316,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("not coinbase");
@@ -1341,6 +1359,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .expect("coinbase-only assemble");
     meters.acc.flush(q.confirm_stats());
@@ -1457,17 +1476,26 @@ fn script_job_shares_prevout_script() {
         Some(&wire),
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .expect("assemble shared prevouts");
     assert_eq!(jobs.len(), 2);
-    let hist = jobs[0].prevout_script(0).expect("historical script");
+    let hist = {
+        let i = jobs[0].inputs().next().unwrap();
+        jobs[0].prevout_script(i)
+    }
+    .expect("historical script");
     assert_eq!(hist, hist_script.as_slice());
     assert_eq!(
         hist.as_ptr(),
         pin_ptr,
         "historical prevout script is the pin allocation"
     );
-    let same = jobs[1].prevout_script(0).expect("same-block script");
+    let same = {
+        let i = jobs[1].inputs().next().unwrap();
+        jobs[1].prevout_script(i)
+    }
+    .expect("same-block script");
     assert_eq!(same, wire.txdata[1].output[0].script_pubkey.as_bytes());
     assert_eq!(
         same.as_ptr(),
@@ -1548,6 +1576,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("unstamped parent must not head-recover");
@@ -1669,6 +1698,88 @@ fn accept_rejects_connect_spend_rules() {
         matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
         "4-deep immature: {err:?}"
     );
+}
+
+/// A tip-follow connect row is the preverified set. Assemble must not fail
+/// the block on that row; the spend rule still runs.
+#[test]
+fn preverified_connect_row_reaches_the_spend_rule() {
+    use rbitcoin_consensus::{mine_empty_regtest, prepare_regtest_candidate, pres_for_tip};
+    use rbitcoin_query::accept_and_connect_block_preverified;
+    use std::sync::Arc;
+
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("preverified-connect");
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    rbitcoin_query::accept_and_connect_block(
+        &q,
+        &params,
+        Height::GENESIS,
+        &genesis,
+        Milestone::NONE,
+    )
+    .unwrap();
+    let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+    rbitcoin_query::accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
+
+    let op = OutPoint {
+        txid: b1.txdata[0].compute_txid(),
+        vout: 0,
+    };
+    let spend = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: op,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let spend_id = spend.compute_txid().to_byte_array();
+    let mut b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
+    b2.txdata.push(spend);
+    prepare_regtest_candidate(&mut b2, b1.block_hash(), b1.header.time + 600);
+
+    let (pres, skip) = pres_for_tip(&b2.txdata, false, |id| id == spend_id);
+    assert!(skip.contains(&spend_id));
+    assert!(pres[1].as_script().is_none(), "live tx is connect-only");
+
+    let bare = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b2.clone()),
+        Milestone::NONE,
+        &Default::default(),
+        Some(Arc::clone(&pres)),
+    )
+    .expect_err("a connect row that will be verified still fails closed");
+    assert!(
+        bare.to_string().contains("sighash midstate"),
+        "unskipped connect row: {bare}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let err = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b2),
+        Milestone::NONE,
+        &skip,
+        Some(pres),
+    )
+    .expect_err("the immature coinbase spend still rejects");
+    assert!(
+        matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
+        "preverified connect row must reach the spend rule, got {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
 }
 
 /// Core never adds the genesis coinbase to the coin view. A spend of it is a
@@ -2106,6 +2217,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("over-budget pin P2WSH must reject");
@@ -2206,6 +2318,7 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
             None,
             None,
             rbitcoin_query::milestone_gate::check_scripts(ms, q, 1, &bh),
+            &std::collections::HashSet::new(),
         )
         .expect("op_true spend assembles")
         .0
@@ -3033,7 +3146,7 @@ fn script_job_shared_tx_is_wire_pointer() {
     };
     let block = Arc::new(block_with(vec![coinbase(1), spend]));
     let tid = block.txdata[1].compute_txid().to_byte_array();
-    let job = ScriptCheckJob::from_parts(
+    let job = ScriptCheckJob::try_from_parts(
         tid,
         rbitcoin_consensus::block::JobPrevouts::owned(vec![TxOut {
             value: Amount::from_sat(50_0000_0000),
@@ -3041,7 +3154,8 @@ fn script_job_shared_tx_is_wire_pointer() {
         }]),
         rbitcoin_consensus::block::JobTx::shared(Arc::clone(&block), 1),
         ScriptVerifyFlags::buried(true, true, true, true, true),
-    );
+    )
+    .expect("prevouts");
     assert!(std::ptr::eq(
         &*job.tx as *const Transaction,
         &block.txdata[1] as *const Transaction

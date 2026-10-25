@@ -135,6 +135,7 @@ pub fn assemble_block_prevouts(
     wire: Option<&Arc<Block>>,
     pres: Option<&Arc<[rbitcoin_consensus::TxPrecompute]>>,
     build_script_jobs: bool,
+    preverified: &std::collections::HashSet<[u8; 32]>,
 ) -> Result<
     (
         Vec<ScriptCheckJob>,
@@ -229,6 +230,7 @@ pub fn assemble_block_prevouts(
                 build_script_jobs,
                 &mut clk_job,
                 &mut waived_out,
+                preverified,
             )?;
         }
 
@@ -314,6 +316,7 @@ pub fn assemble_non_cb_tx(
     build_script_jobs: bool,
     clk_job: &mut u64,
     waived_out: &mut Option<WaivedOut>,
+    preverified: &std::collections::HashSet<[u8; 32]>,
 ) -> Result<u64, ConfirmError> {
     rbitcoin_consensus::block::reject_tx_without_inputs(tx)?;
     let (value_in, waived_cb, prevouts, tx_in_sigops) = assemble_non_cb_inputs(
@@ -352,15 +355,20 @@ pub fn assemble_non_cb_tx(
         let t_job = Instant::now();
         let mut job = match (wire, prevouts) {
             (Some(w), rbitcoin_consensus::block::JobPrevouts::Shared(v)) => {
-                rbitcoin_consensus::block::ScriptCheckJob::from_parts(
+                rbitcoin_consensus::block::ScriptCheckJob::try_from_parts(
                     txid,
                     rbitcoin_consensus::block::JobPrevouts::Shared(v),
                     rbitcoin_consensus::block::JobTx::shared(Arc::clone(w), ti),
                     flags,
-                )
+                )?
             }
             (None, rbitcoin_consensus::block::JobPrevouts::Owned(v)) => {
-                rbitcoin_consensus::block::ScriptCheckJob::with_txid(txid, v, tx.clone(), flags)
+                rbitcoin_consensus::block::ScriptCheckJob::try_with_txid(
+                    txid,
+                    v,
+                    tx.clone(),
+                    flags,
+                )?
             }
             _ => {
                 return Err(ConfirmError::Store(rbitcoin_store::StoreError::Corrupt(
@@ -370,7 +378,12 @@ pub fn assemble_non_cb_tx(
         };
         if let Some(ps) = pres {
             if rbitcoin_consensus::block::should_use_pres(ti, ps.len()) {
-                job = job.with_pre_slice(Arc::clone(ps), ti);
+                // A preverified connect row has no midstates. The script stage
+                // drops that job, so attaching it would fail the block first.
+                let connect_only = ps[ti].as_script().is_none();
+                if !(connect_only && preverified.contains(&txid)) {
+                    job = job.with_pre_slice(Arc::clone(ps), ti)?;
+                }
             }
         }
         script_jobs.push(job);

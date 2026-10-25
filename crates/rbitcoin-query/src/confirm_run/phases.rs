@@ -138,6 +138,7 @@ pub struct Assembled {
     pub tx_sizes: Vec<(u32, u32)>,
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub fn assemble_run(
     query: &Query,
     params: &ChainParams,
@@ -146,6 +147,7 @@ pub fn assemble_run(
     wire_blocks: &[Arc<Block>],
     batch_parents: &crate::BatchParents,
     spend_edges: &crate::SpendEdges,
+    preverified: &ScriptPreverified,
 ) -> Result<Assembled, ConfirmError> {
     // Provisional same-run double-spend only (not durable spentness).
     let mut pending_spent: crate::OutPointSet = Default::default();
@@ -225,6 +227,7 @@ pub fn assemble_run(
             Some(block),
             Some(&meta.pres),
             build_script_jobs,
+            preverified,
         )?;
         meters.acc.flush(query.confirm_stats());
         crate::note_confirm(&query.confirm_stats().asm_prevout_ns, meters.prev_ns);

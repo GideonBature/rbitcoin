@@ -542,6 +542,7 @@ fn load_from_plan_inner(
         &wire_blocks,
         &batch_parents,
         &spend_edges,
+        preverified,
     )?;
     drop(spend_edges);
     if let Some(ref mut plan) = plan {
