@@ -167,7 +167,7 @@ fn seednode_window_ignores_the_catchup_dial() {
         seednode_delay_elapsed(catch_up, clock.now_secs()),
         "a catch-up dial is already 11s old when follow starts"
     );
-    arm_seednode_follow_wait(&clock);
+    arm_seednode_follow_wait(&clock, 1);
     assert!(
         seednode_window_start(clock.connection_attempt_at()).is_none(),
         "arming the follow wait drops the catch-up sample"
@@ -186,6 +186,35 @@ fn seednode_window_ignores_the_catchup_dial() {
         "setmocktime during the follow hold must not move that sample"
     );
     assert!(seednode_delay_elapsed(follow, clock.now_secs()));
+}
+
+#[test]
+fn seednode_window_opens_at_arm_when_follow_queues_no_dial() {
+    let clock = rbitcoin_consensus::clock::NodeClock::new();
+    clock.set_mock(1_700_000_000);
+    clock.note_connection_attempt();
+    let catch_up = clock.connection_attempt_at();
+    clock.set_mock((catch_up + 11) as i64);
+    assert!(
+        seednode_delay_elapsed(catch_up, clock.now_secs()),
+        "the catch-up dial is already old when follow has nothing to dial"
+    );
+    arm_seednode_follow_wait(&clock, 0);
+    let started = seednode_window_start(clock.connection_attempt_at())
+        .expect("no follow dial opens the window at arm time");
+    assert_ne!(started, catch_up);
+    assert_eq!(started, clock.now_secs());
+    assert!(
+        !seednode_delay_elapsed(started, clock.now_secs()),
+        "arm time itself is not already 10s old"
+    );
+    clock.set_mock((started + 11) as i64);
+    assert_eq!(
+        seednode_window_start(clock.connection_attempt_at()),
+        Some(started),
+        "setmocktime must not move the arm sample"
+    );
+    assert!(seednode_delay_elapsed(started, clock.now_secs()));
 }
 
 #[test]

@@ -879,71 +879,66 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
             }
         }
     }
-    // Arm this before the follow connects. Each connect is awaited, and a
-    // dead proxy holds it for the connect timeout. A wait that starts
-    // afterwards never sees `setmocktime` during that hold. Catch-up already
-    // noted the first dial; drop that sample on this task, before follow
-    // dials, so the wait measures from the follow dial.
-    if tip_follow_ready
-        && !shutdown.requested()
-        && !addrman.is_empty()
-        && seednodes_allowed(&config.listen)
-    {
-        arm_seednode_follow_wait(&node.hub.clock);
-        let seeds = config.listen.seednodes.clone();
-        let network = config.network;
-        let peers = Arc::clone(&node.peers);
-        let clock = Arc::clone(&node.hub.clock);
-        let stop = Arc::clone(&shutdown.flag);
-        tokio::spawn(async move {
-            let started = loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if let Some(at) = seednode_window_start(clock.connection_attempt_at()) {
-                    break at;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            };
-            loop {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                if seednode_delay_elapsed(started, clock.now_secs()) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            if peers.outbound_full_relay_ids().len() >= 2 {
-                return;
-            }
-            for raw in &seeds {
-                let addr = match resolve_seednode(raw, network) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("seednode {raw}: {e}");
-                        continue;
-                    }
-                };
-                let host = raw.split(':').next().unwrap_or(raw);
-                info!(
-                    "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
-                );
-                if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
-                    warn!("seednode dial {addr}: {e}");
-                }
-            }
-        });
-    }
     if tip_follow_ready && !shutdown.requested() {
+        let follow_n = targets.len().min(max_out.min(3));
+        // Arm before those connects. A dead proxy holds the connect, and
+        // `setmocktime` during that hold must not restart the 10s. Catch-up
+        // already stored a dial; drop it here. No queued dial means the
+        // window opens on this clock.
+        if !addrman.is_empty() && seednodes_allowed(&config.listen) {
+            arm_seednode_follow_wait(&node.hub.clock, follow_n);
+            let seeds = config.listen.seednodes.clone();
+            let network = config.network;
+            let peers = Arc::clone(&node.peers);
+            let clock = Arc::clone(&node.hub.clock);
+            let stop = Arc::clone(&shutdown.flag);
+            tokio::spawn(async move {
+                let started = loop {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if let Some(at) = seednode_window_start(clock.connection_attempt_at()) {
+                        break at;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                };
+                loop {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if seednode_delay_elapsed(started, clock.now_secs()) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if peers.outbound_full_relay_ids().len() >= 2 {
+                    return;
+                }
+                for raw in &seeds {
+                    let addr = match resolve_seednode(raw, network) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            warn!("seednode {raw}: {e}");
+                            continue;
+                        }
+                    };
+                    let host = raw.split(':').next().unwrap_or(raw);
+                    info!(
+                        "Couldn't connect to peers from addrman after {ADD_NEXT_SEEDNODE_SECS} seconds. Adding seednode ({host}) to addrfetch"
+                    );
+                    if let Err(e) = peers.dial(addr, PeerConnType::AddrFetch) {
+                        warn!("seednode dial {addr}: {e}");
+                    }
+                }
+            });
+        }
         let header_mark = (
             node.hub.initial_getheaders_sent(),
             node.hub.headers_reply_count(),
         );
-        let follow_n = targets.len().min(max_out.min(3));
         if catch_up.dial_failed_all() {
             for peer in targets.iter().take(follow_n) {
                 if let Err(e) = node.peers.dial_net(*peer, follow_type) {
@@ -2843,20 +2838,24 @@ pub const ADD_NEXT_SEEDNODE_SECS: u64 = 10;
 /// Drop a dial sample taken before tip-follow.
 ///
 /// Catch-up records the process's first dial and then drops those
-/// sessions. Call this once on the task that is about to dial follow,
-/// before that dial. The 10s wait then measures from the follow dial.
+/// sessions. Call this once, before follow dials. `follow_dials == 0`
+/// opens the 10s window on this clock: nothing queued will record a
+/// later sample. A positive count leaves the sample clear until that dial.
 #[doc(hidden)]
-pub fn arm_seednode_follow_wait(clock: &rbitcoin_consensus::clock::NodeClock) {
+pub fn arm_seednode_follow_wait(clock: &rbitcoin_consensus::clock::NodeClock, follow_dials: usize) {
     clock.forget_connection_attempt();
+    if follow_dials == 0 {
+        clock.note_connection_attempt();
+    }
 }
 
 /// Clock sample that opens the 10s seednode wait.
 ///
-/// `None` until the next outbound dial. A later `setmocktime` does not
-/// move this sample, so the wait still ends. Sampling `now` after that
-/// jump would start the wait at the mock, and mock time does not advance.
-/// A catch-up dial is not this sample: [`arm_seednode_follow_wait`] clears
-/// it before follow dials.
+/// `None` until the next outbound dial, or until [`arm_seednode_follow_wait`]
+/// when follow queues none. A later `setmocktime` does not move this
+/// sample, so the wait still ends. Sampling `now` after that jump would
+/// start the wait at the mock, and mock time does not advance. A catch-up
+/// dial is not this sample: arming clears it before follow dials.
 #[doc(hidden)]
 pub fn seednode_window_start(attempt_at: u64) -> Option<u64> {
     if attempt_at == 0 {
