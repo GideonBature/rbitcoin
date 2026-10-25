@@ -109,6 +109,9 @@ pub struct RpcContext {
     /// `-blocksonly`: the pool accepts local transactions and does not relay
     /// them. Mining and raw-mempool listing stay off for the life of the node.
     pub blocksonly: bool,
+    /// `submitpackage` uses Core `IsChildWithParents` (the node's
+    /// `RBITCOIN_RPC_PACKAGE_DIALECT`). Off by default.
+    pub package_dialect: bool,
     /// In-flight RPC methods for `getrpcinfo.active_commands`.
     pub active: Arc<std::sync::Mutex<RpcActive>>,
 }

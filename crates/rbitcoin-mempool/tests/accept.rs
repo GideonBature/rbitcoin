@@ -2031,9 +2031,8 @@ fn duplicate_commit_after_prepare_is_duplicate() {
 }
 
 /// Core `IsChildWithParents` for `submitpackage` when
-/// `RBITCOIN_RPC_PACKAGE_DIALECT` is on. Setting that variable in a test
-/// races every other package RPC in the process, so this stays on the
-/// function the RPC calls. A session with the flag rejects a package
+/// `RpcContext::package_dialect` is on (the node's
+/// `RBITCOIN_RPC_PACKAGE_DIALECT`). A session with the flag rejects a package
 /// whose last tx does not spend every other member.
 #[test]
 fn package_direct_parents_require_the_child_to_spend_each_member() {

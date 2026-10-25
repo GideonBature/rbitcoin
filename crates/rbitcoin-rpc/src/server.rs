@@ -154,6 +154,8 @@ pub struct RpcConfig {
     pub alert_notify: Option<String>,
     /// `-blocksonly`. Mining and raw-mempool listing stay off.
     pub blocksonly: bool,
+    /// See [`crate::methods::RpcContext::package_dialect`].
+    pub package_dialect: bool,
 }
 
 /// Live RPC server handle.
@@ -255,6 +257,7 @@ pub async fn run_rpc(
         alert_notify: config.alert_notify.clone(),
         alert_fired: Arc::new(AtomicBool::new(false)),
         blocksonly: config.blocksonly,
+        package_dialect: config.package_dialect,
     });
 
     let n = work_queue_permits(config.work_queue);

@@ -274,6 +274,9 @@ pub struct RpcOpts {
     pub work_queue: Option<usize>,
     /// Core REST on the RPC listener. Off unless `--rest` / `rest=`.
     pub rest: bool,
+    /// `submitpackage` uses Core `IsChildWithParents`. Set only from
+    /// [`NodeEnv::rpc_package_dialect`].
+    pub package_dialect: bool,
 }
 
 impl Default for RpcOpts {
@@ -288,6 +291,7 @@ impl Default for RpcOpts {
             cookie_perms: rbitcoin_rpc::RpcCookiePerms::Owner,
             work_queue: Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE),
             rest: false,
+            package_dialect: false,
         }
     }
 }
@@ -309,6 +313,9 @@ pub struct NodeEnv {
     /// `RBITCOIN_SH_FORCE_REBUILD` is on: tip SH finalize wipes the head and
     /// recollects all of Class A, on every start while it stays set.
     pub sh_force_rebuild: bool,
+    /// `RBITCOIN_RPC_PACKAGE_DIALECT` is on: `submitpackage` uses Core
+    /// `IsChildWithParents`.
+    pub rpc_package_dialect: bool,
 }
 
 impl NodeEnv {
@@ -340,6 +347,7 @@ impl NodeEnv {
                 }
                 Some("RBITCOIN_TEST_DROP_STORE") => env.test_drop_store = flag_on(val),
                 Some("RBITCOIN_SH_FORCE_REBUILD") => env.sh_force_rebuild = flag_on(val),
+                Some("RBITCOIN_RPC_PACKAGE_DIALECT") => env.rpc_package_dialect = flag_on(val),
                 _ => {}
             }
         }

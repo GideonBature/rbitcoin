@@ -707,46 +707,50 @@ fn block_queue_env_sets_the_assign_stop() {
     assert_eq!(stop(&[(GB, "lots")]), BQ_ASSIGN_STOP_BYTES);
 }
 
-/// `RBITCOIN_TEST_DROP_STORE` and `RBITCOIN_SH_FORCE_REBUILD` are on only for
-/// `1` or `true` (any case). `RBITCOIN_SH_FORCE_REBUILD` reaches `NodeConfig`.
+/// `RBITCOIN_TEST_DROP_STORE`, `RBITCOIN_SH_FORCE_REBUILD`, and
+/// `RBITCOIN_RPC_PACKAGE_DIALECT` are on only for `1` or `true` (any case).
+/// The last two reach `NodeConfig`.
 #[test]
 fn env_flags_are_on_only_when_true() {
+    const KEYS: [&str; 3] = [
+        "RBITCOIN_TEST_DROP_STORE",
+        "RBITCOIN_SH_FORCE_REBUILD",
+        "RBITCOIN_RPC_PACKAGE_DIALECT",
+    ];
     let flags = |key: &str, val: &str| {
         let env = NodeEnv::from_vars([(key, val)]);
-        (env.test_drop_store, env.sh_force_rebuild)
+        [
+            env.test_drop_store,
+            env.sh_force_rebuild,
+            env.rpc_package_dialect,
+        ]
     };
     for on in ["1", "true", "TRUE", "True"] {
-        assert_eq!(
-            flags("RBITCOIN_TEST_DROP_STORE", on),
-            (true, false),
-            "{on:?}"
-        );
-        assert_eq!(
-            flags("RBITCOIN_SH_FORCE_REBUILD", on),
-            (false, true),
-            "{on:?}"
-        );
+        for (i, key) in KEYS.iter().enumerate() {
+            let mut want = [false; 3];
+            want[i] = true;
+            assert_eq!(flags(key, on), want, "{key}={on:?}");
+        }
     }
     for off in ["", "0", "false", "yes", " 1"] {
-        assert_eq!(
-            flags("RBITCOIN_TEST_DROP_STORE", off),
-            (false, false),
-            "{off:?}"
-        );
-        assert_eq!(
-            flags("RBITCOIN_SH_FORCE_REBUILD", off),
-            (false, false),
-            "{off:?}"
-        );
+        for key in KEYS {
+            assert_eq!(flags(key, off), [false; 3], "{key}={off:?}");
+        }
     }
     assert_eq!(
         NodeEnv::from_vars(std::iter::empty::<(&str, &str)>()),
         NodeEnv::default()
     );
 
-    let env = NodeEnv::from_vars([("RBITCOIN_SH_FORCE_REBUILD", "1")]);
+    let env = NodeEnv::from_vars([
+        ("RBITCOIN_SH_FORCE_REBUILD", "1"),
+        ("RBITCOIN_RPC_PACKAGE_DIALECT", "1"),
+    ]);
     match operator_config_from_args(["rbitcoin-node"], &env) {
-        Ok(OperatorArgs::Ready { config, .. }) => assert!(config.sh_force_rebuild),
+        Ok(OperatorArgs::Ready { config, .. }) => {
+            assert!(config.sh_force_rebuild);
+            assert!(config.rpc.package_dialect);
+        }
         other => panic!("expected assembled config, got {other:?}"),
     }
 }

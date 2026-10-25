@@ -564,20 +564,6 @@ pub fn tx_fee_sat_from_prevouts(ctx: &RpcContext, tx: &Transaction) -> TxFeeLook
 }
 
 #[doc(hidden)]
-pub fn package_dialect_from_env(v: Option<&str>) -> bool {
-    matches!(v, Some(s) if s == "1" || s.eq_ignore_ascii_case("true"))
-}
-
-#[doc(hidden)]
-pub fn rpc_package_dialect() -> bool {
-    package_dialect_from_env(
-        std::env::var("RBITCOIN_RPC_PACKAGE_DIALECT")
-            .ok()
-            .as_deref(),
-    )
-}
-
-#[doc(hidden)]
 pub fn submitpackage_topology_disallowed(txs: &[Transaction], dialect: bool) -> bool {
     dialect && txs.len() > 1 && !MempoolHub::package_is_child_with_direct_parents(txs)
 }
@@ -1391,8 +1377,7 @@ pub fn submitpackage(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Valu
     if package_has_conflicts(&txs) {
         return Ok(submitpackage_conflict_result(&txs));
     }
-    let dialect = rpc_package_dialect();
-    if submitpackage_topology_disallowed(&txs, dialect) {
+    if submitpackage_topology_disallowed(&txs, ctx.package_dialect) {
         return Err(rpc_error(ERR_VERIFY_ERROR, "package topology disallowed"));
     }
     if let Some(failed) = submitpackage_fee_burn_precheck(ctx, &txs, max_feerate, max_burn)? {
