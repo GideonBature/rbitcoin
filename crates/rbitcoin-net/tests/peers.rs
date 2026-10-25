@@ -817,6 +817,13 @@ fn addnode_net_without_a_dialer_errors() {
         let err = hub.addnode(a, cmd).unwrap_err();
         assert!(err.contains("no dialer"), "{cmd}: {err}");
     }
+    assert!(
+        hub.added
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty(),
+        "a refused add must not be remembered"
+    );
     let (tx, mut rx) = mpsc::unbounded_channel();
     hub.set_dialer(tx);
     hub.redial_remembered();
