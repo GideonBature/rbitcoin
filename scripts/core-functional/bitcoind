@@ -134,7 +134,6 @@ FORWARD_FLAGS = frozenset(
         "whitelist",
         "whitelistrelay",
         "whitelistforcerelay",
-        "blocksonly",
         "minrelaytxfee",
         "mempoolexpiry",
         "startupnotify",
@@ -527,6 +526,7 @@ def translate(
     want_version = False
     extra_node_args: list[str] = []
     wipe_mempool = False
+    blocks_only = False
     signet_challenges: list[str] = []
     blocksdir_arg: Path | None = None
     argv_binds: list[tuple[str, int | None, bool]] = []
@@ -655,6 +655,10 @@ def translate(
         elif key == "wallet":
             print("Error parsing command line arguments", file=sys.stderr)
             raise SystemExit(1)
+        elif key == "blocksonly":
+            v = "1" if val is None else str(val).lower()
+            blocks_only = v not in ("0", "false", "off", "no")
+            extra_node_args.extend(node_args(key, val))
         elif key in IGNORE_FLAGS:
             pass
         elif key in FORWARD_FLAGS:
@@ -1000,6 +1004,7 @@ def main(argv: list[str] | None = None) -> int:
             rpcauth_lines=read_conf_keys(conf_path, "rpcauth"),
             whitelist_lines=read_conf_keys(conf_path, "rpcwhitelist"),
             whitelist_default=conf.get("rpcwhitelistdefault"),
+            blocks_only=blocks_only,
         )
     except OSError:
         if child.poll() is None:

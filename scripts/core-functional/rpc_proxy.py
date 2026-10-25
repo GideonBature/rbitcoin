@@ -505,12 +505,17 @@ class RpcProxy:
         rpcauth_lines: list[str] | None = None,
         whitelist_lines: list[str] | None = None,
         whitelist_default: str | None = None,
+        blocks_only: bool = False,
     ) -> None:
         self.node_url = node_url.rstrip("/") + "/"
         self.cookie_line = cookie_line
         self.rpcauth_lines = list(rpcauth_lines or [])
         self.whitelist_lines = list(whitelist_lines or [])
         self.whitelist_default = whitelist_default
+        self.blocks_only = blocks_only
+        # Latched once tx relay is on (or this node will never turn it on).
+        # IBD stays unlatched: the collect can leave IBD before relay starts.
+        self._test_started = False
         self._handlers: dict[str, Callable[[Any], dict[str, Any]]] = {}
         proxy = self
 
@@ -566,6 +571,16 @@ class RpcProxy:
             return 403, b'{"error":"forbidden"}\n'
         if not parsed:
             return self.forward_raw(raw)
+        if not self.test_may_start():
+            req_id = payload.get("id") if isinstance(payload, dict) else None
+            body = json.dumps(
+                {
+                    "result": None,
+                    "error": {"code": -28, "message": "Loading..."},
+                    "id": req_id,
+                }
+            ).encode()
+            return 200, body
         try:
             if isinstance(payload, list):
                 for item in payload:
@@ -592,6 +607,67 @@ class RpcProxy:
             ).encode()
             return 200, body
         return self.forward_raw(raw)
+
+    def _node_rpc(self, method: str) -> tuple[str, dict[str, Any] | None]:
+        """One call to the node. 'dict', 'bare' (test echo), or 'down'."""
+        raw = json.dumps(
+            {"jsonrpc": "1.0", "id": "probe", "method": method, "params": []}
+        ).encode()
+        cookie = self.cookie_line() or ""
+        req = urllib.request.Request(
+            self.node_url,
+            data=raw,
+            headers={
+                "Authorization": node_authorization(cookie),
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                parsed = json.loads(resp.read().decode())
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+        ):
+            return "down", None
+        if not isinstance(parsed, dict) or parsed.get("error"):
+            return "down", None
+        result = parsed.get("result")
+        if isinstance(result, dict):
+            return "dict", result
+        return "bare", None
+
+    def test_may_start(self) -> bool:
+        """Core retries -28 until the node will send a fee filter.
+
+        Still in IBD: answer now, and keep checking. The index pack can
+        leave IBD with relay still off. `-blocksonly` never sends a filter.
+        A fake that echoes the method name has no relay bit; let it through.
+        """
+        if self._test_started:
+            return True
+        if self.blocks_only:
+            self._test_started = True
+            return True
+        chain_kind, chain = self._node_rpc("getblockchaininfo")
+        net_kind, net = self._node_rpc("getnetworkinfo")
+        if chain_kind == "down" or net_kind == "down":
+            return False
+        if chain_kind == "bare" or net_kind == "bare":
+            self._test_started = True
+            return True
+        if chain is None or net is None:
+            return False
+        if chain.get("initialblockdownload"):
+            return True
+        if net.get("localrelay"):
+            self._test_started = True
+            return True
+        return False
 
     def forward_raw(self, raw: bytes) -> tuple[int, bytes]:
         cookie = self.cookie_line() or ""

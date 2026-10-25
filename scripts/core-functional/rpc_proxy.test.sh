@@ -551,3 +551,104 @@ assert whitelist_map(
 ) == {"alice": {"getblock"}}
 print("ok - repeated rpcwhitelist lines intersect")
 PY
+
+python3 - <<'PY'
+"""Hold the test at warmup until a fee filter can be sent."""
+import base64
+import json
+import threading
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from rpc_proxy import RpcProxy
+
+COOKIE = "__cookie__:secret"
+STATE = {"ibd": True, "relay": False}
+
+
+class RelayNode(BaseHTTPRequestHandler):
+    def log_message(self, *_a):
+        return
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        item = json.loads(self.rfile.read(n).decode())
+        method = item.get("method")
+        if method == "getblockchaininfo":
+            result = {"initialblockdownload": STATE["ibd"]}
+        elif method == "getnetworkinfo":
+            result = {"localrelay": STATE["relay"]}
+        else:
+            result = method
+        body = json.dumps(
+            {"result": result, "error": None, "id": item.get("id")}
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+node = HTTPServer(("127.0.0.1", 0), RelayNode)
+threading.Thread(target=node.serve_forever, daemon=True).start()
+
+
+def start(blocks_only=False):
+    proxy = RpcProxy(
+        ("127.0.0.1", 0),
+        f"http://127.0.0.1:{node.server_address[1]}",
+        lambda: COOKIE,
+        blocks_only=blocks_only,
+    )
+    proxy.start()
+    return proxy
+
+
+def call(port, method):
+    tok = base64.b64encode(COOKIE.encode()).decode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/",
+        data=json.dumps(
+            {"jsonrpc": "1.0", "id": 7, "method": method, "params": []}
+        ).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Basic " + tok,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read().decode())
+
+
+proxy = start()
+port = proxy._httpd.server_address[1]
+body = call(port, "getblockcount")
+assert body["error"] is None and body["result"] == "getblockcount", body
+
+STATE["ibd"] = False
+body = call(port, "getblockcount")
+assert body["result"] is None, body
+assert body["error"]["code"] == -28, body
+assert "Loading" in body["error"]["message"], body
+
+STATE["relay"] = True
+body = call(port, "getblockcount")
+assert body["error"] is None and body["result"] == "getblockcount", body
+STATE["relay"] = False
+body = call(port, "getblockcount")
+assert body["error"] is None and body["result"] == "getblockcount", body
+proxy.shutdown()
+print("ok - rpc stays in warmup until tx relay is on")
+
+STATE["ibd"] = False
+STATE["relay"] = False
+proxy = start(blocks_only=True)
+port = proxy._httpd.server_address[1]
+body = call(port, "getblockcount")
+assert body["error"] is None and body["result"] == "getblockcount", body
+proxy.shutdown()
+node.shutdown()
+print("ok - blocks-only does not wait for tx relay")
+PY
