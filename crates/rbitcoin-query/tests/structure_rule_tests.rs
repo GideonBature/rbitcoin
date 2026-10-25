@@ -1257,6 +1257,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("empty");
@@ -1286,6 +1287,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("fk mismatch");
@@ -1314,6 +1316,7 @@ fn assemble_rejects_empty_and_fk_mismatch() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("not coinbase");
@@ -1356,6 +1359,7 @@ fn assemble_pending_creates_is_txid_map_and_meters_flush() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .expect("coinbase-only assemble");
     meters.acc.flush(q.confirm_stats());
@@ -1472,6 +1476,7 @@ fn script_job_shares_prevout_script() {
         Some(&wire),
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .expect("assemble shared prevouts");
     assert_eq!(jobs.len(), 2);
@@ -1571,6 +1576,7 @@ fn optimistic_assemble_unstamped_parent_is_invariant() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("unstamped parent must not head-recover");
@@ -1692,6 +1698,88 @@ fn accept_rejects_connect_spend_rules() {
         matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
         "4-deep immature: {err:?}"
     );
+}
+
+/// A tip-follow connect row is the preverified set. Assemble must not fail
+/// the block on that row; the spend rule still runs.
+#[test]
+fn preverified_connect_row_reaches_the_spend_rule() {
+    use rbitcoin_consensus::{mine_empty_regtest, prepare_regtest_candidate, pres_for_tip};
+    use rbitcoin_query::accept_and_connect_block_preverified;
+    use std::sync::Arc;
+
+    let (_dir, q) = rbitcoin_query::testutil::tiny_query_labeled("preverified-connect");
+    let params = ChainParams::regtest();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    rbitcoin_query::accept_and_connect_block(
+        &q,
+        &params,
+        Height::GENESIS,
+        &genesis,
+        Milestone::NONE,
+    )
+    .unwrap();
+    let b1 = mine_empty_regtest(genesis.block_hash(), genesis.header.time + 600, 1);
+    rbitcoin_query::accept_and_connect_block(&q, &params, Height(1), &b1, Milestone::NONE).unwrap();
+
+    let op = OutPoint {
+        txid: b1.txdata[0].compute_txid(),
+        vout: 0,
+    };
+    let spend = Transaction {
+        version: TxVersion::ONE,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: op,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let spend_id = spend.compute_txid().to_byte_array();
+    let mut b2 = mine_empty_regtest(b1.block_hash(), b1.header.time + 600, 2);
+    b2.txdata.push(spend);
+    prepare_regtest_candidate(&mut b2, b1.block_hash(), b1.header.time + 600);
+
+    let (pres, skip) = pres_for_tip(&b2.txdata, false, |id| id == spend_id);
+    assert!(skip.contains(&spend_id));
+    assert!(pres[1].as_script().is_none(), "live tx is connect-only");
+
+    let bare = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b2.clone()),
+        Milestone::NONE,
+        &Default::default(),
+        Some(Arc::clone(&pres)),
+    )
+    .expect_err("a connect row that will be verified still fails closed");
+    assert!(
+        bare.to_string().contains("sighash midstate"),
+        "unskipped connect row: {bare}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
+
+    let err = accept_and_connect_block_preverified(
+        &q,
+        &params,
+        Height(2),
+        Arc::new(b2),
+        Milestone::NONE,
+        &skip,
+        Some(pres),
+    )
+    .expect_err("the immature coinbase spend still rejects");
+    assert!(
+        matches!(err, ConfirmError::Rules(ConsensusError::BadTx(s)) if s.contains("immature")),
+        "preverified connect row must reach the spend rule, got {err:?}"
+    );
+    assert_eq!(q.tip_height(), Some(Height(1)));
 }
 
 /// Core never adds the genesis coinbase to the coin view. A spend of it is a
@@ -2129,6 +2217,7 @@ fn assemble_milestone_pin_still_rejects_bad_blk_sigops() {
         None,
         None,
         true,
+        &std::collections::HashSet::new(),
     )
     .err()
     .expect("over-budget pin P2WSH must reject");
@@ -2229,6 +2318,7 @@ fn signet_low_work_fork_runs_scripts(q: &rbitcoin_query::Query) {
             None,
             None,
             rbitcoin_query::milestone_gate::check_scripts(ms, q, 1, &bh),
+            &std::collections::HashSet::new(),
         )
         .expect("op_true spend assembles")
         .0

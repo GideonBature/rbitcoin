@@ -76,6 +76,7 @@ fn signet_challenge_applies_above_genesis() {
         std::slice::from_ref(&block),
         &rbitcoin_query::BatchParents::new(),
         &rbitcoin_query::SpendEdges::default(),
+        &rbitcoin_query::confirm_run::ScriptPreverified::new(),
     ) {
         Ok(_) => panic!("height 1 with a challenge must reject a block that has no solution"),
         Err(e) => e,
