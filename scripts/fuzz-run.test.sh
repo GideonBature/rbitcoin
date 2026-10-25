@@ -187,18 +187,15 @@ assert_ok "asmap dry-run bin" \
   grep -qx "FUZZ_BIN=asmap" <<<"$out"
 assert_ok "asmap dry-run sanitizer address" \
   grep -qx "FUZZ_SANITIZER=address" <<<"$out"
-over="$(FUZZ_DRY_RUN=1 FUZZ_SANITIZER=undefined "$RUN" asmap)"
+over="$(FUZZ_DRY_RUN=1 FUZZ_SANITIZER=none "$RUN" asmap)"
 assert_ok "FUZZ_SANITIZER overrides asmap" \
-  grep -qx "FUZZ_SANITIZER=undefined" <<<"$over"
-wire="$(FUZZ_DRY_RUN=1 FUZZ_SANITIZER=undefined "$RUN" block_wire)"
+  grep -qx "FUZZ_SANITIZER=none" <<<"$over"
+wire="$(FUZZ_DRY_RUN=1 FUZZ_SANITIZER=none "$RUN" block_wire)"
 assert_ok "FUZZ_SANITIZER overrides block_wire" \
-  grep -qx "FUZZ_SANITIZER=undefined" <<<"$wire"
+  grep -qx "FUZZ_SANITIZER=none" <<<"$wire"
 plain="$(FUZZ_DRY_RUN=1 "$RUN" block_wire)"
 assert_ok "block_wire stays address when FUZZ_SANITIZER is unset" \
   grep -qx "FUZZ_SANITIZER=address" <<<"$plain"
-heavy="$(FUZZ_DRY_RUN=1 FUZZ_SANITIZER=undefined "$RUN" block_differential)"
-assert_ok "FUZZ_SANITIZER overrides an unsanitized differential" \
-  grep -qx "FUZZ_SANITIZER=undefined" <<<"$heavy"
 assert_ok "asmap dry-run no Core" \
   grep -qx "FUZZ_NO_CORE=1" <<<"$out"
 assert_ok "asmap listed in fuzz Cargo.toml" \
@@ -209,10 +206,6 @@ assert_ok "asmap two-prefix-plus-ip seed" \
   test -s "$ROOT/crates/rbitcoin-net/tests/fixtures/asmap_two_prefix_plus_ip.bin"
 assert_ok "asmap listed in fuzz.yml matrix" \
   grep -q '{ bin: asmap, core: false }' "$ROOT/.github/workflows/fuzz.yml"
-assert_ok "weekly ubsan job names asmap and block_wire" \
-  grep -q 'bin: \[asmap, block_wire\]' "$ROOT/.github/workflows/fuzz.yml"
-assert_ok "weekly ubsan sets undefined" \
-  grep -q 'FUZZ_SANITIZER: undefined' "$ROOT/.github/workflows/fuzz.yml"
 
 t6="$(FUZZ_WEEKDAY=6 "$RUN" --default-time)"
 assert_ok "FUZZ_WEEKDAY=6 is 600" \

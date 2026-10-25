@@ -460,8 +460,7 @@ Sanitizers, nightly only: AddressSanitizer on the wire parsers
 `cmpct_differential`, and `script_kernel_differential`. The heavy Core
 differentials run with `--sanitizer none`. `block_spend_differential`
 uses AddressSanitizer on Sunday and none on other days. `FUZZ_SANITIZER`
-overrides that choice; unset keeps it. A Sunday (or `workflow_dispatch`)
-job runs `asmap` and `block_wire` for 120s with `--sanitizer undefined`.
+overrides that choice; unset keeps it. cargo-fuzz has no UBSan.
 Miri stays `rbitcoin-primitives` only.
 Treat crate-root `pub` that exists only so a fuzz target can call it as
 the same smell as a test-only export: prefer the in-crate graph, or the
