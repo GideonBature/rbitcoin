@@ -157,6 +157,22 @@ async fn ibd_header_height_survives_resume() {
         ));
         assert!(!hub.knows_header(&parent.block_hash()));
         assert_rpc_headers(&hub, 1, 6);
+        let mut rejected = HubRegtest(Arc::clone(&hub))
+            .assemble_block_to_script(bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
+            .unwrap();
+        rejected.header.time = hub.tip_header().unwrap().time + 1;
+        rejected.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0]);
+        rejected.header.merkle_root = rejected.compute_merkle_root().unwrap();
+        rbitcoin_consensus::grind_regtest_pow(&mut rejected.header);
+        let rejected_hash = rejected.block_hash();
+        assert!(!hub.knows_header(&rejected_hash));
+        assert_eq!(
+            HubRegtest(Arc::clone(&hub)).submit_block(rejected),
+            rbitcoin_rpc::methods::SubmitBlockOutcome::Rejected("bad-cb-length".into())
+        );
+        assert!(hub.knows_header(&rejected_hash));
+        assert_rpc_headers(&hub, 1, 6);
+        hub.reconsider_block(rejected_hash).unwrap();
         let mut sibling = hub.tip_header().unwrap();
         sibling.prev_blockhash = sibling.block_hash();
         sibling.time += 1;
@@ -179,9 +195,17 @@ async fn ibd_header_height_survives_resume() {
             &[next]
         ));
         assert_rpc_headers(&hub, 1, 7);
+        let unstored_interior = headers[0];
+        assert!(!hub.knows_header(&unstored_interior.block_hash()));
+        hub.note_invalid_block(unstored_interior.block_hash());
+        assert_rpc_headers(&hub, 1, 4);
+        hub.ensure_header(&unstored_interior).unwrap();
+        assert_rpc_headers(&hub, 1, 4);
+        hub.reconsider_block(unstored_interior.block_hash())
+            .unwrap();
+        assert_rpc_headers(&hub, 1, 7);
         let checkpoint = hub.header_of(&st.header_walk.checkpoints[0].hash).unwrap();
-        let parent = hub.header_of(&checkpoint.prev_blockhash).unwrap();
-        let interior = parent.prev_blockhash;
+        let interior = checkpoint.prev_blockhash;
         assert!(!st
             .header_walk
             .checkpoints
@@ -189,7 +213,7 @@ async fn ibd_header_height_survives_resume() {
             .any(|c| c.hash == interior));
         hub.invalidate_block(interior).unwrap();
         header_walk::publish_work(&mut st, &hub);
-        assert_rpc_headers(&hub, 1, 1);
+        assert_rpc_headers(&hub, 1, 2);
         hub.reconsider_block(interior).unwrap();
         header_walk::publish_work(&mut st, &hub);
         assert_rpc_headers(&hub, 1, 7);
@@ -221,10 +245,10 @@ async fn ibd_header_height_survives_resume() {
         header_walk::rewind_above(&mut st, &hub, 1);
         assert_eq!(
             hub.best_header_height(),
-            2,
-            "reconsider also restores the sibling header"
+            5,
+            "the stored frontier remains known after rewinding look-ahead"
         );
-        assert_rpc_headers(&hub, 1, 2);
+        assert_rpc_headers(&hub, 1, 5);
     })
     .await
     .unwrap();

@@ -2507,6 +2507,24 @@ fn submit_header_child_is_headers_only_tip() {
     }
     hub.ensure_headers_batch(&headers).unwrap();
     assert_eq!(hub.best_header_height(), 10_003);
+    let interior = headers[4_998].block_hash();
+    hub.invalidate_block(interior).unwrap();
+    assert_eq!(
+        hub.best_header_height(),
+        4_999,
+        "keep the valid prefix below height 5,000"
+    );
+    let higher = headers[6_998].block_hash();
+    hub.invalidate_block(higher).unwrap();
+    assert_eq!(
+        hub.best_header_height(),
+        4_999,
+        "a second invalid descendant must not hide the lower failure"
+    );
+    hub.reconsider_block(interior).unwrap();
+    assert_eq!(hub.best_header_height(), 6_999);
+    hub.reconsider_block(higher).unwrap();
+    assert_eq!(hub.best_header_height(), 10_003);
     hub.invalidate_block(b1.block_hash()).unwrap();
     assert_eq!(
         hub.best_header_height(),

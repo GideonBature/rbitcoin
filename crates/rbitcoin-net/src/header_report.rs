@@ -7,6 +7,8 @@ use bitcoin::BlockHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+type HeaderPoint = (BlockHash, u32);
+
 /// Reporting generation captured before loading or validating an IBD walk.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IbdHeaderEpoch(u64);
@@ -22,8 +24,9 @@ struct IbdProof {
 #[derive(Default)]
 pub(super) struct HeaderReport {
     epoch: IbdHeaderEpoch,
+    revision: u64,
     invalid: Arc<HashSet<BlockHash>>,
-    stored: HashMap<BlockHash, u32>,
+    stored: HashMap<BlockHash, HeaderPoint>,
     ibd: Option<IbdProof>,
     ibd_height: Option<u32>,
     dirty: bool,
@@ -32,6 +35,7 @@ pub(super) struct HeaderReport {
 
 struct ReportContext {
     epoch: IbdHeaderEpoch,
+    revision: u64,
     invalid: Arc<HashSet<BlockHash>>,
     proved: HashMap<BlockHash, u32>,
 }
@@ -55,14 +59,14 @@ impl HeaderReport {
         self.height = self
             .stored
             .values()
-            .copied()
+            .map(|point| point.1)
             .chain(self.ibd_height)
             .max()
             .unwrap_or(0);
     }
 
     fn context(&self) -> ReportContext {
-        let mut proved = self.stored.clone();
+        let mut proved: HashMap<_, _> = self.stored.values().copied().collect();
         if let Some(proof) = &self.ibd {
             if proof.epoch == self.epoch {
                 if let Some((hash, height)) = proof.stored {
@@ -72,6 +76,7 @@ impl HeaderReport {
         }
         ReportContext {
             epoch: self.epoch,
+            revision: self.revision,
             invalid: Arc::clone(&self.invalid),
             proved,
         }
@@ -139,6 +144,9 @@ impl ChainHub {
             safe_until,
         });
         report.dirty |= !fast;
+        if !fast {
+            report.revision = report.revision.wrapping_add(1);
+        }
         report.refresh_height();
         fast.then_some(current)
     }
@@ -171,20 +179,25 @@ impl ChainHub {
         let candidates: Vec<_> = self.header_tips.read().unwrap().entries().collect();
         let valid: HashMap<_, _> = candidates
             .into_iter()
-            .filter(|(hash, height)| {
-                self.proved_stored_header_height(*hash, &context.invalid, &context.proved)
-                    == Some(*height)
+            .filter_map(|(hash, height)| {
+                self.stored_header_prefix(hash, &context.invalid, &context.proved)
+                    .filter(|point| {
+                        if point.0 == hash {
+                            point.1 == height
+                        } else {
+                            point.1 < height
+                        }
+                    })
+                    .map(|point| (hash, point))
             })
             .collect();
-        context
-            .proved
-            .extend(valid.iter().map(|(hash, height)| (*hash, *height)));
+        context.proved.extend(valid.values().copied());
         let checked = proof
             .as_ref()
             .map(|p| self.check_ibd_header_proof(&p.anchors, &context));
         let tips = self.header_tips.read().unwrap();
         let mut report = self.header_report.write().unwrap();
-        if report.epoch != context.epoch {
+        if report.epoch != context.epoch || report.revision != context.revision {
             return;
         }
         for (hash, height) in valid {
@@ -219,6 +232,15 @@ impl ChainHub {
     #[doc(hidden)]
     pub fn note_header_tip(&self, header: &Header) {
         let hash = header.block_hash();
+        let registered_invalid = self.invalidated.set.read().unwrap().contains(&hash);
+        if registered_invalid {
+            {
+                let mut report = self.header_report.write().unwrap();
+                report.dirty = true;
+                report.revision = report.revision.wrapping_add(1);
+            }
+            self.refresh_header_report();
+        }
         if self.is_connected(&hash) {
             self.forget_reported_header_tip(&hash);
             return;
@@ -238,25 +260,28 @@ impl ChainHub {
         };
         let height = height.or_else(|| {
             let context = self.header_report.read().unwrap().context();
-            self.proved_stored_header_height(hash, &context.invalid, &context.proved)
+            self.proved_stored_header_height(hash, &HashSet::new(), &context.proved)
         });
         let Some(height) = height else {
             return;
         };
-        let (epoch, parent_valid) = {
+        let (epoch, parent_proof) = {
             let report = self.header_report.read().unwrap();
-            (report.epoch, report.stored.contains_key(&prev))
+            (report.epoch, report.stored.get(&prev).copied())
         };
         let directly_invalid = {
             let invalid = self.invalidated.set.read().unwrap();
             invalid.contains(&hash) || invalid.contains(&prev)
         };
-        let valid = !directly_invalid
-            && (connected || parent_valid || {
-                let context = self.header_report.read().unwrap().context();
-                self.proved_stored_header_height(hash, &context.invalid, &context.proved)
-                    == Some(height)
-            });
+        let proof = if !directly_invalid && (connected || parent_proof.is_some_and(|p| p.0 == prev))
+        {
+            Some((hash, height))
+        } else if let Some(parent) = parent_proof {
+            Some(parent)
+        } else {
+            let context = self.header_report.read().unwrap().context();
+            self.stored_header_prefix(hash, &context.invalid, &context.proved)
+        };
         let mut tips = self.header_tips.write().unwrap();
         tips.remove(&prev);
         if !tips.contains(&hash) && tips.len() >= 128 {
@@ -265,8 +290,10 @@ impl ChainHub {
         tips.insert(hash, prev, height);
         let mut report = self.header_report.write().unwrap();
         let stale = epoch != report.epoch;
-        if !stale && valid {
-            report.stored.insert(hash, height);
+        if !stale {
+            if let Some(proof) = proof {
+                report.stored.insert(hash, proof);
+            }
         }
         report.stored.retain(|hash, _| tips.contains(hash));
         report.refresh_height();
@@ -286,14 +313,22 @@ impl ChainHub {
 
     fn refresh_stored_header_tip(&self, hash: BlockHash, height: u32) {
         let context = self.header_report.read().unwrap().context();
-        if self.proved_stored_header_height(hash, &context.invalid, &context.proved) != Some(height)
-        {
+        let Some(prefix) = self
+            .stored_header_prefix(hash, &context.invalid, &context.proved)
+            .filter(|p| {
+                if p.0 == hash {
+                    p.1 == height
+                } else {
+                    p.1 < height
+                }
+            })
+        else {
             return;
-        }
+        };
         let tips = self.header_tips.read().unwrap();
         let mut report = self.header_report.write().unwrap();
         if report.epoch == context.epoch && tips.contains(&hash) {
-            report.stored.insert(hash, height);
+            report.stored.insert(hash, prefix);
             report.refresh_height();
         }
     }
@@ -304,22 +339,41 @@ impl ChainHub {
         invalid: &HashSet<BlockHash>,
         proved: &HashMap<BlockHash, u32>,
     ) -> Option<u32> {
+        self.stored_header_prefix(hash, invalid, proved)
+            .filter(|point| point.0 == hash)
+            .map(|point| point.1)
+    }
+
+    fn stored_header_prefix(
+        &self,
+        hash: BlockHash,
+        invalid: &HashSet<BlockHash>,
+        proved: &HashMap<BlockHash, u32>,
+    ) -> Option<HeaderPoint> {
         let (mut fk, mut rec) = self.query.get_header_by_hash(hash.as_byte_array()).ok()??;
+        let mut prefix = hash;
         let mut depth = 0u32;
         loop {
             let hash = BlockHash::from_byte_array(rec.hash);
             if invalid.contains(&hash) {
-                return None;
+                if rec.prev_fk.is_null() || rec.prev_fk.0 >= fk.0 {
+                    return None;
+                }
+                fk = rec.prev_fk;
+                rec = self.query.get_header(fk).ok()?;
+                prefix = BlockHash::from_byte_array(rec.hash);
+                depth = 0;
+                continue;
             }
             if let Some(height) = proved
                 .get(&hash)
                 .copied()
                 .or_else(|| self.query.published_height_of_hash(&rec.hash).map(|h| h.0))
             {
-                return height.checked_add(depth);
+                return Some((prefix, height.checked_add(depth)?));
             }
             if rec.prev_fk.is_null() {
-                return (hash == self.params.genesis_hash).then_some(depth);
+                return (hash == self.params.genesis_hash).then_some((prefix, depth));
             }
             if rec.prev_fk.0 >= fk.0 {
                 return None;
@@ -359,16 +413,23 @@ impl ChainHub {
         }) else {
             return IbdValidation::default();
         };
-        if self.proved_stored_header_height(stored, &context.invalid, &context.proved)
-            != Some(stored_height)
-        {
-            let (base, base_height) = anchors[0];
-            let valid = self.proved_stored_header_height(base, &context.invalid, &context.proved)
-                == Some(base_height);
+        let valid_prefix = self
+            .stored_header_prefix(stored, &context.invalid, &context.proved)
+            .or_else(|| {
+                anchors.iter().rev().find_map(|&(hash, height)| {
+                    (self.proved_stored_header_height(hash, &context.invalid, &context.proved)
+                        == Some(height))
+                    .then_some((hash, height))
+                })
+            });
+        let Some(valid_prefix) = valid_prefix else {
+            return IbdValidation::default();
+        };
+        if valid_prefix != (stored, stored_height) {
             return IbdValidation {
-                height: valid.then_some(base_height),
-                stored: valid.then_some((base, base_height)),
-                safe_until: base_height,
+                height: Some(valid_prefix.1),
+                stored: Some(valid_prefix),
+                safe_until: valid_prefix.1,
             };
         }
         let prefix = IbdValidation {
