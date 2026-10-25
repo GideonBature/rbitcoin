@@ -200,10 +200,13 @@ async fn try_jsonrpc(addr: SocketAddr, method: &str, params: Value) -> std::io::
     rbitcoin_test::jsonrpc::try_jsonrpc(addr, method, params).await
 }
 
-async fn history_txids(electrum: SocketAddr, script: &[u8]) -> BTreeSet<String> {
+async fn read_history_txids(
+    electrum: SocketAddr,
+    script: &[u8],
+) -> Result<BTreeSet<String>, String> {
     let mut stream = TcpStream::connect(electrum)
         .await
-        .expect("electrum connect");
+        .map_err(|e| format!("electrum connect: {e}"))?;
     let req = json!({
         "id": 1,
         "jsonrpc": "2.0",
@@ -212,22 +215,30 @@ async fn history_txids(electrum: SocketAddr, script: &[u8]) -> BTreeSet<String> 
     })
     .to_string()
         + "\n";
-    stream.write_all(req.as_bytes()).await.unwrap();
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| format!("electrum write: {e}"))?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).await.unwrap();
-    let hist: Value = serde_json::from_str(line.trim())
-        .unwrap_or_else(|e| panic!("history json: {e} body={line}"));
-    hist["result"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{hist}"))
-        .iter()
-        .map(|row| {
-            row["tx_hash"]
-                .as_str()
-                .unwrap_or_else(|| panic!("{row}"))
-                .to_string()
-        })
-        .collect()
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .await
+        .map_err(|e| format!("electrum read: {e}"))?;
+    let hist: Value =
+        serde_json::from_str(line.trim()).map_err(|e| format!("history json: {e} body={line}"))?;
+    let rows = hist["result"].as_array().ok_or_else(|| format!("{hist}"))?;
+    let mut out = BTreeSet::new();
+    for row in rows {
+        let hash = row["tx_hash"].as_str().ok_or_else(|| format!("{row}"))?;
+        out.insert(hash.to_string());
+    }
+    Ok(out)
+}
+
+async fn history_txids(electrum: SocketAddr, script: &[u8]) -> BTreeSet<String> {
+    read_history_txids(electrum, script)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 async fn stop_run_p2p(
@@ -257,9 +268,13 @@ async fn wait_caught_up(
         let best = jsonrpc(rpc, "getbestblockhash", json!([])).await;
         let height_ok = count["result"].as_u64() == Some(u64::from(height));
         let hash_ok = best["result"].as_str() == Some(hash);
-        let hist_a = history_txids(electrum, &[0x51]).await;
-        let hist_b = history_txids(electrum, &[0x52]).await;
-        if height_ok && hash_ok && &hist_a == script_a && &hist_b == script_b {
+        let hist_a = read_history_txids(electrum, &[0x51]).await.ok();
+        let hist_b = read_history_txids(electrum, &[0x52]).await.ok();
+        if height_ok
+            && hash_ok
+            && hist_a.as_ref() == Some(script_a)
+            && hist_b.as_ref() == Some(script_b)
+        {
             return;
         }
         if Instant::now() >= deadline {
@@ -752,7 +767,10 @@ async fn follow_journey() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_of_ibd_sh_interrupt() {
-    let wall = llvm_cov_wall(120, 240);
+    // Five history polls. Each may spend 60s waiting for the port and then
+    // 30s (60s under llvm-cov) for the history. The first catch-up may
+    // spend 40s. Those caps are 490s, and 640s under coverage.
+    let wall = llvm_cov_wall(500, 660);
     tokio::time::timeout(wall, sh_interrupt_journey())
         .await
         .expect("end_of_ibd_sh_interrupt wall");
@@ -822,21 +840,21 @@ async fn resume_until_history(
     // built shows up after the follow headers round. Wait for that history.
     let deadline = Instant::now() + llvm_cov_wall(30, 60);
     loop {
-        let hist_a = history_txids(electrum, &[0x51]).await;
-        let hist_b = history_txids(electrum, &[0x52]).await;
+        let hist_a = read_history_txids(electrum, &[0x51]).await.ok();
+        let hist_b = read_history_txids(electrum, &[0x52]).await.ok();
         let count = try_jsonrpc(rpc, "getblockcount", json!([])).await.ok();
         let best = try_jsonrpc(rpc, "getbestblockhash", json!([])).await.ok();
         let tip_ok = count.as_ref().and_then(|v| v["result"].as_u64()) == Some(u64::from(height))
             && best.as_ref().and_then(|v| v["result"].as_str()) == Some(hash);
-        if &hist_a == script_a && &hist_b == script_b && tip_ok {
+        if hist_a.as_ref() == Some(script_a) && hist_b.as_ref() == Some(script_b) && tip_ok {
             break;
         }
         if Instant::now() >= deadline {
             panic!(
                 "scripthash history did not catch height {height}: A {}/{} B {}/{} tip={tip_ok}",
-                hist_a.len(),
+                hist_a.as_ref().map(|s| s.len()).unwrap_or(0),
                 script_a.len(),
-                hist_b.len(),
+                hist_b.as_ref().map(|s| s.len()).unwrap_or(0),
                 script_b.len()
             );
         }
@@ -1288,9 +1306,9 @@ async fn work_fork_journey() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn end_of_ibd_invalid_heavier_fork() {
-    // Five serial syncs. Under llvm-cov each may use 60s, so the wall has to
-    // cover 300s plus startup.
-    let wall = llvm_cov_wall(60, 360);
+    // Five serial syncs. Each may use 20s (60s under llvm-cov), so the wall
+    // covers 100s (300s) plus startup.
+    let wall = llvm_cov_wall(120, 360);
     tokio::time::timeout(wall, invalid_heavier_fork_journey())
         .await
         .expect("end_of_ibd_invalid_heavier_fork wall");
