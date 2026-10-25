@@ -138,8 +138,57 @@ fn verify_job_uses_stashed_pre_for_bip143() {
         tx,
         rbitcoin_consensus::block::ScriptVerifyFlags::buried(true, true, true, true, true),
     )
-    .with_pre_slice(pres, 0);
-    assert_eq!(job.pre().txid, job.txid);
+    .with_pre_slice(pres, 0)
+    .expect("script precompute");
+    assert_eq!(job.pre().expect("script precompute").txid, job.txid);
+}
+
+#[test]
+fn connect_precompute_is_rejected_before_verify() {
+    let tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![],
+    };
+    let connect = rbitcoin_consensus::TxPrecompute::from_tx_connect(&tx);
+    let pres: std::sync::Arc<[rbitcoin_consensus::TxPrecompute]> = std::sync::Arc::from([connect]);
+    let job = ScriptCheckJob::new(
+        vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new(),
+        }],
+        tx.clone(),
+        rbitcoin_consensus::block::ScriptVerifyFlags::buried(false, false, false, false, false),
+    );
+    let err = match job.with_pre_slice(pres, 0) {
+        Err(err) => err,
+        Ok(_) => panic!("connect row has no sighash midstates"),
+    };
+    let msg = format!("{err}");
+    assert!(msg.contains("sighash midstate"), "{msg}");
+
+    let past = match rbitcoin_consensus::script::interpreter::EvalContext::from_eval_parts(
+        &tx,
+        1,
+        Amount::ZERO,
+        bitcoin::script::Script::from_bytes(&[]),
+        rbitcoin_consensus::script::interpreter::SigVersion::Base,
+        false,
+        false,
+        false,
+        std::borrow::Cow::Owned(rbitcoin_consensus::TxScriptPrecompute::from_tx(&tx)),
+    ) {
+        Err(err) => err,
+        Ok(_) => panic!("input 1 is past vin"),
+    };
+    let msg = format!("{past}");
+    assert!(msg.contains("input index"), "{msg}");
 }
 
 #[test]

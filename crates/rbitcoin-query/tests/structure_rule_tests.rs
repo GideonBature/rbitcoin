@@ -195,20 +195,28 @@ fn script_jobs_from_same_pres_slice_share_pre() {
         spend.clone(),
         ScriptVerifyFlags::buried(true, true, true, true, true),
     )
-    .with_pre_slice(std::sync::Arc::clone(&pres), 0);
+    .with_pre_slice(std::sync::Arc::clone(&pres), 0)
+    .expect("script precompute");
     let job_b = ScriptCheckJob::with_txid(
         pres[0].txid,
         prevouts,
         spend,
         ScriptVerifyFlags::buried(true, true, true, true, true),
     )
-    .with_pre_slice(std::sync::Arc::clone(&pres), 0);
+    .with_pre_slice(std::sync::Arc::clone(&pres), 0)
+    .expect("script precompute");
     assert!(
-        std::ptr::eq(job_a.pre(), pres[0].as_script().expect("script precompute")),
+        std::ptr::eq(
+            job_a.pre().expect("script precompute"),
+            pres[0].as_script().expect("script precompute")
+        ),
         "job pre must be the slice element, not a cloned TxPrecompute"
     );
     assert!(
-        std::ptr::eq(job_a.pre(), job_b.pre()),
+        std::ptr::eq(
+            job_a.pre().expect("script precompute"),
+            job_b.pre().expect("script precompute")
+        ),
         "two jobs from the same Arc<[TxPrecompute]> share the element"
     );
 }

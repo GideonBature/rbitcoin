@@ -282,6 +282,7 @@ impl<'a> EvalContext<'a> {
             bip66_active,
             Cow::Owned(crate::TxScriptPrecompute::from_tx(tx)),
         )
+        .expect("input index")
     }
 
     #[allow(clippy::too_many_arguments)] // call-site args stay unbundled
@@ -296,9 +297,9 @@ impl<'a> EvalContext<'a> {
         bip112_active: bool,
         bip66_active: bool,
         pre: Cow<'a, crate::TxScriptPrecompute>,
-    ) -> Self {
-        let input_index = crate::block::InputIndex::in_tx(tx, input_index).expect("input index");
-        Self {
+    ) -> Result<Self, ConsensusError> {
+        let input_index = crate::block::InputIndex::in_tx(tx, input_index)?;
+        Ok(Self {
             tx,
             input_index,
             amount,
@@ -325,7 +326,7 @@ impl<'a> EvalContext<'a> {
                 sig_version,
             )),
             tapscript: None,
-        }
+        })
     }
 
     /// Attach the tapleaf and annex facts of a BIP341 script-path spend.
@@ -372,8 +373,8 @@ impl<'a> EvalContext<'a> {
             job.bip65_active,
             job.bip112_active,
             job.bip66_active,
-            Cow::Borrowed(job.pre()),
-        )
+            Cow::Borrowed(job.pre()?),
+        )?
         .apply_job_flags(job))
     }
 }

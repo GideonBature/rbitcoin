@@ -45,7 +45,8 @@ fn tapscript_checksig_without_leaf_facts_fails() {
         false,
         false,
         Cow::Owned(rbitcoin_consensus::TxScriptPrecompute::from_tx(&tx)),
-    );
+    )
+    .expect("input index");
     let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
     assert!(format!("{err}").contains("tapleaf"), "{err}");
 }
@@ -67,7 +68,8 @@ fn tapscript_checksig_rejects_a_signature_that_is_not_64_or_65_bytes() {
         false,
         false,
         Cow::Owned(rbitcoin_consensus::TxScriptPrecompute::from_tx(&tx)),
-    );
+    )
+    .expect("input index");
     let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
     assert!(format!("{err}").contains("CHECKSIG"), "{err}");
 }
@@ -89,7 +91,8 @@ fn tapscript_checksigverify_rejects_an_empty_signature_on_a_32_byte_key() {
         false,
         false,
         Cow::Owned(rbitcoin_consensus::TxScriptPrecompute::from_tx(&tx)),
-    );
+    )
+    .expect("input index");
     let err = eval_script(sc, &mut Vec::new(), &ctx).unwrap_err();
     assert!(format!("{err}").contains("CHECKSIGVERIFY"), "{err}");
 }

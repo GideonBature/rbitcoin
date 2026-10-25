@@ -360,10 +360,10 @@ impl TxPrecompute {
 impl TxScriptPrecompute {
     /// One walk of `tx` including BIP143/341 midstates. Does not hash spent prevouts.
     pub fn from_tx(tx: &Transaction) -> Self {
-        match TxPrecompute::from_tx_inner(tx, true) {
-            TxPrecompute::Script(s) => s,
-            TxPrecompute::Connect(connect) => Self::from_connect(connect, tx),
-        }
+        let TxPrecompute::Script(script) = TxPrecompute::from_tx_inner(tx, true) else {
+            unreachable!("sighash walk always packs midstates");
+        };
+        script
     }
 
     /// Midstates on an already-walked connect row. Does not rehash the txid.
@@ -405,24 +405,25 @@ impl TxScriptPrecompute {
 
     /// BIP341 spent midstates. Call when `prevouts.len() == tx.input.len()`.
     pub fn finish_spent(&mut self, prevouts: &[TxOut]) {
-        let _ = self.finish_spent_parts(prevouts.len(), |i| {
-            let prev = prevouts.get(i)?;
-            Some((prev.value.to_sat() as i64, prev.script_pubkey.as_bytes()))
-        });
+        let _ =
+            self.finish_spent_parts((0..prevouts.len()).map(crate::block::InputIndex::at), |i| {
+                let prev = prevouts.get(i.get())?;
+                Some((prev.value.to_sat() as i64, prev.script_pubkey.as_bytes()))
+            });
     }
 
     /// BIP341 spent midstates from borrowed amount and script bytes.
     ///
-    /// `parts` is called once per input index. `false` means a prevout was
-    /// missing; the midstates are left unset.
+    /// `parts` is called once per input. `false` means a prevout was missing;
+    /// the midstates are left unset.
     pub fn finish_spent_parts<'a>(
         &mut self,
-        n: usize,
-        mut parts: impl FnMut(usize) -> Option<(i64, &'a [u8])>,
+        inputs: impl IntoIterator<Item = crate::block::InputIndex>,
+        mut parts: impl FnMut(crate::block::InputIndex) -> Option<(i64, &'a [u8])>,
     ) -> bool {
         let mut enc_amt = sha256::Hash::engine();
         let mut enc_spk = sha256::Hash::engine();
-        for i in 0..n {
+        for i in inputs {
             let Some((value, script)) = parts(i) else {
                 return false;
             };

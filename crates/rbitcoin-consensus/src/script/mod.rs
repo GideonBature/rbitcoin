@@ -48,7 +48,7 @@ pub fn verify_job_all_inputs(job: &ScriptCheckJob) -> Result<(), ConsensusError>
         return Ok(());
     };
     let mut cache = None;
-    let pre = job.pre();
+    let pre = job.pre()?;
     let tap_spent = crypto::TapSpentHashes::default();
     verify_input(job, first, tx, &mut cache, pre, &tap_spent)
         .map_err(|e| annotate_script_err(e, job, first))?;
@@ -562,10 +562,8 @@ pub mod crypto {
                 return Ok(*hashes);
             }
             let mut failed: Option<ConsensusError> = None;
-            let mut spent = job.pre().clone();
-            let inputs: Vec<_> = job.inputs().collect();
-            let n = inputs.len();
-            let ok = spent.finish_spent_parts(n, |i| match job.prevout_parts(inputs[i]) {
+            let mut spent = job.pre()?.clone();
+            let ok = spent.finish_spent_parts(job.inputs(), |i| match job.prevout_parts(i) {
                 Ok((value, script)) => Some((value as i64, script)),
                 Err(e) => {
                     failed = Some(e);
@@ -624,7 +622,7 @@ pub mod crypto {
 
         let tx = &*job.tx;
         let txin = &tx.input[input_index.get()];
-        let pre = job.pre();
+        let pre = job.pre()?;
         let hash_type = hash_type as u8;
         let output_type = match hash_type {
             0 => SIGHASH_ALL,

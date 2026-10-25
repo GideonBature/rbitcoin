@@ -196,7 +196,7 @@ fn core_bip341_wallet_vectors_all_rows() {
                         vin,
                         tx_ref,
                         &mut None,
-                        job.pre(),
+                        job.pre().expect("script precompute"),
                         &Default::default(),
                     ) {
                         Ok(()) => pass += 1,

@@ -929,6 +929,12 @@ impl InputIndex {
         }
         Ok(Self(i as u32))
     }
+
+    /// Position in a prevout list the caller already matched to `vin`.
+    #[inline]
+    pub(crate) fn at(i: usize) -> Self {
+        Self(i as u32)
+    }
 }
 
 /// Script-verify job for one non-coinbase create.
@@ -1064,10 +1070,25 @@ impl ScriptCheckJob {
     }
 
     /// Confirm assemble: `slice[idx]` by refcount only (no `TxPrecompute` clone).
+    ///
+    /// A connect-only row has no sighash midstates. Assemble rejects it here
+    /// so script verify does not discover that on the worker.
     #[inline]
-    pub fn with_pre_slice(self, slice: std::sync::Arc<[crate::TxPrecompute]>, idx: usize) -> Self {
+    pub fn with_pre_slice(
+        self,
+        slice: std::sync::Arc<[crate::TxPrecompute]>,
+        idx: usize,
+    ) -> Result<Self, ConsensusError> {
+        let Some(row) = slice.get(idx) else {
+            return Err(ConsensusError::Internal("invariant: precompute index"));
+        };
+        if row.as_script().is_none() {
+            return Err(ConsensusError::Internal(
+                "invariant: sighash midstate missing",
+            ));
+        }
         let _ = self.pre.set(JobPre::Slice { slice, idx });
-        self
+        Ok(self)
     }
 
     #[doc(hidden)]
@@ -1119,13 +1140,16 @@ impl ScriptCheckJob {
     }
 
     #[inline]
-    pub fn pre(&self) -> &crate::TxScriptPrecompute {
+    pub fn pre(&self) -> Result<&crate::TxScriptPrecompute, ConsensusError> {
         let row = match self.job_pre() {
             JobPre::Owned(a) => a.as_ref(),
-            JobPre::Slice { slice, idx } => &slice[*idx],
+            JobPre::Slice { slice, idx } => slice
+                .get(*idx)
+                .ok_or(ConsensusError::Internal("invariant: precompute index"))?,
         };
-        row.as_script()
-            .expect("script verify uses a precompute that has midstates")
+        row.as_script().ok_or(ConsensusError::Internal(
+            "invariant: sighash midstate missing",
+        ))
     }
 }
 

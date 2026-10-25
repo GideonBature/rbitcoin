@@ -374,7 +374,7 @@ pub fn assemble_non_cb_tx(
         };
         if let Some(ps) = pres {
             if rbitcoin_consensus::block::should_use_pres(ti, ps.len()) {
-                job = job.with_pre_slice(Arc::clone(ps), ti);
+                job = job.with_pre_slice(Arc::clone(ps), ti)?;
             }
         }
         script_jobs.push(job);
