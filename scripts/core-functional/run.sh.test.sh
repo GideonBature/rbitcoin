@@ -167,8 +167,7 @@ DRY_OUT="$("$RUN" --dry-run --inventory "$INV" --tests-dir "$TESTS" \
   --config-out "$WORKDIR/config.ini" feature_help.py 2>/dev/null || true)"
 if printf '%s' "$DRY_OUT" | grep -q -- '--v2transport' \
   && printf '%s' "$DRY_OUT" | grep -q -- '--jobs' \
-  && printf '%s' "$DRY_OUT" | grep -q -- '--timeout-factor' \
-  && printf '%s' "$DRY_OUT" | grep -q -- '--timeout-factor 4' \
+  && printf '%s' "$DRY_OUT" | grep -q -- '--timeout-factor=4' \
   && printf '%s' "$DRY_OUT" | grep -q -- '--keepcache' \
   && printf '%s' "$DRY_OUT" | grep -q 'feature_help.py'; then
   echo "ok - dry-run run name"
