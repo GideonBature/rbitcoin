@@ -2325,8 +2325,6 @@ impl PeerHub {
         *self.dial_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 
-    /// Clone the dial sender. RPC `addnode` takes this and does not match
-    /// on a missing dialer again.
     pub fn dial_ready(&self) -> Result<DialReady<'_>, String> {
         let g = self.dial_tx.lock().unwrap_or_else(|e| e.into_inner());
         let tx = g
@@ -2678,15 +2676,16 @@ impl PeerHub {
     }
 
     pub fn addnode_net(&self, addr: crate::NetAddr, cmd: &str) -> Result<(), String> {
+        let ready = self.dial_ready()?;
         self.trust_allows_spec(&addr.to_string())?;
         match cmd {
-            "onetry" => self.dial_manual_net(&addr),
+            "onetry" => self.dial_manual_ready(&ready.tx, DialTarget::from_net(addr)),
             "add" => {
                 self.added
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(addr);
-                let _ = self.dial_manual_net(&addr);
+                let _ = self.dial_manual_ready(&ready.tx, DialTarget::from_net(addr));
                 Ok(())
             }
             "remove" => {

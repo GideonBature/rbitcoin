@@ -299,6 +299,7 @@ impl Default for RpcOpts {
 /// **Env input:** [`Self::absorb_inbound_env`] reads `RBITCOIN_P2P_MAX_INBOUND`
 /// once when inbound was not set on CLI/conf. It never writes process env.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NodeConfig {
     pub datadir: DatadirOpts,
     pub listen: ListenOpts,
@@ -421,38 +422,26 @@ pub struct NodeConfig {
     pub trust_peer: Option<rbitcoin_net::NetAddr>,
     /// `--trust-peer` clearnet DNS name. Mutually exclusive with [`Self::trust_peer`].
     pub trust_peer_host: Option<String>,
-    /// Set by [`Self::seal_trust_peer`]. Private so another crate cannot copy it
-    /// with `..NodeConfig::default()`. Listen fields stay public; [`Self::validate`]
-    /// re-checks them.
-    trust_seal: Option<TrustPeerSeal>,
 }
 
-/// Passed listen, seeds, and inbound at [`TrustPeerSeal::try_new`].
-///
-/// Not a snapshot of [`ListenOpts`]. Those fields stay public, so
-/// [`NodeConfig::validate`] runs this check on the live values.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TrustPeerSeal;
-
-impl TrustPeerSeal {
-    fn try_new(listen: &ListenOpts) -> Result<Self, NodeError> {
-        if !matches!(listen.p2p, P2pListen::Off) || listen.listen_onion {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --listen".into(),
-            ));
-        }
-        if listen.max_inbound > 0 {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --max-inbound greater than 0".into(),
-            ));
-        }
-        if listen.use_seeds || !listen.seednodes.is_empty() {
-            return Err(NodeError::Config(
-                "trust-peer cannot be combined with --seed-node".into(),
-            ));
-        }
-        Ok(Self)
+fn reject_trust_peer_listen(listen: &ListenOpts) -> Result<(), NodeError> {
+    if !matches!(listen.p2p, P2pListen::Off) || listen.listen_onion || !listen.p2p_extra.is_empty()
+    {
+        return Err(NodeError::Config(
+            "trust-peer cannot be combined with --listen".into(),
+        ));
     }
+    if listen.max_inbound > 0 {
+        return Err(NodeError::Config(
+            "trust-peer cannot be combined with --max-inbound greater than 0".into(),
+        ));
+    }
+    if listen.use_seeds || !listen.seednodes.is_empty() {
+        return Err(NodeError::Config(
+            "trust-peer cannot be combined with --seed-node".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl Default for NodeConfig {
@@ -519,7 +508,6 @@ impl Default for NodeConfig {
             connect_redial: rbitcoin_net::REDIAL_INTERVAL,
             trust_peer: None,
             trust_peer_host: None,
-            trust_seal: None,
         }
     }
 }
@@ -729,23 +717,14 @@ impl NodeConfig {
             ));
         }
         self.validate_only_net()?;
-        self.validate_hidden_inbound()?;
         self.validate_trust_peer()?;
+        self.validate_hidden_inbound()?;
         self.validate_rpc_cookie()
     }
 
     /// True when `--trust-peer` named the sole dial target.
     pub fn trust_peer_set(&self) -> bool {
         self.trust_peer.is_some() || self.trust_peer_host.is_some()
-    }
-
-    /// True after [`Self::seal_trust_peer`] stored a seal.
-    ///
-    /// The seal is not a copy of listen, seeds, or inbound. [`Self::validate`]
-    /// re-checks those public fields.
-    #[doc(hidden)]
-    pub fn trust_peer_sealed(&self) -> bool {
-        self.trust_seal.is_some()
     }
 
     /// Pin `--trust-peer` as the only dial target and refuse clashing flags.
@@ -779,7 +758,6 @@ impl NodeConfig {
         self.listen.use_seeds = false;
         self.listen.max_inbound = 0;
         self.listen.seednodes.clear();
-        self.trust_seal = Some(TrustPeerSeal::try_new(&self.listen)?);
         Ok(())
     }
 
@@ -842,16 +820,11 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Sealed `--trust-peer` state: one dial target, no listen, no seeds.
-    ///
-    /// [`ListenOpts`] stays public, so a later write can undo the seal.
-    /// This always re-runs [`TrustPeerSeal::try_new`] on the live fields.
-    /// A config that names a trust peer and never sealed fails the same check.
     fn validate_trust_peer(&self) -> Result<(), NodeError> {
         if !self.trust_peer_set() {
             return Ok(());
         }
-        TrustPeerSeal::try_new(&self.listen)?;
+        reject_trust_peer_listen(&self.listen)?;
         self.connect_matches_trust_peer()?;
         if self.listen.connect.is_empty() && self.listen.connect_dns.is_empty() {
             return Err(NodeError::Config("trust-peer requires an address".into()));

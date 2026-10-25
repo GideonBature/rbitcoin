@@ -802,8 +802,28 @@ fn connect_resolve_replaces_socket() {
 #[test]
 fn addnode_unknown_command() {
     let hub = PeerHub::new();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    hub.set_dialer(tx);
     let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
-    assert!(hub.addnode(a, "nope").is_err());
+    let err = hub.addnode(a, "nope").unwrap_err();
+    assert!(err.contains("unknown addnode command"), "{err}");
+}
+
+#[test]
+fn addnode_net_without_a_dialer_errors() {
+    let hub = PeerHub::new();
+    let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+    for cmd in ["add", "onetry", "remove"] {
+        let err = hub.addnode(a, cmd).unwrap_err();
+        assert!(err.contains("no dialer"), "{cmd}: {err}");
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    hub.set_dialer(tx);
+    hub.redial_remembered();
+    assert!(
+        take_dials(&mut rx).is_empty(),
+        "a refused add must not stay on the redial list"
+    );
 }
 
 fn take_dials(rx: &mut mpsc::UnboundedReceiver<DialRequest>) -> Vec<DialRequest> {
