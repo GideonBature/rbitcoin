@@ -337,7 +337,7 @@ block getdata in flight. Tip+1 getdata races up to 4 peers ranked by expected
 drain time (`(queue+1)/EWMA`), not by inflight count, only once the body queue
 meets any of: a quarter of the ~1 min confirm window in blocks, a quarter of
 the configured assign-stop (default 1 GiB, `RBITCOIN_BLOCK_QUEUE_BYTES` /
-`_GB`), or 1000 blocks. The count is the queue's total blocks and bytes, so
+`RBITCOIN_BLOCK_QUEUE_GB`), or 1000 blocks. The count is the queue's total blocks and bytes, so
 gaps count. The ~100 MiB free floor still only limits how far densify looks.
 Below all three, the gap is the frontier: tip+1 gets one peer and densify
 keeps filling ahead. Later contiguous holes

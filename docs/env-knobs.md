@@ -25,7 +25,7 @@ for signet/mainnet sync. **Not** CLI.
 | Env | Default | Role |
 |-----|---------|------|
 | `RBITCOIN_BLOCK_QUEUE_GB` | 1 | Densify assign-stop (GiB). `0` = unlimited. Never refuses enqueue for budget (undecodable wire is dropped) |
-| `RBITCOIN_BLOCK_QUEUE_BYTES` | 1 GiB | Same stop in bytes (wins over GB). `0` = unlimited |
+| `RBITCOIN_BLOCK_QUEUE_BYTES` | 1 GiB | Same stop in bytes (wins over `RBITCOIN_BLOCK_QUEUE_GB`). `0` = unlimited |
 | `RBITCOIN_BULK_IO_WORKERS` | backend default | pread worker count when `RBITCOIN_IO=pread` |
 | `RBITCOIN_CLASS_C_INRAM_MAX_MB` | 256 | L2 cap for `confirmed` / `header_txs_*`; over → fd L0. `strong_tx` always L2 |
 | `RBITCOIN_TX_HEAD_BITS` | scale default | `tx.head` bits (dangerous on a live datadir) |
@@ -46,9 +46,9 @@ for signet/mainnet sync. **Not** CLI.
 | Confirm `loadq` / `scriptq` / `writeq` | 14 / 4 / 14 (`ready=` is not a cap) |
 | `RBITCOIN_SH_UNIQUE_HINT` | ignored; cold open-address pre-size is gone |
 | `RBITCOIN_CONFIRM_BATCH_INPUTS` | 8000 soft inputs/pack |
-| Per-path IO (`PIN_IO`, `HEAD_RESOLVE_IO`, `SPEND_META`, `SPEND_ANN`, `CLASS_C_IO`) | Follow **`RBITCOIN_IO` only** (strings deleted) |
+| Per-path IO (`RBITCOIN_PIN_IO`, `RBITCOIN_HEAD_RESOLVE_IO`, `RBITCOIN_SPEND_META`, `RBITCOIN_SPEND_ANN`, `RBITCOIN_CLASS_C_IO`) | Follow **`RBITCOIN_IO` only** (strings deleted) |
 | `RBITCOIN_FD_APPEND` | Never read (deleted) |
-| `RBITCOIN_BLOCK_QUEUE_MB` | Never read (deleted; use `_BYTES` / `_GB`) |
+| `RBITCOIN_BLOCK_QUEUE_MB` | Never read (deleted; use `RBITCOIN_BLOCK_QUEUE_BYTES` / `RBITCOIN_BLOCK_QUEUE_GB`) |
 
 ## Test-only (not operator)
 

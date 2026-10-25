@@ -14,8 +14,9 @@ pub const BQ_SOFT_CONFIRM_SECS: f64 = 60.0;
 
 /// Default densify assign-stop (1 GiB). At/over this, densify only holes within
 /// the ~1 min tip-rate confirm window **and** not past `fetched_hi` (do not grow
-/// past fetched; do not densify far holes outside the window). Override with
-/// `RBITCOIN_BLOCK_QUEUE_BYTES` / `_GB` (`0` = unlimited).
+/// past fetched; do not densify far holes outside the window). The node
+/// overrides it from `RBITCOIN_BLOCK_QUEUE_BYTES` or `RBITCOIN_BLOCK_QUEUE_GB`
+/// (`0` = unlimited).
 pub const BQ_ASSIGN_STOP_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Blocks confirm can take in one soft confirm window at `rate` (ceil).
