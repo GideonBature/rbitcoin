@@ -1615,6 +1615,7 @@ pub fn apply_consensus_invalid_reject(
         // `save_adopt` saves none while a mark is not on disk.
         let _ = h.note_failed_connect(hash);
         super::header_walk::retire_invalid(st, h, hash, height);
+        super::header_walk::request_report_refresh(st, h);
     }
     if st.height_to_hash.get(&height) == Some(&hash) {
         st.height_to_hash.remove(&height);

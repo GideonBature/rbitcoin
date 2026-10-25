@@ -1131,16 +1131,19 @@ fn a_fork_retarget_uses_the_challenger_period() {
     let genesis = hub.header_of(&gen_hash).unwrap();
     plant_origin(&mut st, &hub);
     fill_soft_queue(&mut st);
+    assert_eq!(hub.best_header_height(), 0, "peer height is not a local header");
     let main_a = extend_chain(&hub, &genesis, &[], 20, 1);
     let main_b = extend_chain(&hub, &genesis, &main_a, 10, 1);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert!(took_getheaders(&mut rx), "the look-ahead ask goes to the peer");
     apply_headers_event(&mut st, &hub, 0, main_a.clone());
     assert!(st.slots[0].alive, "the first look-ahead window is accepted");
+    assert_eq!(hub.best_header_height(), 20);
     assert!(send_getheaders(&mut st, &hub).unwrap());
     assert!(took_getheaders(&mut rx), "the next look-ahead ask goes to the peer");
     apply_headers_event(&mut st, &hub, 0, main_b);
     assert!(st.slots[0].alive, "the second look-ahead window is accepted");
+    assert_eq!(hub.best_header_height(), 30);
     // The download path names a different header at the period height than the
     // checkpoint that opened that period. The store fallback would retarget
     // from this decoy; the challenger snap must keep the checkpoint header.

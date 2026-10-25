@@ -2489,6 +2489,50 @@ fn submit_header_child_is_headers_only_tip() {
         1,
         "an invalidated taller header does not count"
     );
+    // Cross the old ancestry cap with headers only, not a tall block fixture.
+    let mut header = b1.header;
+    let mut headers = Vec::new();
+    for height in 2u32..=10_003 {
+        header.prev_blockhash = if height == 2 {
+            b1.block_hash()
+        } else {
+            header.block_hash()
+        };
+        header.time = b1.header.time + height;
+        header.merkle_root = bitcoin::TxMerkleNode::from_byte_array(
+            bitcoin::hashes::sha256d::Hash::hash(&height.to_le_bytes()).to_byte_array(),
+        );
+        rbitcoin_consensus::grind_regtest_pow(&mut header);
+        headers.push(header);
+    }
+    hub.ensure_headers_batch(&headers).unwrap();
+    assert_eq!(hub.best_header_height(), 10_003);
+    let interior = headers[4_998].block_hash();
+    hub.invalidate_block(interior).unwrap();
+    assert_eq!(
+        hub.best_header_height(),
+        4_999,
+        "keep the valid prefix below height 5,000"
+    );
+    let higher = headers[6_998].block_hash();
+    hub.invalidate_block(higher).unwrap();
+    assert_eq!(
+        hub.best_header_height(),
+        4_999,
+        "a second invalid descendant must not hide the lower failure"
+    );
+    hub.reconsider_block(interior).unwrap();
+    assert_eq!(hub.best_header_height(), 6_999);
+    hub.reconsider_block(higher).unwrap();
+    assert_eq!(hub.best_header_height(), 10_003);
+    hub.invalidate_block(b1.block_hash()).unwrap();
+    assert_eq!(
+        hub.best_header_height(),
+        1,
+        "only the shorter valid sibling remains"
+    );
+    hub.reconsider_block(b1.block_hash()).unwrap();
+    assert_eq!(hub.best_header_height(), 10_003);
     let _ = std::fs::remove_dir_all(dir);
 }
 

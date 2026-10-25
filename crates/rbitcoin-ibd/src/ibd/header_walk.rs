@@ -70,6 +70,7 @@ pub struct Challenger {
 
 #[derive(Debug, Default)]
 pub struct HeaderWalk {
+    pub report_epoch: Option<rbitcoin_net::chain::IbdHeaderEpoch>,
     pub checkpoints: Vec<Checkpoint>,
     /// Confirmed tip, or the stored path tip, before any look-ahead checkpoint.
     pub base_hash: Option<BlockHash>,
@@ -259,6 +260,7 @@ pub struct OriginInput {
 }
 
 pub struct OriginLoaded {
+    pub report_epoch: Option<rbitcoin_net::chain::IbdHeaderEpoch>,
     pub height: u32,
     pub hash: Option<BlockHash>,
     pub work: Work,
@@ -301,6 +303,11 @@ pub fn origin_input(st: &IbdWorkState, hub: &ChainHub) -> OriginInput {
 
 /// Header-store reads for the walk origin. No `IbdWorkState` borrow.
 pub fn load_origin(hub: &ChainHub, input: &OriginInput) -> OriginLoaded {
+    let mut report_epoch = Some(hub.ibd_header_epoch());
+    let invalid: HashSet<_> = hub.invalid_blocks().into_iter().collect();
+    if input.hash.is_some_and(|hash| invalid.contains(&hash)) {
+        report_epoch = None;
+    }
     let mut height = input.height;
     let mut hash = input.hash;
     let mut work = hub
@@ -320,6 +327,9 @@ pub fn load_origin(hub: &ChainHub, input: &OriginInput) -> OriginLoaded {
             if hash.is_some_and(|h| hdr.prev_blockhash != h) {
                 break;
             }
+            if invalid.contains(next) {
+                report_epoch = None;
+            }
             work = work + hdr.work();
             if input.milestone_height == *next_h {
                 let mut latch = WalkTip {
@@ -338,6 +348,7 @@ pub fn load_origin(hub: &ChainHub, input: &OriginInput) -> OriginLoaded {
     }
     let tip_header = hash.and_then(|h| hub.header_of(&h));
     OriginLoaded {
+        report_epoch,
         height,
         hash,
         work,
@@ -353,6 +364,7 @@ pub fn install_origin(st: &mut IbdWorkState, hub: &ChainHub, loaded: OriginLoade
         return;
     }
     let OriginLoaded {
+        report_epoch,
         height,
         hash,
         work,
@@ -374,6 +386,7 @@ pub fn install_origin(st: &mut IbdWorkState, hub: &ChainHub, loaded: OriginLoade
     st.header_walk.base_height = height;
     st.header_walk.base_work = work.to_be_bytes();
     st.header_walk.origin = true;
+    st.header_walk.report_epoch = report_epoch;
     if let Some(h) = tip_header {
         seed_tip_times(st, hub, h);
         note_period_snap(&mut st.header_walk.tip.diff, hub, h, height);
@@ -942,6 +955,7 @@ pub fn refuse_invalid_batch(st: &mut IbdWorkState, peer: usize, headers: &[Heade
 /// the path above its parent is dropped and every peer may be asked for
 /// headers again. A candidate built on it falls back to that parent.
 pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, height: u32) {
+    let report_epoch = hub.ibd_header_epoch();
     if !st.is_on_path(&hash, height) {
         return;
     }
@@ -961,6 +975,7 @@ pub fn retire_invalid(st: &mut IbdWorkState, hub: &ChainHub, hash: BlockHash, he
         st.header_walk.base_diff = tip.diff;
     }
     st.header_walk.tip = tip;
+    st.header_walk.report_epoch = Some(report_epoch);
     // `header.adopt` restores the tip from the last checkpoint.
     if st
         .header_walk
@@ -1093,6 +1108,7 @@ pub fn rewind_to(st: &mut IbdWorkState, hub: &ChainHub, height: u32, dead: Optio
         }
     }
     clear_off_path(st);
+    publish_header_tip(st, hub);
     save_adopt(st, hub);
 }
 
@@ -2306,6 +2322,7 @@ pub fn remember_milestone(tip: &mut WalkTip, hub: &ChainHub, prev: BlockHash, hd
 
 #[doc(hidden)]
 pub fn publish_work(st: &mut IbdWorkState, hub: &ChainHub) {
+    publish_header_tip(st, hub);
     if below_floor(hub, &st.header_walk.tip_work()) {
         return;
     }
@@ -2336,6 +2353,41 @@ pub fn publish_work(st: &mut IbdWorkState, hub: &ChainHub) {
         "ibd: headers milestone height={} hash={hash} work=ok",
         hub.milestone.height
     );
+}
+
+fn publish_header_tip(st: &mut IbdWorkState, hub: &ChainHub) {
+    let Some(epoch) = st.header_walk.report_epoch else {
+        return;
+    };
+    let mut anchors = Vec::new();
+    if let Some(hash) = st.header_walk.base_hash {
+        anchors.push((hash, st.header_walk.base_height));
+    }
+    anchors.extend(
+        st.header_walk
+            .checkpoints
+            .iter()
+            .filter(|c| c.height <= st.header_walk.tip_height())
+            .map(|c| (c.hash, c.height)),
+    );
+    if let Some(hash) = st.header_walk.tip_hash() {
+        anchors.push((hash, st.header_walk.tip_height()));
+    }
+    anchors.sort_by_key(|a| a.1);
+    anchors.dedup();
+    if let Some(epoch) = hub.publish_ibd_header_tip(epoch, anchors) {
+        st.header_walk.report_epoch = Some(epoch);
+    } else {
+        request_report_refresh(st, hub);
+    }
+}
+
+pub(super) fn request_report_refresh(st: &mut IbdWorkState, hub: &ChainHub) {
+    if st.header_cmd.is_some() {
+        super::state::enqueue_header_cmd(st, super::state::HeaderCmd::Report);
+    } else {
+        hub.refresh_header_report();
+    }
 }
 
 #[doc(hidden)]
@@ -3188,7 +3240,9 @@ pub fn base_conflicts(st: &IbdWorkState, hub: &ChainHub, walk: &HeaderWalk) -> b
 /// stay on until this chain records the milestone block. A reorg that stays
 /// above the milestone puts that hash back after the path clear.
 pub fn on_confirmed_rewind(st: &mut IbdWorkState, hub: &ChainHub, lca_h: u32) {
+    let report_epoch = hub.ibd_header_epoch();
     if st.header_walk.base_hash.is_some() && lca_h < st.header_walk.base_height {
+        let _ = hub.publish_ibd_header_tip(report_epoch, Vec::new());
         st.header_walk = HeaderWalk::default();
         forget_adopt(hub);
         return;
@@ -3356,6 +3410,7 @@ fn failure_height(hub: &ChainHub, hash: BlockHash) -> Option<u32> {
 }
 
 pub fn restore_adopt(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
+    let report_epoch = hub.ibd_header_epoch();
     retire_adopt_if_confirmed(st, hub);
     let started = std::time::Instant::now();
     let path = adopt_path(hub);
@@ -3396,6 +3451,7 @@ pub fn restore_adopt(st: &mut IbdWorkState, hub: &ChainHub) -> bool {
         return false;
     }
     st.header_walk = parsed;
+    st.header_walk.report_epoch = Some(report_epoch);
     restore_tip_header(st, hub);
     renote_stored_path(st, hub);
     if let Some(hash) = st.header_walk.milestone_hash() {
@@ -3485,6 +3541,7 @@ pub fn parse_adopt(bytes: &[u8]) -> Option<HeaderWalk> {
         None => (None, 0, [0u8; 32]),
     };
     Some(HeaderWalk {
+        report_epoch: None,
         checkpoints,
         base_hash: (base != [0u8; 32]).then_some(BlockHash::from_byte_array(base)),
         base_height,

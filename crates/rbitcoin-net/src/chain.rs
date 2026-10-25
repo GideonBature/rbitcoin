@@ -598,6 +598,11 @@ pub const IBD_FEEFILTER_SAT_KVB: u64 = 9_936_506;
 /// Stale blocks older than this vs the best header are not served (`p2p_fingerprint`).
 pub const STALE_RELAY_AGE_LIMIT_SECS: u64 = 30 * 24 * 60 * 60;
 
+#[path = "header_report.rs"]
+mod header_report;
+use header_report::HeaderReport;
+pub use header_report::IbdHeaderEpoch;
+
 /// Thread-safe chain façade used by peer sessions.
 pub struct ChainHub {
     pub query: Arc<Query>,
@@ -633,6 +638,7 @@ pub struct ChainHub {
     pub fork_tips: RwLock<ForkTips>,
     /// Header-only tips (`submitheader` / P2P headers): hash → (prev, height).
     pub header_tips: RwLock<HeaderTips>,
+    header_report: RwLock<HeaderReport>,
     /// Set around `accept_branch` connect so each `TipEvent` carries branch length.
     pub announce_reorg_len: AtomicU32,
     /// Min-chain-work floor (32-byte BE). `None` = no extra floor.
@@ -743,6 +749,7 @@ impl ChainHub {
         // synchronous walk multi-minute). Tip/genesis are seeded immediately.
         spawn_confirmed_seed(query.clone(), confirmed.clone());
         let invalidated = Invalidated::open(query.store().path());
+        let header_report = HeaderReport::new(invalidated.set.read().unwrap().clone());
         Self {
             query,
             cache: Arc::new(BlockCache::new()),
@@ -762,6 +769,7 @@ impl ChainHub {
             precious: RwLock::new(None),
             fork_tips: RwLock::new(ForkTips::new()),
             header_tips: RwLock::new(HeaderTips::new()),
+            header_report: RwLock::new(header_report),
             announce_reorg_len: AtomicU32::new(0),
             minimum_chain_work: RwLock::new(None),
             mining: MiningKnobs::new(),
@@ -1471,56 +1479,13 @@ impl ChainHub {
         None
     }
 
-    /// Best known header height (may lead `blocks` after `submitheader`).
-    ///
-    /// Copies the tips out before walking: `prev_of` read-locks `header_tips`
-    /// again, and std's `RwLock` refuses a new reader while a writer waits, so
-    /// a walk under the guard deadlocks against `note_header_tip`.
+    /// Best known header height, including IBD's accepted look-ahead walk.
+    /// Cached O(1) read. Invalidation checks the bounded stored frontier once,
+    /// streaming its ancestry rather than retaining a chain-scale reporting index.
     pub fn best_header_height(&self) -> u32 {
-        let mut best = self.tip_height().unwrap_or(0);
-        let tips: Vec<(BlockHash, u32)> = self.header_tips.read().unwrap().entries().collect();
-        for (hash, h) in tips {
-            if !self.header_ancestry_invalid(hash) {
-                best = best.max(h);
-            }
-        }
-        best
-    }
-
-    #[doc(hidden)]
-    pub fn note_header_tip(&self, header: &Header) {
-        let hash = header.block_hash();
-        if self.is_connected(&hash) {
-            self.header_tips.write().unwrap().remove(&hash);
-            return;
-        }
-        let prev = header.prev_blockhash;
-        let height = if self.is_connected(&prev) {
-            self.query
-                .height_of_hash(&prev.to_byte_array())
-                .ok()
-                .flatten()
-                .map(|h| h.0.saturating_add(1))
-        } else {
-            self.header_tips
-                .read()
-                .unwrap()
-                .get(&prev)
-                .map(|(_, h)| h.saturating_add(1))
-        };
-        let Some(height) = height else {
-            return;
-        };
-        let mut tips = self.header_tips.write().unwrap();
-        tips.remove(&prev);
-        if tips.contains(&hash) {
-            tips.insert(hash, prev, height);
-            return;
-        }
-        if tips.len() >= 128 {
-            tips.evict_one();
-        }
-        tips.insert(hash, prev, height);
+        self.tip_height()
+            .unwrap_or(0)
+            .max(self.header_report.read().unwrap().height)
     }
 
     /// Persist a header row only (for header-sync → out-of-order body archive).
@@ -1544,7 +1509,15 @@ impl ChainHub {
 
     /// Remember a consensus-invalid block (not a mutated merkle).
     pub fn note_invalid_block(&self, hash: BlockHash) {
-        self.invalidated.set.write().unwrap().insert(hash);
+        self.mark_invalid_block(hash);
+        self.refresh_header_report();
+    }
+
+    fn mark_invalid_block(&self, hash: BlockHash) {
+        let inserted = self.invalidated.set.write().unwrap().insert(hash);
+        if inserted {
+            self.invalidate_header_report();
+        }
         self.drop_held(hash);
     }
 
@@ -1552,8 +1525,10 @@ impl ChainHub {
     /// [`Self::note_invalid_block`], the mark survives restart; mutated bodies,
     /// a future timestamp, and store faults are not this.
     /// True when the mark is on disk.
+    /// The accepting role calls [`Self::refresh_header_report`] after dropping
+    /// IBD's coordination lock.
     pub fn note_failed_connect(&self, hash: BlockHash) -> bool {
-        self.note_invalid_block(hash);
+        self.mark_invalid_block(hash);
         self.invalidated.keep_failed(hash)
     }
 
@@ -1597,11 +1572,13 @@ impl ChainHub {
         }
         if e.failing_block_hash().is_some() {
             let _ = self.note_failed_connect(hash);
+            self.refresh_header_report();
             return;
         }
         if let NetError::Consensus(s) = e {
             if !s.to_ascii_lowercase().contains("not found") {
                 let _ = self.note_failed_connect(hash);
+                self.refresh_header_report();
             }
         }
     }
@@ -2529,12 +2506,15 @@ impl ChainHub {
                 });
             }
             let keep = h.0.saturating_sub(1);
-            self.disconnect_to(keep)?;
+            let disconnected = self.disconnect_to(keep);
+            self.revalidate_header_report();
+            disconnected?;
             drop(_guard);
         } else if self.knows_header(&hash) || self.held_body(&hash).is_some() {
             // Side-branch / held header (feature_chain_tiebreaks B10): mark
             // invalid without a tip disconnect.
             self.invalidated.set.write().unwrap().insert(hash);
+            self.revalidate_header_report();
             self.drop_held(hash);
             self.invalidated.paths.write().unwrap().push(InvalidPath {
                 hashes: vec![hash],
@@ -2635,7 +2615,9 @@ impl ChainHub {
             .filter_map(|p| p.hashes.last().copied())
             .collect();
         leaves.push(hash);
-        self.apply_after_reconsider(&leaves, &restored, &validated)
+        let applied = self.apply_after_reconsider(&leaves, &restored, &validated);
+        self.revalidate_header_report();
+        applied
     }
 
     /// Core `ActivateBestChain` after `reconsiderblock`: connect the most-work
@@ -3796,7 +3778,7 @@ impl ChainHub {
                     NetError::store(se)
                 }
             })?;
-        self.header_tips.write().unwrap().remove(&hash);
+        self.forget_reported_header_tip(&hash);
         let t_mp = std::time::Instant::now();
         if let Some(mp) = self.mempool() {
             mp.clear_recent_rejects();

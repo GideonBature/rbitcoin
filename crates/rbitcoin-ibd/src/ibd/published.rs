@@ -23,6 +23,7 @@ pub fn spawn_header_thread(
         probe.bind_header_thread();
         while let Some(cmd) = rx.blocking_recv() {
             match cmd {
+                HeaderCmd::Report => {}
                 HeaderCmd::Batch { peer, headers } => {
                     run_header_batch(&shared, hub.as_ref(), peer, headers, &header_fks);
                 }
@@ -68,6 +69,7 @@ pub fn spawn_header_thread(
                     }
                 }
             }
+            hub.refresh_header_report();
         }
     })
 }

@@ -229,6 +229,7 @@ pub enum HeaderCmd {
     },
     Ask,
     Reseed,
+    Report,
 }
 
 /// Header batches waiting on the header thread. Past this, the coordination
