@@ -103,7 +103,8 @@ pub struct AssembleMeters {
 ///
 /// `pending_spent`: pack-local double-spend (early reject before scripts).
 /// `pending_creates`: pack-local `txid → create_fk` (not per-vout).
-/// Same-block outs use `txid_index` (this block, `pj < ti`); meters flush
+/// Same-block outs use `txid_index` when the create index is earlier than
+/// the spender; meters flush
 /// once per block (no per-input Instant / atomics).
 ///
 /// Prevouts resolve from per-batch [`crate::BatchParents`] +
@@ -426,16 +427,18 @@ pub fn assemble_non_cb_inputs(
             params.is_genesis_coinbase(&key.0),
         )?;
         rbitcoin_consensus::block::reject_duplicate_input(pending_spent.insert(key))?;
-        let (skip_fee, residue) = if let Some(&pj) = txid_index.get(&key.0) {
+        let (skip_fee, residue, same_block) = if let Some(&pj) = txid_index.get(&key.0) {
             let skip_fee = rbitcoin_consensus::block::reject_same_block_create(pj, ti)?;
             let residue = if skip_fee {
                 0
             } else {
                 same_block_residue(waived_out, key)
             };
-            (skip_fee, residue)
+            let same_block = EarlierIndex::earlier_than(pj, ti)
+                .expect("reject_same_block_create returned only for an earlier parent");
+            (skip_fee, residue, Some(same_block))
         } else {
-            (false, 0)
+            (false, 0, None)
         };
         let prev_fk = edges
             .as_ref()
@@ -447,8 +450,7 @@ pub fn assemble_non_cb_inputs(
             op,
             input,
             prev_fk,
-            txid_index,
-            ti,
+            same_block,
             batch_parents,
             bip16_active,
             flags.witness_active,
@@ -1444,6 +1446,24 @@ pub fn mtp_at(query: &Query, height: Height, cache: &mut U32Map<u32>) -> Result<
     Ok(t)
 }
 
+/// Create index strictly earlier in this block than the spender.
+///
+/// The only constructor returns `None` when `parent >= spender`, so a
+/// same-index parent is not a value of this type.
+pub struct EarlierIndex {
+    index: usize,
+}
+
+impl EarlierIndex {
+    fn earlier_than(parent: usize, spender: usize) -> Option<Self> {
+        if parent < spender {
+            Some(Self { index: parent })
+        } else {
+            None
+        }
+    }
+}
+
 pub struct ResolvedPrevout {
     pub txout: TxOut,
     /// Set when the script bytes stay in a block or pin `Arc`.
@@ -1461,8 +1481,7 @@ pub fn resolve_prevout(
     op: OutPoint,
     inp: &bitcoin::TxIn,
     prev_fk_hint: Option<rbitcoin_primitives::Fk>,
-    txid_index: &TxidMap<usize>,
-    spend_ti: usize,
+    same_block: Option<EarlierIndex>,
     batch_parents: &crate::BatchParents,
     bip16: bool,
     witness: bool,
@@ -1472,44 +1491,43 @@ pub fn resolve_prevout(
 ) -> Result<ResolvedPrevout, ConfirmError> {
     let prev_txid = op.txid.to_byte_array();
 
-    if let Some(&pj) = txid_index.get(&prev_txid) {
-        if pj < spend_ti {
-            let v = op.vout as usize;
-            let o = rbitcoin_consensus::block::require_same_block_output(block.txdata.get(pj), v)?;
-            // Core never puts this script in the coin view. The returned
-            // `txout` is often empty; the wire output holds the real bytes.
-            rbitcoin_consensus::block::reject_unspendable_prevout(
-                rbitcoin_consensus::policy::is_unspendable(o.script_pubkey.as_bytes()),
-            )?;
-            acc.in_n = acc.in_n.saturating_add(1);
-            acc.same_n = acc.same_n.saturating_add(1);
-            let shared = if need_script_buf {
-                wire.map(|_| rbitcoin_consensus::block::SharedPrevout::Wire {
-                    tx_index: pj as u32,
-                    vout: op.vout,
-                })
+    if let Some(parent) = same_block {
+        let pj = parent.index;
+        let v = op.vout as usize;
+        let o = rbitcoin_consensus::block::require_same_block_output(block.txdata.get(pj), v)?;
+        // Core never puts this script in the coin view. The returned
+        // `txout` is often empty; the wire output holds the real bytes.
+        rbitcoin_consensus::block::reject_unspendable_prevout(
+            rbitcoin_consensus::policy::is_unspendable(o.script_pubkey.as_bytes()),
+        )?;
+        acc.in_n = acc.in_n.saturating_add(1);
+        acc.same_n = acc.same_n.saturating_add(1);
+        let shared = if need_script_buf {
+            wire.map(|_| rbitcoin_consensus::block::SharedPrevout::Wire {
+                tx_index: pj as u32,
+                vout: op.vout,
+            })
+        } else {
+            None
+        };
+        return Ok(ResolvedPrevout {
+            txout: if shared.is_some() || !need_script_buf {
+                TxOut {
+                    value: o.value,
+                    script_pubkey: ScriptBuf::new(),
+                }
             } else {
-                None
-            };
-            return Ok(ResolvedPrevout {
-                txout: if shared.is_some() || !need_script_buf {
-                    TxOut {
-                        value: o.value,
-                        script_pubkey: ScriptBuf::new(),
-                    }
-                } else {
-                    o.clone()
-                },
-                shared,
-                input_sigops: rbitcoin_consensus::block::prevout_spk_sigops(
-                    inp,
-                    o.script_pubkey.as_bytes(),
-                    bip16,
-                    witness,
-                ),
-                create_fk: rbitcoin_primitives::Fk::NULL,
-            });
-        }
+                o.clone()
+            },
+            shared,
+            input_sigops: rbitcoin_consensus::block::prevout_spk_sigops(
+                inp,
+                o.script_pubkey.as_bytes(),
+                bip16,
+                witness,
+            ),
+            create_fk: rbitcoin_primitives::Fk::NULL,
+        });
     }
 
     // Batch pin first (no TxRecord clone — A3). Pin identity/vout misses are

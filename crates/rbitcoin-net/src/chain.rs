@@ -1965,7 +1965,9 @@ impl ChainHub {
                 None => break,
             }
         }
-        rbitcoin_primitives::median_time_past_times(&times).unwrap_or(parent.time)
+        rbitcoin_primitives::MedianWindow::new(&times)
+            .map(rbitcoin_primitives::median_time_past_times)
+            .unwrap_or(parent.time)
     }
 
     #[doc(hidden)]
