@@ -223,57 +223,6 @@ fn lookup_started_hi_none_until_set() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn query_sh_heads_capped_after_append_miss_still_writes() {
-    use rbitcoin_store::{script_hash, ScriptHashRecord, ShHeadValue, SH_HEADS_CAP};
-    let (dir, q) = temp_query("sh-heads-cap");
-    {
-        let mut heads = q.sh.heads.lock().unwrap();
-        for i in 0..SH_HEADS_CAP as u64 {
-            let mut k = [0xEE; 32];
-            k[..8].copy_from_slice(&i.to_le_bytes());
-            heads.insert(k, ShHeadValue::Empty);
-        }
-    }
-    let sh = script_hash(&[0x51]);
-    {
-        let mut heads = q.sh.heads.lock().unwrap();
-        let rec = ScriptHashRecord::from_fk(sh, Fk(1));
-        q.store()
-            .scripthash
-            .put_create_batch_append(&[rec], &mut heads)
-            .unwrap();
-    }
-    assert!(
-        q.process_owned_size_snapshot().sh_heads <= SH_HEADS_CAP,
-        "sh_heads={}",
-        q.process_owned_size_snapshot().sh_heads
-    );
-    assert_eq!(q.store().scripthash.entries(&sh).unwrap().len(), 1);
-
-    let evicted = {
-        let heads = q.sh.heads.lock().unwrap();
-        (0..SH_HEADS_CAP as u64).find_map(|i| {
-            let mut k = [0xEE; 32];
-            k[..8].copy_from_slice(&i.to_le_bytes());
-            (!heads.contains_key(&k)).then_some(k)
-        })
-    };
-    if let Some(evicted) = evicted {
-        let rec = ScriptHashRecord::from_fk(evicted, Fk(2));
-        {
-            let mut heads = q.sh.heads.lock().unwrap();
-            q.store()
-                .scripthash
-                .put_create_batch_append(&[rec], &mut heads)
-                .unwrap();
-        }
-        assert_eq!(q.store().scripthash.entries(&evicted).unwrap().len(), 1);
-        assert!(q.process_owned_size_snapshot().sh_heads <= SH_HEADS_CAP);
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// Write-gate-safe: non-null `prev` requires `parent_hash` committed in header hash.
 fn coinbase_block(h: u32, prev: Fk, parent_hash: Option<[u8; 32]>) -> (HeaderRecord, TxApply) {
     let version = 1;

@@ -938,11 +938,10 @@ async fn contaminate_writebehind(dir: &Path, miner: &P2PNode, height: u32) {
     if node.query.store().scripthash.include_hwm() < count {
         let fk = Fk(count);
         let rec = ScriptHashRecord::from_fk(script_hash(&[0x51]), fk);
-        let mut heads = std::collections::HashMap::new();
         node.query
             .store()
             .scripthash
-            .put_create_batch_append(&[rec], &mut heads)
+            .put_create_batch_append(&[rec])
             .unwrap();
         std::fs::write(
             store.join(rbitcoin_store::INCLUDE_HWM_NAME),

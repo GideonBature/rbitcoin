@@ -149,10 +149,7 @@ pub use point_table::PointRecord;
 pub use rbitcoin_primitives::{
     merkle_branch, merkle_root_from_branch, merkle_root_from_txids, merkle_root_mutated,
 };
-pub use scripthash::{
-    script_hash, sh_heads_insert_capped, ColdProgress, ScriptHashRecord, INCLUDE_HWM_NAME,
-    SH_HEADS_CAP,
-};
+pub use scripthash::{script_hash, ColdProgress, ScriptHashRecord, INCLUDE_HWM_NAME};
 pub use scripthash_layout::ShHeadValue;
 pub use scripthash_materialize::{
     clear_unsorted_shard_dir, collect_unsorted_shard_files, materialize_sh_unsorted_from_class_a,

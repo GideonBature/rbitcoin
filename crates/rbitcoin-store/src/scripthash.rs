@@ -46,34 +46,6 @@ pub const COLD_PROGRESS_MAGIC: &[u8; 8] = b"SHCOLDP1";
 /// Max create_fk fully present in durable SH (inclusion HWM; crash catch-up).
 pub const INCLUDE_HWM_NAME: &str = "scripthash.include_hwm";
 
-/// Process-local `Query::sh_heads` cap. Miss path `locate_head`s.
-pub const SH_HEADS_CAP: usize = 65_536;
-
-pub fn sh_heads_insert_capped(
-    heads: &mut HashMap<[u8; 32], ShHeadValue>,
-    key: [u8; 32],
-    val: ShHeadValue,
-    cap: usize,
-) {
-    if heads.len() >= cap && !heads.contains_key(&key) {
-        if let Some(k) = heads.keys().next().copied() {
-            heads.remove(&k);
-        }
-    }
-    heads.insert(key, val);
-}
-
-#[doc(hidden)]
-pub fn sh_heads_trim(heads: &mut HashMap<[u8; 32], ShHeadValue>, cap: usize) {
-    while heads.len() > cap {
-        if let Some(k) = heads.keys().next().copied() {
-            heads.remove(&k);
-        } else {
-            break;
-        }
-    }
-}
-
 /// Progress after each fully installed prefix shard (SIGINT resume).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColdProgress {
@@ -1366,7 +1338,7 @@ impl ScriptHashTable {
         n
     }
 
-    /// Head value for a key (process-cache seed / disconnect refresh).
+    /// Durable head value for a key.
     pub fn head_value(&self, scripthash: &[u8; 32]) -> Result<Option<ShHeadValue>, StoreError> {
         Ok(self.locate_head(scripthash)?.map(|(v, _)| v))
     }
@@ -1589,7 +1561,7 @@ impl ScriptHashTable {
         }
     }
 
-    /// Forward-append creates. Process-local `heads` map.
+    /// Forward-append creates. Each call locates heads from disk.
     ///
     /// Per scripthash key: sort create_tx_fks ascending, skip every `fk ≤` durable
     /// max (last page only), append the rest. **No full page-chain walk** on
@@ -1601,7 +1573,6 @@ impl ScriptHashTable {
     pub fn put_create_batch_append(
         &self,
         recs: &[ScriptHashRecord],
-        heads: &mut HashMap<[u8; 32], ShHeadValue>,
     ) -> Result<(usize, AppendTiming), StoreError> {
         let mut timing = AppendTiming::default();
         if recs.is_empty() {
@@ -1613,46 +1584,31 @@ impl ScriptHashTable {
         order.sort_by(|&a, &b| recs[a].scripthash.cmp(&recs[b].scripthash));
         timing.sort_ns = t_sort.elapsed().as_nanos() as u64;
 
+        let mut heads: HashMap<[u8; 32], ShHeadValue> = HashMap::new();
         let mut home: HashMap<[u8; 32], KeyHome> = HashMap::new();
 
         let t_seed = std::time::Instant::now();
         // Cold body (no prior creates): skip N head gets — empty table probes.
         if self.entry_count() > 0 || !self.head_is_empty() {
-            let mut missing: Vec<[u8; 32]> = Vec::new();
-            {
-                let mut seen_miss = std::collections::HashSet::new();
-                for &i in &order {
-                    let rec = &recs[i];
-                    if rec.create_tx_fk.is_null() {
-                        continue;
-                    }
-                    if heads.contains_key(&rec.scripthash) {
-                        continue;
-                    }
-                    if seen_miss.insert(rec.scripthash) {
-                        missing.push(rec.scripthash);
-                    }
+            let mut keys: Vec<[u8; 32]> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for &i in &order {
+                let rec = &recs[i];
+                if rec.create_tx_fk.is_null() {
+                    continue;
+                }
+                if seen.insert(rec.scripthash) {
+                    keys.push(rec.scripthash);
                 }
             }
-            missing.sort_unstable();
-            for key in missing {
+            keys.sort_unstable();
+            for key in keys {
                 if let Some((v, kh)) = self.locate_head(&key)? {
                     heads.insert(key, v);
                     home.insert(key, KeyHome::from(kh));
                 } else {
                     home.insert(key, KeyHome::Absent);
                 }
-            }
-        }
-        for &i in &order {
-            let key = recs[i].scripthash;
-            if home.contains_key(&key) {
-                continue;
-            }
-            if heads.contains_key(&key) {
-                home.insert(key, self.key_home(&key)?);
-            } else {
-                home.insert(key, KeyHome::Absent);
             }
         }
         timing.seed_ns = t_seed.elapsed().as_nanos() as u64;
@@ -1706,7 +1662,6 @@ impl ScriptHashTable {
             let new_val = self.append_sorted_creates(body, &mut alloc, &cur, &add)?;
             write_alloc_header(body, &alloc)?;
             drop(alloc);
-            heads.insert(key, new_val.clone());
             head_final.push((key, new_val, kh));
         }
 
@@ -1718,7 +1673,6 @@ impl ScriptHashTable {
             self.apply_head_upserts(&head_final, flush_each)?;
             timing.head_ns = t_head.elapsed().as_nanos() as u64;
         }
-        sh_heads_trim(heads, SH_HEADS_CAP);
         Ok((written, timing))
     }
 

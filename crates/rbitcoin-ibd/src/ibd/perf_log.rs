@@ -1200,7 +1200,6 @@ pub fn ser_process_owned<S: serde::Serializer>(
     serde_json::json!({
         "conf_plans": o.conf_plans,
         "sh_runs": o.sh_runs,
-        "sh_heads": o.sh_heads,
         "inflight_layers": o.inflight_layers,
         "inflight_pins": o.inflight_pins,
         "inflight_bytes": o.inflight_bytes,
@@ -1246,7 +1245,6 @@ pub struct TipPerfLog {
     pub rss: ProcessRss,
     pub cache_bodies: usize,
     pub held_bodies: usize,
-    pub sh_heads: usize,
     pub mp_live: usize,
     pub follow_live: usize,
     pub blocks: u64,

@@ -213,7 +213,6 @@ fn tip_perf_json_is_timestamped() {
         },
         cache_bodies: 3,
         held_bodies: 1,
-        sh_heads: 2,
         mp_live: 4,
         follow_live: 5,
         blocks: 6,

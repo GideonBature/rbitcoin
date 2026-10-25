@@ -752,11 +752,7 @@ impl Query {
             for r in sh_creates {
                 tip_sh_max_fk = tip_sh_max_fk.max(r.create_tx_fk.0);
             }
-            let mut heads = self.sh.heads.lock().unwrap();
-            let (n, timing) = self
-                .store
-                .scripthash
-                .put_create_batch_append(sh_creates, &mut heads)?;
+            let (n, timing) = self.store.scripthash.put_create_batch_append(sh_creates)?;
             crate::note_confirm(&self.confirm_stats().sh_written_n, n as u64);
             let st = self.confirm_stats();
             st.add_sh_part(&st.sh_sort_ns, timing.sort_ns);
@@ -1072,29 +1068,6 @@ impl Query {
             groups.push((sh, fks));
         }
         self.store.scripthash.unlink_creates_batch(&groups)?;
-        let touched_sh: Vec<[u8; 32]> = groups.iter().map(|(sh, _)| *sh).collect();
-        if !touched_sh.is_empty() {
-            let mut heads = self.sh.heads.lock().unwrap();
-            for sh in touched_sh {
-                if self.store.scripthash.deferred_empty(&sh) {
-                    heads.remove(&sh);
-                    continue;
-                }
-                match self.store.scripthash.head_value(&sh) {
-                    Ok(Some(v)) if !v.is_empty() => {
-                        rbitcoin_store::sh_heads_insert_capped(
-                            &mut heads,
-                            sh,
-                            v,
-                            rbitcoin_store::SH_HEADS_CAP,
-                        );
-                    }
-                    _ => {
-                        heads.remove(&sh);
-                    }
-                }
-            }
-        }
 
         self.store.confirmed.disconnect_tip(height)?;
         self.store.height_fence_pop_tip(height);

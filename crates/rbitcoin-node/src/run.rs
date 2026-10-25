@@ -1327,7 +1327,6 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         rss: read_platform_rss(),
                         cache_bodies: node.hub.cache_body_count(),
                         held_bodies: node.hub.held_body_count(),
-                        sh_heads: node.query.process_owned_size_snapshot().sh_heads,
                         mp_live: live,
                         follow_live,
                         blocks: blks,

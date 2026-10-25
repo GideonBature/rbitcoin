@@ -79,7 +79,6 @@ Not page cache. Caps on **decoded `Block` objects and live outbound sessions**:
 | **`pending_blocks`** | **128** decoded bodies / session | Insert evicts the **oldest** hash (FIFO). Unsolicited BIP130 window still 16. |
 | **Hub `BlockCache` bodies** | **16** decoded (`DEFAULT_BODY_DEPTH`) | Hashes kept for locators. Compact/`getblocktxn` serve is depth 5/10; IBD does not `push_best`. Reconstruct from store past the window. |
 | **Hub `held_bodies`** | **320** count + **288** height window | Side-branch hold for most-work apply. After a successful tip connect, drop bodies whose connected height is more than **288** below tip (Core unrequested window). Do not hold `IgnoredWeaker` already that far behind. Consensus-invalid held tips are dropped and skipped by `try_apply_held`. Count cap evicts the oldest unasked hash at 320 (in-flight getdata hashes stay). |
-| **Query `sh_heads`** | **65_536** process-local SH body heads | Evict arbitrary key at cap (`keys().next()`). Miss path `locate_head`s. Catch-up and tip SH apply share this map. |
 | **getheaders continuation** | full 2000-header reply locates from last hash | Next batch after that hash, not a replay from our tip. |
 | **headers poll** | skip if `best_known` cannot beat our tip | 120s `getheaders` only for peers that can still add work. |
 | **Chainwork prefix** | `Vec<Work>` `prefix[h] = work through h` (~32 B × tip; ≈28–32 MiB at 900k) | Process cache. Extend/truncate to `query.tip_height()`. Not durable. Restart fills it with one sequential read of `header.body` (`nBits` only), then one height at a time. |
@@ -141,12 +140,12 @@ Every ~5s IBD emits one DEBUG **`ibd: perf`** JSON object. RSS and retain
 occupancy are fields on that object (`rss_kb`, `rss_anon_kb`, `rss_file_kb`,
 `vm_hwm_kb`, `work`, `owned`, `conf_pipe`). Tip-follow emits **`tip: perf`**
 (DEBUG) as JSON with `rss.rss_kb` / `rss.anon_kb` / `rss.file_kb` / `rss.hwm_kb`
-plus `cache_bodies`, `held_bodies`, `sh_heads`, `mp_live`. `rss_anon_kb` growth
+plus `cache_bodies`, `held_bodies`, `mp_live`. `rss_anon_kb` growth
 is process heap; `rss_file_kb` growth is mmap page cache.
 
 ```bash
 grep 'ibd: perf {' mainnet.log | sed 's/.*ibd: perf //' | jq -c '{ts, rss_kb, rss_anon_kb, rss_file_kb, vm_hwm_kb}'
-grep 'tip: perf {' mainnet.log | sed 's/.*tip: perf //' | jq -c '{ts, rss, cache_bodies, held_bodies, sh_heads, mp_live}'
+grep 'tip: perf {' mainnet.log | sed 's/.*tip: perf //' | jq -c '{ts, rss, cache_bodies, held_bodies, mp_live}'
 ```
 
 | Token group | What it meters |
