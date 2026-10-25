@@ -707,18 +707,48 @@ fn block_queue_env_sets_the_assign_stop() {
     assert_eq!(stop(&[(GB, "lots")]), BQ_ASSIGN_STOP_BYTES);
 }
 
-/// `RBITCOIN_TEST_DROP_STORE` is on only for `1` or `true` (any case).
+/// `RBITCOIN_TEST_DROP_STORE` and `RBITCOIN_SH_FORCE_REBUILD` are on only for
+/// `1` or `true` (any case). `RBITCOIN_SH_FORCE_REBUILD` reaches `NodeConfig`.
 #[test]
-fn drop_store_env_is_on_only_when_true() {
-    let drop_store =
-        |val: &str| NodeEnv::from_vars([("RBITCOIN_TEST_DROP_STORE", val)]).test_drop_store;
+fn env_flags_are_on_only_when_true() {
+    let flags = |key: &str, val: &str| {
+        let env = NodeEnv::from_vars([(key, val)]);
+        (env.test_drop_store, env.sh_force_rebuild)
+    };
     for on in ["1", "true", "TRUE", "True"] {
-        assert!(drop_store(on), "{on:?} turns it on");
+        assert_eq!(
+            flags("RBITCOIN_TEST_DROP_STORE", on),
+            (true, false),
+            "{on:?}"
+        );
+        assert_eq!(
+            flags("RBITCOIN_SH_FORCE_REBUILD", on),
+            (false, true),
+            "{on:?}"
+        );
     }
     for off in ["", "0", "false", "yes", " 1"] {
-        assert!(!drop_store(off), "{off:?} leaves it off");
+        assert_eq!(
+            flags("RBITCOIN_TEST_DROP_STORE", off),
+            (false, false),
+            "{off:?}"
+        );
+        assert_eq!(
+            flags("RBITCOIN_SH_FORCE_REBUILD", off),
+            (false, false),
+            "{off:?}"
+        );
     }
-    assert!(!NodeEnv::from_vars(std::iter::empty::<(&str, &str)>()).test_drop_store);
+    assert_eq!(
+        NodeEnv::from_vars(std::iter::empty::<(&str, &str)>()),
+        NodeEnv::default()
+    );
+
+    let env = NodeEnv::from_vars([("RBITCOIN_SH_FORCE_REBUILD", "1")]);
+    match operator_config_from_args(["rbitcoin-node"], &env) {
+        Ok(OperatorArgs::Ready { config, .. }) => assert!(config.sh_force_rebuild),
+        other => panic!("expected assembled config, got {other:?}"),
+    }
 }
 
 /// `--trust-peer ADDR` is the only dial target. Clashing flags fail in the

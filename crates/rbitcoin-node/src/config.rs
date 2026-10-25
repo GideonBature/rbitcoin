@@ -306,6 +306,9 @@ pub struct NodeEnv {
     /// `RBITCOIN_TEST_DROP_STORE` is on: `--smoke` deletes the store before
     /// shutdown, so the shutdown error path runs.
     pub test_drop_store: bool,
+    /// `RBITCOIN_SH_FORCE_REBUILD` is on: tip SH finalize wipes the head and
+    /// recollects all of Class A, on every start while it stays set.
+    pub sh_force_rebuild: bool,
 }
 
 impl NodeEnv {
@@ -335,10 +338,8 @@ impl NodeEnv {
                 Some("RBITCOIN_BLOCK_QUEUE_GB") => {
                     bq_gib = val.and_then(|v| u64::from_str(v).ok());
                 }
-                Some("RBITCOIN_TEST_DROP_STORE") => {
-                    env.test_drop_store =
-                        val.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-                }
+                Some("RBITCOIN_TEST_DROP_STORE") => env.test_drop_store = flag_on(val),
+                Some("RBITCOIN_SH_FORCE_REBUILD") => env.sh_force_rebuild = flag_on(val),
                 _ => {}
             }
         }
@@ -347,6 +348,11 @@ impl NodeEnv {
             .map(|n| if n == 0 { u64::MAX } else { n });
         env
     }
+}
+
+/// An env flag is on only for `1` or `true` (any case).
+fn flag_on(val: Option<&str>) -> bool {
+    val.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Node process configuration (CLI + optional conf file).
@@ -379,6 +385,9 @@ pub struct NodeConfig {
     pub max_run_secs: Option<u64>,
     /// Build Class B scripthash index (Electrum/Esplora history). Default **off**.
     pub shindex: bool,
+    /// Rebuild the scripthash index from Class A at tip entry. Set only from
+    /// [`NodeEnv::sh_force_rebuild`].
+    pub sh_force_rebuild: bool,
     /// Build BIP158 basic block filters. Default **off**. Independent of `shindex`.
     pub block_filter_index: bool,
     /// Drop Class A seqsigwit below a 288-height watermark (`NETWORK_LIMITED`).
@@ -524,6 +533,7 @@ impl Default for NodeConfig {
             head_scale: HeadScale::Mainnet,
             max_run_secs: None,
             shindex: false,
+            sh_force_rebuild: false,
             block_filter_index: false,
             prune_seqsigwit: false,
             datadir_hdd: false,

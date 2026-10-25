@@ -1042,6 +1042,18 @@ fn startup_sets_datadir_hdd_on_the_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn startup_sets_sh_force_rebuild_on_the_query() {
+    let dir = scratch_dir("sh-force-rebuild");
+    let q = Query::open_or_create_tiny(&dir).unwrap();
+    assert!(!q.sh_force_rebuild());
+    let mut cfg = NodeConfig::default();
+    cfg.sh_force_rebuild = true;
+    apply_startup_index_mode(&q, &cfg, 0).unwrap();
+    assert!(q.sh_force_rebuild());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A pack-marked head whose inclusion floor is behind the tip must not open
 /// Electrum. Tip follow still starts so write-behind can catch up.
 #[test]

@@ -435,6 +435,8 @@ pub struct Query {
     /// Operator scripthash index intent (`--shindex`). When false, Class C skips
     /// SH collect/enqueue/durable write-through entirely (tip follow independent).
     pub sh_index_enabled: std::sync::atomic::AtomicBool,
+    /// See [`Self::set_sh_force_rebuild`].
+    pub sh_force_rebuild: std::sync::atomic::AtomicBool,
     pub block_filter_enabled: std::sync::atomic::AtomicBool,
     /// Confirm appends filter and tweak rows. Set by `prepare_live_indexes`
     /// when every enabled index is contiguous with the tip. Load reads it;
@@ -633,6 +635,7 @@ impl Query {
             // Library default: SH on (tests / enter_direct). Node sets false for
             // `--shindex` off before entering Direct.
             sh_index_enabled: std::sync::atomic::AtomicBool::new(true),
+            sh_force_rebuild: std::sync::atomic::AtomicBool::new(false),
             block_filter_enabled: std::sync::atomic::AtomicBool::new(false),
             index_live: std::sync::atomic::AtomicBool::new(false),
             block_filters: std::sync::OnceLock::new(),

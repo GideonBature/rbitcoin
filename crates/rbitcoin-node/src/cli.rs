@@ -197,6 +197,7 @@ pub fn finish_operator_config(
     if let Some(stop) = env.bq_assign_stop_bytes {
         config.bq_assign_stop_bytes = stop;
     }
+    config.sh_force_rebuild |= env.sh_force_rebuild;
     config.resolve_listen_defaults();
     if let Err(e) = config.seal_trust_peer() {
         eprintln!("error: {e}");

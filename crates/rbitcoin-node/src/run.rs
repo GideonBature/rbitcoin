@@ -1919,6 +1919,7 @@ pub fn apply_startup_index_mode(
 ) -> Result<(), NodeError> {
     query.store().set_datadir_hdd(config.datadir_hdd);
     query.set_sh_index_enabled(config.shindex);
+    query.set_sh_force_rebuild(config.sh_force_rebuild);
     query.set_block_filter_index(config.block_filter_index)?;
     query.set_max_sh_creates(config.max_sh_creates);
     query.set_heavy_sh_creates(config.heavy_sh_creates);

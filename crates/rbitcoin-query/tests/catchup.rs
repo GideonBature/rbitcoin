@@ -1,6 +1,6 @@
 use rbitcoin_primitives::{Fk, Height};
 use rbitcoin_query::catchup::*;
-use rbitcoin_query::sh_builder::{load_seal, sh_force_rebuild, store_seal};
+use rbitcoin_query::sh_builder::{load_seal, store_seal};
 use rbitcoin_query::testutil::FixtureChain;
 use rbitcoin_query::Query;
 use rbitcoin_store::StoreError;
@@ -187,10 +187,8 @@ fn force_rebuild_recollects_class_a_not_empty_materialize() {
     let _ = q.finalize_sh_runs().unwrap();
     assert!(q.store.scripthash.has_durable_index());
 
-    std::env::set_var("RBITCOIN_SH_FORCE_REBUILD", "1");
-    assert!(sh_force_rebuild());
+    q.set_sh_force_rebuild(true);
     let result = q.finalize_sh_runs();
-    std::env::remove_var("RBITCOIN_SH_FORCE_REBUILD");
     let n_mat = result.expect("finalize after FORCE must not fail empty");
     assert!(
         n_mat > 0,
