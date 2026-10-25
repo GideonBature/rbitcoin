@@ -276,6 +276,16 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+OUTNBO="$("$SHIM" --print-cmd -datadir="$DATADIR" -regtest -noblocksonly 2>"$WORKDIR/nbo.err")" || OUTNBO=""
+if printf '%s' "$OUTNBO" | grep -q -- '--blocks-only=0' \
+  && ! grep -q 'Error parsing' "$WORKDIR/nbo.err"; then
+  echo "ok - -noblocksonly maps to --blocks-only=0"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - -noblocksonly maps to --blocks-only=0 (got: $OUTNBO err=$(cat "$WORKDIR/nbo.err"))"
+  FAIL=$((FAIL + 1))
+fi
+
 assert_fail_msg "datadir required" "datadir is required" \
   env RBITCOIN_NODE="$FAKE" "$SHIM" --print-cmd -regtest
 

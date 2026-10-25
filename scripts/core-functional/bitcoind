@@ -542,7 +542,9 @@ def translate(
             continue
         key, val = parse_kv(a)
         # Core `-nofoo` / `-nofoo=1` is foo=false; `-nofoo=0` is foo=true.
-        no_bases = FORWARD_FLAGS | IGNORE_FLAGS | {"txindex", "maxconnections"}
+        # blocksonly has its own arm (proxy latch) and is not in FORWARD_FLAGS.
+        # -noblocksonly still has to rewrite to blocksonly=0 before that arm.
+        no_bases = FORWARD_FLAGS | IGNORE_FLAGS | {"txindex", "maxconnections", "blocksonly"}
         if key.startswith("no") and key[2:] in no_bases:
             base = key[2:]
             if val is None or str(val).lower() in ("1", "true", "yes", "on"):
