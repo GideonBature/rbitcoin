@@ -1,17 +1,6 @@
 use rbitcoin_rpc::methods::mempool::{
-    fold_tx_fee_sat, package_dialect_from_env, submitpackage_topology_disallowed, TxFeeLook,
+    fold_tx_fee_sat, submitpackage_topology_disallowed, TxFeeLook,
 };
-
-#[test]
-fn package_dialect_from_env_only_one_and_true() {
-    assert!(!package_dialect_from_env(None));
-    assert!(!package_dialect_from_env(Some("")));
-    assert!(!package_dialect_from_env(Some("0")));
-    assert!(!package_dialect_from_env(Some("false")));
-    assert!(package_dialect_from_env(Some("1")));
-    assert!(package_dialect_from_env(Some("true")));
-    assert!(package_dialect_from_env(Some("TRUE")));
-}
 
 #[test]
 fn topology_gate_only_when_dialect() {

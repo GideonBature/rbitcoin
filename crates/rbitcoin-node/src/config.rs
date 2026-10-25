@@ -8,8 +8,10 @@ use rbitcoin_primitives::{
 };
 
 use rbitcoin_store::HeadScale;
+use std::ffi::{OsStr, OsString};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 /// Default max concurrent inbound P2P sessions (same as net `DEFAULT_MAX_INBOUND`).
@@ -272,6 +274,12 @@ pub struct RpcOpts {
     pub work_queue: Option<usize>,
     /// Core REST on the RPC listener. Off unless `--rest` / `rest=`.
     pub rest: bool,
+    /// `submitpackage` uses Core `IsChildWithParents`. Set only from
+    /// [`NodeEnv::rpc_package_dialect`].
+    pub package_dialect: bool,
+    /// RPC tip waits drain the tip-accept lane. Set only from
+    /// [`NodeEnv::rpc_wait_tip_idle`].
+    pub wait_tip_idle: bool,
 }
 
 impl Default for RpcOpts {
@@ -286,7 +294,91 @@ impl Default for RpcOpts {
             cookie_perms: rbitcoin_rpc::RpcCookiePerms::Owner,
             work_queue: Some(rbitcoin_rpc::DEFAULT_RPC_WORK_QUEUE),
             rest: false,
+            package_dialect: false,
+            wait_tip_idle: false,
         }
+    }
+}
+
+/// `RBITCOIN_*` node process env, read once by the process shell
+/// ([`crate::process_main`]) and passed to [`crate::cli_main`].
+/// An unset or empty knob keeps its default. A set value that is not UTF-8 or
+/// does not parse is an error. A flag takes `1` or `true` (on) and `0` or
+/// `false` (off), `true`/`false` in any case.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeEnv {
+    /// `RBITCOIN_P2P_MAX_INBOUND`.
+    pub p2p_max_inbound: Option<u32>,
+    /// `RBITCOIN_BLOCK_QUEUE_BYTES`, else `RBITCOIN_BLOCK_QUEUE_GB` in GiB.
+    /// `0` is unlimited (`u64::MAX`).
+    pub bq_assign_stop_bytes: Option<u64>,
+    /// `RBITCOIN_TEST_DROP_STORE` is on: `--smoke` deletes the store before
+    /// shutdown, so the shutdown error path runs.
+    pub test_drop_store: bool,
+    /// `RBITCOIN_SH_FORCE_REBUILD` is on: tip SH finalize wipes the head and
+    /// recollects all of Class A, on every start while it stays set.
+    pub sh_force_rebuild: bool,
+    /// `RBITCOIN_RPC_PACKAGE_DIALECT` is on: `submitpackage` uses Core
+    /// `IsChildWithParents`.
+    pub rpc_package_dialect: bool,
+    /// `RBITCOIN_RPC_WAIT_TIP_IDLE` is on: `getblockcount`, `getbestblockhash`,
+    /// and `wait_height` wait until the tip-accept lane is empty.
+    pub rpc_wait_tip_idle: bool,
+}
+
+impl NodeEnv {
+    /// Snapshot the process env. Only a process shell calls this.
+    /// `std::env::var_os` matches each name as the platform does, which is
+    /// case-insensitive on Windows.
+    pub fn from_env() -> Result<Self, NodeError> {
+        Self::from_lookup(|key| std::env::var_os(key))
+    }
+
+    /// Read each knob through `get`, which returns the value set for a name.
+    pub fn from_lookup(mut get: impl FnMut(&str) -> Option<OsString>) -> Result<Self, NodeError> {
+        let mut var = |key: &'static str| (key, get(key));
+        let bq_bytes = env_num::<u64>(var("RBITCOIN_BLOCK_QUEUE_BYTES"))?;
+        let bq_gib = env_num::<u64>(var("RBITCOIN_BLOCK_QUEUE_GB"))?;
+        Ok(Self {
+            p2p_max_inbound: env_num(var("RBITCOIN_P2P_MAX_INBOUND"))?,
+            bq_assign_stop_bytes: bq_bytes
+                .or(bq_gib.map(|g| g.saturating_mul(1 << 30)))
+                .map(|n| if n == 0 { u64::MAX } else { n }),
+            test_drop_store: env_flag(var("RBITCOIN_TEST_DROP_STORE"))?,
+            sh_force_rebuild: env_flag(var("RBITCOIN_SH_FORCE_REBUILD"))?,
+            rpc_package_dialect: env_flag(var("RBITCOIN_RPC_PACKAGE_DIALECT"))?,
+            rpc_wait_tip_idle: env_flag(var("RBITCOIN_RPC_WAIT_TIP_IDLE"))?,
+        })
+    }
+}
+
+/// The value of a set env knob, `None` when unset or empty.
+fn env_value<'a>(key: &str, val: Option<&'a OsStr>) -> Result<Option<&'a str>, NodeError> {
+    match val.map(|v| (v, v.to_str())) {
+        None | Some((_, Some(""))) => Ok(None),
+        Some((_, Some(v))) => Ok(Some(v)),
+        Some((v, None)) => Err(NodeError::Config(format!("{key}={v:?}: not UTF-8"))),
+    }
+}
+
+fn env_num<T>((key, val): (&str, Option<OsString>)) -> Result<Option<T>, NodeError>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    env_value(key, val.as_deref())?
+        .map(|v| T::from_str(v).map_err(|e| NodeError::Config(format!("{key}={v:?}: {e}"))))
+        .transpose()
+}
+
+fn env_flag((key, val): (&str, Option<OsString>)) -> Result<bool, NodeError> {
+    match env_value(key, val.as_deref())? {
+        None => Ok(false),
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => Ok(true),
+        Some(v) if v == "0" || v.eq_ignore_ascii_case("false") => Ok(false),
+        Some(v) => Err(NodeError::Config(format!(
+            "{key}={v:?}: expected 1, true, 0, or false"
+        ))),
     }
 }
 
@@ -296,8 +388,8 @@ impl Default for RpcOpts {
 /// set via `RBITCOIN_*` env vars (documented as advanced); normal signet/mainnet
 /// sync does not require any env export.
 ///
-/// **Env input:** [`Self::absorb_inbound_env`] reads `RBITCOIN_P2P_MAX_INBOUND`
-/// once when inbound was not set on CLI/conf. It never writes process env.
+/// **Env input:** [`Self::absorb_inbound_env`] applies [`NodeEnv`] when
+/// inbound was not set on CLI/conf.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NodeConfig {
@@ -320,6 +412,9 @@ pub struct NodeConfig {
     pub max_run_secs: Option<u64>,
     /// Build Class B scripthash index (Electrum/Esplora history). Default **off**.
     pub shindex: bool,
+    /// Rebuild the scripthash index from Class A at tip entry. Set only from
+    /// [`NodeEnv::sh_force_rebuild`].
+    pub sh_force_rebuild: bool,
     /// Build BIP158 basic block filters. Default **off**. Independent of `shindex`.
     pub block_filter_index: bool,
     /// Drop Class A seqsigwit below a 288-height watermark (`NETWORK_LIMITED`).
@@ -328,6 +423,9 @@ pub struct NodeConfig {
     pub datadir_hdd: bool,
     /// RAM cap for the prune witness window. `0` keeps nothing in RAM.
     pub prune_seqsigwit_ram_threshold_bytes: u64,
+    /// IBD densify assign-stop in block-queue bytes. `u64::MAX` is unlimited.
+    /// Set only from [`NodeEnv::bq_assign_stop_bytes`].
+    pub bq_assign_stop_bytes: u64,
     /// Persist / serve BIP-352 tweaks from `sp_tweaks.*`. Default **off**.
     pub sptweaks: bool,
     /// Electrum tweaks: omit P2TR outs with `value <=` this (sats). `0` serves
@@ -462,10 +560,12 @@ impl Default for NodeConfig {
             head_scale: HeadScale::Mainnet,
             max_run_secs: None,
             shindex: false,
+            sh_force_rebuild: false,
             block_filter_index: false,
             prune_seqsigwit: false,
             datadir_hdd: false,
             prune_seqsigwit_ram_threshold_bytes: 256 * 1024 * 1024,
+            bq_assign_stop_bytes: rbitcoin_query::BQ_ASSIGN_STOP_BYTES,
             sptweaks: false,
             sptweaks_dust: rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST,
             max_sh_creates: rbitcoin_query::DEFAULT_MAX_SH_CREATES,
@@ -1024,17 +1124,11 @@ impl NodeConfig {
     }
 
     /// If inbound was not explicit on CLI/conf, honor `RBITCOIN_P2P_MAX_INBOUND`.
-    ///
-    /// Input only — does not publish process env.
-    pub fn absorb_inbound_env(&mut self) {
+    pub fn absorb_inbound_env(&mut self, env: &NodeEnv) {
         if self.listen.max_inbound_explicit {
             return;
         }
-        if let Some(n) = std::env::var("RBITCOIN_P2P_MAX_INBOUND")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&n: &u32| n > 0)
-        {
+        if let Some(n) = env.p2p_max_inbound {
             self.listen.max_inbound = n;
         }
     }
@@ -1842,7 +1936,3 @@ impl NodeConfig {
         }
     }
 }
-
-/// Serialize tests that mutate process `RBITCOIN_*` env (CLI + config unit tests).
-#[doc(hidden)]
-pub static OPERATOR_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

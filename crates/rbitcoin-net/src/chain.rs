@@ -647,6 +647,8 @@ pub struct ChainHub {
     /// Tip recency seconds. Default 24h.
     pub max_tip_age_secs: AtomicU64,
     pub prefill_compact: AtomicBool,
+    /// See [`Self::set_rpc_wait_tip_idle`].
+    pub rpc_wait_tip_idle: AtomicBool,
     pub prefill_plan: std::sync::Mutex<Option<crate::compact::PrefillPlan>>,
     /// Block hashes we already issued getdata for (any peer).
     pub asked_blocks: RwLock<HashSet<BlockHash>>,
@@ -775,6 +777,7 @@ impl ChainHub {
             mining: MiningKnobs::new(),
             max_tip_age_secs: AtomicU64::new(DEFAULT_MAX_TIP_AGE_SECS),
             prefill_compact: AtomicBool::new(false),
+            rpc_wait_tip_idle: AtomicBool::new(false),
             prefill_plan: std::sync::Mutex::new(None),
             asked_blocks: RwLock::new(HashSet::new()),
             chain_work_prefix: RwLock::new(Vec::new()),
@@ -875,6 +878,17 @@ impl ChainHub {
 
     pub fn prefill_compact(&self) -> bool {
         self.prefill_compact.load(Ordering::Relaxed)
+    }
+
+    /// [`Self::wait_tip_stable_for_rpc`] waits until the tip-accept lane is
+    /// empty, not just the running job (the node's `RBITCOIN_RPC_WAIT_TIP_IDLE`;
+    /// Core functional `sync_blocks`). Off by default.
+    pub fn set_rpc_wait_tip_idle(&self, on: bool) {
+        self.rpc_wait_tip_idle.store(on, Ordering::Relaxed);
+    }
+
+    pub fn rpc_wait_tip_idle(&self) -> bool {
+        self.rpc_wait_tip_idle.load(Ordering::Relaxed)
     }
 
     pub fn remember_cmpct_prefill(&self, hash: BlockHash, prev: BlockHash, indexes: Vec<usize>) {
@@ -3427,10 +3441,13 @@ impl ChainHub {
     ///
     /// Default is bounded to that job: a queued follow-on accept may still be
     /// in flight so wallet `getblockcount` cannot stall across a catch-up burst.
-    /// `RBITCOIN_RPC_WAIT_TIP_IDLE=1` waits until the lane is empty (Core
-    /// functional `sync_blocks`; not a production default).
+    /// [`Self::set_rpc_wait_tip_idle`] waits until the lane is empty instead.
     pub fn wait_tip_stable_for_rpc(&self) {
-        crate::tip_accept::wait_for_rpc();
+        if self.rpc_wait_tip_idle() {
+            crate::tip_accept::wait_idle();
+        } else {
+            crate::tip_accept::wait_current_job();
+        }
     }
 
     #[doc(hidden)]

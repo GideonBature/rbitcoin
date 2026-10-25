@@ -56,6 +56,7 @@ fn open_ctx(dir: &TempDir) -> RpcContext {
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         blocksonly: false,
+        package_dialect: false,
     }
 }
 
@@ -1310,6 +1311,7 @@ fn all_methods_callable_empty_or_error() {
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         blocksonly: false,
+        package_dialect: false,
     };
     let mem2 = dispatch(&ctx2, "getmempoolinfo", vec![]).unwrap();
     assert_eq!(mem2["loaded"], true);
@@ -1751,6 +1753,7 @@ fn regtest_ctx(
         alert_notify: None,
         alert_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         blocksonly: false,
+        package_dialect: false,
     };
     (ctx, dir, hub)
 }
@@ -2497,6 +2500,53 @@ fn pin_maxburn_json_shapes(ctx: &RpcContext, hex: &str) {
         assert_eq!(e["code"], ERR_INVALID_PARAMETER, "{e}");
         assert_eq!(e["message"], "Invalid amount", "{e}");
     }
+}
+
+/// `RpcContext::package_dialect` turns on Core's child-with-parents gate for
+/// `submitpackage`. Off, the same unrelated pair gets past that gate.
+#[test]
+fn submitpackage_topology_gate_follows_the_context() {
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::transaction::Version as TxVersion;
+    use bitcoin::{OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
+    let unrelated = |n: u8| {
+        let tx = Transaction {
+            version: TxVersion::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([n; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        rbitcoin_primitives::hex_encode(serialize(&tx))
+    };
+    let pkg = json!([unrelated(1), unrelated(2)]);
+    let dir = TempDir::labeled("rpc-pkg-dialect").unwrap();
+    let mut ctx = open_ctx(&dir);
+
+    ctx.package_dialect = true;
+    let err = dispatch(&ctx, "submitpackage", vec![pkg.clone()]).unwrap_err();
+    assert!(
+        err.to_string().contains("package topology disallowed"),
+        "{err}"
+    );
+
+    ctx.package_dialect = false;
+    let res = dispatch(&ctx, "submitpackage", vec![pkg]);
+    assert!(
+        !format!("{res:?}").contains("package topology disallowed"),
+        "{res:?}"
+    );
 }
 
 #[test]
@@ -5001,6 +5051,7 @@ fn ctx_without_chain(src: &RpcContext) -> RpcContext {
         alert_notify: src.alert_notify.clone(),
         alert_fired: Arc::clone(&src.alert_fired),
         blocksonly: src.blocksonly,
+        package_dialect: src.package_dialect,
     }
 }
 

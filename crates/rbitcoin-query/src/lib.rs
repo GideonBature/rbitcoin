@@ -94,9 +94,9 @@ pub use reconstruct::{BlockTxStatRows, StampedTxstatBlock};
 pub use regtest_pad::pad_empty_from;
 pub use resolved_wire::{BlockQueueWaveIntake, ResolvedWire};
 pub use soft_densify::{
-    bq_assign_stop_bytes, soft_ahead_quarter_full, soft_assign_restricted,
-    soft_confirm_window_covered, soft_confirm_window_n, soft_densify_band_hi, BQ_ASSIGN_STOP_BYTES,
-    BQ_SOFT_FREE_BYTES, TIP_HOLE_MIN_AHEAD_BLOCKS,
+    soft_ahead_quarter_full, soft_assign_restricted, soft_confirm_window_covered,
+    soft_confirm_window_n, soft_densify_band_hi, BQ_ASSIGN_STOP_BYTES, BQ_SOFT_FREE_BYTES,
+    TIP_HOLE_MIN_AHEAD_BLOCKS,
 };
 pub use sp_read::{tweaks_at_height, tweaks_for_height, tweaks_from_thin_and_body};
 pub use sp_tweaks::{BlockSpOutpoints, ThinTweakRangeLimits, ThinTweakRow};
@@ -435,6 +435,8 @@ pub struct Query {
     /// Operator scripthash index intent (`--shindex`). When false, Class C skips
     /// SH collect/enqueue/durable write-through entirely (tip follow independent).
     pub sh_index_enabled: std::sync::atomic::AtomicBool,
+    /// See [`Self::set_sh_force_rebuild`].
+    pub sh_force_rebuild: std::sync::atomic::AtomicBool,
     pub block_filter_enabled: std::sync::atomic::AtomicBool,
     /// Confirm appends filter and tweak rows. Set by `prepare_live_indexes`
     /// when every enabled index is contiguous with the tip. Load reads it;
@@ -633,6 +635,7 @@ impl Query {
             // Library default: SH on (tests / enter_direct). Node sets false for
             // `--shindex` off before entering Direct.
             sh_index_enabled: std::sync::atomic::AtomicBool::new(true),
+            sh_force_rebuild: std::sync::atomic::AtomicBool::new(false),
             block_filter_enabled: std::sync::atomic::AtomicBool::new(false),
             index_live: std::sync::atomic::AtomicBool::new(false),
             block_filters: std::sync::OnceLock::new(),
@@ -1620,9 +1623,8 @@ impl Query {
 
     /// In-RAM block queue stats: `(bytes, count)`.
     ///
-    /// Bytes are process heap (wire payloads). The densify cap is
-    /// [`bq_assign_stop_bytes`], copied onto the IBD config when that config
-    /// is built.
+    /// Bytes are process heap (wire payloads). The densify cap is the IBD
+    /// config's `assign_stop_bytes`.
     pub fn block_queue_stats(&self) -> (u64, usize) {
         let g = self.block_queue.lock().unwrap();
         (g.bytes(), g.count())

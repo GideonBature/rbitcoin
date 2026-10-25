@@ -310,9 +310,8 @@ pub struct IbdConfig {
     pub peers: Option<std::sync::Arc<std::sync::Mutex<rbitcoin_net::seeds::AddrMan>>>,
     /// Outbound TCP: direct or SOCKS5.
     pub dialer: rbitcoin_net::socks::Dialer,
-    /// Densify assign-stop in bytes. `u64::MAX` is unlimited.
-    /// Production copies [`rbitcoin_query::bq_assign_stop_bytes`] once at
-    /// startup. Tests pass the cap here instead of mutating process env.
+    /// Densify assign-stop in bytes. `u64::MAX` is unlimited. The node sets
+    /// it from `RBITCOIN_BLOCK_QUEUE_BYTES` / `RBITCOIN_BLOCK_QUEUE_GB`.
     pub assign_stop_bytes: u64,
 }
 
@@ -329,7 +328,7 @@ impl Default for IbdConfig {
             peerless: Peerless::GiveUp,
             peers: None,
             dialer: rbitcoin_net::socks::Dialer::Direct,
-            assign_stop_bytes: rbitcoin_query::bq_assign_stop_bytes(),
+            assign_stop_bytes: rbitcoin_query::BQ_ASSIGN_STOP_BYTES,
         }
     }
 }

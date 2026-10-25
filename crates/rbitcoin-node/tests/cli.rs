@@ -1,12 +1,23 @@
 use rbitcoin_consensus::default_milestone_height;
 use rbitcoin_node::cli::*;
 use rbitcoin_node::config::NodeConfig;
-use rbitcoin_node::config::OPERATOR_ENV_TEST_LOCK;
+use rbitcoin_node::config::NodeEnv;
 use rbitcoin_primitives::Network;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// [`NodeEnv::from_lookup`] over literal pairs, matched exactly. The last pair
+/// for a name wins.
+fn env_of(vars: &[(&str, &str)]) -> Result<NodeEnv, rbitcoin_node::NodeError> {
+    NodeEnv::from_lookup(|k| {
+        vars.iter()
+            .rev()
+            .find(|(name, _)| *name == k)
+            .map(|(_, v)| OsString::from(v))
+    })
+}
 
 fn tmp_datadir() -> PathBuf {
     let n = SystemTime::now()
@@ -36,7 +47,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    match operator_config_from_args(args) {
+    match operator_config_from_args(args, &NodeEnv::default()) {
         Ok(OperatorArgs::Ready { config, .. }) => config,
         other => panic!("expected assembled config, got {other:?}"),
     }
@@ -51,10 +62,6 @@ where
 fn operator_conf_and_argv() {
     use rbitcoin_consensus::Milestone;
     use rbitcoin_node::config::P2pListen;
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
     let h = operator_usage();
     for flag in [
         "--prefill-compact",
@@ -159,11 +166,11 @@ fn operator_conf_and_argv() {
     assert!(h.contains("Networks: mainnet|testnet|signet|regtest."));
     assert!(h.contains("[--signet-block-time SECS]"));
     assert!(matches!(
-        operator_config_from_args(["rbitcoin-node", "-V"]),
+        operator_config_from_args(["rbitcoin-node", "-V"], &NodeEnv::default()),
         Ok(OperatorArgs::Version)
     ));
     assert!(matches!(
-        operator_config_from_args(["rbitcoin-node", "--log-level=off"]),
+        operator_config_from_args(["rbitcoin-node", "--log-level=off"], &NodeEnv::default()),
         Ok(OperatorArgs::Ready {
             log_level_cli: Some(None),
             ..
@@ -291,7 +298,10 @@ fn operator_conf_and_argv() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("sp_tweaks_dust"), "{err}");
-    match operator_config_from_args(["rbitcoin-node", "--conf", bad_dust.to_str().unwrap()]) {
+    match operator_config_from_args(
+        ["rbitcoin-node", "--conf", bad_dust.to_str().unwrap()],
+        &NodeEnv::default(),
+    ) {
         Err(code) => assert_exit(code, ExitCode::from(2)),
         Ok(other) => panic!("bad sp_tweaks_dust conf assembled: {other:?}"),
     }
@@ -438,7 +448,7 @@ fn operator_conf_and_argv() {
         Some(40)
     );
     assert_exit(
-        cli_main(["rbitcoin-node", "--bytes-per-sigop=x"]),
+        cli_main(["rbitcoin-node", "--bytes-per-sigop=x"], NodeEnv::default()),
         ExitCode::from(2),
     );
     assert_eq!(
@@ -566,9 +576,6 @@ include!("overlay_config_journey.rs");
 #[test]
 fn testnet3_default_milestone_is_anchored() {
     use bitcoin::hashes::Hash;
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let cfg = ready_config(["rbitcoin-node", "--network", "testnet"]);
     assert_eq!(cfg.network, Network::Testnet);
     let m = cfg.milestone();
@@ -613,9 +620,6 @@ fn testnet3_default_milestone_is_anchored() {
 /// the launch rather than surface as a warning after IBD.
 #[test]
 fn cli_rejects_bad_rpc_cookie_at_launch() {
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let dir = tmp_datadir();
     std::fs::create_dir_all(&dir).unwrap();
     let cookie = dir.join("rpc.cookie");
@@ -636,7 +640,7 @@ fn cli_rejects_bad_rpc_cookie_at_launch() {
             cookie.to_str().unwrap(),
         ];
         args.extend_from_slice(extra);
-        cli_main(args)
+        cli_main(args, NodeEnv::default())
     };
     assert_exit(run(&["--rpc-listen"]), ExitCode::FAILURE);
     std::fs::write(&cookie, "__cookie__:secret\n").unwrap();
@@ -664,34 +668,165 @@ fn cli_rejects_bad_rpc_cookie_at_launch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// CLI omit of inbound must not clobber pre-set advanced envs.
+/// `RBITCOIN_P2P_MAX_INBOUND` sets the inbound cap only when CLI and conf
+/// omit it. `0` is no inbound slots, as `--max-inbound 0` is. Empty is unset.
 #[test]
-fn cli_omit_preserves_advanced_env() {
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("RBITCOIN_P2P_MAX_INBOUND", "91");
-    let dir = tmp_datadir();
-    let code = cli_main([
-        "rbitcoin-node",
-        "--smoke",
-        "--network",
-        "regtest",
-        "--datadir",
-        dir.to_str().unwrap(),
-        "--log-level",
-        "error",
-        "--no-seeds",
-        "--milestone",
-        "0",
-    ]);
-    assert_exit(code, ExitCode::SUCCESS);
-    assert_eq!(
-        std::env::var("RBITCOIN_P2P_MAX_INBOUND").as_deref(),
-        Ok("91")
+fn inbound_env_is_below_cli_and_conf() {
+    use rbitcoin_node::config::DEFAULT_MAX_INBOUND;
+    let inbound = |args: &[&str], val: &str| {
+        let env = env_of(&[("RBITCOIN_P2P_MAX_INBOUND", val)]).unwrap();
+        let args = std::iter::once("rbitcoin-node").chain(args.iter().copied());
+        match operator_config_from_args(args, &env) {
+            Ok(OperatorArgs::Ready { config, .. }) => config.listen.max_inbound,
+            other => panic!("expected assembled config, got {other:?}"),
+        }
+    };
+    assert_eq!(inbound(&[], "91"), 91);
+    assert_eq!(inbound(&["--max-inbound", "12"], "91"), 12);
+    assert_eq!(inbound(&[], "0"), 0);
+    assert_eq!(inbound(&[], ""), DEFAULT_MAX_INBOUND);
+
+    let conf_dir = tmp_datadir();
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let conf = conf_dir.join("rbitcoin.conf");
+    std::fs::write(&conf, "max_inbound=7\n").unwrap();
+    assert_eq!(inbound(&["--conf", conf.to_str().unwrap()], "91"), 7);
+    let _ = std::fs::remove_dir_all(&conf_dir);
+}
+
+/// `RBITCOIN_BLOCK_QUEUE_BYTES` wins over `RBITCOIN_BLOCK_QUEUE_GB`. `0` is
+/// unlimited. Empty is unset.
+#[test]
+fn block_queue_env_sets_the_assign_stop() {
+    use rbitcoin_query::BQ_ASSIGN_STOP_BYTES;
+    const BYTES: &str = "RBITCOIN_BLOCK_QUEUE_BYTES";
+    const GB: &str = "RBITCOIN_BLOCK_QUEUE_GB";
+    let stop = |vars: &[(&str, &str)]| {
+        let env = env_of(vars).unwrap();
+        match operator_config_from_args(["rbitcoin-node"], &env) {
+            Ok(OperatorArgs::Ready { config, .. }) => config.bq_assign_stop_bytes,
+            other => panic!("expected assembled config, got {other:?}"),
+        }
+    };
+    assert_eq!(stop(&[]), BQ_ASSIGN_STOP_BYTES);
+    assert_eq!(stop(&[(GB, "2")]), 2 << 30);
+    assert_eq!(stop(&[(GB, "2"), (BYTES, "4096")]), 4096);
+    assert_eq!(stop(&[(BYTES, "4096"), (GB, "2")]), 4096);
+    assert_eq!(stop(&[(GB, "0")]), u64::MAX);
+    assert_eq!(stop(&[(BYTES, "0"), (GB, "2")]), u64::MAX);
+    assert_eq!(stop(&[(BYTES, ""), (GB, "2")]), 2 << 30);
+    assert_eq!(stop(&[(GB, "")]), BQ_ASSIGN_STOP_BYTES);
+}
+
+/// `RBITCOIN_TEST_DROP_STORE`, `RBITCOIN_SH_FORCE_REBUILD`,
+/// `RBITCOIN_RPC_PACKAGE_DIALECT`, and `RBITCOIN_RPC_WAIT_TIP_IDLE` are on for
+/// `1` or `true` and off for `0`, `false`, or empty (`true`/`false` in any
+/// case). All but the first reach `NodeConfig`.
+#[test]
+fn env_flags_take_one_true_zero_or_false() {
+    const KEYS: [&str; 4] = [
+        "RBITCOIN_TEST_DROP_STORE",
+        "RBITCOIN_SH_FORCE_REBUILD",
+        "RBITCOIN_RPC_PACKAGE_DIALECT",
+        "RBITCOIN_RPC_WAIT_TIP_IDLE",
+    ];
+    let flags = |key: &str, val: &str| {
+        let env = env_of(&[(key, val)]).unwrap();
+        [
+            env.test_drop_store,
+            env.sh_force_rebuild,
+            env.rpc_package_dialect,
+            env.rpc_wait_tip_idle,
+        ]
+    };
+    for on in ["1", "true", "TRUE", "True"] {
+        for (i, key) in KEYS.iter().enumerate() {
+            let mut want = [false; 4];
+            want[i] = true;
+            assert_eq!(flags(key, on), want, "{key}={on:?}");
+        }
+    }
+    for off in ["", "0", "false", "FALSE"] {
+        for key in KEYS {
+            assert_eq!(flags(key, off), [false; 4], "{key}={off:?}");
+        }
+    }
+    assert_eq!(env_of(&[]).unwrap(), NodeEnv::default());
+
+    let env = env_of(&[
+        ("RBITCOIN_SH_FORCE_REBUILD", "1"),
+        ("RBITCOIN_RPC_PACKAGE_DIALECT", "1"),
+        ("RBITCOIN_RPC_WAIT_TIP_IDLE", "1"),
+    ])
+    .unwrap();
+    match operator_config_from_args(["rbitcoin-node"], &env) {
+        Ok(OperatorArgs::Ready { config, .. }) => {
+            assert!(config.sh_force_rebuild);
+            assert!(config.rpc.package_dialect);
+            assert!(config.rpc.wait_tip_idle);
+        }
+        other => panic!("expected assembled config, got {other:?}"),
+    }
+}
+
+/// `NodeEnv` asks its lookup for each knob by name and leaves the name match to
+/// it. `std::env::var_os` ignores case on Windows, so there a lower-case name
+/// still sets the knob, as it did before `NodeEnv`.
+#[test]
+fn env_lookup_owns_the_name_match() {
+    let ignore_case = |k: &str| {
+        k.eq_ignore_ascii_case("rbitcoin_sh_force_rebuild")
+            .then(|| OsString::from("1"))
+    };
+    assert!(NodeEnv::from_lookup(ignore_case).unwrap().sh_force_rebuild);
+    assert!(
+        !env_of(&[("rbitcoin_sh_force_rebuild", "1")])
+            .unwrap()
+            .sh_force_rebuild
     );
-    std::env::remove_var("RBITCOIN_P2P_MAX_INBOUND");
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A set `RBITCOIN_*` value that does not parse is an error naming the var,
+/// not a silent default. Other env is not read.
+#[test]
+fn malformed_env_names_the_var() {
+    for (key, val) in [
+        ("RBITCOIN_P2P_MAX_INBOUND", "many"),
+        ("RBITCOIN_P2P_MAX_INBOUND", "-1"),
+        ("RBITCOIN_BLOCK_QUEUE_BYTES", "4k"),
+        ("RBITCOIN_BLOCK_QUEUE_GB", "1.5"),
+        ("RBITCOIN_TEST_DROP_STORE", "yes"),
+        ("RBITCOIN_SH_FORCE_REBUILD", "on"),
+        ("RBITCOIN_RPC_PACKAGE_DIALECT", " 1"),
+        ("RBITCOIN_RPC_WAIT_TIP_IDLE", "ture"),
+    ] {
+        let err = env_of(&[(key, val)]).unwrap_err().to_string();
+        assert!(
+            err.contains(key) && err.contains(val),
+            "{key}={val:?}: {err}"
+        );
+    }
+    let err = env_of(&[
+        ("RBITCOIN_BLOCK_QUEUE_BYTES", "4096"),
+        ("RBITCOIN_BLOCK_QUEUE_GB", "lots"),
+    ])
+    .unwrap_err();
+    assert!(err.to_string().contains("RBITCOIN_BLOCK_QUEUE_GB"), "{err}");
+    assert!(env_of(&[("PATH", "not a number"), ("RBITCOIN_NOT_A_KNOB", "x")]).is_ok());
+
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let bad = OsStr::from_bytes(&[0xff, 0x31]);
+        let err =
+            NodeEnv::from_lookup(|k| (k == "RBITCOIN_SH_FORCE_REBUILD").then(|| bad.to_owned()))
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("RBITCOIN_SH_FORCE_REBUILD"),
+            "{err}"
+        );
+    }
 }
 
 /// `--trust-peer ADDR` is the only dial target. Clashing flags fail in the
@@ -700,11 +835,6 @@ fn cli_omit_preserves_advanced_env() {
 fn trust_peer_addr() {
     use rbitcoin_node::config::P2pListen;
     use rbitcoin_node::config::DEFAULT_MAX_INBOUND;
-    // `plain` pins the default inbound cap, which `RBITCOIN_P2P_MAX_INBOUND`
-    // overrides; `cli_omit_preserves_advanced_env` sets it under this lock.
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
 
     let h = operator_usage();
     assert!(
@@ -712,7 +842,7 @@ fn trust_peer_addr() {
         "help must name --trust-peer with an address"
     );
 
-    let missing = operator_config_from_args(["rbitcoin-node", "--trust-peer"]);
+    let missing = operator_config_from_args(["rbitcoin-node", "--trust-peer"], &NodeEnv::default());
     assert!(missing.is_err(), "bare --trust-peer must not start");
 
     let dir = tmp_datadir();
@@ -823,7 +953,7 @@ fn trust_peer_clashing_flags() {
         let mut args = vec!["rbitcoin-node", "--datadir", dir.to_str().unwrap()];
         args.extend_from_slice(extra);
         assert!(
-            operator_config_from_args(args).is_err(),
+            operator_config_from_args(args, &NodeEnv::default()).is_err(),
             "expected start error for {extra:?}"
         );
         assert!(!dir.exists(), "clash must not create the datadir");

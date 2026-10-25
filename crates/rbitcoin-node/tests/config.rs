@@ -524,37 +524,6 @@ fn builders_paths_milestone_and_ensure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Env is an input when inbound was not explicit; never published back.
-#[test]
-fn absorb_inbound_env_reads_but_does_not_write() {
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let prev_in = std::env::var_os("RBITCOIN_P2P_MAX_INBOUND");
-    std::env::set_var("RBITCOIN_P2P_MAX_INBOUND", "99");
-    let mut cfg = NodeConfig::default();
-    assert!(!cfg.listen.max_inbound_explicit);
-    cfg.absorb_inbound_env();
-    assert_eq!(cfg.listen.max_inbound, 99);
-    assert_eq!(
-        std::env::var("RBITCOIN_P2P_MAX_INBOUND").as_deref(),
-        Ok("99"),
-        "absorb must not rewrite process env"
-    );
-    let mut explicit = NodeConfig::default();
-    explicit.listen.max_inbound = 12;
-    explicit.listen.max_inbound_explicit = true;
-    explicit.absorb_inbound_env();
-    assert_eq!(
-        explicit.listen.max_inbound, 12,
-        "explicit CLI/conf wins over env"
-    );
-    match prev_in {
-        Some(v) => std::env::set_var("RBITCOIN_P2P_MAX_INBOUND", v),
-        None => std::env::remove_var("RBITCOIN_P2P_MAX_INBOUND"),
-    }
-}
-
 #[test]
 fn operator_knob_defaults_and_fields() {
     let mut cfg = NodeConfig::default();

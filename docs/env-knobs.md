@@ -11,8 +11,17 @@ below. Do not grow env surface without a damn-good reason.
 | **`RBITCOIN_LOG`** / **`RUST_LOG`** | Bootstrap logging before conf parse; CLI `--log-level` wins when set |
 | **`RBITCOIN_IO`** | Field escape hatch: `uring` \| `pool` \| `iocp` \| `pread`. **Single** bulk switch. `pread` disables the completion session. Unknown tokens (including deleted `mmap`) fall through to the default |
 
-`RBITCOIN_P2P_MAX_INBOUND` is an **input** when CLI/conf omit `--max-inbound`
-(`NodeConfig::absorb_inbound_env`). The node does not `set_var` it.
+`main` (`process_main`) reads `RBITCOIN_P2P_MAX_INBOUND`,
+`RBITCOIN_BLOCK_QUEUE_BYTES`, `RBITCOIN_BLOCK_QUEUE_GB`,
+`RBITCOIN_SH_FORCE_REBUILD`, `RBITCOIN_RPC_PACKAGE_DIALECT`,
+`RBITCOIN_RPC_WAIT_TIP_IDLE`, and `RBITCOIN_TEST_DROP_STORE` once into
+`NodeEnv` and passes that to `cli_main`. Nothing below the process shell
+reads them. An empty value is the same as unset. A set value that does not
+parse stops the start with exit 2 and `error: configuration error:
+RBITCOIN_…`; it is never ignored. Flags take `1` or `true` (on) and `0` or
+`false` (off).
+`RBITCOIN_P2P_MAX_INBOUND` is an **input** only when CLI/conf omit
+`--max-inbound` (`NodeConfig::absorb_inbound_env`).
 
 ## Unstable (honored, not advertised)
 
@@ -22,7 +31,7 @@ for signet/mainnet sync. **Not** CLI.
 | Env | Default | Role |
 |-----|---------|------|
 | `RBITCOIN_BLOCK_QUEUE_GB` | 1 | Densify assign-stop (GiB). `0` = unlimited. Never refuses enqueue for budget (undecodable wire is dropped) |
-| `RBITCOIN_BLOCK_QUEUE_BYTES` | 1 GiB | Same stop in bytes (wins over GB). `0` = unlimited |
+| `RBITCOIN_BLOCK_QUEUE_BYTES` | 1 GiB | Same stop in bytes (wins over `RBITCOIN_BLOCK_QUEUE_GB`). `0` = unlimited |
 | `RBITCOIN_BULK_IO_WORKERS` | backend default | pread worker count when `RBITCOIN_IO=pread` |
 | `RBITCOIN_CLASS_C_INRAM_MAX_MB` | 256 | L2 cap for `confirmed` / `header_txs_*`; over → fd L0. `strong_tx` always L2 |
 | `RBITCOIN_TX_HEAD_BITS` | scale default | `tx.head` bits (dangerous on a live datadir) |
@@ -43,15 +52,15 @@ for signet/mainnet sync. **Not** CLI.
 | Confirm `loadq` / `scriptq` / `writeq` | 14 / 4 / 14 (`ready=` is not a cap) |
 | `RBITCOIN_SH_UNIQUE_HINT` | ignored; cold open-address pre-size is gone |
 | `RBITCOIN_CONFIRM_BATCH_INPUTS` | 8000 soft inputs/pack |
-| Per-path IO (`PIN_IO`, `HEAD_RESOLVE_IO`, `SPEND_META`, `SPEND_ANN`, `CLASS_C_IO`) | Follow **`RBITCOIN_IO` only** (strings deleted) |
+| Per-path IO (`RBITCOIN_PIN_IO`, `RBITCOIN_HEAD_RESOLVE_IO`, `RBITCOIN_SPEND_META`, `RBITCOIN_SPEND_ANN`, `RBITCOIN_CLASS_C_IO`) | Follow **`RBITCOIN_IO` only** (strings deleted) |
 | `RBITCOIN_FD_APPEND` | Never read (deleted) |
-| `RBITCOIN_BLOCK_QUEUE_MB` | Never read (deleted; use `_BYTES` / `_GB`) |
+| `RBITCOIN_BLOCK_QUEUE_MB` | Never read (deleted; use `RBITCOIN_BLOCK_QUEUE_BYTES` / `RBITCOIN_BLOCK_QUEUE_GB`) |
 
 ## Test-only (not operator)
 
 | Env | Use |
 |-----|-----|
-| `RBITCOIN_TEST_DROP_STORE` | Node/store test fixture |
+| `RBITCOIN_TEST_DROP_STORE` | `1` or `true`: `--smoke` deletes the store before shutdown so the shutdown error path runs (`NodeEnv::test_drop_store`) |
 | `RBITCOIN_CORE_DATA` | Directory of Core JSON corpora for consensus tests |
 
 ## Deleted / do not reintroduce

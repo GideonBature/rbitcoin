@@ -1,6 +1,6 @@
 use rbitcoin_ibd::IbdConfig;
 use rbitcoin_net::{AddrMan, Dialer, PeerConnType, TipEvent};
-use rbitcoin_node::config::{parse_btc_to_sat, NodeConfig};
+use rbitcoin_node::config::{parse_btc_to_sat, NodeConfig, NodeEnv};
 use rbitcoin_node::run::*;
 use rbitcoin_query::Query;
 use std::net::SocketAddr;
@@ -78,15 +78,18 @@ fn trust_peer_dials_only_that_peer() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("rbitcoin-trust-dial-{n}"));
     let addr = "192.0.2.1:8333";
-    let cfg = match operator_config_from_args([
-        "rbitcoin-node",
-        "--datadir",
-        dir.to_str().unwrap(),
-        "--network",
-        "regtest",
-        "--trust-peer",
-        addr,
-    ]) {
+    let cfg = match operator_config_from_args(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            dir.to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--trust-peer",
+            addr,
+        ],
+        &NodeEnv::default(),
+    ) {
         Ok(OperatorArgs::Ready { config, .. }) => config,
         other => panic!("expected config, got {other:?}"),
     };
@@ -802,11 +805,12 @@ fn follow_connect_timeout_i2p_is_longer_than_clearnet() {
 #[test]
 fn catch_up_retry_config_uses_production_not_for_test() {
     let peers = std::sync::Arc::new(std::sync::Mutex::new(rbitcoin_net::AddrMan::new()));
-    let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers), Dialer::Direct);
+    let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers), Dialer::Direct, 4096);
     let prod = IbdConfig::default();
     let test = IbdConfig::for_test();
 
     assert_eq!(cfg.target_peers, 1);
+    assert_eq!(cfg.assign_stop_bytes, 4096, "the node's block-queue cap");
     assert_eq!(
         cfg.initial_dial_waves, 1,
         "a stale-tip retry dials one wave"
@@ -1140,6 +1144,18 @@ fn startup_sets_datadir_hdd_on_the_store() {
     cfg.datadir_hdd = true;
     apply_startup_index_mode(&q, &cfg, 0).unwrap();
     assert!(q.store().datadir_hdd());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn startup_sets_sh_force_rebuild_on_the_query() {
+    let dir = scratch_dir("sh-force-rebuild");
+    let q = Query::open_or_create_tiny(&dir).unwrap();
+    assert!(!q.sh_force_rebuild());
+    let mut cfg = NodeConfig::default();
+    cfg.sh_force_rebuild = true;
+    apply_startup_index_mode(&q, &cfg, 0).unwrap();
+    assert!(q.sh_force_rebuild());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

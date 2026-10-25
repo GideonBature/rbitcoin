@@ -177,7 +177,6 @@ fn hidden_services_and_cjdns(c: &mut NodeConfig) {
 
 #[test]
 fn overlay_config() {
-    let _g = OPERATOR_ENV_TEST_LOCK.lock().unwrap();
     assert_overlay_help();
     onion_only_does_not_socks_clearnet();
     let mut c = NodeConfig::default();

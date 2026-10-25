@@ -1,4 +1,4 @@
-use crate::config::{ConfApply, NodeConfig};
+use crate::config::{ConfApply, NodeConfig, NodeEnv};
 use crate::inhibit::SuspendInhibit;
 use crate::run::{run_node, run_p2p};
 use rbitcoin_consensus::{default_milestone_height, default_min_chain_work_be};
@@ -20,8 +20,8 @@ pub enum OperatorArgs {
     },
 }
 
-/// Assemble [`NodeConfig`] from argv (conf then CLI `apply_kv`). Does not open the store.
-pub fn operator_config_from_args<I, T>(args: I) -> Result<OperatorArgs, ExitCode>
+/// Assemble [`NodeConfig`] from argv (conf then CLI `apply_kv`), then `env`. Does not open the store.
+pub fn operator_config_from_args<I, T>(args: I, env: &NodeEnv) -> Result<OperatorArgs, ExitCode>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
@@ -40,7 +40,7 @@ where
                 config.conf_path = Some(cp.clone());
             }
             apply_operator_kvs(&mut config, parsed.kvs)?;
-            finish_operator_config(config, parsed.smoke, parsed.log_level_cli)
+            finish_operator_config(config, parsed.smoke, parsed.log_level_cli, env)
         }
     }
 }
@@ -179,6 +179,7 @@ pub fn finish_operator_config(
     mut config: NodeConfig,
     smoke: bool,
     log_level_cli: Option<Option<Level>>,
+    env: &NodeEnv,
 ) -> Result<OperatorArgs, ExitCode> {
     if let Err(e) = config.subversion() {
         eprintln!("{e}");
@@ -192,7 +193,13 @@ pub fn finish_operator_config(
         config.minimum_chain_work = default_min_chain_work_be(config.network);
     }
     config.smoke = smoke;
-    config.absorb_inbound_env();
+    config.absorb_inbound_env(env);
+    if let Some(stop) = env.bq_assign_stop_bytes {
+        config.bq_assign_stop_bytes = stop;
+    }
+    config.sh_force_rebuild |= env.sh_force_rebuild;
+    config.rpc.package_dialect |= env.rpc_package_dialect;
+    config.rpc.wait_tip_idle |= env.rpc_wait_tip_idle;
     config.resolve_listen_defaults();
     if let Err(e) = config.seal_trust_peer() {
         eprintln!("error: {e}");
@@ -204,13 +211,25 @@ pub fn finish_operator_config(
     })
 }
 
-/// Process entry used by `main` and high-level scenarios.
-pub fn cli_main<I, T>(args: I) -> ExitCode
+/// The process shell: argv and env from the OS, then [`cli_main`]. A malformed
+/// `RBITCOIN_*` value exits 2 before anything starts.
+pub fn process_main() -> ExitCode {
+    match NodeEnv::from_env() {
+        Ok(env) => cli_main(std::env::args_os(), env),
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Process entry used by [`process_main`] and high-level scenarios.
+pub fn cli_main<I, T>(args: I, env: NodeEnv) -> ExitCode
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    let (mut config, log_level_cli) = match operator_config_from_args(args) {
+    let (mut config, log_level_cli) = match operator_config_from_args(args, &env) {
         Ok(OperatorArgs::Help | OperatorArgs::Version) => return ExitCode::SUCCESS,
         Ok(OperatorArgs::Ready {
             config,
@@ -277,7 +296,7 @@ where
                     handle.network_name(),
                     handle.config.datadir.path().display()
                 );
-                if std::env::var_os("RBITCOIN_TEST_DROP_STORE").is_some() {
+                if env.test_drop_store {
                     let _ = std::fs::remove_dir_all(handle.config.store_path());
                 }
                 match handle.shutdown() {

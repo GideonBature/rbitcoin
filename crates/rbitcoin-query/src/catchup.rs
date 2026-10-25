@@ -83,6 +83,16 @@ impl Query {
         self.sh_index_enabled.store(on, Ordering::SeqCst);
     }
 
+    /// Tip SH finalize wipes the durable head and recollects all of Class A
+    /// (the node's `RBITCOIN_SH_FORCE_REBUILD`). Off by default.
+    pub fn set_sh_force_rebuild(&self, on: bool) {
+        self.sh_force_rebuild.store(on, Ordering::SeqCst);
+    }
+
+    pub fn sh_force_rebuild(&self) -> bool {
+        self.sh_force_rebuild.load(Ordering::SeqCst)
+    }
+
     /// Enter **direct** IBD with scripthash indexing **on** (library / test default).
     ///
     /// Prefer [`Self::enter_direct_index_mode_sh`] when the operator knobs `shindex`.
@@ -210,7 +220,7 @@ impl Query {
     /// Direct IBD defers SH. Tip: two Class A scans (identity-map keys, then
     /// fuse-hit postings) into `scripthash.unsorted`, then pack and seal.
     ///
-    /// **`RBITCOIN_SH_FORCE_REBUILD=1`:** wipe SH head/runs/SEAL/HWM, then
+    /// **[`Self::set_sh_force_rebuild`]:** wipe SH head/runs/SEAL/HWM, then
     /// full unsorted Class A collect + pack (not a catch-up tail).
     pub fn finalize_sh_runs(&self) -> Result<u64, QueryError> {
         self.finalize_sh_runs_cancellable(None)
@@ -221,9 +231,7 @@ impl Query {
         &self,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<u64, QueryError> {
-        use crate::sh_builder::sh_force_rebuild;
-
-        if !sh_force_rebuild() && self.sh_use_writebehind() {
+        if !self.sh_force_rebuild() && self.sh_use_writebehind() {
             if self.store.scripthash.unsealed_main_shards().is_empty() {
                 let residual = self.sh_run.on_disk_run_count();
                 self.sh_run.discard_residual_runs();
@@ -277,7 +285,7 @@ impl Query {
         &self,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<u64, QueryError> {
-        if crate::sh_builder::sh_force_rebuild() {
+        if self.sh_force_rebuild() {
             rbitcoin_log::info!(
                 "node: scripthash FORCE_REBUILD + unsorted-shards — wipe head then Class A collect"
             );

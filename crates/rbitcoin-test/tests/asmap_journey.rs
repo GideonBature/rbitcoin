@@ -178,7 +178,7 @@ fn node_bin() -> PathBuf {
     };
     assert!(
         bin.is_file(),
-        "operator CLI missing at {} (journey-node is rbitcoin_node::cli_main)",
+        "operator CLI missing at {} (journey-node is rbitcoin_node::process_main)",
         bin.display()
     );
     bin

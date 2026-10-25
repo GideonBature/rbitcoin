@@ -13,16 +13,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// `RBITCOIN_SH_FORCE_REBUILD=1|true` — full Class A collect + unsorted rematerialize.
-pub fn sh_force_rebuild() -> bool {
-    matches!(
-        std::env::var("RBITCOIN_SH_FORCE_REBUILD")
-            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-            .ok(),
-        Some(true)
-    )
-}
-
 /// Inclusion floor for a durable SH head.
 ///
 /// Prefer `include_hwm` when present. When the HWM file is missing (legacy
@@ -142,7 +132,7 @@ impl ShRunBuilder {
 
     /// Wipe SH runs/SEAL/cold progress/include_hwm and empty durable SH tables.
     ///
-    /// Used by `RBITCOIN_SH_FORCE_REBUILD=1` so tip collects **all** Class A.
+    /// Used by [`crate::Query::set_sh_force_rebuild`] so tip collects **all** Class A.
     pub fn prepare_force_full_rebuild(&self, store: &Store) -> Result<(), StoreError> {
         info!("node: scripthash FORCE_REBUILD — clearing runs/SEAL/progress/HWM and reinit head");
         self.wipe_catalog_and_seal()?;
