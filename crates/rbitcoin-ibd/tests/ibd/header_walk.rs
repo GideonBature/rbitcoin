@@ -1384,6 +1384,7 @@ fn restart_restores_the_checkpoint_skip_and_garbage_does_not() {
     assert!(restore_adopt(&mut st, &hub));
     assert!(st.header_walk.base_height > 0);
     let path = hub.query.store().path().join("header.adopt");
+    assert_eq!(hub.best_header_height(), 3);
     on_confirmed_rewind(&mut st, &hub, 0);
     assert!(
         !path.exists(),
@@ -2317,6 +2318,7 @@ fn a_retire_whose_failure_is_not_written_leaves_no_resume_point() {
     assert!(send_getheaders(&mut st, &hub).unwrap());
     let p1 = mine(gen, 61);
     apply(&mut st, &hub, 1, vec![p1, mine(p1.block_hash(), 62)]);
+    assert_eq!(hub.best_header_height(), 2);
     assert!(st.is_on_path(&p1.block_hash(), 1));
     rbitcoin_ibd::ibd::events::apply_consensus_invalid_reject(
         &mut st,
@@ -2327,6 +2329,11 @@ fn a_retire_whose_failure_is_not_written_leaves_no_resume_point() {
         Some(&hub),
     );
     assert_eq!(st.header_walk.tip_height(), 0, "the candidate is retired");
+    assert_eq!(
+        hub.best_header_height(),
+        0,
+        "the retired tip is not reported"
+    );
     assert!(
         !store.join("header.adopt").exists(),
         "a retired walk is not the resume point while its failure is not on disk"

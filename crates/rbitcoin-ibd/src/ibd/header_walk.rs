@@ -1093,6 +1093,7 @@ pub fn rewind_to(st: &mut IbdWorkState, hub: &ChainHub, height: u32, dead: Optio
         }
     }
     clear_off_path(st);
+    publish_header_tip(st, hub);
     save_adopt(st, hub);
 }
 
@@ -2306,6 +2307,7 @@ pub fn remember_milestone(tip: &mut WalkTip, hub: &ChainHub, prev: BlockHash, hd
 
 #[doc(hidden)]
 pub fn publish_work(st: &mut IbdWorkState, hub: &ChainHub) {
+    publish_header_tip(st, hub);
     if below_floor(hub, &st.header_walk.tip_work()) {
         return;
     }
@@ -2335,6 +2337,14 @@ pub fn publish_work(st: &mut IbdWorkState, hub: &ChainHub) {
     rbitcoin_log::info!(
         "ibd: headers milestone height={} hash={hash} work=ok",
         hub.milestone.height
+    );
+}
+
+fn publish_header_tip(st: &IbdWorkState, hub: &ChainHub) {
+    hub.publish_ibd_header_tip(
+        st.header_walk
+            .tip_hash()
+            .map(|hash| (hash, st.header_walk.tip_height())),
     );
 }
 
@@ -3190,6 +3200,7 @@ pub fn base_conflicts(st: &IbdWorkState, hub: &ChainHub, walk: &HeaderWalk) -> b
 pub fn on_confirmed_rewind(st: &mut IbdWorkState, hub: &ChainHub, lca_h: u32) {
     if st.header_walk.base_hash.is_some() && lca_h < st.header_walk.base_height {
         st.header_walk = HeaderWalk::default();
+        publish_header_tip(st, hub);
         forget_adopt(hub);
         return;
     }

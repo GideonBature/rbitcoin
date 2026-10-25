@@ -633,6 +633,7 @@ pub struct ChainHub {
     pub fork_tips: RwLock<ForkTips>,
     /// Header-only tips (`submitheader` / P2P headers): hash → (prev, height).
     pub header_tips: RwLock<HeaderTips>,
+    ibd_header_tip: RwLock<Option<(BlockHash, u32)>>,
     /// Set around `accept_branch` connect so each `TipEvent` carries branch length.
     pub announce_reorg_len: AtomicU32,
     /// Min-chain-work floor (32-byte BE). `None` = no extra floor.
@@ -762,6 +763,7 @@ impl ChainHub {
             precious: RwLock::new(None),
             fork_tips: RwLock::new(ForkTips::new()),
             header_tips: RwLock::new(HeaderTips::new()),
+            ibd_header_tip: RwLock::new(None),
             announce_reorg_len: AtomicU32::new(0),
             minimum_chain_work: RwLock::new(None),
             mining: MiningKnobs::new(),
@@ -1471,20 +1473,27 @@ impl ChainHub {
         None
     }
 
-    /// Best known header height (may lead `blocks` after `submitheader`).
+    /// Best known header height, including IBD's accepted look-ahead walk.
     ///
     /// Copies the tips out before walking: `prev_of` read-locks `header_tips`
     /// again, and std's `RwLock` refuses a new reader while a writer waits, so
     /// a walk under the guard deadlocks against `note_header_tip`.
     pub fn best_header_height(&self) -> u32 {
         let mut best = self.tip_height().unwrap_or(0);
-        let tips: Vec<(BlockHash, u32)> = self.header_tips.read().unwrap().entries().collect();
+        let mut tips: Vec<(BlockHash, u32)> = self.header_tips.read().unwrap().entries().collect();
+        tips.extend(*self.ibd_header_tip.read().unwrap());
         for (hash, h) in tips {
             if !self.header_ancestry_invalid(hash) {
                 best = best.max(h);
             }
         }
         best
+    }
+
+    /// Replace the IBD walk's accepted tip, including on rewind and resume.
+    /// Peer-advertised horizons are not accepted header tips.
+    pub fn publish_ibd_header_tip(&self, tip: Option<(BlockHash, u32)>) {
+        *self.ibd_header_tip.write().unwrap() = tip;
     }
 
     #[doc(hidden)]
