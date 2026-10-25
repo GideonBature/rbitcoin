@@ -333,6 +333,10 @@ def _sat_btc(sats: int) -> float:
 # while the listener was still down and the wallet reported a zero balance.
 ESPLORA_READY_S = 60.0
 _ESPLORA_POLL_S = 0.1
+# How long one RPC may sit after IBD, waiting for tx relay, before -28.
+# Core retries -28 only inside wait_for_rpc_connection. Later calls do not.
+RPC_WARMUP_S = 60.0
+_WARMUP_POLL_S = 0.05
 
 
 def wait_esplora_tip(esplora: Callable[[str], Any], tip_height: int) -> None:
@@ -641,33 +645,51 @@ class RpcProxy:
             return "dict", result
         return "bare", None
 
-    def test_may_start(self) -> bool:
-        """Core retries -28 until the node will send a fee filter.
+    def _warmup_state(self) -> str:
+        """'open' forwards, 'hold' waits for tx relay, 'down' is -28 now.
 
         Still in IBD: answer now, and keep checking. The index pack can
         leave IBD with relay still off. `-blocksonly` never sends a filter.
         A fake that echoes the method name has no relay bit; let it through.
+        A node whose RPC port is not up yet is 'down' so Core's startup
+        poll can retry, instead of sitting here for the whole warmup.
         """
         if self._test_started:
-            return True
+            return "open"
         if self.blocks_only:
             self._test_started = True
-            return True
+            return "open"
         chain_kind, chain = self._node_rpc("getblockchaininfo")
         net_kind, net = self._node_rpc("getnetworkinfo")
         if chain_kind == "down" or net_kind == "down":
-            return False
+            return "down"
         if chain_kind == "bare" or net_kind == "bare":
             self._test_started = True
-            return True
+            return "open"
         if chain is None or net is None:
-            return False
+            return "down"
         if chain.get("initialblockdownload"):
-            return True
+            return "open"
         if net.get("localrelay"):
             self._test_started = True
-            return True
-        return False
+            return "open"
+        return "hold"
+
+    def test_may_start(self) -> bool:
+        """Block this RPC until the node will send a fee filter.
+
+        Core does not retry -28 once wait_for_rpc_connection has returned.
+        setup_nodes mines the block that leaves IBD and then keeps calling.
+        Holding the response lets that call finish after relay is on.
+        """
+        deadline = time.monotonic() + RPC_WARMUP_S
+        while True:
+            state = self._warmup_state()
+            if state == "open":
+                return True
+            if state == "down" or time.monotonic() >= deadline:
+                return False
+            time.sleep(_WARMUP_POLL_S)
 
     def forward_raw(self, raw: bytes) -> tuple[int, bytes]:
         cookie = self.cookie_line() or ""

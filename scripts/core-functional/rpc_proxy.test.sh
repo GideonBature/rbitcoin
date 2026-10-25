@@ -557,10 +557,15 @@ python3 - <<'PY'
 import base64
 import json
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import rpc_proxy
 from rpc_proxy import RpcProxy
+
+# The immediate -28 case must not sit for the production warmup.
+rpc_proxy.RPC_WARMUP_S = 0
 
 COOKIE = "__cookie__:secret"
 STATE = {"ibd": True, "relay": False}
@@ -649,6 +654,28 @@ port = proxy._httpd.server_address[1]
 body = call(port, "getblockcount")
 assert body["error"] is None and body["result"] == "getblockcount", body
 proxy.shutdown()
-node.shutdown()
 print("ok - blocks-only does not wait for tx relay")
+
+# A call that arrives out of IBD before relay has to wait, not fail.
+rpc_proxy.RPC_WARMUP_S = 3
+STATE["ibd"] = False
+STATE["relay"] = False
+proxy = start()
+port = proxy._httpd.server_address[1]
+
+
+def flip_relay():
+    time.sleep(0.4)
+    STATE["relay"] = True
+
+
+threading.Thread(target=flip_relay, daemon=True).start()
+started = time.monotonic()
+body = call(port, "getblockcount")
+waited = time.monotonic() - started
+assert body["error"] is None and body["result"] == "getblockcount", body
+assert waited >= 0.3, waited
+proxy.shutdown()
+node.shutdown()
+print("ok - rpc waits out the tx-relay gap instead of failing")
 PY
