@@ -5,7 +5,11 @@ use rbitcoin_query::testutil::FixtureChain;
 use rbitcoin_query::Query;
 use rbitcoin_store::StoreError;
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
-use std::sync::Mutex;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 /// Serialize FORCE_REBUILD env mutations (parallel tests share process env).
 static FORCE_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -368,6 +372,54 @@ fn backfill_includes_create_that_lands_after_count_sample() {
 
 fn extend_one_during_backfill(q: &Query) {
     extend_direct_chain(q, 1);
+}
+
+/// Two `put_create_batch_append` calls on one scripthash corrupt the chain
+/// when they overlap. The Class A tail and `rbtc-sh-wb` both append, so the
+/// tail has to wait on `sh.appender`.
+#[test]
+fn class_a_tail_backfill_waits_on_sh_appender() {
+    let _g = lock_force_env();
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-backfill-appender");
+    let q = Arc::new(q);
+    seed_direct_chain(&q, 3);
+    q.finalize_sh_runs().unwrap();
+    extend_direct_chain(&q, 1);
+    assert!(!q.sh_is_tip_ready());
+    let sh_new = rbitcoin_store::script_hash(&[0x51, 3]);
+    assert!(
+        q.scripthash_history(&sh_new).unwrap().is_empty(),
+        "the lagging create is not indexed yet"
+    );
+
+    let hold = q.sh.appender.lock().unwrap();
+    let q2 = Arc::clone(&q);
+    let (tx, rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            q2.backfill_sh_creates_from_class_a().expect("backfill");
+        }));
+        let _ = tx.send(result);
+    });
+    let timed = rx.recv_timeout(Duration::from_millis(400));
+    drop(hold);
+    if timed.is_err() {
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("backfill finishes once sh.appender is free")
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    }
+    worker.join().unwrap();
+    match timed {
+        Ok(Ok(())) => panic!("Class A tail backfill appended while sh.appender was held"),
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => {}
+    }
+    assert!(
+        !q.scripthash_history(&sh_new).unwrap().is_empty(),
+        "the lagging create is indexed after the appender is released"
+    );
+    assert!(q.sh_is_tip_ready());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The ready sample inside the chase can miss a create that lands before
