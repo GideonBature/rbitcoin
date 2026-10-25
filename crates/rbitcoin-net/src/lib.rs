@@ -104,7 +104,7 @@ pub use serve_perf::{
     format_serve_perf, sample_reset_serve_perf, serve_perf_totals, ServePerfSample,
 };
 pub use service::{P2PNode, REDIAL_INTERVAL, REDIAL_INTERVAL_TEST};
-pub use socks::{install_i2p_dialer, Dialer};
+pub use socks::{install_i2p_dialer, Dialer, NetProxies};
 pub use tx_relay::{
     ElectrumMempoolItem, FeeHistoryBackfillStats, MempoolAnnounce, MempoolHub, MempoolPerfSample,
     MempoolTxSnapEntry, MempoolTxSnapshot,

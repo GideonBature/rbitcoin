@@ -39,20 +39,27 @@ impl OnlyNet {
         }
     }
 
-    pub fn matches_addr(self, addr: NetAddr) -> bool {
-        match (self, addr) {
-            (Self::Ipv4, NetAddr::Ip(s)) => s.is_ipv4(),
-            (Self::Ipv6, NetAddr::Ip(s)) => s.is_ipv6(),
-            (Self::Onion, NetAddr::Onion { .. }) => true,
-            (Self::I2p, NetAddr::I2p { .. }) => true,
-            (Self::Cjdns, NetAddr::Cjdns { .. }) => true,
-            _ => false,
+    pub const ALL: [Self; 5] = [Self::Ipv4, Self::Ipv6, Self::Onion, Self::I2p, Self::Cjdns];
+
+    pub fn of(addr: NetAddr) -> Self {
+        match addr {
+            NetAddr::Ip(s) if s.is_ipv4() => Self::Ipv4,
+            NetAddr::Ip(_) => Self::Ipv6,
+            NetAddr::Onion { .. } => Self::Onion,
+            NetAddr::I2p { .. } => Self::I2p,
+            NetAddr::Cjdns { .. } => Self::Cjdns,
         }
     }
-}
 
-pub fn addr_allowed(addr: NetAddr, only: &[OnlyNet]) -> bool {
-    only.is_empty() || only.iter().any(|n| n.matches_addr(addr))
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+            Self::Onion => "onion",
+            Self::I2p => "i2p",
+            Self::Cjdns => "cjdns",
+        }
+    }
 }
 
 /// Prefixes `Ipv6Addr` does not classify on 1.95.
@@ -335,13 +342,7 @@ impl NetAddr {
     }
 
     pub fn network_label(self) -> &'static str {
-        match self {
-            NetAddr::Ip(s) if s.is_ipv4() => "ipv4",
-            NetAddr::Ip(_) => "ipv6",
-            NetAddr::Onion { .. } => "onion",
-            NetAddr::I2p { .. } => "i2p",
-            NetAddr::Cjdns { .. } => "cjdns",
-        }
+        OnlyNet::of(self).label()
     }
 }
 

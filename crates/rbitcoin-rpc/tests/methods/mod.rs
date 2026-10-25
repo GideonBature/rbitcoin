@@ -876,6 +876,81 @@ fn trust_peer_warning_does_not_spend_alertnotify() {
 }
 
 #[test]
+fn getnetworkinfo_networks_report_reach_and_proxy() {
+    use rbitcoin_net::{AddrMan, Dialer, NetProxies, OnlyNet, PeerHub};
+    let row = |name: &str, reachable: bool, proxy: &str, randomize: bool| {
+        json!({
+            "name": name,
+            "limited": !reachable,
+            "reachable": reachable,
+            "proxy": proxy,
+            "proxy_randomize_credentials": randomize,
+        })
+    };
+    let networks =
+        |ctx: &RpcContext| dispatch(ctx, "getnetworkinfo", vec![]).unwrap()["networks"].clone();
+    let (mut ctx, dir) = ctx_empty();
+    assert_eq!(
+        networks(&ctx),
+        json!([
+            row("ipv4", true, "", false),
+            row("ipv6", true, "", false),
+            row("onion", false, "", false),
+            row("i2p", false, "", false),
+            row("cjdns", false, "", false),
+        ])
+    );
+
+    let (socks, onion, sam) = ("127.0.0.1:9050", "127.0.0.1:9150", "127.0.0.1:7656");
+    let mut book = AddrMan::new();
+    book.set_onion_reachable(true);
+    book.set_i2p_reachable(true);
+    ctx.addrman = Some(Arc::new(std::sync::Mutex::new(book)));
+    let peers = PeerHub::new();
+    peers.set_proxies(NetProxies {
+        dialer: Dialer::with_proxies(
+            Some(socks.parse().unwrap()),
+            Some(onion.parse().unwrap()),
+            false,
+        ),
+        i2p_sam: Some(sam.parse().unwrap()),
+    });
+    ctx.peers = Some(Arc::clone(&peers));
+    assert_eq!(
+        networks(&ctx),
+        json!([
+            row("ipv4", true, socks, false),
+            row("ipv6", true, socks, false),
+            row("onion", true, onion, false),
+            row("i2p", true, sam, false),
+            row("cjdns", false, "", false),
+        ])
+    );
+
+    ctx.addrman
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .set_only_net(vec![OnlyNet::Ipv4]);
+    peers.set_proxies(NetProxies {
+        dialer: Dialer::with_proxies(Some(socks.parse().unwrap()), None, true),
+        i2p_sam: Some(sam.parse().unwrap()),
+    });
+    assert_eq!(
+        networks(&ctx),
+        json!([
+            row("ipv4", true, socks, true),
+            row("ipv6", false, socks, true),
+            row("onion", false, socks, true),
+            row("i2p", false, sam, false),
+            row("cjdns", false, "", false),
+        ])
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn getnetworkinfo_localrelay_follows_mempool_relay() {
     // `p2p_blocksonly.py`: `-blocksonly` leaves relay off → localrelay false.
     let (ctx, dir) = ctx_empty();
