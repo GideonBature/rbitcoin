@@ -77,7 +77,11 @@ thread_local! {
     /// `None` means no walk is active.
     static PROMOTE_NOTES: std::cell::RefCell<Option<Vec<Txid>>> =
         const { std::cell::RefCell::new(None) };
-    /// Set by the maintenance-publish test. Fired while `template_prev` is held.
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// Fired while `template_prev` is held. Off until a test arms it on this thread.
     static MAINT_PUBLISH_HOOK: std::cell::Cell<Option<fn(&MempoolHub)>> =
         const { std::cell::Cell::new(None) };
 }
@@ -1508,17 +1512,20 @@ impl MempoolHub {
             self.note_block_fee_history(h);
         }
         self.pool_maintained.store(true, Ordering::Release);
+        #[cfg(debug_assertions)]
         self.fire_maint_publish_hook();
         drop(slot);
         true
     }
 
     /// Observe maintenance publish. The hook runs on this thread.
+    #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn set_maint_publish_hook(hook: fn(&MempoolHub)) {
         MAINT_PUBLISH_HOOK.with(|slot| slot.set(Some(hook)));
     }
 
+    #[cfg(debug_assertions)]
     fn fire_maint_publish_hook(&self) {
         let hook = MAINT_PUBLISH_HOOK.with(|slot| slot.take());
         if let Some(hook) = hook {
