@@ -251,14 +251,10 @@ impl Query {
                         "node: scripthash durable head with HWM/SEAL lag while Direct — \
                      Class A tail backfill (write-behind no-ops until Tip)"
                     );
-                    self.backfill_sh_creates_from_class_a()?;
-                    if self.sh_is_tip_ready() {
-                        self.mark_sh_indexed_through_tip();
-                    } else {
-                        return Err(StoreError::Corrupt(
-                            "scripthash Class A tail backfill left include_hwm short of tip",
-                        ));
-                    }
+                    self.backfill_until_sh_tip_ready(
+                        "scripthash Class A tail backfill left include_hwm short of tip",
+                    )?;
+                    self.mark_sh_indexed_through_tip();
                 } else {
                     rbitcoin_log::info!(
                         "node: scripthash durable head with HWM/SEAL lag — skip collect; \
@@ -301,17 +297,22 @@ impl Query {
         }
         if tip_max > 0 {
             let mut n = n;
-            if !self.sh_is_tip_ready() && self.store.scripthash.has_durable_index() {
+            // A create can land after the chase samples readiness and before
+            // this check. The watermark is then behind `txs.count()`, so scan
+            // again. A watermark that already covers the count is a real gap.
+            const GAP: &str =
+                "scripthash unsorted-shards create gap remain after materialize drain \
+                     (refuse tip-follow / Electrum)";
+            while !self.sh_is_tip_ready() {
+                if !self.store.scripthash.has_durable_index()
+                    || self.store.scripthash.include_hwm() >= self.store.txs.count()
+                {
+                    return Err(StoreError::Corrupt(GAP));
+                }
                 rbitcoin_log::info!(
                     "node: scripthash unsorted-shards post-materialize Class A tail backfill"
                 );
-                n = n.saturating_add(self.backfill_sh_creates_from_class_a()?);
-            }
-            if !self.sh_is_tip_ready() {
-                return Err(StoreError::Corrupt(
-                    "scripthash unsorted-shards create gap remain after materialize drain \
-                     (refuse tip-follow / Electrum)",
-                ));
+                n = n.saturating_add(self.backfill_until_sh_tip_ready(GAP)?);
             }
             self.mark_sh_indexed_through_tip();
             return Ok(n);
@@ -319,52 +320,89 @@ impl Query {
         Ok(n)
     }
 
+    /// Keep scanning Class A until the inclusion watermark covers the tip.
+    ///
+    /// A create that lands after one pass is another pass. When the watermark
+    /// already covers every create and the tip is still short, `gap` is the
+    /// corrupt record.
+    fn backfill_until_sh_tip_ready(&self, gap: &'static str) -> Result<u64, QueryError> {
+        let mut n = 0u64;
+        loop {
+            n = n.saturating_add(self.backfill_sh_creates_from_class_a()?);
+            if self.sh_is_tip_ready() {
+                #[cfg(debug_assertions)]
+                if let Some(hook) = sh_backfill_on_ready_hook() {
+                    hook(self);
+                }
+                return Ok(n);
+            }
+            if self.store.scripthash.include_hwm() >= self.store.txs.count() {
+                return Err(StoreError::Corrupt(gap));
+            }
+        }
+    }
+
     /// Append Class A creates after the durable inclusion floor onto a live SH head.
+    ///
+    /// Confirm keeps appending while this runs (`submitblock` during
+    /// materialize). Each pass samples `txs.count()` and, when that count
+    /// grew, scans the new tail before publishing the watermark.
     #[doc(hidden)]
     pub fn backfill_sh_creates_from_class_a(&self) -> Result<u64, QueryError> {
         use crate::sh_builder::durable_sh_inclusion_floor;
 
-        let last = self.store.txs.count();
-        self.sh_run.refresh_seal();
-        let floor = durable_sh_inclusion_floor(
-            self.store.scripthash.include_hwm(),
-            self.sh_run.sealed_max_create_fk(),
-        );
-        let first = if floor == 0 {
-            1
-        } else {
-            floor.saturating_add(1)
-        };
-        if last < first {
-            return Ok(0);
-        }
-        rbitcoin_log::info!("node: scripthash Class A tail backfill first={first} last={last}");
         const CHUNK: u64 = 64_000;
         let mut total = 0u64;
-        let mut lo = first;
-        let mut heads = self.sh.heads.lock().unwrap();
-        while lo <= last {
-            let hi = lo.saturating_add(CHUNK.saturating_sub(1)).min(last);
-            let mut recs = Vec::new();
-            self.store
-                .txs
-                .for_each_script_hashes_in_fk_span(lo, hi, |fk, sh| {
-                    recs.push(ScriptHashRecord::from_fk(sh, fk));
-                    Ok(())
-                })?;
-            if !recs.is_empty() {
-                total = total.saturating_add(recs.len() as u64);
-                self.store
-                    .scripthash
-                    .put_create_batch_append(&recs, &mut heads)?;
+        loop {
+            let last = self.store.txs.count();
+            self.sh_run.refresh_seal();
+            let floor = durable_sh_inclusion_floor(
+                self.store.scripthash.include_hwm(),
+                self.sh_run.sealed_max_create_fk(),
+            );
+            let first = if floor == 0 {
+                1
+            } else {
+                floor.saturating_add(1)
+            };
+            #[cfg(debug_assertions)]
+            if let Some(hook) = sh_backfill_after_sample_hook() {
+                hook(self);
             }
-            lo = hi.saturating_add(1);
+            if last < first {
+                if self.store.txs.count() <= last {
+                    return Ok(total);
+                }
+                continue;
+            }
+            rbitcoin_log::info!("node: scripthash Class A tail backfill first={first} last={last}");
+            let mut lo = first;
+            let mut heads = self.sh.heads.lock().unwrap();
+            while lo <= last {
+                let hi = lo.saturating_add(CHUNK.saturating_sub(1)).min(last);
+                let mut recs = Vec::new();
+                self.store
+                    .txs
+                    .for_each_script_hashes_in_fk_span(lo, hi, |fk, sh| {
+                        recs.push(ScriptHashRecord::from_fk(sh, fk));
+                        Ok(())
+                    })?;
+                if !recs.is_empty() {
+                    total = total.saturating_add(recs.len() as u64);
+                    self.store
+                        .scripthash
+                        .put_create_batch_append(&recs, &mut heads)?;
+                }
+                lo = hi.saturating_add(1);
+            }
+            drop(heads);
+            self.store.scripthash.flush()?;
+            self.store.scripthash.note_include_hwm(last)?;
+            self.sh_run.publish_seal_watermark(last)?;
+            if self.store.txs.count() <= last {
+                return Ok(total);
+            }
         }
-        drop(heads);
-        self.store.scripthash.flush()?;
-        self.store.scripthash.note_include_hwm(last)?;
-        self.sh_run.publish_seal_watermark(last)?;
-        Ok(total)
     }
 
     #[doc(hidden)]
@@ -384,4 +422,42 @@ impl Query {
     pub fn sh_run_enabled(&self) -> bool {
         self.sh_run.is_enabled()
     }
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SH_BACKFILL_AFTER_SAMPLE: std::cell::Cell<Option<fn(&Query)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SH_BACKFILL_ON_READY: std::cell::Cell<Option<fn(&Query)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(debug_assertions)]
+fn sh_backfill_on_ready_hook() -> Option<fn(&Query)> {
+    SH_BACKFILL_ON_READY.with(|c| c.take())
+}
+
+/// One-shot hook after a Class A tail chase has observed a tip-ready sample.
+/// Tests confirm another create in the gap before the caller checks again.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_sh_backfill_on_ready_for_test(hook: Option<fn(&Query)>) {
+    SH_BACKFILL_ON_READY.with(|c| c.set(hook));
+}
+
+#[cfg(debug_assertions)]
+fn sh_backfill_after_sample_hook() -> Option<fn(&Query)> {
+    SH_BACKFILL_AFTER_SAMPLE.with(|c| c.take())
+}
+
+/// One-shot hook invoked after a Class A tail backfill samples `txs.count()`.
+/// Tests use it to confirm another create in that window.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_sh_backfill_after_sample_for_test(hook: Option<fn(&Query)>) {
+    SH_BACKFILL_AFTER_SAMPLE.with(|c| c.set(hook));
 }

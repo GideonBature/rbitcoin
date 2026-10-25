@@ -341,3 +341,57 @@ fn finalize_sh_backfills_class_a_tail_when_shards_already_sealed() {
     assert!(q.store.scripthash.include_hwm() >= q.store.txs.count());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `submitblock` confirms while the tail backfill has already sampled
+/// `txs.count()`. That create has to land in the inclusion watermark or
+/// materialize refuses and Esplora never binds.
+#[test]
+fn backfill_includes_create_that_lands_after_count_sample() {
+    let _g = lock_force_env();
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-backfill-race");
+    seed_direct_chain(&q, 3);
+    let _ = q.finalize_sh_runs().unwrap();
+    assert!(q.sh_is_tip_ready());
+    extend_direct_chain(&q, 1);
+    assert!(!q.sh_is_tip_ready());
+    set_sh_backfill_after_sample_for_test(Some(extend_one_during_backfill));
+    let result = q.backfill_sh_creates_from_class_a();
+    set_sh_backfill_after_sample_for_test(None);
+    result.expect("backfill");
+    assert!(
+        q.sh_is_tip_ready(),
+        "a create confirmed after the count sample stays inside include_hwm"
+    );
+    assert!(q.store.scripthash.include_hwm() >= q.store.txs.count());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn extend_one_during_backfill(q: &Query) {
+    extend_direct_chain(q, 1);
+}
+
+/// The ready sample inside the chase can miss a create that lands before
+/// `finalize_sh_unsorted_cancellable` checks again. That create is still
+/// behind the watermark, so the chase runs once more.
+#[test]
+fn finalize_chases_a_create_that_lands_after_the_ready_sample() {
+    let _g = lock_force_env();
+    let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-ready-gap");
+    seed_direct_chain(&q, 3);
+    let _ = q.finalize_sh_runs().unwrap();
+    assert!(q.sh_is_tip_ready());
+    extend_direct_chain(&q, 1);
+    assert!(!q.sh_is_tip_ready());
+    set_sh_backfill_on_ready_for_test(Some(extend_one_during_backfill));
+    let result = q.finalize_sh_unsorted_cancellable(None);
+    set_sh_backfill_on_ready_for_test(None);
+    result.expect("a create after the ready sample is chased");
+    let sh_late = rbitcoin_store::script_hash(&[0x51, 4]);
+    assert!(
+        !q.scripthash_history(&sh_late).unwrap().is_empty(),
+        "the create that landed after the ready sample is in the index"
+    );
+    assert!(q.sh_is_tip_ready());
+    assert!(q.store.scripthash.include_hwm() >= q.store.txs.count());
+    let _ = std::fs::remove_dir_all(&dir);
+}
