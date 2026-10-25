@@ -294,11 +294,15 @@ impl Default for RpcOpts {
 
 /// `RBITCOIN_*` node process env, read once by the process shell
 /// ([`Self::from_env`]) and passed to [`crate::cli_main`].
-/// Unset, non-UTF-8, and unparsable values are `None`.
+/// A valued knob that is unset, non-UTF-8, or unparsable is `None`. A flag is
+/// on only for `1` or `true` (any case).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeEnv {
     /// `RBITCOIN_P2P_MAX_INBOUND`, when positive.
     pub p2p_max_inbound: Option<u32>,
+    /// `RBITCOIN_TEST_DROP_STORE` is on: `--smoke` deletes the store before
+    /// shutdown, so the shutdown error path runs.
+    pub test_drop_store: bool,
 }
 
 impl NodeEnv {
@@ -315,11 +319,17 @@ impl NodeEnv {
     {
         let mut env = Self::default();
         for (key, val) in vars {
-            let (Some(key), Some(val)) = (key.as_ref().to_str(), val.as_ref().to_str()) else {
-                continue;
-            };
-            if key == "RBITCOIN_P2P_MAX_INBOUND" {
-                env.p2p_max_inbound = u32::from_str(val).ok().filter(|&n| n > 0);
+            let val = val.as_ref().to_str();
+            match key.as_ref().to_str() {
+                Some("RBITCOIN_P2P_MAX_INBOUND") => {
+                    env.p2p_max_inbound =
+                        val.and_then(|v| u32::from_str(v).ok()).filter(|&n| n > 0);
+                }
+                Some("RBITCOIN_TEST_DROP_STORE") => {
+                    env.test_drop_store =
+                        val.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                }
+                _ => {}
             }
         }
         env

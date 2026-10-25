@@ -584,22 +584,15 @@ fn node_cli_and_surface_smoke() {
         );
     }
 
-    // Serialize process-wide env mutation (parallel `cargo test` races).
-    static DROP_STORE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    {
-        let _g = DROP_STORE_ENV.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("RBITCOIN_TEST_DROP_STORE", "1");
-        assert!(!exit_success(node_cli_main(
-            [
-                "rbitcoin-node",
-                "--datadir",
-                td.path().join("shutdown-fail").to_str().unwrap(),
-                "--smoke",
-            ],
-            NodeEnv::default()
-        )));
-        std::env::remove_var("RBITCOIN_TEST_DROP_STORE");
-    }
+    assert!(!exit_success(node_cli_main(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            td.path().join("shutdown-fail").to_str().unwrap(),
+            "--smoke",
+        ],
+        NodeEnv::from_vars([("RBITCOIN_TEST_DROP_STORE", "1")])
+    )));
 }
 
 #[test]

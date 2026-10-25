@@ -278,7 +278,7 @@ where
                     handle.network_name(),
                     handle.config.datadir.path().display()
                 );
-                if std::env::var_os("RBITCOIN_TEST_DROP_STORE").is_some() {
+                if env.test_drop_store {
                     let _ = std::fs::remove_dir_all(handle.config.store_path());
                 }
                 match handle.shutdown() {

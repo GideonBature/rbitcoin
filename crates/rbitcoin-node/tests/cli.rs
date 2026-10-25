@@ -683,6 +683,20 @@ fn inbound_env_is_below_cli_and_conf() {
     let _ = std::fs::remove_dir_all(&conf_dir);
 }
 
+/// `RBITCOIN_TEST_DROP_STORE` is on only for `1` or `true` (any case).
+#[test]
+fn drop_store_env_is_on_only_when_true() {
+    let drop_store =
+        |val: &str| NodeEnv::from_vars([("RBITCOIN_TEST_DROP_STORE", val)]).test_drop_store;
+    for on in ["1", "true", "TRUE", "True"] {
+        assert!(drop_store(on), "{on:?} turns it on");
+    }
+    for off in ["", "0", "false", "yes", " 1"] {
+        assert!(!drop_store(off), "{off:?} leaves it off");
+    }
+    assert!(!NodeEnv::from_vars(std::iter::empty::<(&str, &str)>()).test_drop_store);
+}
+
 /// `--trust-peer ADDR` is the only dial target. Clashing flags fail in the
 /// parser, before `ensure_datadir` creates a store.
 #[test]

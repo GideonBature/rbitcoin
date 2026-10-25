@@ -52,7 +52,7 @@ for signet/mainnet sync. **Not** CLI.
 
 | Env | Use |
 |-----|-----|
-| `RBITCOIN_TEST_DROP_STORE` | Node/store test fixture |
+| `RBITCOIN_TEST_DROP_STORE` | `1` or `true`: `--smoke` deletes the store before shutdown so the shutdown error path runs (`NodeEnv::test_drop_store`) |
 | `RBITCOIN_CORE_DATA` | Directory of Core JSON corpora for consensus tests |
 
 ## Deleted / do not reintroduce
