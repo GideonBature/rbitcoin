@@ -145,7 +145,9 @@ class FakeEsplora(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path.startswith("/address/") and path.endswith("/utxo"):
+        if path == "/blocks/tip/height":
+            body = json.dumps(STORE["tip"]).encode()
+        elif path.startswith("/address/") and path.endswith("/utxo"):
             addr = path[len("/address/") : -len("/utxo")]
             body = json.dumps(STORE["utxos"].get(addr, [])).encode()
         elif path.startswith("/tx/") and path.endswith("/status"):
@@ -243,4 +245,177 @@ print("ok - rpc_wallet createwallet / combo / listunspent / send / gettransactio
 proxy.shutdown()
 node.shutdown()
 esplora.shutdown()
+PY
+
+python3 - <<'PY'
+"""Esplora binds after the scripthash collect. Balance must wait, not read as zero."""
+import base64
+import hashlib
+import json
+import socket
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from rpc_proxy import RpcProxy
+from rpc_util import COIN
+from rpc_wallet import CACHE_WIF_0, register_wallet
+from test_framework.address import address_to_scriptpubkey, base58_to_byte, key_to_p2pkh
+from test_framework.descriptors import descsum_create
+from test_framework.key import ECKey
+
+data, _ver = base58_to_byte(CACHE_WIF_0)
+key = ECKey()
+key.set(data[:32], True)
+pub = key.get_pubkey().get_bytes()
+p2pkh = key_to_p2pkh(pub)
+spk = bytes(address_to_scriptpubkey(p2pkh))
+sh = hashlib.sha256(spk).digest()[::-1].hex()
+TXID = "22" * 32
+COOKIE = "__cookie__:secret"
+TIP = 200
+UTXO = {
+    "txid": TXID,
+    "vout": 0,
+    "value": 50 * COIN,
+    "status": {"confirmed": True, "block_height": 1},
+}
+TX = {"vin": [{"is_coinbase": True}], "vout": [{"value": 50 * COIN}]}
+
+
+class Node(BaseHTTPRequestHandler):
+    def log_message(self, *_a):
+        return
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        item = json.loads(self.rfile.read(n).decode())
+        result = TIP if item.get("method") == "getblockcount" else None
+        error = None if result is not None else {"code": -32601, "message": "no"}
+        body = json.dumps({"result": result, "error": error, "id": item.get("id")}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def free_port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+class Esplora(BaseHTTPRequestHandler):
+    def log_message(self, *_a):
+        return
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/blocks/tip/height":
+            body = json.dumps(TIP).encode()
+        elif path.startswith("/address/") and path.endswith("/utxo"):
+            addr = path[len("/address/") : -len("/utxo")]
+            body = json.dumps([UTXO] if addr == p2pkh else []).encode()
+        elif path == f"/scripthash/{sh}/utxo":
+            body = json.dumps([UTXO]).encode()
+        elif path == f"/tx/{TXID}":
+            body = json.dumps(TX).encode()
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def listen_later(port: int, delay_s: float) -> HTTPServer:
+    time.sleep(delay_s)
+    httpd = HTTPServer(("127.0.0.1", port), Esplora)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def proxy_on(esplora_port: int) -> tuple[RpcProxy, HTTPServer, int]:
+    node = HTTPServer(("127.0.0.1", 0), Node)
+    threading.Thread(target=node.serve_forever, daemon=True).start()
+    proxy = RpcProxy(
+        ("127.0.0.1", 0),
+        f"http://127.0.0.1:{node.server_address[1]}",
+        lambda: COOKIE,
+    )
+    register_wallet(proxy, f"http://127.0.0.1:{esplora_port}")
+    proxy.start()
+    return proxy, node, proxy._httpd.server_address[1]
+
+
+def call(port: int, method: str, params=None, timeout: float = 30):
+    tok = base64.b64encode(COOKIE.encode()).decode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/",
+        data=json.dumps(
+            {"jsonrpc": "1.0", "id": 1, "method": method, "params": params or []}
+        ).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Basic " + tok,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def import_wallet(port: int) -> None:
+    body = call(port, "createwallet", ["w"])
+    assert body["error"] is None, body
+    desc = descsum_create(f"combo({CACHE_WIF_0})")
+    body = call(port, "importdescriptors", [[{"desc": desc, "timestamp": 0}]])
+    assert body["error"] is None and body["result"][0]["success"], body
+
+
+# Listener comes up after the old 4s retry would have given up.
+late_port = free_port()
+threading.Thread(target=listen_later, args=(late_port, 5), daemon=True).start()
+proxy, node, listen = proxy_on(late_port)
+import_wallet(listen)
+body = call(listen, "getbalance")
+assert body["error"] is None, body
+assert body["result"] == 50, body
+raw = f"raw({spk.hex()})"
+body = call(listen, "scantxoutset", ["start", [raw]])
+assert body["error"] is None, body
+assert body["result"]["total_amount"] == 50, body
+assert len(body["result"]["unspents"]) == 1, body
+proxy.shutdown()
+node.shutdown()
+print("ok - balance and scantxoutset wait for a late esplora")
+
+# A listener that never binds is an error, not a zero balance.
+import rpc_proxy
+
+_saved_ready = getattr(rpc_proxy, "ESPLORA_READY_S", 60.0)
+rpc_proxy.ESPLORA_READY_S = 0.4
+dead_port = free_port()
+proxy, node, listen = proxy_on(dead_port)
+import_wallet(listen)
+body = call(listen, "getbalance", timeout=10)
+assert body["error"] is not None, body
+assert body["error"]["code"] == -1, body
+assert "esplora unreachable" in body["error"]["message"], body
+assert body["result"] != 0, body
+body = call(listen, "scantxoutset", ["start", [raw]], timeout=10)
+assert body["error"] is not None, body
+assert "esplora unreachable" in body["error"]["message"], body
+proxy.shutdown()
+node.shutdown()
+rpc_proxy.ESPLORA_READY_S = _saved_ready
+print("ok - dead esplora is an error, not a zero balance")
 PY

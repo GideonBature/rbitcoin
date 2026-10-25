@@ -99,6 +99,8 @@ seen = []
 
 def esplora(path):
     seen.append(path)
+    if path == "/blocks/tip/height":
+        return 5
     if path == f"/scripthash/{sh}/utxo":
         return [
             {

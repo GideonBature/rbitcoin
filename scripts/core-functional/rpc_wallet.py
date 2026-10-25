@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from rpc_proxy import RpcError, shim_miniwallet_scantxoutset
+from rpc_proxy import RpcError, shim_miniwallet_scantxoutset, wait_esplora_tip
 from core_dest import decode_destination
 from rpc_util import (
     COIN,
@@ -172,14 +172,20 @@ class WalletHub:
         except RpcError:
             return None
 
-    def _esplora(self, path: str, timeout: float = 5.0) -> Any:
+    def _esplora_once(self, path: str, timeout: float = 5.0) -> Any:
         url = self.esplora_url + path
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+            raise RpcError(ERR_MISC, f"esplora unreachable: {e}") from e
+
+    def _esplora(self, path: str, timeout: float = 5.0) -> Any:
         last: Exception | None = None
         for _ in range(40):
             try:
-                with urllib.request.urlopen(url, timeout=timeout) as resp:
-                    return json.loads(resp.read().decode())
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+                return self._esplora_once(path, timeout=timeout)
+            except RpcError as e:
                 last = e
                 time.sleep(0.1)
         raise RpcError(ERR_MISC, f"esplora unreachable: {last}")
@@ -338,15 +344,13 @@ class WalletHub:
 
     def _esplora_utxos(self, w: Wallet) -> list[dict[str, Any]]:
         tip = self._tip()
+        wait_esplora_tip(self._esplora_once, tip)
         found: list[dict[str, Any]] = []
         seen: set[tuple[str, int]] = set()
         for addr in list(w.addr_index.keys()):
-            try:
-                arr = self._esplora(f"/address/{addr}/utxo")
-            except RpcError:
-                continue
+            arr = self._esplora_once(f"/address/{addr}/utxo")
             if not isinstance(arr, list):
-                continue
+                raise RpcError(ERR_MISC, "esplora utxo was not a list")
             for u in arr:
                 if not isinstance(u, dict):
                     continue
@@ -488,7 +492,7 @@ class WalletHub:
     def scantxoutset(self, params: Any) -> dict[str, Any]:
         height = int(self._node("getblockcount", []))
         return shim_miniwallet_scantxoutset(
-            params, esplora=self._esplora, tip_height=height
+            params, esplora=self._esplora_once, tip_height=height
         )
 
     def listunspent(self, params: Any) -> list[dict[str, Any]]:

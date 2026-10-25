@@ -14,6 +14,7 @@ import hmac
 import json
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from decimal import Decimal
@@ -328,6 +329,29 @@ def _sat_btc(sats: int) -> float:
     return float(Decimal(sats) / Decimal(100_000_000))
 
 
+# Esplora binds after the scripthash collect. The old 4s retry gave up
+# while the listener was still down and the wallet reported a zero balance.
+ESPLORA_READY_S = 60.0
+_ESPLORA_POLL_S = 0.1
+
+
+def wait_esplora_tip(esplora: Callable[[str], Any], tip_height: int) -> None:
+    """Return once `GET /blocks/tip/height` matches the node tip."""
+    deadline = time.monotonic() + ESPLORA_READY_S
+    last: BaseException | None = None
+    while True:
+        try:
+            height = esplora("/blocks/tip/height")
+            if int(height) == int(tip_height):
+                return
+            last = None
+        except (RpcError, TypeError, ValueError) as exc:
+            last = exc
+        if time.monotonic() >= deadline:
+            raise RpcError(-1, f"esplora unreachable: {last}")
+        time.sleep(_ESPLORA_POLL_S)
+
+
 def shim_miniwallet_scantxoutset(
     params: Any, *, esplora: Callable[[str], Any], tip_height: int
 ) -> dict[str, Any]:
@@ -345,8 +369,12 @@ def shim_miniwallet_scantxoutset(
     unspents: list[dict[str, Any]] = []
     total = 0
     tx_cache: dict[str, Any] = {}
+    ready = False
     for obj in objects:
         script = _raw_script(obj)
+        if not ready:
+            wait_esplora_tip(esplora, tip_height)
+            ready = True
         sh = hashlib.sha256(script).digest()[::-1].hex()
         rows = esplora(f"/scripthash/{sh}/utxo")
         if not isinstance(rows, list):
