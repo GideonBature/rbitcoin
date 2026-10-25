@@ -8,8 +8,10 @@ use rbitcoin_primitives::{
 };
 
 use rbitcoin_store::HeadScale;
+use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 /// Default max concurrent inbound P2P sessions (same as net `DEFAULT_MAX_INBOUND`).
@@ -290,14 +292,48 @@ impl Default for RpcOpts {
     }
 }
 
+/// `RBITCOIN_*` node process env, read once by the process shell
+/// ([`Self::from_env`]) and passed to [`crate::cli_main`].
+/// Unset, non-UTF-8, and unparsable values are `None`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeEnv {
+    /// `RBITCOIN_P2P_MAX_INBOUND`, when positive.
+    pub p2p_max_inbound: Option<u32>,
+}
+
+impl NodeEnv {
+    /// Snapshot the process env. Only a process shell calls this.
+    pub fn from_env() -> Self {
+        Self::from_vars(std::env::vars_os())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        let mut env = Self::default();
+        for (key, val) in vars {
+            let (Some(key), Some(val)) = (key.as_ref().to_str(), val.as_ref().to_str()) else {
+                continue;
+            };
+            if key == "RBITCOIN_P2P_MAX_INBOUND" {
+                env.p2p_max_inbound = u32::from_str(val).ok().filter(|&n| n > 0);
+            }
+        }
+        env
+    }
+}
+
 /// Node process configuration (CLI + optional conf file).
 ///
 /// Operator-critical knobs live here. Advanced IO/perf tunables may still be
 /// set via `RBITCOIN_*` env vars (documented as advanced); normal signet/mainnet
 /// sync does not require any env export.
 ///
-/// **Env input:** [`Self::absorb_inbound_env`] reads `RBITCOIN_P2P_MAX_INBOUND`
-/// once when inbound was not set on CLI/conf. It never writes process env.
+/// **Env input:** [`Self::absorb_inbound_env`] applies [`NodeEnv`] when
+/// inbound was not set on CLI/conf.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NodeConfig {
@@ -1024,17 +1060,11 @@ impl NodeConfig {
     }
 
     /// If inbound was not explicit on CLI/conf, honor `RBITCOIN_P2P_MAX_INBOUND`.
-    ///
-    /// Input only — does not publish process env.
-    pub fn absorb_inbound_env(&mut self) {
+    pub fn absorb_inbound_env(&mut self, env: &NodeEnv) {
         if self.listen.max_inbound_explicit {
             return;
         }
-        if let Some(n) = std::env::var("RBITCOIN_P2P_MAX_INBOUND")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&n: &u32| n > 0)
-        {
+        if let Some(n) = env.p2p_max_inbound {
             self.listen.max_inbound = n;
         }
     }

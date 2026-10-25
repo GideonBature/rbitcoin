@@ -1,6 +1,6 @@
 use rbitcoin_ibd::IbdConfig;
 use rbitcoin_net::{AddrMan, Dialer, PeerConnType, TipEvent};
-use rbitcoin_node::config::{parse_btc_to_sat, NodeConfig};
+use rbitcoin_node::config::{parse_btc_to_sat, NodeConfig, NodeEnv};
 use rbitcoin_node::run::*;
 use rbitcoin_query::Query;
 use std::net::SocketAddr;
@@ -78,15 +78,18 @@ fn trust_peer_dials_only_that_peer() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("rbitcoin-trust-dial-{n}"));
     let addr = "192.0.2.1:8333";
-    let cfg = match operator_config_from_args([
-        "rbitcoin-node",
-        "--datadir",
-        dir.to_str().unwrap(),
-        "--network",
-        "regtest",
-        "--trust-peer",
-        addr,
-    ]) {
+    let cfg = match operator_config_from_args(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            dir.to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--trust-peer",
+            addr,
+        ],
+        &NodeEnv::default(),
+    ) {
         Ok(OperatorArgs::Ready { config, .. }) => config,
         other => panic!("expected config, got {other:?}"),
     };

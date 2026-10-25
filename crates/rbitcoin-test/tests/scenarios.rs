@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Amount, Block, BlockHash};
 use rbitcoin_cli::cli_main as cli_cli_main;
 use rbitcoin_consensus::{genesis_block, ChainParams, Milestone};
-use rbitcoin_node::{cli_main as node_cli_main, run_node, NodeConfig};
+use rbitcoin_node::{cli_main as node_cli_main, run_node, NodeConfig, NodeEnv};
 use rbitcoin_primitives::{Fk, Height, Network, VERSION};
 use rbitcoin_query::accept_and_connect_block;
 use rbitcoin_query::testutil::FixtureChain;
@@ -32,14 +32,17 @@ fn pin_conf_unknown_key_and_peertimeout(td: &TestDatadir) {
     let unknown_conf = unknown_dir.join("rbitcoin.conf");
     std::fs::write(&unknown_conf, "network=regtest\nunknown_key=1\n").unwrap();
     assert!(
-        exit_success(node_cli_main([
-            "rbitcoin-node",
-            "--datadir",
-            unknown_dir.join("data").to_str().unwrap(),
-            "--conf",
-            unknown_conf.to_str().unwrap(),
-            "--smoke",
-        ])),
+        exit_success(node_cli_main(
+            [
+                "rbitcoin-node",
+                "--datadir",
+                unknown_dir.join("data").to_str().unwrap(),
+                "--conf",
+                unknown_conf.to_str().unwrap(),
+                "--smoke",
+            ],
+            NodeEnv::default()
+        )),
         "unknown conf key must be ignored"
     );
 
@@ -52,35 +55,44 @@ fn pin_conf_unknown_key_and_peertimeout(td: &TestDatadir) {
         let p = d.join("rbitcoin.conf");
         std::fs::write(&p, body).unwrap();
         assert!(
-            !exit_success(node_cli_main([
-                "rbitcoin-node",
-                "--datadir",
-                d.join("data").to_str().unwrap(),
-                "--conf",
-                p.to_str().unwrap(),
-                "--smoke",
-            ])),
+            !exit_success(node_cli_main(
+                [
+                    "rbitcoin-node",
+                    "--datadir",
+                    d.join("data").to_str().unwrap(),
+                    "--conf",
+                    p.to_str().unwrap(),
+                    "--smoke",
+                ],
+                NodeEnv::default()
+            )),
             "{name} must fail start"
         );
     }
 
     assert!(
-        exit_success(node_cli_main([
-            "rbitcoin-node",
-            "--datadir",
-            td.path().join("peertimeout-one").to_str().unwrap(),
-            "--network",
-            "regtest",
-            "--peer-timeout",
-            "1",
-            "--smoke",
-        ])),
+        exit_success(node_cli_main(
+            [
+                "rbitcoin-node",
+                "--datadir",
+                td.path().join("peertimeout-one").to_str().unwrap(),
+                "--network",
+                "regtest",
+                "--peer-timeout",
+                "1",
+                "--smoke",
+            ],
+            NodeEnv::default()
+        )),
         "--peer-timeout=1 must smoke"
     );
 }
 
 fn node(args: &[&str]) -> ExitCode {
-    node_cli_main(std::iter::once("rbitcoin-node").chain(args.iter().copied()))
+    node_cli_main(
+        std::iter::once("rbitcoin-node").chain(args.iter().copied()),
+        NodeEnv::default(),
+    )
 }
 
 fn exit_is(c: ExitCode, want: u8) -> bool {
@@ -416,18 +428,30 @@ fn node_cli_and_surface_smoke() {
 
     for net in ["mainnet", "testnet", "signet", "regtest"] {
         let d = td.path().join(net);
-        assert!(exit_success(node_cli_main([
-            "rbitcoin-node",
-            "--datadir",
-            d.to_str().unwrap(),
-            "--network",
-            net,
-            "--smoke",
-        ])));
+        assert!(exit_success(node_cli_main(
+            [
+                "rbitcoin-node",
+                "--datadir",
+                d.to_str().unwrap(),
+                "--network",
+                net,
+                "--smoke",
+            ],
+            NodeEnv::default()
+        )));
     }
-    assert!(exit_success(node_cli_main(["rbitcoin-node", "--help"])));
-    assert!(exit_success(node_cli_main(["rbitcoin-node", "--version"])));
-    assert!(exit_success(node_cli_main(["rbitcoin-node", "-V"])));
+    assert!(exit_success(node_cli_main(
+        ["rbitcoin-node", "--help"],
+        NodeEnv::default()
+    )));
+    assert!(exit_success(node_cli_main(
+        ["rbitcoin-node", "--version"],
+        NodeEnv::default()
+    )));
+    assert!(exit_success(node_cli_main(
+        ["rbitcoin-node", "-V"],
+        NodeEnv::default()
+    )));
     // No node is listening: help and version answer without dialing RPC.
     for arg in ["--help", "-h", "--version", "-V", "help"] {
         assert!(
@@ -443,64 +467,73 @@ fn node_cli_and_surface_smoke() {
     pin_argv_usage_errors();
     // Electrum without --sh-index still smokes (channel-watch APIs; SH methods fail closed).
     let no_sh = td.path().join("electrum-no-shindex");
-    assert!(exit_success(node_cli_main([
-        "rbitcoin-node",
-        "--datadir",
-        no_sh.to_str().unwrap(),
-        "--network",
-        "regtest",
-        "--electrum-listen",
-        "127.0.0.1:0",
-        "--no-seeds",
-        "--milestone",
-        "0",
-        "--log-level",
-        "error",
-        "--smoke",
-    ])));
+    assert!(exit_success(node_cli_main(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            no_sh.to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--electrum-listen",
+            "127.0.0.1:0",
+            "--no-seeds",
+            "--milestone",
+            "0",
+            "--log-level",
+            "error",
+            "--smoke",
+        ],
+        NodeEnv::default()
+    )));
     let flags_ok = td.path().join("flags-ok");
-    assert!(exit_success(node_cli_main([
-        "rbitcoin-node",
-        "--datadir",
-        flags_ok.to_str().unwrap(),
-        "--network",
-        "regtest",
-        "--no-seeds",
-        "--milestone",
-        "0",
-        "--max-outbound",
-        "2",
-        "--mempool-size-mb",
-        "32",
-        "--max-run-secs",
-        "1",
-        "--log-level",
-        "warn",
-        "--listen",
-        "127.0.0.1:0",
-        "--connect",
-        "127.0.0.1:1",
-        "--sh-index",
-        "--electrum-listen",
-        "127.0.0.1:0",
-        "--inhibit-suspend",
-        "--smoke",
-    ])));
+    assert!(exit_success(node_cli_main(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            flags_ok.to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--no-seeds",
+            "--milestone",
+            "0",
+            "--max-outbound",
+            "2",
+            "--mempool-size-mb",
+            "32",
+            "--max-run-secs",
+            "1",
+            "--log-level",
+            "warn",
+            "--listen",
+            "127.0.0.1:0",
+            "--connect",
+            "127.0.0.1:1",
+            "--sh-index",
+            "--electrum-listen",
+            "127.0.0.1:0",
+            "--inhibit-suspend",
+            "--smoke",
+        ],
+        NodeEnv::default()
+    )));
     assert!(
         flags_ok.join("store").is_dir(),
         "smoke must create the store under --datadir"
     );
     let flags_off = td.path().join("flags-log-off");
-    assert!(exit_success(node_cli_main([
-        "rbitcoin-node",
-        "--datadir",
-        flags_off.to_str().unwrap(),
-        "--network",
-        "regtest",
-        "--log-level",
-        "off",
-        "--smoke",
-    ])));
+    assert!(exit_success(node_cli_main(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            flags_off.to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--log-level",
+            "off",
+            "--smoke",
+        ],
+        NodeEnv::default()
+    )));
     let conf_dir = td.path().join("from-conf");
     std::fs::create_dir_all(&conf_dir).unwrap();
     let conf = conf_dir.join("rbitcoin.conf");
@@ -509,24 +542,30 @@ fn node_cli_and_surface_smoke() {
         "network=regtest\nmax_outbound=3\nlog_level=warn\nno_seeds=1\n",
     )
     .unwrap();
-    assert!(exit_success(node_cli_main([
-        "rbitcoin-node",
-        "--datadir",
-        conf_dir.join("data").to_str().unwrap(),
-        "--conf",
-        conf.to_str().unwrap(),
-        "--smoke",
-    ])));
-    assert!(!exit_success(node_cli_main([
-        "rbitcoin-node",
-        "--datadir",
-        td.path().join("peertimeout-zero").to_str().unwrap(),
-        "--network",
-        "regtest",
-        "--peer-timeout",
-        "0",
-        "--smoke",
-    ])));
+    assert!(exit_success(node_cli_main(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            conf_dir.join("data").to_str().unwrap(),
+            "--conf",
+            conf.to_str().unwrap(),
+            "--smoke",
+        ],
+        NodeEnv::default()
+    )));
+    assert!(!exit_success(node_cli_main(
+        [
+            "rbitcoin-node",
+            "--datadir",
+            td.path().join("peertimeout-zero").to_str().unwrap(),
+            "--network",
+            "regtest",
+            "--peer-timeout",
+            "0",
+            "--smoke",
+        ],
+        NodeEnv::default()
+    )));
     pin_conf_unknown_key_and_peertimeout(&td);
     pin_conf_file_refusals(&td);
     pin_validate_refusals(&td);
@@ -550,12 +589,15 @@ fn node_cli_and_surface_smoke() {
     {
         let _g = DROP_STORE_ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("RBITCOIN_TEST_DROP_STORE", "1");
-        assert!(!exit_success(node_cli_main([
-            "rbitcoin-node",
-            "--datadir",
-            td.path().join("shutdown-fail").to_str().unwrap(),
-            "--smoke",
-        ])));
+        assert!(!exit_success(node_cli_main(
+            [
+                "rbitcoin-node",
+                "--datadir",
+                td.path().join("shutdown-fail").to_str().unwrap(),
+                "--smoke",
+            ],
+            NodeEnv::default()
+        )));
         std::env::remove_var("RBITCOIN_TEST_DROP_STORE");
     }
 }

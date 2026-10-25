@@ -1,6 +1,7 @@
 use rbitcoin_consensus::default_milestone_height;
 use rbitcoin_node::cli::*;
 use rbitcoin_node::config::NodeConfig;
+use rbitcoin_node::config::NodeEnv;
 use rbitcoin_node::config::OPERATOR_ENV_TEST_LOCK;
 use rbitcoin_primitives::Network;
 use std::ffi::OsString;
@@ -36,7 +37,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    match operator_config_from_args(args) {
+    match operator_config_from_args(args, &NodeEnv::default()) {
         Ok(OperatorArgs::Ready { config, .. }) => config,
         other => panic!("expected assembled config, got {other:?}"),
     }
@@ -159,11 +160,11 @@ fn operator_conf_and_argv() {
     assert!(h.contains("Networks: mainnet|testnet|signet|regtest."));
     assert!(h.contains("[--signet-block-time SECS]"));
     assert!(matches!(
-        operator_config_from_args(["rbitcoin-node", "-V"]),
+        operator_config_from_args(["rbitcoin-node", "-V"], &NodeEnv::default()),
         Ok(OperatorArgs::Version)
     ));
     assert!(matches!(
-        operator_config_from_args(["rbitcoin-node", "--log-level=off"]),
+        operator_config_from_args(["rbitcoin-node", "--log-level=off"], &NodeEnv::default()),
         Ok(OperatorArgs::Ready {
             log_level_cli: Some(None),
             ..
@@ -291,7 +292,10 @@ fn operator_conf_and_argv() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("sp_tweaks_dust"), "{err}");
-    match operator_config_from_args(["rbitcoin-node", "--conf", bad_dust.to_str().unwrap()]) {
+    match operator_config_from_args(
+        ["rbitcoin-node", "--conf", bad_dust.to_str().unwrap()],
+        &NodeEnv::default(),
+    ) {
         Err(code) => assert_exit(code, ExitCode::from(2)),
         Ok(other) => panic!("bad sp_tweaks_dust conf assembled: {other:?}"),
     }
@@ -438,7 +442,7 @@ fn operator_conf_and_argv() {
         Some(40)
     );
     assert_exit(
-        cli_main(["rbitcoin-node", "--bytes-per-sigop=x"]),
+        cli_main(["rbitcoin-node", "--bytes-per-sigop=x"], NodeEnv::default()),
         ExitCode::from(2),
     );
     assert_eq!(
@@ -636,7 +640,7 @@ fn cli_rejects_bad_rpc_cookie_at_launch() {
             cookie.to_str().unwrap(),
         ];
         args.extend_from_slice(extra);
-        cli_main(args)
+        cli_main(args, NodeEnv::default())
     };
     assert_exit(run(&["--rpc-listen"]), ExitCode::FAILURE);
     std::fs::write(&cookie, "__cookie__:secret\n").unwrap();
@@ -664,34 +668,30 @@ fn cli_rejects_bad_rpc_cookie_at_launch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// CLI omit of inbound must not clobber pre-set advanced envs.
+/// `RBITCOIN_P2P_MAX_INBOUND` sets the inbound cap only when CLI and conf
+/// omit it. Zero and garbage keep the default.
 #[test]
-fn cli_omit_preserves_advanced_env() {
-    let _g = OPERATOR_ENV_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("RBITCOIN_P2P_MAX_INBOUND", "91");
-    let dir = tmp_datadir();
-    let code = cli_main([
-        "rbitcoin-node",
-        "--smoke",
-        "--network",
-        "regtest",
-        "--datadir",
-        dir.to_str().unwrap(),
-        "--log-level",
-        "error",
-        "--no-seeds",
-        "--milestone",
-        "0",
-    ]);
-    assert_exit(code, ExitCode::SUCCESS);
-    assert_eq!(
-        std::env::var("RBITCOIN_P2P_MAX_INBOUND").as_deref(),
-        Ok("91")
-    );
-    std::env::remove_var("RBITCOIN_P2P_MAX_INBOUND");
-    let _ = std::fs::remove_dir_all(&dir);
+fn inbound_env_is_below_cli_and_conf() {
+    use rbitcoin_node::config::DEFAULT_MAX_INBOUND;
+    let inbound = |args: &[&str], val: &str| {
+        let env = NodeEnv::from_vars([("RBITCOIN_P2P_MAX_INBOUND", val)]);
+        let args = std::iter::once("rbitcoin-node").chain(args.iter().copied());
+        match operator_config_from_args(args, &env) {
+            Ok(OperatorArgs::Ready { config, .. }) => config.listen.max_inbound,
+            other => panic!("expected assembled config, got {other:?}"),
+        }
+    };
+    assert_eq!(inbound(&[], "91"), 91);
+    assert_eq!(inbound(&["--max-inbound", "12"], "91"), 12);
+    assert_eq!(inbound(&[], "0"), DEFAULT_MAX_INBOUND);
+    assert_eq!(inbound(&[], "many"), DEFAULT_MAX_INBOUND);
+
+    let conf_dir = tmp_datadir();
+    std::fs::create_dir_all(&conf_dir).unwrap();
+    let conf = conf_dir.join("rbitcoin.conf");
+    std::fs::write(&conf, "max_inbound=7\n").unwrap();
+    assert_eq!(inbound(&["--conf", conf.to_str().unwrap()], "91"), 7);
+    let _ = std::fs::remove_dir_all(&conf_dir);
 }
 
 /// `--trust-peer ADDR` is the only dial target. Clashing flags fail in the
@@ -712,7 +712,7 @@ fn trust_peer_addr() {
         "help must name --trust-peer with an address"
     );
 
-    let missing = operator_config_from_args(["rbitcoin-node", "--trust-peer"]);
+    let missing = operator_config_from_args(["rbitcoin-node", "--trust-peer"], &NodeEnv::default());
     assert!(missing.is_err(), "bare --trust-peer must not start");
 
     let dir = tmp_datadir();
@@ -823,7 +823,7 @@ fn trust_peer_clashing_flags() {
         let mut args = vec!["rbitcoin-node", "--datadir", dir.to_str().unwrap()];
         args.extend_from_slice(extra);
         assert!(
-            operator_config_from_args(args).is_err(),
+            operator_config_from_args(args, &NodeEnv::default()).is_err(),
             "expected start error for {extra:?}"
         );
         assert!(!dir.exists(), "clash must not create the datadir");

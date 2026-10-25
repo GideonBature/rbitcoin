@@ -11,8 +11,9 @@ below. Do not grow env surface without a damn-good reason.
 | **`RBITCOIN_LOG`** / **`RUST_LOG`** | Bootstrap logging before conf parse; CLI `--log-level` wins when set |
 | **`RBITCOIN_IO`** | Field escape hatch: `uring` \| `pool` \| `iocp` \| `pread`. **Single** bulk switch. `pread` disables the completion session. Unknown tokens (including deleted `mmap`) fall through to the default |
 
-`RBITCOIN_P2P_MAX_INBOUND` is an **input** when CLI/conf omit `--max-inbound`
-(`NodeConfig::absorb_inbound_env`). The node does not `set_var` it.
+`RBITCOIN_P2P_MAX_INBOUND` is an **input** when CLI/conf omit `--max-inbound`.
+`main` reads it once into `NodeEnv` and passes that to `cli_main`
+(`NodeConfig::absorb_inbound_env`). Nothing below the process shell reads it.
 
 ## Unstable (honored, not advertised)
 
