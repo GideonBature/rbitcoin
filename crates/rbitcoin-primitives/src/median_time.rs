@@ -14,7 +14,7 @@ impl<'a> MedianWindow<'a> {
     }
 }
 
-/// Median of `times` (unsorted OK). The lower middle when the count is even.
+/// Median of `times` (unsorted OK). The upper middle when the count is even.
 pub fn median_time_past_times(times: MedianWindow<'_>) -> u32 {
     let mut sorted = times.times.to_vec();
     sorted.sort_unstable();
