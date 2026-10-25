@@ -13,7 +13,7 @@ stays a scan at that size.
 An unsolicited block frame, and a frame whose hash is already queued, is
 dropped before the body-queue copy. Assign will not issue a new getdata
 hash when body-queue `bytes()` plus outstanding hashes × 4 MiB
-(`GETDATA_RESERVE_BYTES`) would pass `bq_assign_stop_bytes`. A hash that
+(`GETDATA_RESERVE_BYTES`) would pass `IbdConfig::assign_stop_bytes`. A hash that
 is already in inflight is still offered. Those two counters are the queue
 byte total (`bq RAM=`) and `inflight.len() * 4 MiB`. Offer does not add
 a second timer.

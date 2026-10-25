@@ -1,51 +1,5 @@
 use rbitcoin_query::soft_densify::*;
 
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[test]
-fn default_assign_stop_is_1gib() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev_b = std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES");
-    let prev_g = std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB");
-    std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
-    std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
-    assert_eq!(bq_assign_stop_bytes(), BQ_ASSIGN_STOP_BYTES);
-    assert_eq!(BQ_ASSIGN_STOP_BYTES, 1024 * 1024 * 1024);
-    match prev_b {
-        Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
-        None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
-    }
-    match prev_g {
-        Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
-        None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
-    }
-}
-
-#[test]
-fn assign_stop_env_bytes_wins_zero_unlimited() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev_b = std::env::var_os("RBITCOIN_BLOCK_QUEUE_BYTES");
-    let prev_g = std::env::var_os("RBITCOIN_BLOCK_QUEUE_GB");
-    std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", "2");
-    std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", "4096");
-    assert_eq!(bq_assign_stop_bytes(), 4096);
-    std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES");
-    assert_eq!(bq_assign_stop_bytes(), 2u64 * 1024 * 1024 * 1024);
-    std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", "0");
-    assert_eq!(bq_assign_stop_bytes(), u64::MAX);
-    std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB");
-    std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", "0");
-    assert_eq!(bq_assign_stop_bytes(), u64::MAX);
-    match prev_b {
-        Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_BYTES", v),
-        None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_BYTES"),
-    }
-    match prev_g {
-        Some(v) => std::env::set_var("RBITCOIN_BLOCK_QUEUE_GB", v),
-        None => std::env::remove_var("RBITCOIN_BLOCK_QUEUE_GB"),
-    }
-}
-
 #[test]
 fn assign_stop_clamps_to_confirm_window_and_fetched() {
     let stop = 2048u64;

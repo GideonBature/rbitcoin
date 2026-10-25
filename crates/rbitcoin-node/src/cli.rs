@@ -194,6 +194,9 @@ pub fn finish_operator_config(
     }
     config.smoke = smoke;
     config.absorb_inbound_env(env);
+    if let Some(stop) = env.bq_assign_stop_bytes {
+        config.bq_assign_stop_bytes = stop;
+    }
     config.resolve_listen_defaults();
     if let Err(e) = config.seal_trust_peer() {
         eprintln!("error: {e}");

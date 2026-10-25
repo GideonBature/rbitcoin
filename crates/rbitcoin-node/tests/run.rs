@@ -700,11 +700,12 @@ fn follow_connect_timeout_i2p_is_longer_than_clearnet() {
 #[test]
 fn catch_up_retry_config_uses_production_not_for_test() {
     let peers = std::sync::Arc::new(std::sync::Mutex::new(rbitcoin_net::AddrMan::new()));
-    let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers), Dialer::Direct);
+    let cfg = catch_up_retry_config(std::sync::Arc::clone(&peers), Dialer::Direct, 4096);
     let prod = IbdConfig::default();
     let test = IbdConfig::for_test();
 
     assert_eq!(cfg.target_peers, 1);
+    assert_eq!(cfg.assign_stop_bytes, 4096, "the node's block-queue cap");
     assert_eq!(
         cfg.initial_dial_waves, 1,
         "a stale-tip retry dials one wave"

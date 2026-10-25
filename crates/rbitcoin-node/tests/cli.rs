@@ -683,6 +683,30 @@ fn inbound_env_is_below_cli_and_conf() {
     let _ = std::fs::remove_dir_all(&conf_dir);
 }
 
+/// `RBITCOIN_BLOCK_QUEUE_BYTES` wins over `RBITCOIN_BLOCK_QUEUE_GB`. `0` is
+/// unlimited. An unparsable value falls through to the next source.
+#[test]
+fn block_queue_env_sets_the_assign_stop() {
+    use rbitcoin_query::BQ_ASSIGN_STOP_BYTES;
+    const BYTES: &str = "RBITCOIN_BLOCK_QUEUE_BYTES";
+    const GB: &str = "RBITCOIN_BLOCK_QUEUE_GB";
+    let stop = |vars: &[(&str, &str)]| {
+        let env = NodeEnv::from_vars(vars.iter().copied());
+        match operator_config_from_args(["rbitcoin-node"], &env) {
+            Ok(OperatorArgs::Ready { config, .. }) => config.bq_assign_stop_bytes,
+            other => panic!("expected assembled config, got {other:?}"),
+        }
+    };
+    assert_eq!(stop(&[]), BQ_ASSIGN_STOP_BYTES);
+    assert_eq!(stop(&[(GB, "2")]), 2 << 30);
+    assert_eq!(stop(&[(GB, "2"), (BYTES, "4096")]), 4096);
+    assert_eq!(stop(&[(BYTES, "4096"), (GB, "2")]), 4096);
+    assert_eq!(stop(&[(GB, "0")]), u64::MAX);
+    assert_eq!(stop(&[(BYTES, "0"), (GB, "2")]), u64::MAX);
+    assert_eq!(stop(&[(BYTES, "lots"), (GB, "2")]), 2 << 30);
+    assert_eq!(stop(&[(GB, "lots")]), BQ_ASSIGN_STOP_BYTES);
+}
+
 /// `RBITCOIN_TEST_DROP_STORE` is on only for `1` or `true` (any case).
 #[test]
 fn drop_store_env_is_on_only_when_true() {

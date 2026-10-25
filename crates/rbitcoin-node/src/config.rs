@@ -300,6 +300,9 @@ impl Default for RpcOpts {
 pub struct NodeEnv {
     /// `RBITCOIN_P2P_MAX_INBOUND`, when positive.
     pub p2p_max_inbound: Option<u32>,
+    /// `RBITCOIN_BLOCK_QUEUE_BYTES`, else `RBITCOIN_BLOCK_QUEUE_GB` in GiB.
+    /// `0` is unlimited (`u64::MAX`).
+    pub bq_assign_stop_bytes: Option<u64>,
     /// `RBITCOIN_TEST_DROP_STORE` is on: `--smoke` deletes the store before
     /// shutdown, so the shutdown error path runs.
     pub test_drop_store: bool,
@@ -318,12 +321,19 @@ impl NodeEnv {
         V: AsRef<OsStr>,
     {
         let mut env = Self::default();
+        let (mut bq_bytes, mut bq_gib) = (None, None);
         for (key, val) in vars {
             let val = val.as_ref().to_str();
             match key.as_ref().to_str() {
                 Some("RBITCOIN_P2P_MAX_INBOUND") => {
                     env.p2p_max_inbound =
                         val.and_then(|v| u32::from_str(v).ok()).filter(|&n| n > 0);
+                }
+                Some("RBITCOIN_BLOCK_QUEUE_BYTES") => {
+                    bq_bytes = val.and_then(|v| u64::from_str(v).ok());
+                }
+                Some("RBITCOIN_BLOCK_QUEUE_GB") => {
+                    bq_gib = val.and_then(|v| u64::from_str(v).ok());
                 }
                 Some("RBITCOIN_TEST_DROP_STORE") => {
                     env.test_drop_store =
@@ -332,6 +342,9 @@ impl NodeEnv {
                 _ => {}
             }
         }
+        env.bq_assign_stop_bytes = bq_bytes
+            .or(bq_gib.map(|g| g.saturating_mul(1 << 30)))
+            .map(|n| if n == 0 { u64::MAX } else { n });
         env
     }
 }
@@ -374,6 +387,9 @@ pub struct NodeConfig {
     pub datadir_hdd: bool,
     /// RAM cap for the prune witness window. `0` keeps nothing in RAM.
     pub prune_seqsigwit_ram_threshold_bytes: u64,
+    /// IBD densify assign-stop in block-queue bytes. `u64::MAX` is unlimited.
+    /// Set only from [`NodeEnv::bq_assign_stop_bytes`].
+    pub bq_assign_stop_bytes: u64,
     /// Persist / serve BIP-352 tweaks from `sp_tweaks.*`. Default **off**.
     pub sptweaks: bool,
     /// Electrum tweaks: omit P2TR outs with `value <=` this (sats). `0` serves
@@ -512,6 +528,7 @@ impl Default for NodeConfig {
             prune_seqsigwit: false,
             datadir_hdd: false,
             prune_seqsigwit_ram_threshold_bytes: 256 * 1024 * 1024,
+            bq_assign_stop_bytes: rbitcoin_query::BQ_ASSIGN_STOP_BYTES,
             sptweaks: false,
             sptweaks_dust: rbitcoin_electrum::DEFAULT_TWEAKS_MIN_DUST,
             max_sh_creates: rbitcoin_query::DEFAULT_MAX_SH_CREATES,

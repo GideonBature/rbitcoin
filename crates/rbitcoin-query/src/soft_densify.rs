@@ -40,26 +40,6 @@ pub fn soft_assign_stopped(depth_bytes: u64, stop_bytes: u64) -> bool {
     stop_bytes != 0 && stop_bytes != u64::MAX && depth_bytes >= stop_bytes
 }
 
-/// Assign-stop from env, or [`BQ_ASSIGN_STOP_BYTES`]. `_BYTES` wins over `_GB`.
-/// `0` means unlimited (`u64::MAX`). Invalid parse falls through.
-pub fn bq_assign_stop_bytes() -> u64 {
-    if let Ok(s) = std::env::var("RBITCOIN_BLOCK_QUEUE_BYTES") {
-        if let Ok(n) = s.parse::<u64>() {
-            return if n == 0 { u64::MAX } else { n };
-        }
-    }
-    if let Ok(s) = std::env::var("RBITCOIN_BLOCK_QUEUE_GB") {
-        if let Ok(n) = s.parse::<u64>() {
-            return if n == 0 {
-                u64::MAX
-            } else {
-                n.saturating_mul(1024 * 1024 * 1024)
-            };
-        }
-    }
-    BQ_ASSIGN_STOP_BYTES
-}
-
 /// Inclusive densify band high height for getdata assign.
 ///
 /// - **At/over** `assign_stop_bytes`: holes only within the ~1 min tip-rate

@@ -772,6 +772,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         &pinned,
         proxy_seeds_queued,
         config.network,
+        config.bq_assign_stop_bytes,
     )
     .await;
 
@@ -1456,8 +1457,11 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                     }
                 } else {
                     info!("ibd: retry catch-up from {peer} (tip stagnant, catch-up incomplete)");
-                    let mut retry_cfg =
-                        catch_up_retry_config(std::sync::Arc::clone(&shared_peers), node.dialer());
+                    let mut retry_cfg = catch_up_retry_config(
+                        std::sync::Arc::clone(&shared_peers),
+                        node.dialer(),
+                        config.bq_assign_stop_bytes,
+                    );
                     if node.hub.query.trust_peer() {
                         retry_cfg.peers = None;
                     }
@@ -1974,6 +1978,7 @@ pub async fn run_ibd_or_skip(
     pinned: &[rbitcoin_net::NetAddr],
     proxy_seeds: bool,
     network: Network,
+    assign_stop_bytes: u64,
 ) -> CatchUp {
     let mut targets = ibd_targets.to_vec();
     // `--trust-peer` has one pinned dial. An empty list is a failed resolve,
@@ -2034,6 +2039,7 @@ pub async fn run_ibd_or_skip(
         peerless,
         peers: ibd_shared_peers(node.hub.query.trust_peer(), shared_peers),
         dialer: node.dialer(),
+        assign_stop_bytes,
         ..IbdConfig::default()
     };
     info!(
@@ -2640,6 +2646,7 @@ pub fn ibd_shared_peers(
 pub fn catch_up_retry_config(
     peers: std::sync::Arc<std::sync::Mutex<AddrMan>>,
     dialer: Dialer,
+    assign_stop_bytes: u64,
 ) -> IbdConfig {
     // One wave: the supervisor retries on its own clock, and a sweep here
     // would hold tip follow while it walks the shared book.
@@ -2648,6 +2655,7 @@ pub fn catch_up_retry_config(
         initial_dial_waves: 1,
         peers: Some(peers),
         dialer,
+        assign_stop_bytes,
         ..IbdConfig::default()
     }
 }
