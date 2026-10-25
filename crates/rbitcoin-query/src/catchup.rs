@@ -347,6 +347,12 @@ impl Query {
     /// Confirm keeps appending while this runs (`submitblock` during
     /// materialize). Each pass samples `txs.count()` and, when that count
     /// grew, scans the new tail before publishing the watermark.
+    ///
+    /// The chunk append holds `sh.appender`, the same mutex as
+    /// [`Query::apply_sh_job_inner`](crate::Query::apply_sh_job_inner).
+    /// `RBITCOIN_SH_FORCE_REBUILD` enters Tip before this tail, so
+    /// write-behind can be live. Two overlapping `put_create_batch_append`
+    /// calls on one scripthash corrupt the chain.
     #[doc(hidden)]
     pub fn backfill_sh_creates_from_class_a(&self) -> Result<u64, QueryError> {
         use crate::sh_builder::durable_sh_inclusion_floor;
@@ -377,20 +383,25 @@ impl Query {
             }
             rbitcoin_log::info!("node: scripthash Class A tail backfill first={first} last={last}");
             let mut lo = first;
-            while lo <= last {
-                let hi = lo.saturating_add(CHUNK.saturating_sub(1)).min(last);
-                let mut recs = Vec::new();
-                self.store
-                    .txs
-                    .for_each_script_hashes_in_fk_span(lo, hi, |fk, sh| {
-                        recs.push(ScriptHashRecord::from_fk(sh, fk));
-                        Ok(())
-                    })?;
-                if !recs.is_empty() {
-                    total = total.saturating_add(recs.len() as u64);
-                    self.store.scripthash.put_create_batch_append(&recs)?;
+            {
+                // Same exclusion as rbtc-sh-wb. A forced rebuild is already Tip.
+                // Dropped before flush so a sync does not stall that thread.
+                let _appender = self.sh.appender.lock().unwrap();
+                while lo <= last {
+                    let hi = lo.saturating_add(CHUNK.saturating_sub(1)).min(last);
+                    let mut recs = Vec::new();
+                    self.store
+                        .txs
+                        .for_each_script_hashes_in_fk_span(lo, hi, |fk, sh| {
+                            recs.push(ScriptHashRecord::from_fk(sh, fk));
+                            Ok(())
+                        })?;
+                    if !recs.is_empty() {
+                        total = total.saturating_add(recs.len() as u64);
+                        self.store.scripthash.put_create_batch_append(&recs)?;
+                    }
+                    lo = hi.saturating_add(1);
                 }
-                lo = hi.saturating_add(1);
             }
             self.store.scripthash.flush()?;
             self.store.scripthash.note_include_hwm(last)?;

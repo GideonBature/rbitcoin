@@ -388,7 +388,7 @@ fn class_a_tail_backfill_waits_on_sh_appender() {
     assert!(!q.sh_is_tip_ready());
     let sh_new = rbitcoin_store::script_hash(&[0x51, 3]);
     assert!(
-        q.scripthash_history(&sh_new).unwrap().is_empty(),
+        q.store.scripthash.entries(&sh_new).unwrap().is_empty(),
         "the lagging create is not indexed yet"
     );
 
@@ -415,9 +415,10 @@ fn class_a_tail_backfill_waits_on_sh_appender() {
         Err(_) => {}
     }
     assert!(
-        !q.scripthash_history(&sh_new).unwrap().is_empty(),
+        !q.store.scripthash.entries(&sh_new).unwrap().is_empty(),
         "the lagging create is indexed after the appender is released"
     );
+    assert!(q.store.scripthash.include_hwm() >= q.store.txs.count());
     assert!(q.sh_is_tip_ready());
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -368,7 +368,8 @@ pub struct ShWriteBehind {
     pub applying: Mutex<Option<connect::ShPendingJob>>,
     /// Pending + in-flight SH creates keyed by scripthash.
     pub ram_head: Mutex<HashMap<[u8; 32], Vec<Fk>>>,
-    /// Serializes the one Class B appender (worker vs generate drain).
+    /// Serializes Class B `put_create_batch_append`: write-behind, the
+    /// generate drain, and the Class A tail backfill.
     pub appender: Mutex<()>,
     /// Max create fk applied to the SH tables (may lead `include_hwm`).
     pub applied_max_fk: AtomicU64,
