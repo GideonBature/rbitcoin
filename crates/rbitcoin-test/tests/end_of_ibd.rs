@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
@@ -635,6 +635,101 @@ async fn crash_with_class_a_above_tip(miner: &P2PNode, synced: &mut Synced) {
     synced.hash = miner.hub.tip_hash().unwrap().to_string();
     drop(query);
     finish_partial(dir.path().as_path(), miner.local_addr, synced).await;
+}
+
+fn indexed_cfg(dir: &Path, follow: Option<SocketAddr>) -> NodeConfig {
+    let dummy = "127.0.0.1:1".parse().unwrap();
+    let mut cfg = syncer_cfg_sh(dir, follow.unwrap_or(dummy), true);
+    if follow.is_none() {
+        cfg.listen.connect.clear();
+    }
+    cfg
+}
+
+/// Accepts one follow dial, completes the handshake, and never sends `headers`.
+async fn silent_headers_peer() -> SocketAddr {
+    use bitcoin::p2p::Magic;
+    use rbitcoin_net::peer::{connect_and_handshake_timed, HandshakePolicy};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let Ok((stream, from)) = listener.accept().await else {
+            return;
+        };
+        let Ok((_ver, mut reader, _writer, _wire, _tcp)) = connect_and_handshake_timed(
+            Duration::from_secs(5),
+            stream,
+            Magic::REGTEST,
+            addr,
+            from,
+            0,
+            true,
+            "/rbitcoin:silent-headers/",
+            HandshakePolicy::plain(),
+        )
+        .await
+        else {
+            return;
+        };
+        while rbitcoin_net::v2::read_v2_contents(&mut reader)
+            .await
+            .is_ok()
+        {}
+    });
+    addr
+}
+
+/// The port opens on the tip this node already indexed. The only follow
+/// peer finishes the handshake and then sends no `headers`.
+async fn electrum_binds_on_indexed_tip() {
+    let dir = TestDatadir::new().unwrap();
+    let miner = start_miner(dir.path().as_path()).await;
+    let genesis = regtest_genesis();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+    let b1 = mine_regtest_block(genesis.block_hash(), now.saturating_sub(2), 1, vec![]);
+    let b2 = mine_regtest_block(b1.block_hash(), now.saturating_sub(1), 2, vec![]);
+    load_chain(&miner, &[genesis, b1, b2]);
+    let height = miner.tip_height().unwrap();
+    assert!(height > 0, "a height of 0 stays in catch-up");
+    miner.shutdown().await;
+
+    let packed = spawn_run_p2p(indexed_cfg(dir.path().as_path(), None));
+    let rpc = published_listener(dir.path().as_path(), "rpc", Duration::from_secs(30)).await;
+    let _electrum =
+        published_listener(dir.path().as_path(), "electrum", Duration::from_secs(60)).await;
+    stop_run_p2p(rpc, packed).await;
+
+    let peer = silent_headers_peer().await;
+    let started = Instant::now();
+    let node = spawn_run_p2p(indexed_cfg(dir.path().as_path(), Some(peer)));
+    let budget = llvm_cov_wall(8, 16);
+    let electrum = published_listener(dir.path().as_path(), "electrum", budget).await;
+    assert!(
+        started.elapsed() < budget,
+        "electrum took {:?}, past {budget:?}, while the follow peer sent no headers",
+        started.elapsed()
+    );
+    let rpc = published_listener(dir.path().as_path(), "rpc", Duration::from_secs(10)).await;
+    let count = jsonrpc(rpc, "getblockcount", json!([])).await;
+    assert_eq!(count["result"].as_u64(), Some(u64::from(height)));
+    assert!(
+        !history_txids(electrum, &[0x51]).await.is_empty(),
+        "indexed coinbases are visible when the port opens"
+    );
+    stop_run_p2p(rpc, node).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn electrum_binds_while_follow_sends_no_headers() {
+    let wall = llvm_cov_wall(90, 180);
+    tokio::time::timeout(wall, electrum_binds_on_indexed_tip())
+        .await
+        .expect("electrum_binds_while_follow_sends_no_headers wall");
 }
 
 async fn follow_journey() {
