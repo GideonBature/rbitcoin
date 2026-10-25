@@ -41,6 +41,36 @@ def pick_port() -> int:
     return port
 
 
+def rpc_until(url: str, cookie: str, method: str, params=None, deadline: float | None = None):
+    """Call until the proxy is past warmup.
+
+    JSON-RPC -28 is Core's loading code. The shim returns it after the tip
+    leaves IBD and before tx relay is on. Cache mining hits that window:
+    setmocktime makes the genesis tip fresh, then generatetoaddress has to
+    wait for relay. A refused connection is the same wait.
+    """
+    end = time.time() + 30 if deadline is None else deadline
+    last: object = None
+    while True:
+        remaining = end - time.time()
+        if remaining <= 0:
+            raise TimeoutError(last)
+        try:
+            resp = rpc_call(
+                url, cookie, method, params, timeout=max(1.0, remaining)
+            )
+        except Exception as exc:  # noqa: BLE001 — node or proxy not up yet
+            last = exc
+            time.sleep(0.1)
+            continue
+        err = resp.get("error") if isinstance(resp, dict) else None
+        if isinstance(err, dict) and err.get("code") == -28:
+            last = err
+            time.sleep(0.1)
+            continue
+        return resp
+
+
 def rpc_call(url: str, cookie: str, method: str, params=None, timeout: float = 30):
     body = json.dumps(
         {"jsonrpc": "1.0", "id": "cache", "method": method, "params": params or []}
@@ -130,51 +160,62 @@ def build_cache(cache: Path) -> int:
             return 1
         cookie = cookie_path.read_text().strip()
         url = f"http://127.0.0.1:{rpcport}/"
-        last_err = None
-        while time.time() < deadline:
-            try:
-                resp = rpc_call(url, cookie, "getblockcount")
-                if resp.get("result") == 0:
-                    break
-            except Exception as e:  # noqa: BLE001 — wait for RPC
-                last_err = e
-                time.sleep(0.1)
-        else:
-            print(f"create_cache: RPC not up ({last_err})", file=sys.stderr)
+        try:
+            resp = rpc_until(url, cookie, "getblockcount", deadline=deadline)
+        except TimeoutError as e:
+            print(f"create_cache: RPC not up ({e})", file=sys.stderr)
+            return 1
+        if resp.get("result") != 0:
+            print(f"create_cache: RPC not up ({resp})", file=sys.stderr)
             return 1
 
         # Core `_initialize_chain`: setmocktime(genesis tip) so the 199-block
         # cache ages from 2011, not wall clock. Startup then mines one wall-clock
         # block; MTP stays old so later setmocktime(now-25h)+generate works.
-        tip = rpc_call(url, cookie, "getbestblockhash").get("result")
-        if not tip:
-            print("create_cache: missing genesis tip hash", file=sys.stderr)
-            return 1
-        hdr = rpc_call(url, cookie, "getblockheader", [tip]).get("result") or {}
-        genesis_time = hdr.get("time")
-        if genesis_time is None:
-            print("create_cache: missing genesis tip time", file=sys.stderr)
-            return 1
-        resp = rpc_call(url, cookie, "setmocktime", [int(genesis_time)])
-        if resp.get("error"):
-            print(f"create_cache: setmocktime: {resp['error']}", file=sys.stderr)
-            return 1
-
-        # Same payee schedule as Core `_initialize_chain` (25×7 + 24).
-        gen_deadline = time.time() + 180
-        hashes: list = []
         try:
+            tip = rpc_until(url, cookie, "getbestblockhash", deadline=deadline).get(
+                "result"
+            )
+            if not tip:
+                print("create_cache: missing genesis tip hash", file=sys.stderr)
+                return 1
+            hdr = rpc_until(url, cookie, "getblockheader", [tip], deadline=deadline).get(
+                "result"
+            ) or {}
+            genesis_time = hdr.get("time")
+            if genesis_time is None:
+                print("create_cache: missing genesis tip time", file=sys.stderr)
+                return 1
+            resp = rpc_until(
+                url, cookie, "setmocktime", [int(genesis_time)], deadline=deadline
+            )
+            if resp.get("error"):
+                print(f"create_cache: setmocktime: {resp['error']}", file=sys.stderr)
+                return 1
+
+            # Same payee schedule as Core `_initialize_chain` (25×7 + 24).
+            # setmocktime drops IBD before relay is on, so these calls see -28
+            # until the proxy opens.
+            gen_deadline = time.time() + 180
+            hashes: list = []
             for i in range(8):
                 nblocks = 25 if i != 7 else 24
                 addr = CACHE_ADDRS[i % len(CACHE_ADDRS)]
-                resp = rpc_call(
-                    url, cookie, "generatetoaddress", [nblocks, addr], timeout=180
+                resp = rpc_until(
+                    url,
+                    cookie,
+                    "generatetoaddress",
+                    [nblocks, addr],
+                    deadline=gen_deadline,
                 )
                 if resp.get("error"):
-                    print(f"create_cache: generatetoaddress: {resp['error']}", file=sys.stderr)
+                    print(
+                        f"create_cache: generatetoaddress: {resp['error']}",
+                        file=sys.stderr,
+                    )
                     return 1
                 hashes.extend(resp.get("result") or [])
-        except Exception as e:  # noqa: BLE001
+        except TimeoutError as e:
             print(f"create_cache: generate failed: {e}", file=sys.stderr)
             return 1
         if len(hashes) != 199:
