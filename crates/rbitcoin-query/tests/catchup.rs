@@ -7,16 +7,9 @@ use rbitcoin_store::StoreError;
 use rbitcoin_store::{HeaderRecord, InputRecord, OutputRecord, TxRecord};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-
-/// Serialize FORCE_REBUILD env mutations (parallel tests share process env).
-static FORCE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn lock_force_env() -> std::sync::MutexGuard<'static, ()> {
-    FORCE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 fn coinbase_block(
     h: u32,
@@ -120,7 +113,6 @@ fn extend_direct_chain(q: &Query, add: u32) {
 
 #[test]
 fn finalize_sh_runs_durable_head_missing_hwm_keeps_seal() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-hwm");
     q.enter_direct_index_mode().unwrap();
     seed_direct_chain(&q, 3);
@@ -160,7 +152,6 @@ fn finalize_sh_runs_durable_head_missing_hwm_keeps_seal() {
 
 #[test]
 fn finalize_sh_runs_empty_head_leftover_seal_is_wiped() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-stale");
     q.enter_direct_index_mode().unwrap();
     assert!(!q.store.scripthash.has_durable_index());
@@ -181,7 +172,6 @@ fn finalize_sh_runs_empty_head_leftover_seal_is_wiped() {
 
 #[test]
 fn force_rebuild_recollects_class_a_not_empty_materialize() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-force-recol");
     seed_direct_chain(&q, 6);
     let _ = q.finalize_sh_runs().unwrap();
@@ -204,7 +194,6 @@ fn force_rebuild_recollects_class_a_not_empty_materialize() {
 
 #[test]
 fn unsorted_shards_finalize_skips_catalog_runs() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-unsorted");
     seed_direct_chain(&q, 5);
     let n_mat = q.finalize_sh_runs().expect("unsorted-shards finalize");
@@ -236,7 +225,6 @@ fn unsorted_shards_finalize_skips_catalog_runs() {
 
 #[test]
 fn durable_head_hwm_lag_discards_leftover_run() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-hwm-lag-skip");
     seed_direct_chain(&q, 6);
     let n0 = q.finalize_sh_runs().unwrap();
@@ -291,7 +279,6 @@ fn durable_head_hwm_lag_discards_leftover_run() {
 
 #[test]
 fn finalize_sh_appends_unsorted_when_done_lags_before_any_shard() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-done-lag");
     seed_direct_chain(&q, 3);
     let n_shards = q.store.scripthash.head_shard_count();
@@ -322,7 +309,6 @@ fn finalize_sh_appends_unsorted_when_done_lags_before_any_shard() {
 
 #[test]
 fn finalize_sh_backfills_class_a_tail_when_shards_already_sealed() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-shard-lag");
     seed_direct_chain(&q, 3);
     let _ = q.finalize_sh_runs().unwrap();
@@ -349,7 +335,6 @@ fn finalize_sh_backfills_class_a_tail_when_shards_already_sealed() {
 /// materialize refuses and Esplora never binds.
 #[test]
 fn backfill_includes_create_that_lands_after_count_sample() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-backfill-race");
     seed_direct_chain(&q, 3);
     let _ = q.finalize_sh_runs().unwrap();
@@ -377,7 +362,6 @@ fn extend_one_during_backfill(q: &Query) {
 /// tail has to wait on `sh.appender`.
 #[test]
 fn class_a_tail_backfill_waits_on_sh_appender() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-backfill-appender");
     let q = Arc::new(q);
     seed_direct_chain(&q, 3);
@@ -426,7 +410,6 @@ fn class_a_tail_backfill_waits_on_sh_appender() {
 /// behind the watermark, so the chase runs once more.
 #[test]
 fn finalize_chases_a_create_that_lands_after_the_ready_sample() {
-    let _g = lock_force_env();
     let (dir, q) = rbitcoin_query::testutil::tiny_query_labeled("q-sh-ready-gap");
     seed_direct_chain(&q, 3);
     let _ = q.finalize_sh_runs().unwrap();
