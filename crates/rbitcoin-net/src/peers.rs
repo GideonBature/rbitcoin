@@ -907,7 +907,7 @@ impl LivePeer {
     pub fn note_send_written(&self, n: usize) {
         let prev = self
             .send_queued
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(n))
             })
             .unwrap_or(0);
@@ -930,7 +930,7 @@ impl LivePeer {
     pub fn free_serve_slot(&self) {
         let _ = self
             .serve_inflight
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                 Some(v.saturating_sub(1))
             });
     }

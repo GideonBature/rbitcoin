@@ -700,6 +700,11 @@ fn cli_omit_preserves_advanced_env() {
 fn trust_peer_addr() {
     use rbitcoin_node::config::P2pListen;
     use rbitcoin_node::config::DEFAULT_MAX_INBOUND;
+    // `plain` pins the default inbound cap, which `RBITCOIN_P2P_MAX_INBOUND`
+    // overrides; `cli_omit_preserves_advanced_env` sets it under this lock.
+    let _g = OPERATOR_ENV_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     let h = operator_usage();
     assert!(

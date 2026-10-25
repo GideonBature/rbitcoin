@@ -225,7 +225,7 @@ impl GetdataWire {
         self.written_ms.store(now_ms, Ordering::Relaxed);
         let _ = self
             .unwritten
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(n))
             });
         self.arm_window_if_closed(now_ms);

@@ -1448,7 +1448,7 @@ impl ConfirmQueueDepths {
     #[doc(hidden)]
     pub fn note_batch_depth_send(depth: &AtomicUsize, hwm: &AtomicUsize) {
         let prev = depth
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_add(1))
             })
             .unwrap_or(0);
@@ -1458,7 +1458,7 @@ impl ConfirmQueueDepths {
     #[inline]
     #[doc(hidden)]
     pub fn note_batch_depth_recv(depth: &AtomicUsize) {
-        let _ = depth.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        let _ = depth.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
             Some(n.saturating_sub(1))
         });
     }
@@ -1467,16 +1467,16 @@ impl ConfirmQueueDepths {
     pub fn note_load_send(&self, blocks: usize, wire_bytes: usize) {
         let _ = self
             .lookup_to_load
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_add(1))
             });
         self.load_blocks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_add(blocks))
             })
             .ok();
         self.load_wire_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_add(wire_bytes))
             })
             .ok();
@@ -1485,12 +1485,12 @@ impl ConfirmQueueDepths {
     pub fn note_load_recv(&self, blocks: usize, wire_bytes: usize) {
         Self::note_batch_depth_recv(&self.lookup_to_load);
         self.load_blocks
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_sub(blocks))
             })
             .ok();
         self.load_wire_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_sub(wire_bytes))
             })
             .ok();
@@ -1603,7 +1603,7 @@ impl ConfirmQueueDepths {
             (wire_bytes, n_wire),
             (parents, n_parents),
         ] {
-            slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(op(cur, n)))
+            slot.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(op(cur, n)))
                 .ok();
         }
     }

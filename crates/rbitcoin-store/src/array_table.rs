@@ -28,7 +28,7 @@ use std::sync::{Mutex, RwLock};
 
 /// Packed dirty generation: `0` is clean. `set` bumps; flush CASes back to `0`.
 pub fn dirty_epoch_bump(epoch: &AtomicU64) {
-    let _ = epoch.fetch_update(Ordering::Release, Ordering::Relaxed, |e| {
+    let _ = epoch.try_update(Ordering::Release, Ordering::Relaxed, |e| {
         Some(e.wrapping_add(1).max(1))
     });
 }

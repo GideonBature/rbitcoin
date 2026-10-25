@@ -1754,7 +1754,7 @@ impl Store {
         use std::sync::atomic::Ordering;
         let v = u64::from(height).saturating_add(1);
         self.spend_annotate_from
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 let cur_h = cur & 0xffff_ffff;
                 let new_h = if cur_h == 0 { v } else { cur_h.min(v) };
                 let mut gen = (cur >> 32).wrapping_add(1);
@@ -1807,7 +1807,7 @@ impl Store {
         }
         let _ = self
             .spend_annotate_from
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 (cur == token).then_some(0)
             });
     }
@@ -1924,7 +1924,7 @@ impl Store {
         self.spend_reorg_gen.fetch_add(1, Ordering::AcqRel);
         let _ = self
             .spend_snapshot
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 let low = self
                     .confirmed
                     .tip_height()
