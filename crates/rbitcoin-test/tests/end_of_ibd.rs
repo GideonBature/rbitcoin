@@ -741,7 +741,10 @@ async fn electrum_binds_on_indexed_tip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn electrum_binds_while_follow_sends_no_headers() {
-    let wall = llvm_cov_wall(90, 180);
+    // Prebuild may spend 30s on RPC, 60s on Electrum, and 20s stopping.
+    // The bind check then has 8s (16s under coverage), plus 10s for RPC
+    // and 20s to stop. Those caps are 148s, and 156s under coverage.
+    let wall = llvm_cov_wall(160, 180);
     tokio::time::timeout(wall, electrum_binds_on_indexed_tip())
         .await
         .expect("electrum_binds_while_follow_sends_no_headers wall");
