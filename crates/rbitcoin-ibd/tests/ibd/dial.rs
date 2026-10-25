@@ -94,6 +94,252 @@ fn dummy_slot(id: usize, a: SocketAddr, alive: bool) -> PeerSlot {
 }
 
 #[test]
+fn onion_stall_kicks_keep_independent_cooldowns_and_strikes() {
+    let now = Instant::now();
+    let onions = [
+        rbitcoin_net::NetAddr::Onion {
+            pk: [1; 32],
+            port: 8333,
+        },
+        rbitcoin_net::NetAddr::Onion {
+            pk: [2; 32],
+            port: 8333,
+        },
+    ];
+    let mut cooldown = HashMap::new();
+    let mut strikes = HashMap::new();
+    for (id, net) in [onions[0], onions[1], onions[0]].into_iter().enumerate() {
+        let mut slot = dummy_slot(id, "0.0.0.0:8333".parse().unwrap(), true);
+        slot.net = net;
+        let h = hash_byte(id as u8);
+        put_on_wire(&mut slot, h, 0);
+        let mut inflight = HashMap::from([(h, rbitcoin_ibd::ibd::state::InflightReq::new(id))]);
+        let freed = disconnect_stalled_block_peers_at(
+            std::slice::from_mut(&mut slot),
+            &mut inflight,
+            &mut rbitcoin_ibd::ibd::body::BodyPresence::new(),
+            &mut cooldown,
+            &mut strikes,
+            now,
+            Duration::from_secs(30),
+            60_000,
+        );
+        assert_eq!(freed, vec![h]);
+        assert!(!slot.alive);
+        let blocked = dial_blocked_addrs(&[], &cooldown, now);
+        assert!(
+            blocked.contains(&net),
+            "kicked onion must be excluded from redial"
+        );
+        if id == 0 {
+            assert!(
+                !blocked.contains(&onions[1]),
+                "another onion on the same port stays free"
+            );
+        }
+    }
+    let after_first = now + STALL_ADDR_COOLDOWN;
+    expire_addr_cooldown(&mut cooldown, after_first);
+    assert_eq!(
+        dial_blocked_addrs(&[], &cooldown, after_first),
+        HashSet::from([onions[0]])
+    );
+    expire_addr_cooldown(&mut cooldown, now + STALL_ADDR_COOLDOWN_2);
+    assert!(dial_blocked_addrs(&[], &cooldown, now + STALL_ADDR_COOLDOWN_2).is_empty());
+}
+
+#[test]
+fn onion_dial_failure_is_excluded_until_cooldown_expires() {
+    let onion = rbitcoin_net::NetAddr::Onion {
+        pk: [3; 32],
+        port: 8333,
+    };
+    let mut book = AddrMan::new();
+    let mut cooldown = HashMap::new();
+    let mut strikes = HashMap::new();
+    let now = Instant::now();
+    apply_dial_result(
+        &mut book,
+        &DialBatchResult {
+            slots: vec![],
+            failed: vec![(onion, DialFailKind::Network)],
+            attempted: vec![onion],
+        },
+        &mut cooldown,
+        &mut strikes,
+        now,
+    );
+    assert!(dial_blocked_addrs(&[], &cooldown, now).contains(&onion));
+    expire_addr_cooldown(&mut cooldown, now + STALL_ADDR_COOLDOWN);
+    assert!(!dial_blocked_addrs(&[], &cooldown, now + STALL_ADDR_COOLDOWN).contains(&onion));
+}
+
+#[test]
+fn cooldown_selection_and_successful_redial_preserve_network_identity() {
+    use rbitcoin_net::NetAddr;
+    for (a, b) in [
+        (
+            NetAddr::Onion {
+                pk: [4; 32],
+                port: 8333,
+            },
+            NetAddr::Onion {
+                pk: [5; 32],
+                port: 8333,
+            },
+        ),
+        (NetAddr::from_socket(addr(4)), NetAddr::from_socket(addr(5))),
+        (
+            "[2606:4700::1]:8333".parse().unwrap(),
+            "[2606:4700::2]:8333".parse().unwrap(),
+        ),
+    ] {
+        let now = Instant::now();
+        let mut book = AddrMan::new();
+        book.set_onion_reachable(true);
+        book.add_addr(a);
+        book.add_addr(b);
+        let mut cooldown = HashMap::new();
+        let mut strikes = HashMap::new();
+        record_stall_kick(&mut cooldown, &mut strikes, a, now);
+        let mut exclude = dial_blocked_addrs(&[], &cooldown, now);
+        assert!(replacement_available(&book, &[], &cooldown, now));
+        assert_eq!(
+            admit_cooldown_fallback(&book, &mut exclude, &[], &cooldown, now, &HashSet::new()),
+            None
+        );
+        assert!(exclude.contains(&a));
+        book.note_attempt_addr(a);
+        record_stall_kick(&mut cooldown, &mut strikes, b, now);
+        assert!(!replacement_available(&book, &[], &cooldown, now));
+        exclude = dial_blocked_addrs(&[], &cooldown, now);
+        assert_eq!(
+            admit_cooldown_fallback(&book, &mut exclude, &[], &cooldown, now, &HashSet::new()),
+            Some(b)
+        );
+        assert!(exclude.contains(&a));
+        assert!(!exclude.contains(&b));
+        let mut held = dial_blocked_addrs(&[], &cooldown, now);
+        assert_eq!(
+            admit_cooldown_fallback(&book, &mut held, &[], &cooldown, now, &HashSet::from([b])),
+            Some(a)
+        );
+        let mut slot = dummy_slot(
+            1,
+            b.socket_addr().unwrap_or("0.0.0.0:8333".parse().unwrap()),
+            true,
+        );
+        slot.net = b;
+        apply_dial_result(
+            &mut book,
+            &DialBatchResult {
+                slots: vec![slot],
+                failed: vec![],
+                attempted: vec![b],
+            },
+            &mut cooldown,
+            &mut strikes,
+            now,
+        );
+        assert_eq!(dial_blocked_addrs(&[], &cooldown, now), HashSet::from([a]));
+        assert_eq!(
+            record_stall_kick(&mut cooldown, &mut strikes, b, now),
+            STALL_ADDR_COOLDOWN_2
+        );
+        expire_addr_cooldown(&mut cooldown, now + STALL_ADDR_COOLDOWN);
+        assert!(replacement_available(
+            &book,
+            &[],
+            &cooldown,
+            now + STALL_ADDR_COOLDOWN
+        ));
+        assert_eq!(
+            dial_blocked_addrs(&[], &cooldown, now + STALL_ADDR_COOLDOWN),
+            HashSet::from([b])
+        );
+    }
+}
+
+#[test]
+fn onion_relative_slow_eviction_requires_an_uncooled_replacement() {
+    use rbitcoin_net::NetAddr;
+    let now = Instant::now();
+    let spare = NetAddr::Onion {
+        pk: [99; 32],
+        port: 8333,
+    };
+    let mut book = AddrMan::new();
+    book.set_onion_reachable(true);
+    book.add_addr(spare);
+    let h = hash_byte(99);
+    let mut slots: Vec<_> = (0..8)
+        .map(|id| {
+            let mut s = dummy_slot(id, "0.0.0.0:8333".parse().unwrap(), true);
+            s.net = NetAddr::Onion {
+                pk: [id as u8 + 1; 32],
+                port: 8333,
+            };
+            s.first_data_ms = 1_000;
+            s.rate.sample(0, 0, true);
+            s.rate.sample(
+                RELSLOW_ACTIVE_MS,
+                if id == 0 { 4_500_000 } else { 45_000_000 },
+                true,
+            );
+            s.in_flight.insert(h);
+            s
+        })
+        .collect();
+    let slow = slots[0].net;
+    let mut cooldown = HashMap::new();
+    let mut strikes = HashMap::new();
+    record_stall_kick(&mut cooldown, &mut strikes, spare, now);
+    let mut suspect = Some((0, 1_000));
+    let mut last_kick = 0;
+    let warm = 1_000 + RELATIVE_SLOW_GLOBAL_WARMUP_MS;
+    let mut inflight = HashMap::from([(h, rbitcoin_ibd::ibd::state::InflightReq::new(0))]);
+    let mut body = rbitcoin_ibd::ibd::body::BodyPresence::new();
+    assert!(disconnect_relative_slow_block_peers_at(
+        &mut slots,
+        &mut inflight,
+        &mut body,
+        &mut cooldown,
+        &mut strikes,
+        now,
+        &book,
+        &mut suspect,
+        &mut last_kick,
+        warm
+    )
+    .is_empty());
+    assert!(slots[0].alive);
+    assert_eq!(suspect, None);
+    let later = now + STALL_ADDR_COOLDOWN;
+    expire_addr_cooldown(&mut cooldown, later);
+    for mono in [warm, warm + RELATIVE_SLOW_HYSTERESIS_MS] {
+        disconnect_relative_slow_block_peers_at(
+            &mut slots,
+            &mut inflight,
+            &mut body,
+            &mut cooldown,
+            &mut strikes,
+            later,
+            &book,
+            &mut suspect,
+            &mut last_kick,
+            mono,
+        );
+    }
+    assert!(!slots[0].alive);
+    assert!(inflight.is_empty());
+    assert_eq!(
+        dial_blocked_addrs(&[], &cooldown, later),
+        HashSet::from([slow])
+    );
+    assert_eq!(strikes.get(&slow), Some(&1));
+}
+
+#[test]
 fn classify_dial_err_network_vs_incompatible() {
     assert_eq!(
         classify_dial_err(&NetError::V1Peer),
@@ -137,7 +383,10 @@ fn cooldown_fallback_retries_least_recent_only_when_all_cooling() {
     book.note_attempt_at(addr(2), now - Duration::from_secs(100));
     let mut cooldown = HashMap::new();
     for o in 1u8..=3 {
-        cooldown.insert(addr(o), now + Duration::from_secs(3600));
+        cooldown.insert(
+            rbitcoin_net::NetAddr::from_socket(addr(o)),
+            now + Duration::from_secs(3600),
+        );
     }
     let mut exclude: HashSet<_> = (1u8..=3)
         .map(|o| rbitcoin_net::NetAddr::from_socket(addr(o)))
@@ -150,14 +399,17 @@ fn cooldown_fallback_retries_least_recent_only_when_all_cooling() {
     assert!(exclude.contains(&rbitcoin_net::NetAddr::from_socket(addr(2))));
 
     // A free address is enough; cooling peers stay blocked.
-    cooldown.remove(&addr(3));
+    cooldown.remove(&rbitcoin_net::NetAddr::from_socket(addr(3)));
     let pick = admit_cooldown_fallback(&book, &mut exclude, &[], &cooldown, now, &HashSet::new());
     assert_eq!(pick, None);
     assert!(!exclude.contains(&never));
 
     // Live never-tried peer is not the fallback; oldest attempt is.
     exclude.insert(never);
-    cooldown.insert(addr(3), now + Duration::from_secs(3600));
+    cooldown.insert(
+        rbitcoin_net::NetAddr::from_socket(addr(3)),
+        now + Duration::from_secs(3600),
+    );
     let live = HashSet::from([never]);
     let pick = admit_cooldown_fallback(&book, &mut exclude, &[], &cooldown, now, &live);
     assert_eq!(pick, Some(rbitcoin_net::NetAddr::from_socket(addr(2))));
@@ -169,8 +421,8 @@ fn cooldown_fallback_retries_least_recent_only_when_all_cooling() {
     due.add(addr(5));
     due.note_attempt_at(addr(5), now - Duration::from_secs(1));
     let mut due_cd = HashMap::new();
-    due_cd.insert(addr(4), now);
-    due_cd.insert(addr(5), now);
+    due_cd.insert(rbitcoin_net::NetAddr::from_socket(addr(4)), now);
+    due_cd.insert(rbitcoin_net::NetAddr::from_socket(addr(5)), now);
     let mut due_ex: HashSet<_> = [4u8, 5]
         .into_iter()
         .map(|o| rbitcoin_net::NetAddr::from_socket(addr(o)))
@@ -192,7 +444,10 @@ fn cooldown_fallback_retries_least_recent_only_when_all_cooling() {
     filtered.set_only_net(vec![rbitcoin_net::OnlyNet::Onion]);
     let mut filt_cd = HashMap::new();
     for o in 6u8..=8 {
-        filt_cd.insert(addr(o), now + Duration::from_secs(60));
+        filt_cd.insert(
+            rbitcoin_net::NetAddr::from_socket(addr(o)),
+            now + Duration::from_secs(60),
+        );
     }
     let mut filt_ex: HashSet<_> = (6u8..=8)
         .map(|o| rbitcoin_net::NetAddr::from_socket(addr(o)))
@@ -209,16 +464,22 @@ fn dial_blocked_and_cooldown_expiry() {
     let now = Instant::now();
     let s = dummy_slot(1, addr(1), true);
     let mut cooldown = HashMap::new();
-    cooldown.insert(addr(2), now + Duration::from_secs(60));
-    cooldown.insert(addr(3), now - Duration::from_secs(1)); // expired
+    cooldown.insert(
+        rbitcoin_net::NetAddr::from_socket(addr(2)),
+        now + Duration::from_secs(60),
+    );
+    cooldown.insert(
+        rbitcoin_net::NetAddr::from_socket(addr(3)),
+        now - Duration::from_secs(1),
+    ); // expired
     let blocked = dial_blocked_addrs(&[s], &cooldown, now);
     assert!(blocked.contains(&rbitcoin_net::NetAddr::Ip(addr(1))));
     assert!(blocked.contains(&rbitcoin_net::NetAddr::Ip(addr(2))));
     assert!(!blocked.contains(&rbitcoin_net::NetAddr::Ip(addr(3))));
 
     expire_addr_cooldown(&mut cooldown, now);
-    assert!(cooldown.contains_key(&addr(2)));
-    assert!(!cooldown.contains_key(&addr(3)));
+    assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(addr(2))));
+    assert!(!cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(addr(3))));
 }
 
 #[test]
@@ -240,7 +501,7 @@ fn handshake_then_die_is_failed_and_cooled() {
         "no block bytes → last-resort"
     );
     assert_eq!(book.flags(&lemon).dial_tier(), 2);
-    assert!(cooldown.contains_key(&lemon));
+    assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(lemon)));
     let blocked = dial_blocked_addrs(&[], &cooldown, now);
     assert!(blocked.contains(&rbitcoin_net::NetAddr::Ip(lemon)));
 
@@ -257,7 +518,7 @@ fn handshake_then_die_is_failed_and_cooled() {
         !book.flags(&good).failed_last_connect(),
         "peer that sent block bytes keeps its connected rank"
     );
-    assert!(!cooldown.contains_key(&good));
+    assert!(!cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(good)));
 }
 
 #[test]
@@ -277,7 +538,7 @@ fn misbehavior_dead_cools_after_a_block_body() {
         book.flags(&lemon).failed_last_connect(),
         "a misbehavior death is a failed connect"
     );
-    assert!(cooldown.contains_key(&lemon));
+    assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(lemon)));
     let blocked = dial_blocked_addrs(&[], &cooldown, now);
     assert!(
         blocked.contains(&rbitcoin_net::NetAddr::Ip(lemon)),
@@ -468,17 +729,21 @@ fn apply_dial_result_updates_book() {
     assert!(book.flags(&bad).failed_last_connect());
     assert!(book.flags(&inc).is_incompatible());
     assert_eq!(
-        cooldown.get(&bad).copied(),
+        cooldown
+            .get(&rbitcoin_net::NetAddr::from_socket(bad))
+            .copied(),
         Some(now + STALL_ADDR_COOLDOWN),
         "EOF/timeout enters the stall cooldown"
     );
     assert!(
-        !cooldown.contains_key(&inc),
+        !cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(inc)),
         "incompatible is last-resort, not a stall ban"
     );
     apply_dial_result(&mut book, &result, &mut cooldown, &mut strikes, now);
     assert_eq!(
-        cooldown.get(&bad).copied(),
+        cooldown
+            .get(&rbitcoin_net::NetAddr::from_socket(bad))
+            .copied(),
         Some(now + STALL_ADDR_COOLDOWN_2)
     );
     book.add(addr(8));
@@ -683,7 +948,7 @@ fn disconnect_stalled_after_30s_without_rx() {
         Duration::from_secs(30),
         30_001,
     );
-    assert!(cooldown.contains_key(&a));
+    assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a)));
     assert!(inflight.is_empty());
     assert_eq!(rbitcoin_net::chain::header_store_counts(), (0, 0, 0));
 }
@@ -710,7 +975,7 @@ fn disconnect_stalled_not_when_rx_recent() {
         Duration::from_secs(30),
         45_000,
     );
-    assert!(!cooldown.contains_key(&a));
+    assert!(!cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a)));
     assert!(inflight.contains_key(&h));
 }
 
@@ -749,7 +1014,7 @@ fn disconnect_stalled_opening_write_starts_a_fresh_window() {
         50_000,
     );
     assert!(
-        !cooldown.contains_key(&a),
+        !cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a)),
         "10s after the opening write is inside the new window"
     );
     assert!(inflight.contains_key(&h));
@@ -768,7 +1033,7 @@ fn disconnect_stalled_opening_write_starts_a_fresh_window() {
         70_001,
     );
     assert!(
-        cooldown.contains_key(&a),
+        cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a)),
         "the second write must not move the window off t=40s"
     );
     assert!(inflight.is_empty());
@@ -804,7 +1069,7 @@ fn disconnect_stalled_rearms_after_the_window_drains() {
         110_000,
     );
     assert!(
-        !cooldown.contains_key(&a),
+        !cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a)),
         "a drained window does not keep the old deadline"
     );
     disconnect_stalled_block_peers_at(
@@ -817,7 +1082,7 @@ fn disconnect_stalled_rearms_after_the_window_drains() {
         Duration::from_secs(30),
         130_001,
     );
-    assert!(cooldown.contains_key(&a));
+    assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a)));
     assert!(inflight.is_empty());
 }
 
@@ -843,7 +1108,7 @@ fn disconnect_stalled_skips_getdata_still_in_the_writer() {
         Duration::from_secs(30),
         90_000,
     );
-    assert!(!cooldown.contains_key(&a));
+    assert!(!cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a)));
     assert!(inflight.contains_key(&h));
 }
 
@@ -880,7 +1145,10 @@ fn disconnect_stalled_drops_one_when_every_peer_is_quiet() {
         "one quiet peer per pass, so give-up stays reachable"
     );
     assert_eq!(inflight.len(), 1);
-    assert!(cooldown.contains_key(&a) ^ cooldown.contains_key(&b));
+    assert!(
+        cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(a))
+            ^ cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(b))
+    );
 }
 
 #[test]
@@ -908,10 +1176,10 @@ fn disconnect_stalled_ignores_silence_without_getdata() {
         60_000,
     );
     assert!(
-        !cooldown.contains_key(&idle_addr),
+        !cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(idle_addr)),
         "no assigned getdata is not a quiet peer"
     );
-    assert!(cooldown.contains_key(&quiet_addr));
+    assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(quiet_addr)));
     assert!(inflight.is_empty());
 }
 
@@ -942,8 +1210,8 @@ fn disconnect_stalled_drops_only_the_quiet_peer() {
         Duration::from_secs(30),
         60_000,
     );
-    assert!(cooldown.contains_key(&quiet_addr));
-    assert!(!cooldown.contains_key(&live_addr));
+    assert!(cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(quiet_addr)));
+    assert!(!cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(live_addr)));
     assert!(!inflight.contains_key(&hq));
     assert!(inflight.contains_key(&hl));
 }
@@ -1058,7 +1326,7 @@ fn disconnect_stalled_releases_and_cools_addr() {
         now,
         Duration::from_secs(30),
     );
-    assert!(!cooldown.contains_key(&addr(13)));
+    assert!(!cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(addr(13))));
 }
 
 #[test]
@@ -1181,7 +1449,10 @@ fn relative_slow_pure_edges_and_mature_sample_filters() {
         replacement_available(&book, &slots, &cooldown, now),
         "an untried address can replace a kicked peer"
     );
-    cooldown.insert(addr(42), now + Duration::from_secs(60));
+    cooldown.insert(
+        rbitcoin_net::NetAddr::from_socket(addr(42)),
+        now + Duration::from_secs(60),
+    );
     assert!(
         !replacement_available(&book, &slots, &cooldown, now),
         "cooling the only clean address leaves no replacement"
@@ -1211,7 +1482,7 @@ fn relative_slow_kick_needs_a_replacement() {
     book.note_connect_failed_addr(rbitcoin_net::NetAddr::from_socket(addr(41)), false);
     book.add(addr(42));
     let mut cooldown = HashMap::new();
-    cooldown.insert(addr(42), now);
+    cooldown.insert(rbitcoin_net::NetAddr::from_socket(addr(42)), now);
     let idle = [dummy_slot(1, addr(40), true)];
     assert!(
         replacement_available(&book, &idle, &cooldown, now),
@@ -1275,7 +1546,7 @@ fn relative_slow_kick_needs_a_replacement() {
         t_warm + RELATIVE_SLOW_HYSTERESIS_MS,
     );
     assert!(
-        !cooldown.contains_key(&slow_addr),
+        !cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(slow_addr)),
         "no clean address outside cooldown, so the outlier stays"
     );
     kicked_book.add(addr(81));
@@ -1307,7 +1578,7 @@ fn relative_slow_kick_needs_a_replacement() {
         t_warm + RELATIVE_SLOW_HYSTERESIS_MS,
     );
     assert!(
-        cooldown.contains_key(&slow_addr),
+        cooldown.contains_key(&rbitcoin_net::NetAddr::from_socket(slow_addr)),
         "an untried replacement allows the relative-slow kick"
     );
 }
@@ -1372,7 +1643,7 @@ fn kick_cooldown_escalates_on_repeat_strikes() {
     assert_eq!(kick_cooldown_for(3), STALL_ADDR_COOLDOWN_3);
     assert_eq!(kick_cooldown_for(9), STALL_ADDR_COOLDOWN_3);
 
-    let a = addr(70);
+    let a = rbitcoin_net::NetAddr::from_socket(addr(70));
     let t0 = Instant::now();
     let mut cooldown = HashMap::new();
     let mut strikes = HashMap::new();

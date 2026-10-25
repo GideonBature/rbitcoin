@@ -10,6 +10,7 @@ use rbitcoin_net::chain::ChainHub;
 use rbitcoin_net::error::NetError;
 use rbitcoin_net::peers::{trying_connection_log, PeerConnType};
 use rbitcoin_net::seeds::AddrMan;
+use rbitcoin_net::NetAddr;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -357,12 +358,12 @@ pub fn redial_want(alive: usize, target: usize) -> usize {
 ///
 /// A network failure (EOF, timeout) takes the same strike cooldown as a
 /// stall kick. Incompatible peers stay last-resort without that ban.
-/// A later successful connect clears the cooldown at the call site.
+/// A later successful connect clears the cooldown, but keeps its strike history.
 pub fn apply_dial_result(
     book: &mut AddrMan,
     result: &DialBatchResult,
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
-    addr_strikes: &mut HashMap<SocketAddr, u8>,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
+    addr_strikes: &mut HashMap<NetAddr, u8>,
     now: Instant,
 ) {
     for &addr in &result.attempted {
@@ -370,6 +371,7 @@ pub fn apply_dial_result(
     }
     for s in &result.slots {
         book.note_connected_addr(s.net);
+        addr_cooldown.remove(&s.net);
     }
     for &(addr, kind) in &result.failed {
         let incompatible = kind == DialFailKind::Incompatible;
@@ -377,9 +379,7 @@ pub fn apply_dial_result(
         if incompatible {
             continue;
         }
-        if let Some(sock) = addr.socket_addr() {
-            record_stall_kick(addr_cooldown, addr_strikes, sock, now);
-        }
+        record_stall_kick(addr_cooldown, addr_strikes, addr, now);
     }
 }
 
@@ -389,7 +389,7 @@ pub fn apply_dial_result(
 pub fn replacement_available(
     book: &AddrMan,
     slots: &[PeerSlot],
-    cooldown: &HashMap<SocketAddr, Instant>,
+    cooldown: &HashMap<NetAddr, Instant>,
     now: Instant,
 ) -> bool {
     let live: HashSet<rbitcoin_net::NetAddr> =
@@ -398,9 +398,7 @@ pub fn replacement_available(
         if !book.is_dialable(addr) || live.contains(&addr) {
             return false;
         }
-        let cooling = addr
-            .socket_addr()
-            .is_some_and(|sock| cooldown.get(&sock).is_some_and(|until| *until > now));
+        let cooling = cooldown.get(&addr).is_some_and(|until| *until > now);
         !cooling && !book.connect_failed(addr)
     })
 }
@@ -497,7 +495,7 @@ pub fn admit_cooldown_fallback(
     book: &AddrMan,
     exclude: &mut HashSet<rbitcoin_net::NetAddr>,
     occupied: &[SocketAddr],
-    cooldown: &HashMap<SocketAddr, Instant>,
+    cooldown: &HashMap<NetAddr, Instant>,
     now: Instant,
     live: &HashSet<rbitcoin_net::NetAddr>,
 ) -> Option<rbitcoin_net::NetAddr> {
@@ -512,10 +510,7 @@ pub fn admit_cooldown_fallback(
         .iter()
         .copied()
         .filter(|a| book.is_dialable(*a) && !live.contains(a))
-        .filter(|a| {
-            a.socket_addr()
-                .is_some_and(|sock| cooldown.get(&sock).is_some_and(|until| *until > now))
-        })
+        .filter(|a| cooldown.get(a).is_some_and(|until| *until > now))
         .collect();
     let pick = cooling
         .iter()
@@ -536,13 +531,13 @@ pub fn admit_cooldown_fallback(
 /// Addrs we must not dial: currently connected/slot-held + still-cooling stall bans.
 pub fn dial_blocked_addrs(
     slots: &[PeerSlot],
-    cooldown: &HashMap<SocketAddr, Instant>,
+    cooldown: &HashMap<NetAddr, Instant>,
     now: Instant,
 ) -> HashSet<rbitcoin_net::NetAddr> {
     let mut blocked: HashSet<rbitcoin_net::NetAddr> = slots.iter().map(|s| s.net).collect();
     for (&addr, &until) in cooldown {
         if until > now {
-            blocked.insert(rbitcoin_net::NetAddr::Ip(addr));
+            blocked.insert(addr);
         }
     }
     blocked
@@ -557,7 +552,7 @@ pub fn alive_dial_addrs(slots: &[PeerSlot]) -> Vec<SocketAddr> {
         .collect()
 }
 
-pub fn expire_addr_cooldown(cooldown: &mut HashMap<SocketAddr, Instant>, now: Instant) {
+pub fn expire_addr_cooldown(cooldown: &mut HashMap<NetAddr, Instant>, now: Instant) {
     cooldown.retain(|_, until| *until > now);
 }
 
@@ -579,11 +574,11 @@ pub fn disconnect_peer(st: &mut super::state::IbdWorkState, peer: usize) {
     };
     let net = st.slots[idx].net;
     let _ = st.slots[idx].cmd_tx.send(PeerCmd::Shutdown);
-    if let Some(sock) = net.socket_addr().filter(|s| !s.ip().is_unspecified()) {
+    if !net.socket_addr().is_some_and(|s| s.ip().is_unspecified()) {
         record_stall_kick(
             &mut st.addr_cooldown,
             &mut st.addr_strikes,
-            sock,
+            net,
             Instant::now(),
         );
     }
@@ -593,9 +588,9 @@ pub fn disconnect_peer(st: &mut super::state::IbdWorkState, peer: usize) {
 
 /// Bump the process-local strike count and set `addr_cooldown`.
 pub fn record_stall_kick(
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
-    strikes: &mut HashMap<SocketAddr, u8>,
-    addr: SocketAddr,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
+    strikes: &mut HashMap<NetAddr, u8>,
+    addr: NetAddr,
     now: Instant,
 ) -> Duration {
     let n = {
@@ -611,7 +606,7 @@ pub fn record_stall_kick(
 /// Handshake with no block bytes: last-resort + stall cooldown (not a stall disconnect).
 pub fn note_dead_without_block_bytes(
     book: &mut AddrMan,
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
     addr: rbitcoin_net::NetAddr,
     first_data_ms: u64,
     now: Instant,
@@ -620,21 +615,21 @@ pub fn note_dead_without_block_bytes(
         return;
     }
     book.note_connect_failed_addr(addr, false);
-    if let Some(sock) = addr.socket_addr().filter(|s| !s.ip().is_unspecified()) {
-        addr_cooldown.insert(sock, now + STALL_ADDR_COOLDOWN);
+    if !addr.socket_addr().is_some_and(|s| s.ip().is_unspecified()) {
+        addr_cooldown.insert(addr, now + STALL_ADDR_COOLDOWN);
     }
 }
 
 /// Misbehavior-threshold death. Cools the dial even after a block body was counted.
 pub fn note_misbehavior_dead(
     book: &mut AddrMan,
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
     addr: rbitcoin_net::NetAddr,
     now: Instant,
 ) {
     book.note_connect_failed_addr(addr, false);
-    if let Some(sock) = addr.socket_addr().filter(|s| !s.ip().is_unspecified()) {
-        addr_cooldown.insert(sock, now + STALL_ADDR_COOLDOWN);
+    if !addr.socket_addr().is_some_and(|s| s.ip().is_unspecified()) {
+        addr_cooldown.insert(addr, now + STALL_ADDR_COOLDOWN);
     }
 }
 
@@ -668,8 +663,8 @@ pub fn disconnect_stalled_block_peers(
     slots: &mut [PeerSlot],
     inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
     body: &mut super::body::BodyPresence,
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
-    addr_strikes: &mut HashMap<SocketAddr, u8>,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
+    addr_strikes: &mut HashMap<NetAddr, u8>,
     now: Instant,
     stall: Duration,
 ) -> Vec<bitcoin::BlockHash> {
@@ -691,8 +686,8 @@ pub fn disconnect_stalled_block_peers_at(
     slots: &mut [PeerSlot],
     inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
     body: &mut super::body::BodyPresence,
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
-    addr_strikes: &mut HashMap<SocketAddr, u8>,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
+    addr_strikes: &mut HashMap<NetAddr, u8>,
     now: Instant,
     stall: Duration,
     now_ms: u64,
@@ -700,8 +695,8 @@ pub fn disconnect_stalled_block_peers_at(
     let stall = stall.max(Duration::from_secs(30));
     let stall_ms = stall.as_millis() as u64;
     let mut on_wire = 0usize;
-    let mut quiet: Vec<(usize, usize, SocketAddr, u64)> = Vec::new();
-    let mut withholding: Vec<(usize, usize, SocketAddr, u64)> = Vec::new();
+    let mut quiet: Vec<(usize, usize, NetAddr, u64)> = Vec::new();
+    let mut withholding: Vec<(usize, usize, NetAddr, u64)> = Vec::new();
     for s in slots.iter() {
         if !s.alive || s.in_flight.is_empty() {
             continue;
@@ -713,7 +708,7 @@ pub fn disconnect_stalled_block_peers_at(
         let row = (
             s.id,
             s.in_flight.len(),
-            s.addr,
+            s.net,
             s.bytes_rx_total.load(Ordering::Relaxed),
         );
         if super::peer_io::getdata_on_wire_quiet(s, now_ms, stall_ms) {
@@ -770,8 +765,8 @@ pub fn disconnect_relative_slow_block_peers(
     slots: &mut [PeerSlot],
     inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
     body: &mut super::body::BodyPresence,
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
-    addr_strikes: &mut HashMap<SocketAddr, u8>,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
+    addr_strikes: &mut HashMap<NetAddr, u8>,
     now: Instant,
     book: &AddrMan,
     suspect: &mut Option<(usize, u64)>,
@@ -796,8 +791,8 @@ pub fn disconnect_relative_slow_block_peers_at(
     slots: &mut [PeerSlot],
     inflight: &mut HashMap<bitcoin::BlockHash, super::state::InflightReq>,
     body: &mut super::body::BodyPresence,
-    addr_cooldown: &mut HashMap<SocketAddr, Instant>,
-    addr_strikes: &mut HashMap<SocketAddr, u8>,
+    addr_cooldown: &mut HashMap<NetAddr, Instant>,
+    addr_strikes: &mut HashMap<NetAddr, u8>,
     now: Instant,
     book: &AddrMan,
     suspect: &mut Option<(usize, u64)>,
@@ -829,7 +824,7 @@ pub fn disconnect_relative_slow_block_peers_at(
         *suspect = None;
         return Vec::new();
     };
-    let addr = slot.addr;
+    let addr = slot.net;
     let n_work = slot.in_flight.len();
     let bps = samples
         .iter()

@@ -2694,7 +2694,7 @@ fn ibd_mutated_body_is_refetched_not_blacklisted() {
         let sender = &st.slots[peer - 1];
         assert_eq!(sender.alive, noban, "{what}: sender dropped");
         assert_eq!(
-            st.addr_cooldown.contains_key(&sender.addr),
+            st.addr_cooldown.contains_key(&sender.net),
             !noban,
             "{what}: sender cooled down"
         );

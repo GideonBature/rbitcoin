@@ -12,9 +12,9 @@ use super::assign_plan::compact_ordered;
 use super::body::{BodyPresence, BodyPresenceSizes};
 use super::reorg::IbdReorgState;
 use bitcoin::BlockHash;
+use rbitcoin_net::NetAddr;
 use rbitcoin_primitives::Fk;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
 use std::time::Instant;
 
 use super::peer_io::PeerSlot;
@@ -174,12 +174,12 @@ pub struct IbdWorkState {
     /// Rotates which peer is offered work first.
     pub assign_rot: usize,
     /// Stall-disconnect cooldowns (addr → until).
-    pub addr_cooldown: HashMap<SocketAddr, Instant>,
+    pub addr_cooldown: HashMap<NetAddr, Instant>,
     /// Per-peer addr token buckets (peer id → bucket), as on tip-follow
     /// sessions. Dropped when the peer dies.
     pub addr_buckets: HashMap<usize, rbitcoin_net::peer::AddrTokenBucket>,
     /// Process-local stall/relative-slow kick counts (not persisted).
-    pub addr_strikes: HashMap<SocketAddr, u8>,
+    pub addr_strikes: HashMap<NetAddr, u8>,
     /// Relative-slow hysteresis: peer id + first Gate B fail ms.
     pub relative_slow_suspect: Option<(usize, u64)>,
     /// Mono ms of last relative-slow disconnect (`0` = never).

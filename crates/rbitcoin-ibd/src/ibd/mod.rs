@@ -970,13 +970,6 @@ pub async fn ibd_cancellable(
                         &mut st.addr_strikes,
                         Instant::now(),
                     );
-                    // A successful dial ends that address's cooldown, including
-                    // the one we admitted while every candidate was cooling.
-                    for s in &result.slots {
-                        if let Some(sock) = s.net.socket_addr() {
-                            st.addr_cooldown.remove(&sock);
-                        }
-                    }
                     let blocked = dial_blocked_addrs(&st.slots, &st.addr_cooldown, Instant::now());
                     let mut n = 0usize;
                     for s in result.slots {
