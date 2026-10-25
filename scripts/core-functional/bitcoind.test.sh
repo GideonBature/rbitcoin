@@ -810,6 +810,59 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# A staying node that publishes a token must reach RpcProxy. `-blocksonly`
+# latches warmup open, so a node that is not speaking HTTP is
+# "Loading... (…)" from the forward, not the bare warmup "Loading...".
+STAY="$WORKDIR/rbitcoin-node-stay"
+cat >"$STAY" <<'EOF'
+#!/bin/sh
+ddir=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--datadir" ]; then
+    ddir="$a"
+  fi
+  prev="$a"
+done
+printf '%s\n' 'staytok' >"$ddir/rpc.token"
+exec sleep 30
+EOF
+chmod +x "$STAY"
+STAY_DD="$WORKDIR/stay"
+mkdir -p "$STAY_DD"
+printf 'regtest=1\nrpcport=38443\nport=38444\nserver=1\n' >"$STAY_DD/bitcoin.conf"
+STAY_ERR="$WORKDIR/stay.err"
+RBITCOIN_NODE="$STAY" "$SHIM" -datadir="$STAY_DD" -regtest -blocksonly \
+  >"$WORKDIR/stay.out" 2>"$STAY_ERR" &
+STAY_PID=$!
+STAY_BODY=""
+for _ in $(seq 1 50); do
+  if ! kill -0 "$STAY_PID" 2>/dev/null; then
+    break
+  fi
+  if [[ -f "$STAY_DD/regtest/.cookie" ]]; then
+    AUTH="$(printf '%s' '__cookie__:staytok' | base64 -w0)"
+    STAY_BODY="$(curl -s -m 2 -H "Authorization: Basic $AUTH" \
+      -H 'content-type: application/json' \
+      --data '{"jsonrpc":"1.0","id":1,"method":"getblockcount","params":[]}' \
+      "http://127.0.0.1:38443/" || true)"
+    if printf '%s' "$STAY_BODY" | grep -q 'Loading... ('; then
+      break
+    fi
+  fi
+  sleep 0.1
+done
+kill "$STAY_PID" 2>/dev/null || true
+wait "$STAY_PID" 2>/dev/null || true
+if printf '%s' "$STAY_BODY" | grep -q 'Loading... (' \
+  && ! grep -q NameError "$STAY_ERR"; then
+  echo "ok - blocksonly proxy starts and skips tx-relay warmup"
+  PASS=$((PASS + 1))
+else
+  echo "not ok - blocksonly proxy starts and skips tx-relay warmup (body=$(printf %q "$STAY_BODY") err=$(cat "$STAY_ERR"))"
+  FAIL=$((FAIL + 1))
+fi
+
 # Live smoke when a real node binary is on disk (optional in this script).
 REAL=""
 if [[ -n "${RBITCOIN_NODE_REAL:-}" && -x "${RBITCOIN_NODE_REAL}" ]]; then

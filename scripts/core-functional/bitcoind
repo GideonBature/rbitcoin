@@ -515,8 +515,8 @@ def _parse_bind(val: str) -> tuple[str, int | None, bool]:
 
 def translate(
     argv: list[str],
-) -> tuple[list[str], Path, int, Path | None, list[str], bool, list[int]]:
-    """Return (node argv, datadir, rpcport, blocksdir, bound_lines, rpc_proxy, lock_fds)."""
+) -> tuple[list[str], Path, int, Path | None, list[str], bool, list[int], bool]:
+    """Return (node argv, datadir, rpcport, blocksdir, bound_lines, rpc_proxy, lock_fds, blocks_only)."""
     datadir: Path | None = None
     rpcport: str | None = None
     p2pport: str | None = None
@@ -829,6 +829,7 @@ def translate(
         bound_lines,
         rpc_proxy,
         lock_fds,
+        blocks_only,
     )
 
 
@@ -865,6 +866,7 @@ def main(argv: list[str] | None = None) -> int:
         bound_lines,
         rpc_proxy,
         _lock_fds,
+        blocks_only,
     ) = translate(argv)
     pid_path = node_dir / "bitcoind.pid"
     if print_cmd:
