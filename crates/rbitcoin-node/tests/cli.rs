@@ -8,6 +8,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// [`NodeEnv::from_lookup`] over literal pairs, matched exactly. The last pair
+/// for a name wins.
+fn env_of(vars: &[(&str, &str)]) -> Result<NodeEnv, rbitcoin_node::NodeError> {
+    NodeEnv::from_lookup(|k| {
+        vars.iter()
+            .rev()
+            .find(|(name, _)| *name == k)
+            .map(|(_, v)| OsString::from(v))
+    })
+}
+
 fn tmp_datadir() -> PathBuf {
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -663,7 +674,7 @@ fn cli_rejects_bad_rpc_cookie_at_launch() {
 fn inbound_env_is_below_cli_and_conf() {
     use rbitcoin_node::config::DEFAULT_MAX_INBOUND;
     let inbound = |args: &[&str], val: &str| {
-        let env = NodeEnv::from_vars([("RBITCOIN_P2P_MAX_INBOUND", val)]).unwrap();
+        let env = env_of(&[("RBITCOIN_P2P_MAX_INBOUND", val)]).unwrap();
         let args = std::iter::once("rbitcoin-node").chain(args.iter().copied());
         match operator_config_from_args(args, &env) {
             Ok(OperatorArgs::Ready { config, .. }) => config.listen.max_inbound,
@@ -691,7 +702,7 @@ fn block_queue_env_sets_the_assign_stop() {
     const BYTES: &str = "RBITCOIN_BLOCK_QUEUE_BYTES";
     const GB: &str = "RBITCOIN_BLOCK_QUEUE_GB";
     let stop = |vars: &[(&str, &str)]| {
-        let env = NodeEnv::from_vars(vars.iter().copied()).unwrap();
+        let env = env_of(vars).unwrap();
         match operator_config_from_args(["rbitcoin-node"], &env) {
             Ok(OperatorArgs::Ready { config, .. }) => config.bq_assign_stop_bytes,
             other => panic!("expected assembled config, got {other:?}"),
@@ -720,7 +731,7 @@ fn env_flags_take_one_true_zero_or_false() {
         "RBITCOIN_RPC_WAIT_TIP_IDLE",
     ];
     let flags = |key: &str, val: &str| {
-        let env = NodeEnv::from_vars([(key, val)]).unwrap();
+        let env = env_of(&[(key, val)]).unwrap();
         [
             env.test_drop_store,
             env.sh_force_rebuild,
@@ -740,12 +751,9 @@ fn env_flags_take_one_true_zero_or_false() {
             assert_eq!(flags(key, off), [false; 4], "{key}={off:?}");
         }
     }
-    assert_eq!(
-        NodeEnv::from_vars(std::iter::empty::<(&str, &str)>()).unwrap(),
-        NodeEnv::default()
-    );
+    assert_eq!(env_of(&[]).unwrap(), NodeEnv::default());
 
-    let env = NodeEnv::from_vars([
+    let env = env_of(&[
         ("RBITCOIN_SH_FORCE_REBUILD", "1"),
         ("RBITCOIN_RPC_PACKAGE_DIALECT", "1"),
         ("RBITCOIN_RPC_WAIT_TIP_IDLE", "1"),
@@ -759,6 +767,23 @@ fn env_flags_take_one_true_zero_or_false() {
         }
         other => panic!("expected assembled config, got {other:?}"),
     }
+}
+
+/// `NodeEnv` asks its lookup for each knob by name and leaves the name match to
+/// it. `std::env::var_os` ignores case on Windows, so there a lower-case name
+/// still sets the knob, as it did before `NodeEnv`.
+#[test]
+fn env_lookup_owns_the_name_match() {
+    let ignore_case = |k: &str| {
+        k.eq_ignore_ascii_case("rbitcoin_sh_force_rebuild")
+            .then(|| OsString::from("1"))
+    };
+    assert!(NodeEnv::from_lookup(ignore_case).unwrap().sh_force_rebuild);
+    assert!(
+        !env_of(&[("rbitcoin_sh_force_rebuild", "1")])
+            .unwrap()
+            .sh_force_rebuild
+    );
 }
 
 /// A set `RBITCOIN_*` value that does not parse is an error naming the var,
@@ -775,26 +800,28 @@ fn malformed_env_names_the_var() {
         ("RBITCOIN_RPC_PACKAGE_DIALECT", " 1"),
         ("RBITCOIN_RPC_WAIT_TIP_IDLE", "ture"),
     ] {
-        let err = NodeEnv::from_vars([(key, val)]).unwrap_err().to_string();
+        let err = env_of(&[(key, val)]).unwrap_err().to_string();
         assert!(
             err.contains(key) && err.contains(val),
             "{key}={val:?}: {err}"
         );
     }
-    let err = NodeEnv::from_vars([
+    let err = env_of(&[
         ("RBITCOIN_BLOCK_QUEUE_BYTES", "4096"),
         ("RBITCOIN_BLOCK_QUEUE_GB", "lots"),
     ])
     .unwrap_err();
     assert!(err.to_string().contains("RBITCOIN_BLOCK_QUEUE_GB"), "{err}");
-    assert!(NodeEnv::from_vars([("PATH", "not a number"), ("RBITCOIN_NOT_A_KNOB", "x")]).is_ok());
+    assert!(env_of(&[("PATH", "not a number"), ("RBITCOIN_NOT_A_KNOB", "x")]).is_ok());
 
     #[cfg(unix)]
     {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
         let bad = OsStr::from_bytes(&[0xff, 0x31]);
-        let err = NodeEnv::from_vars([(OsStr::new("RBITCOIN_SH_FORCE_REBUILD"), bad)]).unwrap_err();
+        let err =
+            NodeEnv::from_lookup(|k| (k == "RBITCOIN_SH_FORCE_REBUILD").then(|| bad.to_owned()))
+                .unwrap_err();
         assert!(
             err.to_string().contains("RBITCOIN_SH_FORCE_REBUILD"),
             "{err}"

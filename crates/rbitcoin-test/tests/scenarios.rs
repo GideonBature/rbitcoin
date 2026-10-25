@@ -591,7 +591,10 @@ fn node_cli_and_surface_smoke() {
             td.path().join("shutdown-fail").to_str().unwrap(),
             "--smoke",
         ],
-        NodeEnv::from_vars([("RBITCOIN_TEST_DROP_STORE", "1")]).unwrap()
+        NodeEnv {
+            test_drop_store: true,
+            ..NodeEnv::default()
+        }
     )));
 }
 
