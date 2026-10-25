@@ -15,9 +15,8 @@ fn tmp() -> rbitcoin_store::testutil::TempDir {
 }
 
 fn sh_put_create(s: &Store, rec: rbitcoin_store::scripthash::ScriptHashRecord) {
-    let mut heads = std::collections::HashMap::new();
     s.scripthash
-        .put_create_batch_append(std::slice::from_ref(&rec), &mut heads)
+        .put_create_batch_append(std::slice::from_ref(&rec))
         .unwrap();
 }
 

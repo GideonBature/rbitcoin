@@ -214,7 +214,6 @@ pub fn uring_recover_credit(last_tip: Option<u32>, tip: u32) -> bool {
 pub struct ProcessOwnedSizes {
     pub conf_plans: usize,
     pub sh_runs: usize,
-    pub sh_heads: usize,
     /// Segmented `tx.head.*` occupancy (logical sizes; no shadow resize).
     pub head: rbitcoin_store::HeadResizeSizeSnapshot,
     /// Prep-ahead in-flight CreatePin occupancy (from load-thread atomics).
@@ -360,8 +359,6 @@ pub struct SeqSigWitRamWindow {
 /// Electrum joins read `ram_head`. Do not merge pending / applying / ram_head.
 #[doc(hidden)]
 pub struct ShWriteBehind {
-    /// Process-local scripthash → body head fk (confirm append path).
-    pub heads: Mutex<HashMap<[u8; 32], rbitcoin_store::ShHeadValue>>,
     /// Last height whose SH creates were applied after tip commit.
     /// `u64::MAX` = none.
     pub indexed_through: AtomicU64,
@@ -383,7 +380,6 @@ impl ShWriteBehind {
     #[doc(hidden)]
     pub fn new() -> Self {
         Self {
-            heads: Mutex::new(HashMap::new()),
             indexed_through: AtomicU64::new(u64::MAX),
             pending: Mutex::new(VecDeque::new()),
             pending_cv: Condvar::new(),
@@ -2098,7 +2094,7 @@ impl Query {
 
     /// Cheap process-owned cache sizes for the IBD `ibd: sizes` line.
     ///
-    /// Brief mutex locks only (header plans / SH / heads). Call from the ~5s
+    /// Brief mutex locks only (header plans, height map). Call from the ~5s
     /// status tick — not the hot path.
     pub fn process_owned_size_snapshot(&self) -> ProcessOwnedSizes {
         note_owned_size_snapshot_call();
@@ -2121,7 +2117,6 @@ impl Query {
         ProcessOwnedSizes {
             conf_plans,
             sh_runs: self.sh_run.on_disk_run_count(),
-            sh_heads: self.sh.heads.lock().unwrap().len(),
             head,
             inflight_layers: mem.inflight_layers,
             inflight_pins: mem.inflight_pins,

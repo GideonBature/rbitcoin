@@ -1880,7 +1880,6 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
 
     // Snapshot SH creates before reopen (kill mid-Class-C shape).
     use rbitcoin_store::ScriptHashRecord;
-    use std::collections::HashMap;
     let n0 = q.scripthash_entry_count();
     let mut durable: Vec<ScriptHashRecord> = Vec::new();
     q.store()
@@ -1913,10 +1912,9 @@ fn consensus_mature_chain_spend_reconstruct_and_scripthash() {
         "after warm, all durable create txs must be considered indexed"
     );
     assert_eq!(q.scripthash_entry_count(), n0);
-    let mut heads = HashMap::new();
     q.store()
         .scripthash
-        .put_create_batch_append(&to_put, &mut heads)
+        .put_create_batch_append(&to_put)
         .unwrap();
     assert_eq!(q.scripthash_entry_count(), n0);
 

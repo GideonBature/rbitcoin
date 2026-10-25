@@ -377,7 +377,6 @@ impl Query {
             }
             rbitcoin_log::info!("node: scripthash Class A tail backfill first={first} last={last}");
             let mut lo = first;
-            let mut heads = self.sh.heads.lock().unwrap();
             while lo <= last {
                 let hi = lo.saturating_add(CHUNK.saturating_sub(1)).min(last);
                 let mut recs = Vec::new();
@@ -389,13 +388,10 @@ impl Query {
                     })?;
                 if !recs.is_empty() {
                     total = total.saturating_add(recs.len() as u64);
-                    self.store
-                        .scripthash
-                        .put_create_batch_append(&recs, &mut heads)?;
+                    self.store.scripthash.put_create_batch_append(&recs)?;
                 }
                 lo = hi.saturating_add(1);
             }
-            drop(heads);
             self.store.scripthash.flush()?;
             self.store.scripthash.note_include_hwm(last)?;
             self.sh_run.publish_seal_watermark(last)?;

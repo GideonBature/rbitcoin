@@ -13,7 +13,6 @@ use rbitcoin_store::scripthash_mphf::{mix_key16, MphfHead};
 use rbitcoin_store::scripthash_pages::{
     sh_page_as_array, sh_page_extent, sh_page_set_next, SH_PAGE_SIZE, SH_PAGE_STREAM_MAX,
 };
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -286,16 +285,12 @@ fn rec(sh: [u8; 32], tx: u64, _vout: u32) -> ScriptHashRecord {
 }
 
 fn put_create(t: &ScriptHashTable, rec: ScriptHashRecord) {
-    let mut heads = HashMap::new();
-    t.put_create_batch_append(std::slice::from_ref(&rec), &mut heads)
+    t.put_create_batch_append(std::slice::from_ref(&rec))
         .unwrap();
 }
 
 fn put_create_batch(t: &ScriptHashTable, recs: impl AsRef<[ScriptHashRecord]>) -> usize {
-    let mut heads = HashMap::new();
-    t.put_create_batch_append(recs.as_ref(), &mut heads)
-        .unwrap()
-        .0
+    t.put_create_batch_append(recs.as_ref()).unwrap().0
 }
 
 #[test]
@@ -601,50 +596,22 @@ fn put_create_batch_skips_leq_max_appends_higher() {
 }
 
 #[test]
-fn append_does_not_retain_head_values() {
+fn append_second_batch_locates_head_from_disk() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
-    let mut heads = HashMap::new();
-    t.put_create_batch_append(&[rec(sh, 1, 0)], &mut heads)
-        .unwrap();
-    assert!(
-        heads.is_empty(),
-        "append must locate the next batch from disk, not a retained head map"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn put_create_batch_append_uses_heads() {
-    let dir = tmp();
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    let sh = script_hash(&[0x51]);
-    let mut heads = HashMap::new();
-    let recs: Vec<_> = (0..3u32).map(|v| rec(sh, u64::from(v) + 1, v)).collect();
-    let (n, _t) = t.put_create_batch_append(&recs, &mut heads).unwrap();
-    assert_eq!(n, 3);
-    assert_eq!(t.entries(&sh).unwrap().len(), 3);
-    assert!(heads.contains_key(&sh));
-    let more = vec![rec(sh, 10, 9)];
-    let (n2, _) = t.put_create_batch_append(&more, &mut heads).unwrap();
+    let (n, _) = t.put_create_batch_append(&[rec(sh, 1, 0)]).unwrap();
+    assert_eq!(n, 1);
+    let (n2, _) = t.put_create_batch_append(&[rec(sh, 2, 0)]).unwrap();
     assert_eq!(n2, 1);
-    assert_eq!(t.entries(&sh).unwrap().len(), 4);
+    let fks: Vec<_> = t
+        .entries(&sh)
+        .unwrap()
+        .into_iter()
+        .map(|(_, r)| r.create_tx_fk)
+        .collect();
+    assert_eq!(fks, vec![Fk(1), Fk(2)]);
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn sh_heads_insert_capped_caps_and_keeps_latest() {
-    let mut heads = HashMap::new();
-    let cap = 8usize;
-    for i in 0u8..20 {
-        sh_heads_insert_capped(&mut heads, [i; 32], ShHeadValue::Empty, cap);
-        assert!(heads.len() <= cap, "len={}", heads.len());
-    }
-    let last = [0xff; 32];
-    sh_heads_insert_capped(&mut heads, last, ShHeadValue::Empty, cap);
-    assert!(heads.len() <= cap);
-    assert!(heads.contains_key(&last), "latest insert must stay");
 }
 
 #[test]
@@ -677,64 +644,13 @@ fn append_after_zero_live_count_keeps_sealed_home() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn dummy_sh_head_key(i: u64) -> [u8; 32] {
-    let mut k = [0xEE; 32];
-    k[..8].copy_from_slice(&i.to_le_bytes());
-    k
-}
-
-#[test]
-fn put_create_batch_append_caps_heads_and_miss_still_writes() {
-    let dir = tmp();
-    let t = ScriptHashTable::create_tiny(&dir).unwrap();
-    let mut heads = HashMap::new();
-    for i in 0..SH_HEADS_CAP as u64 {
-        heads.insert(dummy_sh_head_key(i), ShHeadValue::Empty);
-    }
-    assert_eq!(heads.len(), SH_HEADS_CAP);
-    let sh = script_hash(&[0x51]);
-    let (n, _) = t
-        .put_create_batch_append(&[rec(sh, 1, 0)], &mut heads)
-        .unwrap();
-    assert_eq!(n, 1);
-    assert!(
-        heads.len() <= SH_HEADS_CAP,
-        "process heads must cap, got {}",
-        heads.len()
-    );
-    assert_eq!(t.entries(&sh).unwrap().len(), 1);
-
-    let evicted = (0..SH_HEADS_CAP as u64).find_map(|i| {
-        let k = dummy_sh_head_key(i);
-        (!heads.contains_key(&k)).then_some(k)
-    });
-    if let Some(evicted) = evicted {
-        let (n2, _) = t
-            .put_create_batch_append(&[rec(evicted, 2, 0)], &mut heads)
-            .unwrap();
-        assert_eq!(n2, 1);
-        assert_eq!(t.entries(&evicted).unwrap().len(), 1);
-        assert!(heads.len() <= SH_HEADS_CAP);
-    } else {
-        heads.remove(&sh);
-        let (n2, _) = t
-            .put_create_batch_append(&[rec(sh, 3, 0)], &mut heads)
-            .unwrap();
-        assert_eq!(n2, 1);
-        assert_eq!(t.entries(&sh).unwrap().len(), 2);
-        assert!(heads.len() <= SH_HEADS_CAP);
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[test]
 fn page_append_preserves_prefix_and_order() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x7a]);
-    let mut heads = HashMap::new();
     let first: Vec<_> = (1..=5u32).map(|v| rec(sh, u64::from(v), v)).collect();
-    let (n, _) = t.put_create_batch_append(&first, &mut heads).unwrap();
+    let (n, _) = t.put_create_batch_append(&first).unwrap();
     assert_eq!(n, 5);
     let first_off = match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Slab { class, used, off } => {
@@ -745,7 +661,7 @@ fn page_append_preserves_prefix_and_order() {
         other => panic!("expected slab, got {other:?}"),
     };
     let more: Vec<_> = (6..=7u32).map(|v| rec(sh, u64::from(v), v)).collect();
-    let (n2, _) = t.put_create_batch_append(&more, &mut heads).unwrap();
+    let (n2, _) = t.put_create_batch_append(&more).unwrap();
     assert_eq!(n2, 2);
     match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Slab { class, used, off } => {
@@ -761,10 +677,9 @@ fn page_append_preserves_prefix_and_order() {
         assert_eq!(e.create_tx_fk, Fk(i as u64 + 1));
     }
     // Grow to megakey pages (≥257 FKs).
-    let mut heads2 = HashMap::new();
     let sh2 = script_hash(&[0x7b]);
     let many: Vec<_> = (1..=600u32).map(|v| rec(sh2, u64::from(v), v)).collect();
-    let (nm, _) = t.put_create_batch_append(&many, &mut heads2).unwrap();
+    let (nm, _) = t.put_create_batch_append(&many).unwrap();
     assert_eq!(nm, 600);
     match t.head_value(&sh2).unwrap().unwrap() {
         ShHeadValue::Extent { .. } => {}
@@ -779,9 +694,8 @@ fn extent_span_over_cap_still_unlinks() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x7c]);
-    let mut heads = HashMap::new();
     let many: Vec<_> = (1..=600u32).map(|v| rec(sh, u64::from(v), v)).collect();
-    let (nm, _) = t.put_create_batch_append(&many, &mut heads).unwrap();
+    let (nm, _) = t.put_create_batch_append(&many).unwrap();
     assert_eq!(nm, 600);
     let last_page = match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Extent { last_page } => last_page,
@@ -1990,8 +1904,7 @@ fn extent_ingest_torn_tail_restores_on_open() {
     {
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
-        t.put_create_batch_append(&many, &mut HashMap::new())
-            .unwrap();
+        t.put_create_batch_append(&many).unwrap();
         assert!(matches!(t.key_home(&sh).unwrap(), KeyHome::Ingest));
         t.test_tear_extent_tail(&sh).unwrap();
     }
@@ -2033,8 +1946,7 @@ fn extent_drop_all_retry_and_failed_free_release_once() {
     let n = 300u64;
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
-    t.put_create_batch_append(&many, &mut HashMap::new())
-        .unwrap();
+    t.put_create_batch_append(&many).unwrap();
     let fks: Vec<_> = (1..=n).map(Fk).collect();
     t.unlink_creates_batch(&[(sh, fks.clone())]).unwrap();
     assert!(t.deferred_empty(&sh));
@@ -2068,16 +1980,14 @@ fn extent_drop_all_after_a_synced_job_frees_the_new_chain() {
     let n = 300u64;
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
-    t.put_create_batch_append(&many, &mut HashMap::new())
-        .unwrap();
+    t.put_create_batch_append(&many).unwrap();
     let fks: Vec<_> = (1..=n).map(Fk).collect();
     t.unlink_creates_batch(&[(sh, fks)]).unwrap();
     ScriptHashTable::fail_next_deferred_free();
     assert!(t.commit_deferred_empty_heads().is_err());
     assert!(t.deferred_empty(&sh));
     let more: Vec<_> = (n + 1..=n + n).map(|i| rec(sh, i, 0)).collect();
-    t.put_create_batch_append(&more, &mut HashMap::new())
-        .unwrap();
+    t.put_create_batch_append(&more).unwrap();
     let new_fks: Vec<_> = (n + 1..=n + n).map(Fk).collect();
     t.unlink_creates_batch(&[(sh, new_fks)]).unwrap();
     t.commit_deferred_empty_heads().unwrap();
@@ -2100,8 +2010,7 @@ fn extent_drop_all_one_free_error_still_commits_the_other_key() {
     let n = 300u64;
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let many_a: Vec<_> = (1..=n).map(|i| rec(sh_a, i, 0)).collect();
-    t.put_create_batch_append(&many_a, &mut HashMap::new())
-        .unwrap();
+    t.put_create_batch_append(&many_a).unwrap();
     put_create(&t, rec(sh_b, 1, 0));
     let fks_a: Vec<_> = (1..=n).map(Fk).collect();
     t.unlink_creates_batch(&[(sh_a, fks_a), (sh_b, vec![Fk(1)])])
@@ -2177,8 +2086,7 @@ fn extent_drop_all_before_tip_flush_keeps_creates() {
     {
         let t = ScriptHashTable::create_tiny(&dir).unwrap();
         let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
-        t.put_create_batch_append(&many, &mut HashMap::new())
-            .unwrap();
+        t.put_create_batch_append(&many).unwrap();
         assert!(matches!(
             t.head_value(&sh).unwrap().unwrap(),
             ShHeadValue::Extent { .. }
@@ -2214,8 +2122,7 @@ fn extent_sealed_ovf_torn_tail_restores_on_open() {
         push_chain(&mut session, sh_main, &[Fk(1)]);
         seal_session(&t, 0, session);
         let many: Vec<_> = (1..=n).map(|i| rec(sh, i, 0)).collect();
-        t.put_create_batch_append(&many, &mut HashMap::new())
-            .unwrap();
+        t.put_create_batch_append(&many).unwrap();
         for i in 0..210u32 {
             let filler = script_hash(&[0xa4, (i & 0xff) as u8, (i >> 8) as u8, 0x04]);
             put_create(&t, rec(filler, 5000 + u64::from(i), 0));
@@ -2348,9 +2255,7 @@ fn append_rejects_extent_page_that_is_not_ver2() {
     t.body().read_at(last_page, &mut page).unwrap();
     page[0] = 0;
     t.body().write_at(last_page, &page).unwrap();
-    let err = t
-        .put_create_batch_append(&[rec(sh, n + 1, 0)], &mut HashMap::new())
-        .unwrap_err();
+    let err = t.put_create_batch_append(&[rec(sh, n + 1, 0)]).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("scripthash extent last page not ver=2"),
@@ -2419,10 +2324,9 @@ fn append_accepts_inflated_extent_tail() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x7d]);
-    let mut heads = HashMap::new();
     let n = 600u32;
     let many: Vec<_> = (1..=n).map(|v| rec(sh, u64::from(v), v)).collect();
-    t.put_create_batch_append(&many, &mut heads).unwrap();
+    t.put_create_batch_append(&many).unwrap();
     let last_page = match t.head_value(&sh).unwrap().unwrap() {
         ShHeadValue::Extent { last_page } => last_page,
         other => panic!("expected extent, got {other:?}"),
@@ -2583,9 +2487,7 @@ fn append_rejects_a_page_that_still_has_a_successor() {
     t.body().read_at(last, &mut page).unwrap();
     sh_page_set_next(sh_page_as_array_mut(&mut page).unwrap(), last).unwrap();
     t.body().write_at(last, &page).unwrap();
-    let err = t
-        .put_create_batch_append(&[rec(sh, n + 1, 0)], &mut HashMap::new())
-        .unwrap_err();
+    let err = t.put_create_batch_append(&[rec(sh, n + 1, 0)]).unwrap_err();
     assert!(
         err.to_string()
             .contains("scripthash extent last page is not the extent tail"),
@@ -2743,8 +2645,7 @@ fn for_each_live_create_skips_unlinked() {
     let dir = tmp();
     let t = ScriptHashTable::create_tiny(&dir).unwrap();
     let sh = script_hash(&[0x51]);
-    let mut heads = HashMap::new();
-    t.put_create_batch_append(&[rec(sh, 1, 0), rec(sh, 2, 0), rec(sh, 3, 0)], &mut heads)
+    t.put_create_batch_append(&[rec(sh, 1, 0), rec(sh, 2, 0), rec(sh, 3, 0)])
         .unwrap();
     t.unlink_create(&sh, Fk(2), 0).unwrap();
     let mut seen = Vec::new();
@@ -3479,10 +3380,7 @@ fn pass1_ingest_append_does_not_hide_packed_history() {
     let udir = rbitcoin_store::unsorted_shard_dir(s.path());
     rbitcoin_store::collect_unsorted_shard_files(&s, &udir, n_shards, 1, None).unwrap();
     let rec = ScriptHashRecord::from_fk(script_hash(&script), Fk(2));
-    let mut heads = std::collections::HashMap::new();
-    s.scripthash
-        .put_create_batch_append(&[rec], &mut heads)
-        .unwrap();
+    s.scripthash.put_create_batch_append(&[rec]).unwrap();
     rbitcoin_store::materialize_sh_unsorted_from_class_a(&s, 1, 1, None).unwrap();
     let mut fks: Vec<u64> = s
         .scripthash
