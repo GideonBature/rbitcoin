@@ -598,6 +598,16 @@ pub const IBD_FEEFILTER_SAT_KVB: u64 = 9_936_506;
 /// Stale blocks older than this vs the best header are not served (`p2p_fingerprint`).
 pub const STALE_RELAY_AGE_LIMIT_SECS: u64 = 30 * 24 * 60 * 60;
 
+/// Reporting generation captured before accepting or restoring an IBD walk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IbdHeaderEpoch(u64);
+
+#[derive(Default)]
+struct IbdHeaderReport {
+    epoch: IbdHeaderEpoch,
+    height: Option<u32>,
+}
+
 /// Thread-safe chain façade used by peer sessions.
 pub struct ChainHub {
     pub query: Arc<Query>,
@@ -633,7 +643,7 @@ pub struct ChainHub {
     pub fork_tips: RwLock<ForkTips>,
     /// Header-only tips (`submitheader` / P2P headers): hash → (prev, height).
     pub header_tips: RwLock<HeaderTips>,
-    ibd_header_tip: RwLock<Option<(BlockHash, u32)>>,
+    ibd_header_report: RwLock<IbdHeaderReport>,
     /// Set around `accept_branch` connect so each `TipEvent` carries branch length.
     pub announce_reorg_len: AtomicU32,
     /// Min-chain-work floor (32-byte BE). `None` = no extra floor.
@@ -763,7 +773,7 @@ impl ChainHub {
             precious: RwLock::new(None),
             fork_tips: RwLock::new(ForkTips::new()),
             header_tips: RwLock::new(HeaderTips::new()),
-            ibd_header_tip: RwLock::new(None),
+            ibd_header_report: RwLock::new(IbdHeaderReport::default()),
             announce_reorg_len: AtomicU32::new(0),
             minimum_chain_work: RwLock::new(None),
             mining: MiningKnobs::new(),
@@ -1479,9 +1489,11 @@ impl ChainHub {
     /// again, and std's `RwLock` refuses a new reader while a writer waits, so
     /// a walk under the guard deadlocks against `note_header_tip`.
     pub fn best_header_height(&self) -> u32 {
-        let mut best = self.tip_height().unwrap_or(0);
-        let mut tips: Vec<(BlockHash, u32)> = self.header_tips.read().unwrap().entries().collect();
-        tips.extend(*self.ibd_header_tip.read().unwrap());
+        let mut best = self
+            .tip_height()
+            .unwrap_or(0)
+            .max(self.ibd_header_report.read().unwrap().height.unwrap_or(0));
+        let tips: Vec<(BlockHash, u32)> = self.header_tips.read().unwrap().entries().collect();
         for (hash, h) in tips {
             if !self.header_ancestry_invalid(hash) {
                 best = best.max(h);
@@ -1490,10 +1502,25 @@ impl ChainHub {
         best
     }
 
-    /// Replace the IBD walk's accepted tip, including on rewind and resume.
-    /// Peer-advertised horizons are not accepted header tips.
-    pub fn publish_ibd_header_tip(&self, tip: Option<(BlockHash, u32)>) {
-        *self.ibd_header_tip.write().unwrap() = tip;
+    /// Current reporting generation; capture before loading or validating a walk.
+    pub fn ibd_header_epoch(&self) -> IbdHeaderEpoch {
+        self.ibd_header_report.read().unwrap().epoch
+    }
+
+    /// Publish a walk accepted in `epoch`. A chain invalidation
+    /// rejects old publications until the walk is rebased or restored again.
+    /// Reads are O(1), including when look-ahead headers have no stored rows.
+    pub fn publish_ibd_header_tip(&self, epoch: IbdHeaderEpoch, height: Option<u32>) {
+        let mut report = self.ibd_header_report.write().unwrap();
+        if report.epoch == epoch {
+            report.height = height;
+        }
+    }
+
+    fn invalidate_ibd_header_report(&self) {
+        let mut report = self.ibd_header_report.write().unwrap();
+        report.epoch.0 = report.epoch.0.wrapping_add(1);
+        report.height = None;
     }
 
     #[doc(hidden)]
@@ -1553,7 +1580,9 @@ impl ChainHub {
 
     /// Remember a consensus-invalid block (not a mutated merkle).
     pub fn note_invalid_block(&self, hash: BlockHash) {
-        self.invalidated.set.write().unwrap().insert(hash);
+        if self.invalidated.set.write().unwrap().insert(hash) {
+            self.invalidate_ibd_header_report();
+        }
         self.drop_held(hash);
     }
 
@@ -2538,12 +2567,15 @@ impl ChainHub {
                 });
             }
             let keep = h.0.saturating_sub(1);
-            self.disconnect_to(keep)?;
+            let disconnected = self.disconnect_to(keep);
+            self.invalidate_ibd_header_report();
+            disconnected?;
             drop(_guard);
         } else if self.knows_header(&hash) || self.held_body(&hash).is_some() {
             // Side-branch / held header (feature_chain_tiebreaks B10): mark
             // invalid without a tip disconnect.
             self.invalidated.set.write().unwrap().insert(hash);
+            self.invalidate_ibd_header_report();
             self.drop_held(hash);
             self.invalidated.paths.write().unwrap().push(InvalidPath {
                 hashes: vec![hash],
