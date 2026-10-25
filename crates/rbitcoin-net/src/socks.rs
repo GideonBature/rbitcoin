@@ -84,6 +84,24 @@ pub enum Dialer {
     },
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetProxies {
+    pub dialer: Dialer,
+    pub i2p_sam: Option<SocketAddr>,
+}
+
+impl NetProxies {
+    pub fn proxy_for(&self, net: crate::OnlyNet) -> Option<(SocketAddr, bool)> {
+        match net {
+            crate::OnlyNet::I2p => self.i2p_sam.map(|sam| (sam, false)),
+            _ => self
+                .dialer
+                .proxy_for(net)
+                .map(|proxy| (proxy, self.dialer.randomizes_credentials())),
+        }
+    }
+}
+
 /// Each isolated SOCKS dial builds its own Tor circuit, and a wave of them
 /// queues inside Tor for longer than a clearnet RTT.
 const SOCKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -136,7 +154,7 @@ impl Dialer {
         }
     }
 
-    pub fn randomizes_credentials(&self) -> bool {
+    fn randomizes_credentials(&self) -> bool {
         matches!(
             self,
             Dialer::Socks {

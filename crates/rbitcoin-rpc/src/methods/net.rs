@@ -347,18 +347,18 @@ fn networks_json(ctx: &RpcContext) -> Value {
         }
         None => nets.map(|net| rbitcoin_net::AddrMan::default().reachable(net)),
     };
-    let dialer = ctx.peers.as_ref().map(|p| p.proxies()).unwrap_or_default();
+    let proxies = ctx.peers.as_ref().map(|p| p.proxies()).unwrap_or_default();
     let rows: Vec<Value> = nets
         .into_iter()
         .zip(reach)
         .map(|(net, reachable)| {
-            let proxy = dialer.proxy_for(net);
+            let proxy = proxies.proxy_for(net);
             json!({
                 "name": net.label(),
                 "limited": !reachable,
                 "reachable": reachable,
-                "proxy": proxy.map(|p| p.to_string()).unwrap_or_default(),
-                "proxy_randomize_credentials": proxy.is_some() && dialer.randomizes_credentials(),
+                "proxy": proxy.map(|(addr, _)| addr.to_string()).unwrap_or_default(),
+                "proxy_randomize_credentials": proxy.is_some_and(|(_, randomize)| randomize),
             })
         })
         .collect();
