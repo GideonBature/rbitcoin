@@ -65,10 +65,6 @@ updates:
       actions:
         patterns:
           - "*"
-    ignore:
-      # Tag encodes rustc version and must match nixpkgs/crane (currently
-      # 1.95.0). Never “latest action” via Dependabot — co-bump with flake.
-      - dependency-name: "dtolnay/rust-toolchain"
 
   # --- Nix flakes (flake.lock inputs) ---------------------------------------
   - package-ecosystem: "nix"

@@ -28,7 +28,7 @@ pinned flake (or `default.nix` + `flake.lock`) musl package.
 | Why not unstable | Hydra-tested channel + official binary cache; less churn for release digests |
 | Lock | Exact commit via `flake.lock`; `shell.nix` / `default.nix` read the same lock |
 | Update cadence | Deliberate (`nix flake update`), ~each stable release or near EOL — not daily |
-| Co-bumps | **crane**, GHA `dtolnay/rust-toolchain@…`, root `rust-toolchain.toml`, shell `llvmPackages`, AGENTS toolchain strings |
+| Co-bumps | **crane**, root `rust-toolchain.toml` (GHA runners' rustup reads it), shell `llvmPackages`, AGENTS toolchain strings |
 | Verify after bump | `nix develop` → fmt/clippy/test; `nix build .#rbitcoin-musl` static install |
 | Dependabot | [`.github/dependabot.yml`](../.github/dependabot.yml) opens **monthly** Nix PRs (plus weekly Cargo / Actions). Treat flake PRs as proposals — still co-bump and verify as above before merge |
 
@@ -39,8 +39,7 @@ pinned flake (or `default.nix` + `flake.lock`) musl package.
 | Cargo **patch** / safe **minor** | Yes if CI green | Dependabot PR or hand `cargo update` |
 | Cargo **major** with API or dual-graph risk | Human PR only | Full suite; prefer one stack (e.g. axum + tower-http + tungstenite) |
 | **`bitcoin_hashes`** | **Ignore in Dependabot** | Co-bump with **`bitcoin` / bip324 / rust-bitcoin** only (must match `bitcoin`’s hashes major) |
-| **`dtolnay/rust-toolchain`** | **Ignore in Dependabot** | Tag **is** rustc; co-bump with **nixpkgs / crane / shell llvm** only |
-| Other Actions (`checkout`, `setup-uv`, `codeql-action/upload-sarif`, `rust-cache`) | Yes after CI smoke | Prefer full semver or commit SHA; never rewrite the rustc pin in the same PR without a flake bump. The zizmor crate version is the `uvx` pin in `zizmor.yml` |
+| Actions (`checkout`, `setup-uv`, `codeql-action/upload-sarif`, `rust-cache`) | Yes after CI smoke | Prefer full semver or commit SHA. The zizmor crate version is the `uvx` pin in `zizmor.yml` |
 | **nixpkgs / crane** | Deliberate only | Monthly Dependabot is a proposal; co-bump CI rustc + docs |
 
 Channel branches advance only after Hydra succeeds ([channel branches](https://wiki.nixos.org/wiki/Channel_branches); status at [status.nixos.org](https://status.nixos.org/)). That is the “tested snapshot” — not a floating `master` commit.
