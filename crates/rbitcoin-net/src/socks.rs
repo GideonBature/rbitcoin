@@ -111,7 +111,9 @@ const I2P_CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 
 impl Dialer {
     /// Dial bound for `addr` over this dialer: `base` for a direct socket,
-    /// at least the SOCKS floor through a proxy, at least 90 s for I2P.
+    /// at least the production SOCKS floor (30s) through a proxy, at least
+    /// 90s for I2P. A floor lowered under that 30s is the bound itself, so
+    /// a stalled-proxy test does not also wait out `base`.
     ///
     /// IBD `dial_batch` and tip-follow wrap connect and handshake in this one
     /// bound, so a slow peer is skipped rather than held through a wave.
@@ -128,13 +130,19 @@ impl Dialer {
                     ..
                 },
                 crate::NetAddr::Ip(_),
-            ) => base.max(*connect_floor),
+            ) => {
+                if *connect_floor < SOCKS_CONNECT_TIMEOUT {
+                    *connect_floor
+                } else {
+                    base.max(*connect_floor)
+                }
+            }
             _ => base,
         }
     }
 
-    /// The same dialer with a lower SOCKS floor, for a test that waits out a
-    /// stalled proxy.
+    /// The same dialer with a different SOCKS floor, for a test that waits
+    /// out a stalled proxy. A floor under the production 30s replaces `base`.
     #[doc(hidden)]
     pub fn with_connect_floor(mut self, floor: Duration) -> Self {
         if let Dialer::Socks { connect_floor, .. } = &mut self {

@@ -369,14 +369,14 @@ async fn redial_skips_a_connect_target_still_dialling() {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("rbitcoin-redial-in-flight-{n}"));
     std::fs::create_dir_all(&dir).unwrap();
+    let connect_bound = Duration::from_millis(500);
     let node = P2PNode::start_outbound_only(
         Query::open_or_create_tiny(&dir).unwrap(),
         ChainParams::regtest(),
         Milestone::NONE,
         "/rbitcoin:0.1.0(redial)/".into(),
         0,
-        rbitcoin_net::socks::Dialer::socks(proxy_addr, false)
-            .with_connect_floor(OUTBOUND_CONNECT_TIMEOUT),
+        rbitcoin_net::socks::Dialer::socks(proxy_addr, false).with_connect_floor(connect_bound),
         rbitcoin_net::REDIAL_INTERVAL_TEST,
     )
     .await
@@ -403,7 +403,7 @@ async fn redial_skips_a_connect_target_still_dialling() {
         "a dial still connecting must not be dialled again"
     );
     // The stalled connect times out and frees the target for the next pass.
-    let deadline = std::time::Instant::now() + OUTBOUND_CONNECT_TIMEOUT * 3;
+    let deadline = std::time::Instant::now() + connect_bound * 3;
     while accepts.load(Ordering::SeqCst) < 2 {
         assert!(
             std::time::Instant::now() < deadline,
