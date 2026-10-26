@@ -1026,7 +1026,11 @@ async fn start_esplora_applies_max_inflight() {
         .await
         .expect("the freed slot serves the waiting GET")
         .unwrap();
-    assert!(out.starts_with(b"HTTP/1.1 "), "{}", String::from_utf8_lossy(&out));
+    assert!(
+        out.starts_with(b"HTTP/1.1 "),
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
     for h in handles {
         h.shutdown().await;
     }
