@@ -375,6 +375,25 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             peer.follow_live_count() >= 1,
             "outbound session must stay live after follow_from"
         );
+        // A tip older than a day has one headers-sync slot. The inbound
+        // must take it before the preferred dial: that outbound's first
+        // writes can win the slot, and the only preferred peer is kept.
+        wait_ms_until(
+            llvm_cov_wall(3, 15).as_millis() as u64,
+            || {
+                seed.peers
+                    .live_peers()
+                    .iter()
+                    .any(|p| p.inbound && p.is_sync_started())
+            },
+            || {
+                format!(
+                    "seed inbound must own headers sync before the preferred dial (seed={:?})",
+                    seed.peers.snapshot()
+                )
+            },
+        )
+        .await;
         seed.peers
             .addconnection(dummy.local_addr, PeerConnType::OutboundFullRelay)
             .expect("preferred outbound for stall");
@@ -471,10 +490,20 @@ async fn p2p_timeout_getaddr_and_keepalive_ping() {
             "same listen bind must reuse the 24h GetAddr cache"
         );
 
-        let now = seed.peers.now_secs();
-        seed.peers.set_mock_now(now + 40 * 60);
-        // The disconnect is requested on this call. Under llvm-cov the session
-        // task can take longer than fifteen seconds to leave the table.
+        let stall_at = seed
+            .peers
+            .live_peers()
+            .iter()
+            .find(|p| p.inbound && p.is_sync_started())
+            .map(|p| {
+                p.headers_sync_timeout
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .expect("inbound must still own headers sync");
+        assert!(stall_at > 0, "headers sync deadline must be armed");
+        // Past that deadline on this call. Under llvm-cov the session task
+        // can take longer than fifteen seconds to leave the table.
+        seed.peers.set_mock_now(stall_at.saturating_add(1));
         wait_ms_until(
             llvm_cov_wall(15, 45).as_millis() as u64,
             || {
