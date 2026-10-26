@@ -55,7 +55,7 @@ jobs:
         run: cargo fmt --all -- --check
       # Not in taiki-e TOOLS.md; install-action falls back to cargo-binstall
       # (GitHub Release prebuilt). Do not cargo install.
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: ast-grep@0.45.1
       - name: ast-grep fixture self-test
@@ -70,7 +70,7 @@ jobs:
         run: ./scripts/unwrap-ratchet.sh
       # Prebuilt cargo-deny — do not cargo install. Pin the action commit.
       # 0.18.x cannot parse rustsec CVSS 4.0 advisories (2026).
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-deny@0.20.2
       - name: cargo deny check
@@ -115,7 +115,7 @@ jobs:
         run: ./scripts/overlay-functional/run.sh.test.sh
       - name: journeys manifest
         run: ./scripts/journeys-manifest.test.sh
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-clippy
           workspaces: ". -> target/dev"
@@ -130,7 +130,7 @@ jobs:
       # doc(hidden) pub modules are rustdoc-visible; a broken link is an error.
       - name: cargo doc
         run: cargo doc --workspace --no-deps
-      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
         with:
           github_access_token: ${{ github.token }}
           enable_kvm: false
@@ -155,7 +155,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-test
           workspaces: ". -> target/dev"
@@ -187,7 +187,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
         with:
           targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-windows
           workspaces: ". -> target/dev"
@@ -207,7 +207,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-macos-26
           workspaces: ". -> target/dev"
@@ -232,7 +232,7 @@ jobs:
       # 1.95.0 branch tip. a5f673d0 still says toolchain 1.95.0 but is no
       # longer on that branch, so zizmor reports it as an impostor commit.
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-pread
           workspaces: ". -> target/dev"
@@ -259,13 +259,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-coverage
           workspaces: ". -> target/cov"
       # Prebuilt binary — do not `cargo install` (compiles llvm-cov from crates.io).
       # Pin the action commit. Unpinned third-party tags are not immutable.
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-llvm-cov@0.6.14,cargo-crap@0.4.3
       - name: coverage (line gate)
