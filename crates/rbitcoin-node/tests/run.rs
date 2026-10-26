@@ -1344,3 +1344,75 @@ async fn proxy_seed_wait_ends_on_a_learned_reply_shutdown_or_deadline() {
     .await;
     assert!(book.is_none(), "shutdown ends the wait with no book");
 }
+
+/// `--esplora-max-inflight` reaches the listener: with a limit of one, a
+/// request whose body never arrives makes the next request wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_esplora_applies_max_inflight() {
+    use rbitcoin_consensus::{ChainParams, Milestone};
+    use rbitcoin_esplora::server::EsploraListen;
+    use rbitcoin_net::{ChainHub, MempoolHub};
+    use rbitcoin_primitives::Network;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let dir = scratch_dir("esplora-max-inflight");
+    let hub = Arc::new(ChainHub::new(
+        Query::open_or_create_tiny(dir.join("store")).unwrap(),
+        ChainParams::regtest(),
+        Milestone::NONE,
+    ));
+    let mp = MempoolHub::open(dir.join("mempool"), Arc::clone(&hub.query)).unwrap();
+    let shutdown = Shutdown::new();
+    let handles = start_esplora_if_ready(
+        true,
+        Some(EsploraListen::Tcp("127.0.0.1:0".parse().unwrap())),
+        Network::Regtest,
+        None,
+        1,
+        &shutdown,
+        Arc::clone(&hub),
+        &mp,
+    )
+    .await;
+    let addr = handles[0].local_addr;
+
+    let get = |addr| async move {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /blocks/tip/height HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        out
+    };
+    let mut stall = TcpStream::connect(addr).await.unwrap();
+    stall
+        .write_all(b"POST /tx HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n")
+        .await
+        .unwrap();
+    let mut waiting = None;
+    for _ in 0..20 {
+        let g = tokio::spawn(get(addr));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if !g.is_finished() {
+            waiting = Some(g);
+            break;
+        }
+    }
+    let waiting = waiting.expect("a limit of one makes the second request wait");
+    drop(stall);
+    let out = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("the freed slot serves the waiting GET")
+        .unwrap();
+    assert!(
+        out.starts_with(b"HTTP/1.1 "),
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
+    for h in handles {
+        h.shutdown().await;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

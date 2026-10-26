@@ -1026,6 +1026,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
         config
             .esplora_block_template
             .then_some(config.mempool.blocksonly),
+        config.esplora_max_inflight,
         &shutdown,
         Arc::clone(&node.hub),
         &mempool,
@@ -1226,6 +1227,7 @@ pub async fn run_p2p(config: NodeConfig) -> Result<(), NodeError> {
                         config
                             .esplora_block_template
                             .then_some(config.mempool.blocksonly),
+                        config.esplora_max_inflight,
                         &shutdown,
                         Arc::clone(&node.hub),
                         &mempool,
@@ -2357,12 +2359,15 @@ pub async fn start_electrum_if_ready(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // call-site args stay unbundled
 pub async fn start_esplora_if_ready(
     sh_tip_ready: bool,
     listen: Option<EsploraListen>,
     network: Network,
     // `Some(blocksonly)` turns on `/block-template`. `None` leaves it off.
     block_template: Option<bool>,
+    // Requests in flight across the listener (`--esplora-max-inflight`).
+    max_inflight: usize,
     shutdown: &Shutdown,
     hub: Arc<ChainHub>,
     mempool: &std::sync::Arc<MempoolHub>,
@@ -2376,6 +2381,7 @@ pub async fn start_esplora_if_ready(
     let q = hub.query.clone();
     let btc_net = rbitcoin_rpc::methods::mine::rpc_btc_network(network);
     let mut ecfg = EsploraConfig::with_listen(listen, btc_net);
+    ecfg.limits.max_connections = max_inflight;
     if let Some(blocksonly) = block_template {
         let q = Arc::clone(&hub.query);
         let mp = Arc::clone(mempool);
