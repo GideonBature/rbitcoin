@@ -285,109 +285,73 @@ fn seednodes_are_off_under_connect() {
     assert!(!seednodes_allowed(&listen), "a --connect hostname pins too");
 }
 
+/// An empty address book dials the operator onion seednode through SOCKS.
+/// The 10s wait before a populated book falls back is
+/// [`seednode_delay_elapsed`], not a second live run.
 #[tokio::test]
 async fn onion_seednode_reaches_socks_from_operator_config() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let dir = rbitcoin_store::testutil::TempDir::new().unwrap();
-    for populated in [false, true] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy = listener.local_addr().unwrap();
-        let onion = "vqfiycyhxoh44hciaznjyeasgevc7n3ht6sbo5ifbdazxyflq6xoidid.onion";
-        let mut cfg = tiny_regtest(dir.path());
-        cfg.apply_kv("milestone", "0").unwrap();
-        cfg.apply_kv("listen", "0").unwrap();
-        cfg.apply_kv("max_inbound", "0").unwrap();
-        cfg.apply_kv("only_net", "onion").unwrap();
-        cfg.apply_kv("onion", &proxy.to_string()).unwrap();
-        cfg.apply_kv("seed_node", &format!("{onion}:8333")).unwrap();
-        cfg.listen.use_seeds = false;
-        cfg.max_run_secs = Some(if populated { 12 } else { 2 });
-        cfg.validate().unwrap();
-        if populated {
-            use rbitcoin_rpc::RpcRegtest;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = listener.local_addr().unwrap();
+    let onion = "vqfiycyhxoh44hciaznjyeasgevc7n3ht6sbo5ifbdazxyflq6xoidid.onion";
+    let mut cfg = tiny_regtest(dir.path());
+    cfg.apply_kv("milestone", "0").unwrap();
+    cfg.apply_kv("listen", "0").unwrap();
+    cfg.apply_kv("max_inbound", "0").unwrap();
+    cfg.apply_kv("only_net", "onion").unwrap();
+    cfg.apply_kv("onion", &proxy.to_string()).unwrap();
+    cfg.apply_kv("seed_node", &format!("{onion}:8333")).unwrap();
+    cfg.listen.use_seeds = false;
+    cfg.max_run_secs = Some(2);
+    cfg.validate().unwrap();
 
-            let hub = Arc::new(rbitcoin_net::ChainHub::new(
-                Query::open_or_create_layout(cfg.store_layout()).unwrap(),
-                rbitcoin_consensus::ChainParams::regtest(),
-                rbitcoin_consensus::Milestone::NONE,
-            ));
-            rbitcoin_rpc::HubRegtest(Arc::clone(&hub))
-                .generate_to_script(1, bitcoin::ScriptBuf::from_bytes(vec![0x51]), vec![])
-                .unwrap();
-            hub.query.flush().unwrap();
-            drop(hub);
-            let mut book = AddrMan::new();
-            book.set_onion_reachable(true);
-            book.add_addr(format!("{onion}:18444").parse().unwrap());
-            assert!(!book.is_empty(), "fallback needs a populated address book");
-            book.save(&dir.path().join("peers")).unwrap();
-        }
-
-        let capture = tokio::spawn(async move {
-            let mut last_book_dial = None;
-            loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut greeting = [0; 2];
-                socket.read_exact(&mut greeting).await.unwrap();
-                assert_eq!(greeting[0], 5);
-                let mut methods = vec![0; greeting[1] as usize];
-                socket.read_exact(&mut methods).await.unwrap();
-                assert!(
-                    methods.contains(&2),
-                    "addrfetch uses isolated SOCKS credentials"
-                );
-                socket.write_all(&[5, 2]).await.unwrap();
-                assert_eq!(socket.read_u8().await.unwrap(), 1);
-                let username_len = socket.read_u8().await.unwrap();
-                let mut username = vec![0; username_len as usize];
-                socket.read_exact(&mut username).await.unwrap();
-                let password_len = socket.read_u8().await.unwrap();
-                let mut password = vec![0; password_len as usize];
-                socket.read_exact(&mut password).await.unwrap();
-                assert!(!username.is_empty() && !password.is_empty());
-                socket.write_all(&[1, 0]).await.unwrap();
-                let mut header = [0; 5];
-                socket.read_exact(&mut header).await.unwrap();
-                assert_eq!(&header[..4], &[5, 1, 0, 3]);
-                let mut host = vec![0; header[4] as usize];
-                socket.read_exact(&mut host).await.unwrap();
-                let port = socket.read_u16().await.unwrap();
-                let connected_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                socket
-                    .write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0])
-                    .await
-                    .unwrap();
-                if port == 8333 {
-                    if populated {
-                        let book_dial =
-                            last_book_dial.expect("addrman must be tried before seednode");
-                        assert!(
-                            connected_at - book_dial >= ADD_NEXT_SEEDNODE_SECS,
-                            "seednode must wait for the delayed fallback window"
-                        );
-                    }
-                    break (String::from_utf8(host).unwrap(), port);
-                }
-                assert_eq!(port, 18444);
-                last_book_dial = Some(connected_at);
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(45), run_p2p(cfg))
-            .await
-            .expect("seednode run must stop")
-            .unwrap();
-        let captured = tokio::time::timeout(Duration::from_secs(1), capture).await;
-        assert_eq!(
-            captured
-                .expect("onion seednode must reach SOCKS CONNECT")
-                .unwrap(),
-            (onion.to_string(), 8333)
+    let capture = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut greeting = [0; 2];
+        socket.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting[0], 5);
+        let mut methods = vec![0; greeting[1] as usize];
+        socket.read_exact(&mut methods).await.unwrap();
+        assert!(
+            methods.contains(&2),
+            "addrfetch uses isolated SOCKS credentials"
         );
-    }
+        socket.write_all(&[5, 2]).await.unwrap();
+        assert_eq!(socket.read_u8().await.unwrap(), 1);
+        let username_len = socket.read_u8().await.unwrap();
+        let mut username = vec![0; username_len as usize];
+        socket.read_exact(&mut username).await.unwrap();
+        let password_len = socket.read_u8().await.unwrap();
+        let mut password = vec![0; password_len as usize];
+        socket.read_exact(&mut password).await.unwrap();
+        assert!(!username.is_empty() && !password.is_empty());
+        socket.write_all(&[1, 0]).await.unwrap();
+        let mut header = [0; 5];
+        socket.read_exact(&mut header).await.unwrap();
+        assert_eq!(&header[..4], &[5, 1, 0, 3]);
+        let mut host = vec![0; header[4] as usize];
+        socket.read_exact(&mut host).await.unwrap();
+        let port = socket.read_u16().await.unwrap();
+        socket
+            .write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        assert_eq!(port, 8333, "empty book dials the operator seednode");
+        (String::from_utf8(host).unwrap(), port)
+    });
+    tokio::time::timeout(Duration::from_secs(45), run_p2p(cfg))
+        .await
+        .expect("seednode run must stop")
+        .unwrap();
+    let captured = tokio::time::timeout(Duration::from_secs(1), capture).await;
+    assert_eq!(
+        captured
+            .expect("onion seednode must reach SOCKS CONNECT")
+            .unwrap(),
+        (onion.to_string(), 8333)
+    );
 }
 
 #[test]
