@@ -856,7 +856,7 @@ pub const NAMED_HELP: &[(&str, &str)] = &[
     (
         "gettxout",
         "gettxout txid n (include_mempool)\n\
-         Connected Class A + mempool. Default include_mempool hides confirmed outs spent by a live mempool tx.",
+         Connected Class A + mempool. Default include_mempool hides an out spent by a live mempool tx, confirmed or not.",
     ),
     (
         "sendrawtransaction",
