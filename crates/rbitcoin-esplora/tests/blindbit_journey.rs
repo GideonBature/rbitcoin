@@ -464,6 +464,27 @@ async fn blindbit_v1_routes_share_one_inflight_limit() {
     .await
     .expect("asks queued on BlindBit hold no listener slot");
     assert_eq!(st, 200);
+    // A stalled POST /tx takes that last slot. The held BlindBit bodies hold
+    // the rest, so a GET waits: the two routers share one limit.
+    let mut spare = TcpStream::connect(addr).await.unwrap();
+    let req = "POST /tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 64\r\n\r\n";
+    spare.write_all(req.as_bytes()).await.unwrap();
+    let mut waiting = None;
+    for _ in 0..20 {
+        let get = tokio::spawn(async move { http_get(addr, "/blocks/tip/height").await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if !get.is_finished() {
+            waiting = Some(get);
+            break;
+        }
+    }
+    let waiting = waiting.expect("BlindBit and the other routes share the listener limit");
+    drop(spare);
+    let (st, _) = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("the freed slot serves the waiting GET")
+        .unwrap();
+    assert_eq!(st, 200);
     drop(held.pop());
     let (st, body) = tokio::time::timeout(Duration::from_secs(10), queued.remove(0))
         .await
