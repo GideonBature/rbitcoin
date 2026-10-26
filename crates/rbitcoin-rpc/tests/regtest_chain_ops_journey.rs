@@ -2297,6 +2297,22 @@ fn chain_ops_generateblock_and_parent_first(ctx: &RpcContext, cbs: &mut TrueCoin
     );
 
     let child_id = dispatch(ctx, "sendrawtransaction", vec![json!(tx_hex(&child))]).unwrap();
+    // Core's mempool coins view: the parent output is spent by the child, so
+    // it is not a UTXO. Without the mempool it was never a confirmed coin.
+    for include_mempool in [true, false] {
+        let out = dispatch(
+            ctx,
+            "gettxout",
+            vec![parent_id.clone(), json!(0), json!(include_mempool)],
+        )
+        .unwrap();
+        assert!(
+            out.is_null(),
+            "include_mempool={include_mempool}: mempool-spent parent output: {out}"
+        );
+    }
+    let unconfirmed = dispatch(ctx, "gettxout", vec![child_id.clone(), json!(0)]).unwrap();
+    assert_eq!(unconfirmed["confirmations"], 0, "{unconfirmed}");
     dispatch(ctx, "generate", vec![json!(1)]).unwrap();
     let tip = best_hash(ctx);
     let mined = dispatch(ctx, "getblock", vec![tip.clone(), json!(1)]).unwrap();

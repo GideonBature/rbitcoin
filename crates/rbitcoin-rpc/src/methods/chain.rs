@@ -1070,6 +1070,11 @@ pub fn gettxout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
         if let Some(mp) = ctx.mempool.as_ref() {
             let tid = Txid::from_byte_array(want);
             if let Some(tx) = mp.get_tx(&tid) {
+                // Another mempool tx spending this output takes it out of the
+                // coins view, as the confirmed path does below.
+                if mp.spends_outpoint(&bitcoin::OutPoint { txid: tid, vout: n }) {
+                    return Ok(Value::Null);
+                }
                 if let Some(out) = tx.output.get(n as usize) {
                     return Ok(json!({
                         "bestblock": getbestblockhash(ctx)?,
