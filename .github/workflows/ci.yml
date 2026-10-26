@@ -246,7 +246,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - run: rustup component add llvm-tools-preview
+      # rustup >= 1.30 no longer auto-installs for `rustup component`, so
+      # install the rust-toolchain.toml toolchain first.
+      - name: rustup llvm-tools-preview
+        run: |
+          rustup toolchain install --no-self-update
+          rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-coverage
