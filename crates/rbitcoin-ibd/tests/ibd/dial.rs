@@ -61,6 +61,11 @@ fn overlay_and_socks_connects_outlast_a_direct_one() {
         lowered.connect_timeout(ip, Duration::from_secs(1)),
         Duration::from_secs(2)
     );
+    assert_eq!(
+        lowered.connect_timeout(ip, base),
+        Duration::from_secs(2),
+        "a floor under 30s is the stalled-proxy bound"
+    );
 }
 
 fn dummy_slot(id: usize, a: SocketAddr, alive: bool) -> PeerSlot {
