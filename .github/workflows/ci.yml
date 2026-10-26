@@ -21,8 +21,9 @@ env:
   # does not write throwaway dep-graphs.
   CARGO_INCREMENTAL: "0"
 
-# Pin rustc to the nix-shell / crane baseline so fmt/clippy do not drift with
-# every GitHub Actions “stable” bump. Bump intentionally with the toolchain.
+# rustc comes from rust-toolchain.toml (the nix-shell / crane baseline), so
+# fmt/clippy do not drift with GitHub Actions “stable”. The runner image's
+# rustup auto-installs that toolchain and its components on first cargo.
 #
 # `qc` is one Ubuntu runner: fmt, ast-grep, unwrap-ratchet, deny, scripts, clippy, then
 # nixos-module-eval. test, windows, and macos each have their own runner.
@@ -48,9 +49,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
-        with:
-          components: rustfmt, clippy
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       # Not in taiki-e TOOLS.md; install-action falls back to cargo-binstall
@@ -154,7 +152,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-test
@@ -184,9 +181,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
-        with:
-          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-windows
@@ -206,7 +200,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # rustc 1.95.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-macos-26
@@ -229,9 +222,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # 1.95.0 branch tip. a5f673d0 still says toolchain 1.95.0 but is no
-      # longer on that branch, so zizmor reports it as an impostor commit.
-      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-pread
@@ -256,9 +246,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
-        with:
-          components: llvm-tools-preview
+      - run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-coverage

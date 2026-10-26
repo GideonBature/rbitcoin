@@ -23,6 +23,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   fuzz:
     name: ${{ matrix.bin }}
@@ -62,9 +66,8 @@ jobs:
           persist-credentials: false
           submodules: false
 
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-        with:
-          components: rust-src
+      - name: rustup nightly + rust-src
+        run: rustup toolchain install nightly --component rust-src --profile minimal --no-self-update
 
       - name: clang (libFuzzer)
         run: sudo apt-get update && sudo apt-get install -y clang
